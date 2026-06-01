@@ -31,9 +31,9 @@ Legend: `[x]` done · `[~]` partial / seam in place · `[ ]` not started
 
 - [x] **Compare another user's playlist** — real song diff (saved vs unsaved), savable.
       (Prototype only displayed; this also lets you save the diff.)
-- [ ] **Logout UX fix** — the prototype's logout button was unreachable (hover gap). Our
-      header uses a shadcn dropdown with no gap; verify the hover/click path. (Seam done via
-      Auth.js `signOut`; confirm UX when iterating on the header.)
+- [x] **Logout UX fix** — the prototype's logout button was unreachable (hover gap). Our
+      header dropdown has a small `sideOffset` (no gap) and logout is a form-submit menu
+      item, so the hover→click path stays connected. Uses Auth.js `signOut`.
 - [ ] **Persistent song store** — SQL table of all songs + listen counts + where saved /
       where listened. Plus search. Needs a DB (Postgres/SQLite via Prisma or Drizzle). The
       task registry and service layer are structured to add this without rework.
