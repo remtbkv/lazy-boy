@@ -1,8 +1,21 @@
 // Auth.js v5 config — the single place Spotify tokens are minted and refreshed.
 // Fixes the prototype's scattered `_ensure_token()` pattern.
 
-import NextAuth from "next-auth";
+import NextAuth, { customFetch } from "next-auth";
 import Spotify from "next-auth/providers/spotify";
+
+// Spotify banned `localhost` redirect URIs (Nov 2025): only the loopback IP literal
+// `http://127.0.0.1:PORT` is allowed over HTTP. But Next.js normalizes 127.0.0.1 ->
+// localhost in request URLs, so Auth.js would otherwise send a `localhost` redirect_uri
+// that Spotify rejects. We pin the callback to the loopback IP in both OAuth steps:
+//   1. the authorize request (authorization.params.redirect_uri), and
+//   2. the token exchange (provider customFetch, below).
+// The matching `localhost -> 127.0.0.1` rewrite for the post-login redirect lives in
+// src/app/api/auth/[...nextauth]/route.ts. Access the app at http://127.0.0.1:3000.
+const ORIGIN = (process.env.AUTH_URL ?? "http://127.0.0.1:3000")
+  .replace(/\/$/, "")
+  .replace("localhost", "127.0.0.1");
+const CALLBACK_URL = `${ORIGIN}/api/auth/callback/spotify`;
 
 // Scopes ported from PlaylistManager.py (read/modify library, playlists, playback).
 const SCOPES = [
@@ -64,10 +77,23 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       clientId: process.env.SPOTIFY_CLIENT_ID,
       clientSecret: process.env.SPOTIFY_CLIENT_SECRET,
       // Include the full url: passing only `params` would drop the provider's
-      // default authorization endpoint and break URL construction.
+      // default authorization endpoint and break URL construction. The explicit
+      // redirect_uri forces the loopback IP in the authorize step.
       authorization: {
         url: "https://accounts.spotify.com/authorize",
-        params: { scope: SCOPES },
+        params: { scope: SCOPES, redirect_uri: CALLBACK_URL },
+      },
+      // Force the same loopback redirect_uri in the token exchange (Auth.js would
+      // otherwise send the normalized `localhost` one, which Spotify rejects).
+      [customFetch]: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.startsWith("https://accounts.spotify.com/api/token") && init?.body) {
+          const body = init.body;
+          if (body instanceof URLSearchParams && body.has("redirect_uri")) {
+            body.set("redirect_uri", CALLBACK_URL);
+          }
+        }
+        return fetch(input, init);
       },
     }),
   ],
