@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { Header } from "@/components/header";
 import { CleanProgressWatcher } from "@/components/clean-progress";
+import { SyncOnLoad } from "@/components/sync-on-load";
 
 export default async function AppLayout({
   children,
@@ -21,6 +22,7 @@ export default async function AppLayout({
         {children}
       </main>
       <CleanProgressWatcher />
+      <SyncOnLoad />
     </>
   );
 }

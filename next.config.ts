@@ -6,8 +6,9 @@ const nextConfig: NextConfig = {
   // resources (HMR + client runtime), which silently breaks hydration so no
   // buttons work. Allow both hosts in dev.
   allowedDevOrigins: ["127.0.0.1", "localhost"],
-  // better-sqlite3 is a native module — don't bundle it, load it from node_modules.
-  serverExternalPackages: ["better-sqlite3"],
+  // libSQL/Turso client: the embedded `libsql` engine (used for the local file:
+  // fallback in dev) is native — don't bundle it, load from node_modules.
+  serverExternalPackages: ["@libsql/client", "libsql"],
   // Baseline security headers. (A strict CSP needs per-request nonces for Next's
   // inline runtime — left as a production follow-up; see docs/SECURITY.md.)
   async headers() {

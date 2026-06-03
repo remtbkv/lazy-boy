@@ -41,11 +41,13 @@ export default async function MePage() {
     first,
   );
 
-  // Read the library from the local store — instant, no Spotify call on render.
+  // Read the library from the store — no Spotify call on render.
   // PlaylistsSync refreshes it in the background when it's empty or stale.
-  const playlists = getStoredPlaylists();
-  const meId = getMeId();
-  const syncedAt = getPlaylistsSyncedAt();
+  const [playlists, meId, syncedAt] = await Promise.all([
+    getStoredPlaylists(),
+    getMeId(),
+    getPlaylistsSyncedAt(),
+  ]);
   const owned = meId ? playlists.filter((p) => p.ownerId === meId).length : 0;
   const totalSongs = playlists.reduce((n, p) => n + p.trackCount, 0);
 

@@ -18,13 +18,13 @@ export async function GET() {
 
     let context: { name: string; type: string } | null = null;
     if (playing.context) {
-      const cached = getContextName(playing.context.uri);
+      const cached = await getContextName(playing.context.uri);
       if (cached) {
         context = { name: cached, type: playing.context.type };
       } else {
         const resolved = await sp.contextName(playing.context.uri);
         if (resolved) {
-          recordContexts([{ uri: playing.context.uri, name: resolved.name, type: resolved.type }]);
+          await recordContexts([{ uri: playing.context.uri, name: resolved.name, type: resolved.type }]);
           context = { name: resolved.name, type: resolved.type };
         }
       }

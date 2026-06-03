@@ -20,7 +20,7 @@ export async function login() {
   await signIn("spotify", { redirectTo: "/me" });
 }
 export async function logout() {
-  clearSpotifyTokens();
+  await clearSpotifyTokens();
   await signOut({ redirectTo: "/login" });
 }
 

@@ -11,8 +11,9 @@ import {
 
 type Spotify = ReturnType<typeof spotifyClient>;
 
-// Core listen-history sync, shared by the manual "Sync recent plays" button
-// (session-bound client) and the background scheduler (stored-token client).
+// Core listen-history sync, shared by the manual "Sync recent plays" button and
+// the on-load /api/sync (session-bound client) and the daily /api/cron/sync
+// backstop (stored-token client).
 // Pulls the last ~50 plays into the local store and resolves any new playback
 // contexts (playlist/album names). recordPlays() stamps `last_sync`.
 export async function syncRecentPlays(sp: Spotify): Promise<{ added: number }> {
@@ -29,17 +30,17 @@ export async function syncRecentPlays(sp: Spotify): Promise<{ added: number }> {
     contextType: r.contextType,
     contextUri: r.contextUri,
   }));
-  const added = recordPlays(rows);
+  const added = await recordPlays(rows);
 
   // Resolve names for any contexts we don't have yet (cap per sync to be gentle).
-  const pending = unresolvedContextUris().slice(0, 20);
+  const pending = (await unresolvedContextUris()).slice(0, 20);
   const resolved: ContextRecord[] = [];
   for (const c of pending) {
     const r = await sp.contextName(c.uri);
     if (r) resolved.push({ uri: c.uri, name: r.name, type: r.type });
   }
-  recordContexts(resolved);
+  await recordContexts(resolved);
 
-  setLastSyncStats(added);
+  await setLastSyncStats(added);
   return { added };
 }

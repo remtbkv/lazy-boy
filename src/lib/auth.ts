@@ -7,6 +7,8 @@ import {
   getSpotifyTokens,
   setSpotifyTokens,
   clearSpotifyTokens,
+  acquireLock,
+  releaseLock,
   type SpotifyTokens,
 } from "@/lib/db";
 
@@ -128,45 +130,87 @@ async function refreshAccessToken(refreshToken: string) {
 // process already refreshed successfully in the meantime, the stored refresh token
 // has moved on and is still valid. Only clear when what's stored is still the exact
 // token we just failed with; otherwise someone else won the race, so keep theirs.
-function clearTokensIfStale(attemptedRefreshToken: string): void {
-  const current = getSpotifyTokens();
+async function clearTokensIfStale(attemptedRefreshToken: string): Promise<void> {
+  const current = await getSpotifyTokens();
   if (!current || current.refreshToken === attemptedRefreshToken) {
-    clearSpotifyTokens();
+    await clearSpotifyTokens();
   }
 }
 
-// In-process lock: concurrent requests that all see an expired token share ONE
-// refresh instead of each firing their own (which, with Spotify's rotating PKCE
-// refresh token, would invalidate each other and log the user out). The winner
-// writes the new tokens to the DB; everyone awaits the same promise.
+const isFresh = (t: SpotifyTokens) => Date.now() / 1000 < t.expiresAt - 60;
+
+// In-process lock: concurrent requests in THIS instance that all see an expired
+// token share ONE refresh instead of each firing their own (which, with Spotify's
+// rotating PKCE refresh token, would invalidate each other and log the user out).
 let inflightRefresh: Promise<SpotifyTokens> | null = null;
 function refreshShared(refreshToken: string): Promise<SpotifyTokens> {
   if (!inflightRefresh) {
-    inflightRefresh = refreshAccessToken(refreshToken)
-      .then((fresh) => {
-        setSpotifyTokens(fresh);
-        return fresh;
-      })
-      .finally(() => {
-        inflightRefresh = null;
-      });
+    inflightRefresh = coordinatedRefresh(refreshToken).finally(() => {
+      inflightRefresh = null;
+    });
   }
   return inflightRefresh;
 }
 
-// Server-side, session-less access token for background jobs (e.g. the sync
-// scheduler) that run without a request. Reuses the same stored tokens and shared
+// Cross-INSTANCE coordination for serverless: the in-process lock above only covers
+// one instance, but Vercel can run several. The DB is the shared source of truth, so:
+//   1) double-check the DB — another request/instance may have already refreshed;
+//   2) take a short-lived DB lock so only one refresh hits Spotify with a given
+//      rotating token; losers poll the DB for the winner's freshly-written token.
+// This is what stops concurrent cold starts from racing into invalid_grant.
+async function coordinatedRefresh(triedToken: string): Promise<SpotifyTokens> {
+  let current = await getSpotifyTokens();
+  if (current && isFresh(current)) return current;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (await acquireLock("spotify_refresh", 15_000)) {
+      try {
+        current = await getSpotifyTokens(); // the winner may have just written
+        if (current && isFresh(current)) return current;
+        const updated = await refreshAccessToken(current?.refreshToken ?? triedToken);
+        await setSpotifyTokens(updated);
+        return updated;
+      } finally {
+        await releaseLock("spotify_refresh");
+      }
+    }
+    // Lost the lock — wait for whoever holds it to publish a fresh token.
+    const published = await waitForFreshToken(triedToken, 10_000);
+    if (published) return published;
+    // Holder stalled/crashed; loop to retry (its lock TTL has likely expired).
+  }
+  // Last resort: refresh ourselves rather than fail the request.
+  const updated = await refreshAccessToken(triedToken);
+  await setSpotifyTokens(updated);
+  return updated;
+}
+
+async function waitForFreshToken(
+  triedToken: string,
+  timeoutMs: number,
+): Promise<SpotifyTokens | null> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    await sleep(500);
+    const t = await getSpotifyTokens();
+    if (t && t.refreshToken !== triedToken && isFresh(t)) return t;
+  }
+  return null;
+}
+
+// Server-side, session-less access token for background jobs (e.g. the daily cron
+// sync) that run without a request. Reuses the same stored tokens and shared
 // refresh lock as the request path, so background and request refreshes coordinate
 // (no PKCE rotation races). Returns null when nobody's signed in or refresh is dead.
 export async function getValidAccessToken(): Promise<string | null> {
-  const stored = getSpotifyTokens();
+  const stored = await getSpotifyTokens();
   if (!stored) return null;
   if (Date.now() / 1000 < stored.expiresAt - 60) return stored.accessToken;
   try {
     const fresh = await refreshShared(stored.refreshToken);
     return fresh.accessToken;
   } catch (e) {
-    if (e instanceof RefreshError && e.terminal) clearTokensIfStale(stored.refreshToken);
+    if (e instanceof RefreshError && e.terminal) await clearTokensIfStale(stored.refreshToken);
     return null;
   }
 }
@@ -211,7 +255,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       // Initial sign-in: stash tokens in the DB (the source of truth) and keep the
       // cookie lean. The DB lets concurrent refreshes coordinate (see refreshShared).
       if (account) {
-        setSpotifyTokens({
+        await setSpotifyTokens({
           accessToken: account.access_token!,
           refreshToken: account.refresh_token!,
           expiresAt: account.expires_at!,
@@ -223,7 +267,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         return t;
       }
 
-      let stored = getSpotifyTokens();
+      let stored = await getSpotifyTokens();
       // Migrate older sessions that kept tokens in the cookie into the DB once.
       if (!stored && t.refreshToken && t.accessToken && t.expiresAt) {
         stored = {
@@ -231,7 +275,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           refreshToken: t.refreshToken,
           expiresAt: t.expiresAt,
         };
-        setSpotifyTokens(stored);
+        await setSpotifyTokens(stored);
         delete t.accessToken;
         delete t.refreshToken;
         delete t.expiresAt;
@@ -253,8 +297,8 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         if (e instanceof RefreshError && e.terminal) {
           // Refresh token is genuinely dead → real re-login required, unless another
           // process already rotated to a fresh one (then this failure is a stale race).
-          clearTokensIfStale(stored.refreshToken);
-          if (getSpotifyTokens()) delete t.error;
+          await clearTokensIfStale(stored.refreshToken);
+          if (await getSpotifyTokens()) delete t.error;
           else t.error = "RefreshAccessTokenError";
         }
         // Transient failure: keep the session; the next request retries.
@@ -263,7 +307,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     },
     async session({ session, token }) {
       const t = token as SpotifyToken;
-      session.accessToken = getSpotifyTokens()?.accessToken;
+      session.accessToken = (await getSpotifyTokens())?.accessToken;
       session.error = t.error;
       return session;
     },

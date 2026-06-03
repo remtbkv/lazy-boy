@@ -12,7 +12,8 @@ the user-scoping item below is handled by row-level security instead.)
 - **One auth gate.** The `(app)` layout calls `auth()` and redirects unauthenticated users;
   every API route also checks `auth()` and returns 401.
 - **Centralized token refresh** in `src/lib/auth.ts` (no scattered token handling).
-- **No SQL injection.** All `better-sqlite3` queries use prepared statements / bound params.
+- **No SQL injection.** All libSQL (`@libsql/client`) queries use bound params (`:name`/`?`).
+- **Cron auth.** `/api/cron/sync` is session-less; it checks `Authorization: Bearer $CRON_SECRET`.
 - **CSRF.** Auth.js protects its routes; Next.js server actions are POST-only with origin checks.
 - **Baseline security headers** in `next.config.ts` (`X-Content-Type-Options`,
   `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`, HSTS).

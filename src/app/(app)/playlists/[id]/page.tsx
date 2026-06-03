@@ -30,7 +30,7 @@ export default async function PlaylistDetailPage({
   }
 
   // Hide the owner line when it's the user's own playlist — they know.
-  const meId = getMeId();
+  const meId = await getMeId();
   const isMine = !!meId && playlist.ownerId === meId;
 
   return (

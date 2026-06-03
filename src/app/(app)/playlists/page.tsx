@@ -4,13 +4,16 @@ import { PlaylistsClient } from "@/components/playlists-client";
 export default async function PlaylistsPage() {
   // Served from the local store — instant. The client triggers a background sync
   // when it's empty or stale (see PlaylistsClient → PlaylistsSync).
-  const items = getStoredPlaylists().map((p) => ({
+  const [stored, syncedAt] = await Promise.all([
+    getStoredPlaylists(),
+    getPlaylistsSyncedAt(),
+  ]);
+  const items = stored.map((p) => ({
     id: p.id,
     name: p.name,
     image: p.image,
     trackCount: p.trackCount,
   }));
-  const syncedAt = getPlaylistsSyncedAt();
 
   return (
     <div className="space-y-8">

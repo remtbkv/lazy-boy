@@ -84,19 +84,27 @@ action layer reads the session directly.
 - **Service layer chokepoint:** one place to handle Spotify's rate limits and pagination,
   which were the prototype's top operational pain.
 
-## Local listen-history store (`src/lib/db.ts`)
+## Listen-history store (`src/lib/db.ts`)
 
-A second data layer, independent of Spotify: a local **SQLite** file
-(`better-sqlite3`, `data/listens.db`, gitignored; native module declared in
-`serverExternalPackages`). Tables: `tracks`, `plays` (deduped on `played_at`),
-`contexts` (resolved playlist/album names), `meta`. Server-only (`import "server-only"`).
+A second data layer, independent of Spotify: **libSQL/Turso** (`@libsql/client`),
+which persists on Vercel's serverless runtime. `TURSO_DATABASE_URL` +
+`TURSO_AUTH_TOKEN` point at the remote DB; with both unset it falls back to a local
+SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
+`played_at`), `contexts` (resolved playlist/album names), `meta`. Server-only
+(`import "server-only"`). **Every function is async** (the DB is over the network).
 
-- **Sync** (`history/actions.ts`) pulls `/me/player/recently-played`, records new plays, and
-  resolves any new playback contexts to names. Manual button for now → background poll later.
+- **Sync core** (`sync/history.ts`, `syncRecentPlays`) pulls `/me/player/recently-played`,
+  records new plays, resolves new playback contexts to names. Triggered three ways (no
+  `setInterval` — serverless can't run one): the manual button (`history/actions.ts`),
+  on app load (`SyncOnLoad` → `POST /api/sync`, debounced server-side to ≥5 min), and a
+  daily Vercel Cron (`/api/cron/sync`, `CRON_SECRET`-guarded; schedule in `vercel.json`).
 - Reads: `searchHistory`, `getDailyStats`, `getLastSync`. The `/history` page renders day
   cards + a searchable, scrollable log.
-- **Not yet user-scoped** — single-user only. Before multi-user/production, key rows by user
-  (or move to Postgres/Supabase). See `docs/SECURITY.md`.
+- **Token refresh coordination:** the `meta` table doubles as a cross-instance mutex
+  (`acquireLock`/`releaseLock`, a TTL compare-and-set) so concurrent serverless instances
+  don't race Spotify's rotating refresh token into `invalid_grant`. See `src/lib/auth.ts`.
+- **Not yet user-scoped** — single-user only. Before multi-user, key rows by user. See
+  `docs/SECURITY.md`.
 
 ## Routes (`src/app/api/**`)
 
@@ -105,8 +113,10 @@ A second data layer, independent of Spotify: a local **SQLite** file
 - `playlists?offset=` — one page of playlists for the client's background load.
 - `history/search?q=` — local history search (no Spotify call → instant).
 - `now-playing` — live "what's playing"; returns `{ playing: null }` when idle (never stale).
+- `sync` (POST) — on-load history sync; server skips if synced <5 min ago.
+- `cron/sync` (GET) — daily Vercel Cron backstop; `CRON_SECRET`-guarded, session-less.
 
-All check `auth()` and 401 on no session.
+All check `auth()` and 401 on no session, except `cron/sync` (cron secret, no session).
 
 ## Player simulation
 

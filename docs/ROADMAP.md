@@ -34,11 +34,12 @@ Legend: `[x]` done · `[~]` partial / seam in place · `[ ]` not started
 - [x] **Logout UX fix** — the prototype's logout button was unreachable (hover gap). Our
       header dropdown has a small `sideOffset` (no gap) and logout is a form-submit menu
       item, so the hover→click path stays connected. Uses Auth.js `signOut`.
-- [~] **Persistent song store** — SQLite (`better-sqlite3`, `data/listens.db`) via
+- [~] **Persistent song store** — libSQL/Turso (file: fallback in dev) via
       `src/lib/db.ts`. DONE: listen history synced from `/me/player/recently-played`
       (`tracks`/`plays`/`contexts` tables), the `/history` page (per-day cards + searchable
       log with play counts, last-played, album art, duration, resolved "From" playlist
-      names). TODO: replace the manual "Sync" button with a ~30s background poll; "where
+      names). Background sync now runs on app load (`/api/sync`) + a daily Vercel Cron
+      (`/api/cron/sync`), replacing the dev-only `setInterval` scheduler. TODO: "where
       saved" (which playlists contain a song) is not implemented yet.
 
 ## Phase 3 — user behavior (`future.txt`)

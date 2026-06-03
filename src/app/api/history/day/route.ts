@@ -11,5 +11,5 @@ export async function GET(req: Request) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
     return Response.json({ error: "bad day" }, { status: 400 });
   }
-  return Response.json({ results: getPlaysByDay(day) });
+  return Response.json({ results: await getPlaysByDay(day) });
 }

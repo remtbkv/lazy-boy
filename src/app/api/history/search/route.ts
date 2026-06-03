@@ -8,5 +8,5 @@ export async function GET(req: Request) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
   const q = new URL(req.url).searchParams.get("q") ?? "";
-  return Response.json({ results: searchHistory(q) });
+  return Response.json({ results: await searchHistory(q) });
 }

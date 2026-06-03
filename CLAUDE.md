@@ -39,7 +39,7 @@ src/lib/auth.ts          Auth.js config + Spotify token refresh (centralized)
 src/lib/session.ts       getSpotify(): server-only authed Spotify client
 src/lib/spotify/         client.ts (fetch+pagination+429/403), resources.ts, domain.ts, types.ts
 src/lib/tasks/           in-memory task registry (clean-playlist progress); swappable iface
-src/lib/db.ts            SQLite listen-history store (better-sqlite3, data/listens.db)
+src/lib/db.ts            libSQL/Turso store (listen-history + tokens); async; file: fallback in dev
 src/lib/format.ts        duration/time/day formatting (shared)
 src/lib/filter.ts        fuzzyFilter — substring+prefix name search (shared)
 src/components/ui/       UI primitives — Base UI under the hood, NOT Radix (see GOTCHAS.md)

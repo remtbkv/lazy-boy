@@ -9,14 +9,16 @@ import { HistoryClient } from "@/components/history-client";
 // Reads the local DB fresh on each request.
 export const dynamic = "force-dynamic";
 
-export default function HistoryPage() {
-  const daily = getDailyStats();
+export default async function HistoryPage() {
+  const [daily, allTime, initialResults] = await Promise.all([
+    getDailyStats(),
+    getAllTimeStats(),
+    // Pre-rendered first page of the search list (only shown while searching).
+    searchHistory(""),
+  ]);
   // Default the main list to the most recent day with plays ("today" in practice).
   const initialDay = daily[0]?.day ?? null;
-  const initialDayTracks = initialDay ? getPlaysByDay(initialDay) : [];
-  const allTime = getAllTimeStats();
-  // Pre-rendered first page of the search list (only shown while searching).
-  const initialResults = searchHistory("");
+  const initialDayTracks = initialDay ? await getPlaysByDay(initialDay) : [];
 
   return (
     <div className="space-y-8">

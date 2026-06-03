@@ -81,8 +81,8 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
 ## Architecture added recently
 
 - **Persistent playlist library (DB-backed):** the full library is stored in
-  SQLite (`playlists` table in `src/lib/db.ts`, native order). `/me` and
-  `/playlists` read it **synchronously on render — no Spotify call**, so pages are
+  libSQL (`playlists` table in `src/lib/db.ts`, native order). `/me` and
+  `/playlists` read it **on render — no Spotify call**, so pages are
   instant and never block/rate-limit on a library scan. `playlists-sync.tsx`
   (client) fires `POST /api/playlists/sync` when the store is empty or >15 min
   stale; the sync does the one full scan off the render path, then `router.refresh()`
@@ -90,14 +90,22 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   old per-page `/api/playlists?offset=` waterfall is gone (the route file remains
   but is unused). `playlist-grid.tsx` still collapses to 3 rows with see-more +
   fuzzy search; thumbnails are lazy.
-- **Listen-history backend (`src/lib/db.ts`):** local **SQLite** via
-  `better-sqlite3` at `data/listens.db` (gitignored; `serverExternalPackages`
-  lists it in `next.config.ts`). Synced on demand from
-  `/me/player/recently-played` in `history/actions.ts`. Tables: `tracks`,
-  `plays` (deduped on `played_at`), `contexts` (resolved playlist/album names for
-  the "From" column). The `/history` page shows per-day cards + a searchable log.
-  **The "Sync recent plays" button is temporary** — slated to become a ~30s
-  background poll (the user asked to be reminded).
+- **Listen-history backend (`src/lib/db.ts`):** **libSQL/Turso** (`@libsql/client`),
+  so it persists on Vercel's serverless runtime. `TURSO_DATABASE_URL` +
+  `TURSO_AUTH_TOKEN` select the remote DB; with both unset (dev) it falls back to a
+  local file at `data/listens.db` (gitignored). **All `db.ts` functions are async**
+  (network DB) — `await` them. Synced from `/me/player/recently-played` in
+  `sync/history.ts`. Tables: `tracks`, `plays` (deduped on `played_at`), `contexts`
+  (resolved playlist/album names for the "From" column). The `/history` page shows
+  per-day cards + a searchable log.
+- **History sync runs without `setInterval`** (serverless has no long-running
+  process). Three triggers, one shared core (`syncRecentPlays`): the manual
+  "Sync recent plays" button, an **on-load** ping (`SyncOnLoad` → `POST /api/sync`,
+  server skips if synced <5 min ago), and a **daily Vercel Cron** backstop
+  (`/api/cron/sync`, guarded by `CRON_SECRET`; see `vercel.json`). Hobby crons run
+  ~once/day — tighten the schedule on Pro. `date(..., 'localtime')` in the day
+  queries is the *server's* localtime, i.e. **UTC on Turso**, so deployed day
+  buckets are UTC (internally consistent; revisit if you want true local days).
 
 ## Verifying UI with Playwright
 

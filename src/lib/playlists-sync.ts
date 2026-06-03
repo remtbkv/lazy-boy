@@ -24,7 +24,7 @@ async function doSync(): Promise<{ count: number }> {
   if (!session?.accessToken || session.error) throw new Error("unauthorized");
   const sp = spotifyClient(session.accessToken);
   const [me, playlists] = await Promise.all([sp.me(), sp.myPlaylistsAll()]);
-  storePlaylists(
+  await storePlaylists(
     playlists.map((p) => ({
       id: p.id,
       name: p.name,

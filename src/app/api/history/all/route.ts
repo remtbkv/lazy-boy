@@ -9,5 +9,5 @@ export async function GET(req: Request) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
   const limit = Math.min(1000, Math.max(1, Number(new URL(req.url).searchParams.get("limit") ?? 300)));
-  return Response.json({ results: getAllTimePlays(limit) });
+  return Response.json({ results: await getAllTimePlays(limit) });
 }
