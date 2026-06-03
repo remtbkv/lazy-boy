@@ -34,9 +34,12 @@ Legend: `[x]` done · `[~]` partial / seam in place · `[ ]` not started
 - [x] **Logout UX fix** — the prototype's logout button was unreachable (hover gap). Our
       header dropdown has a small `sideOffset` (no gap) and logout is a form-submit menu
       item, so the hover→click path stays connected. Uses Auth.js `signOut`.
-- [ ] **Persistent song store** — SQL table of all songs + listen counts + where saved /
-      where listened. Plus search. Needs a DB (Postgres/SQLite via Prisma or Drizzle). The
-      task registry and service layer are structured to add this without rework.
+- [~] **Persistent song store** — SQLite (`better-sqlite3`, `data/listens.db`) via
+      `src/lib/db.ts`. DONE: listen history synced from `/me/player/recently-played`
+      (`tracks`/`plays`/`contexts` tables), the `/history` page (per-day cards + searchable
+      log with play counts, last-played, album art, duration, resolved "From" playlist
+      names). TODO: replace the manual "Sync" button with a ~30s background poll; "where
+      saved" (which playlists contain a song) is not implemented yet.
 
 ## Phase 3 — user behavior (`future.txt`)
 
@@ -44,8 +47,19 @@ Legend: `[x]` done · `[~]` partial / seam in place · `[ ]` not started
       features (save queue) on it. (Scopes + product read wired; enforce in UI.)
 - [ ] **Tasks survive refresh** — clean-playlist progress persists across reloads. The task
       registry interface is the swap point (move from in-memory Map to Redis/DB).
-- [ ] **Friends** — see what a friend is playing; let them queue songs for you; DND toggle to
-      block modifications. Needs a backend social model + the persistent store.
+- [ ] **Friends** — let them queue songs for you; the song is held server-side and
+      delivered to your Spotify queue when you next have an active device (works even
+      if you're offline when they send it). DND toggle to block modifications.
+      ("See what a friend is playing" is dropped — Spotify already shows that.)
+      Needs a backend social model + the persistent store.
+- [ ] **Playlist subtracter** — pick your playlist and a friend's; show the set diff
+      (unique to you / unique to them / shared) at a glance. Built on `compareUser`.
+
+> **BLOCKER for all "friend" features (subtracter, friend queue, compare):** the Spotify
+> app is in **development mode**, so reading any other user's data returns **403** (even the
+> official `spotify` account). The user must add each friend to the app's allowlist in the
+> Spotify dashboard → User Management (≤25 users), or request extended-quota mode. Not
+> fixable in code. See `docs/GOTCHAS.md`.
 
 ## Phase 4 — nice to have / unlikely (`future.txt`)
 

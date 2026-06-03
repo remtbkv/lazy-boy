@@ -22,8 +22,11 @@ export type CompareEntry = {
 
 export class Service {
   readonly resources: Resources;
-  constructor(accessToken: string) {
-    this.resources = new Resources(accessToken);
+  // `patient` rides out rate limits for background bulk work (e.g. cleaning a
+  // playlist); forwarded to Resources/HttpClient. Interactive callers omit it so
+  // they fail fast and let the UI degrade rather than hang.
+  constructor(accessToken: string, patient = false) {
+    this.resources = new Resources(accessToken, patient);
   }
 
   me() {
@@ -32,11 +35,51 @@ export class Service {
   myPlaylists(onlyMine = false) {
     return this.resources.myPlaylists(onlyMine);
   }
+  myPlaylistsAll() {
+    return this.resources.myPlaylistsAll();
+  }
+  myPlaylistsPage(offset = 0, limit = 50) {
+    return this.resources.myPlaylistsPage(offset, limit);
+  }
   playlist(id: string) {
     return this.resources.playlist(id);
   }
   playlistTracks(id: string) {
     return this.resources.playlistTracks(id);
+  }
+  recentlyPlayed(limit = 50) {
+    return this.resources.recentlyPlayed(limit);
+  }
+  contextName(uri: string) {
+    return this.resources.contextName(uri);
+  }
+  currentlyPlaying() {
+    return this.resources.currentlyPlaying();
+  }
+  addToQueue(uri: string) {
+    return this.resources.addToQueue(uri);
+  }
+  nextTrack() {
+    return this.resources.nextTrack();
+  }
+  previousTrack() {
+    return this.resources.previousTrack();
+  }
+  resumePlayback() {
+    return this.resources.resumePlayback();
+  }
+  pausePlayback() {
+    return this.resources.pausePlayback();
+  }
+  seek(positionMs: number) {
+    return this.resources.seek(positionMs);
+  }
+  saveTrack(id: string) {
+    return this.resources.saveTrack(id);
+  }
+
+  removeFromPlaylist(playlistId: string, uri: string) {
+    return this.resources.removeItems(playlistId, [uri]);
   }
 
   /** Union of the user's entire library (liked + every owned playlist), deduped.
@@ -131,16 +174,111 @@ export class Service {
     return { id, count: liked.length, name };
   }
 
-  /** Save the current playback queue to a playlist (Premium + active device). */
+  /** Save the current playback queue to a playlist (Premium + active device).
+   *
+   *  Spotify's GET /me/player/queue is forbidden for many apps (403), so we use the
+   *  original skip-through trick: queue a rare sentinel track followed by the current
+   *  track, mute, then skip forward collecting each song until we reach the sentinel,
+   *  and finally skip past it back onto the re-queued current track and restore the
+   *  position + volume. Paced with small sleeps so fast skipping isn't rate-limited. */
   async saveQueue(): Promise<{ id: string; name: string; count: number }> {
-    const queue = await this.resources.queue();
-    if (queue.length === 0) {
-      throw new Error("Nothing is playing — start playback to capture a queue.");
+    const SENTINEL_ID = "6sVK7RXMHRGxAefiqEGEbP"; // "bittersweet" by $up1 — unlikely to be queued
+    const SENTINEL_URI = `spotify:track:${SENTINEL_ID}`;
+    const MAX = 100; // Spotify queues cap around 100
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    const start = await this.resources.playbackState();
+    if (!start || !start.trackUri) {
+      throw new Error("No active device — open Spotify and play a song first.");
     }
-    const name = "Saved queue";
+    const position = start.progressMs;
+    const currentUri = start.trackUri;
+    if (!start.isPlaying) await this.resources.resumePlayback();
+
+    // Mute while skipping so it isn't a blast of song intros. Best-effort: some
+    // devices (phones) can't be volume-controlled (403) — just carry on unmuted.
+    let restoreVolume: number | null = null;
+    if (start.volumePercent != null && start.volumePercent > 0) {
+      try {
+        await this.resources.setVolume(0);
+        restoreVolume = start.volumePercent;
+      } catch {
+        /* device volume not controllable */
+      }
+    }
+
+    const collected: { id: string; uri: string }[] = [];
+    try {
+      // Sentinel marks the end of the real queue; re-queue the current track after
+      // it so playback lands back where it started.
+      await this.resources.addToQueue(SENTINEL_URI);
+      await this.resources.addToQueue(currentUri);
+      await this.resources.nextTrack();
+      await sleep(300);
+
+      const playingTrack = async () =>
+        (await this.resources.currentlyPlaying())?.track ?? null;
+      let curr = await playingTrack();
+      let n = 0;
+      while (curr && curr.id !== SENTINEL_ID && n <= MAX + 5) {
+        if (n === MAX - 7) await sleep(10000); // let the API's queue view catch up
+        collected.push({ id: curr.id, uri: curr.uri });
+        n++;
+        await this.resources.nextTrack();
+        await sleep(300);
+        // Wait for the track to actually change; nudge again if it stalls.
+        const prevId = curr.id;
+        let next: Track | null = curr;
+        let nudgedAt = Date.now();
+        while (next && next.id === prevId) {
+          await sleep(150);
+          next = await playingTrack();
+          if (Date.now() - nudgedAt > 1500) {
+            nudgedAt = Date.now();
+            await this.resources.nextTrack();
+            next = await playingTrack();
+          }
+        }
+        curr = next;
+      }
+      // Skip past the sentinel back onto the re-queued current track, then restore.
+      await this.resources.nextTrack();
+      await sleep(300);
+      await this.resources.seek(position);
+    } catch (e) {
+      // Spotify can refuse a player command (403 "Player command failed") on the
+      // back of rapid skipping. If we already collected the queue, that's the part
+      // that matters — don't lose it; fall through and still save what we have.
+      if (collected.length === 0) throw e;
+    } finally {
+      if (restoreVolume != null) {
+        try {
+          await this.resources.setVolume(restoreVolume);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+
+    if (collected.length === 0) {
+      throw new Error("Your queue is empty — add songs, then save.");
+    }
+    // Let any player-command throttling settle before the playlist write, so the
+    // save itself isn't refused on the back of all the rapid skipping.
+    await sleep(800);
+    // Stamp each save with the local date/time so every queue snapshot is a
+    // distinct playlist (e.g. "Saved queue — Jun 2, 2026, 3:25 PM").
+    const stamp = new Date().toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+    const name = `Saved queue — ${stamp}`;
     const id = await this.resources.createPlaylist(name);
-    await this.resources.addItems(id, queue.map((t) => t.uri));
-    return { id, name, count: queue.length };
+    await this.resources.addItems(id, collected.map((t) => t.uri));
+    return { id, name, count: collected.length };
   }
 
   /** Song diff vs another user's public playlists. */

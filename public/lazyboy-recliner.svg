@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 200" role="img" aria-label="Lazy Boy panda reclining">
+  <!-- floor shadow -->
+  <ellipse cx="112" cy="182" rx="86" ry="9" fill="#000" opacity="0.35"/>
+
+  <!-- ===== RECLINER (brown, side 3/4 view, reclined) ===== -->
+  <!-- backrest, leaning back to the left -->
+  <g transform="rotate(-20 70 100)">
+    <rect x="44" y="34" width="52" height="104" rx="20" fill="#6f5238"/>
+    <rect x="52" y="42" width="36" height="88" rx="14" fill="#7e5f43"/>
+  </g>
+  <!-- seat cushion -->
+  <rect x="66" y="112" width="92" height="40" rx="16" fill="#7e5f43"/>
+  <rect x="70" y="116" width="84" height="20" rx="10" fill="#8a694b"/>
+  <!-- front armrest -->
+  <rect x="60" y="100" width="22" height="58" rx="11" fill="#6f5238"/>
+  <ellipse cx="71" cy="103" rx="12" ry="8" fill="#8a694b"/>
+  <!-- footrest popped up to the right -->
+  <g transform="rotate(-10 178 134)">
+    <rect x="150" y="120" width="58" height="30" rx="13" fill="#6f5238"/>
+    <rect x="155" y="124" width="48" height="14" rx="8" fill="#7e5f43"/>
+  </g>
+  <!-- base / legs -->
+  <rect x="78" y="150" width="70" height="16" rx="6" fill="#5b4330"/>
+
+  <!-- ===== PANDA reclining ===== -->
+  <!-- far leg, tucked slightly behind (black) -->
+  <ellipse cx="140" cy="148" rx="20" ry="10" fill="#101010" transform="rotate(-7 140 148)"/>
+  <circle cx="166" cy="142" r="8.5" fill="#101010"/>
+  <!-- body (white), leaning back -->
+  <ellipse cx="104" cy="118" rx="34" ry="30" fill="#fafafa" transform="rotate(-14 104 118)"/>
+  <!-- near arm resting over the armrest (black) -->
+  <ellipse cx="86" cy="120" rx="11" ry="20" fill="#141414" transform="rotate(28 86 120)"/>
+  <ellipse cx="73" cy="106" rx="8" ry="7" fill="#141414"/>
+
+  <!-- head, tipped back on the rest -->
+  <g transform="rotate(-12 86 78)">
+    <!-- ears -->
+    <circle cx="71" cy="62" r="10" fill="#141414"/>
+    <circle cx="101" cy="62" r="10" fill="#141414"/>
+    <!-- face -->
+    <ellipse cx="86" cy="80" rx="26" ry="24" fill="#fafafa"/>
+    <!-- eye patches -->
+    <ellipse cx="76" cy="76" rx="8" ry="10.5" fill="#141414" transform="rotate(28 76 76)"/>
+    <ellipse cx="96" cy="76" rx="8" ry="10.5" fill="#141414" transform="rotate(-28 96 76)"/>
+    <!-- closed sleepy eyes -->
+    <path d="M71 76 Q76 72 81 76" fill="none" stroke="#fafafa" stroke-width="2.2" stroke-linecap="round"/>
+    <path d="M91 76 Q96 72 101 76" fill="none" stroke="#fafafa" stroke-width="2.2" stroke-linecap="round"/>
+    <!-- nose + relaxed mouth -->
+    <path d="M82 86 Q86 84.5 90 86 Q88 90 86 90 Q84 90 82 86 Z" fill="#141414"/>
+    <path d="M86 90 L86 93" fill="none" stroke="#141414" stroke-width="1.8" stroke-linecap="round"/>
+    <path d="M81.5 94 Q86 97 90.5 94" fill="none" stroke="#141414" stroke-width="1.8" stroke-linecap="round"/>
+  </g>
+
+  <!-- near leg crossed up on the footrest (black), with a rounded foot -->
+  <ellipse cx="138" cy="136" rx="23" ry="11" fill="#141414" transform="rotate(-9 138 136)"/>
+  <circle cx="166" cy="128" r="9.5" fill="#141414"/>
+  <ellipse cx="168" cy="128" rx="4.5" ry="6" fill="#2c2c2c"/>
+
+  <!-- green music note (chilling to music) -->
+  <g fill="#1DB954">
+    <circle cx="132" cy="48" r="3.4"/>
+    <rect x="134.6" y="33" width="2" height="16" rx="1"/>
+    <circle cx="152" cy="55" r="2.8"/>
+    <rect x="154" y="42" width="1.7" height="14" rx="0.9"/>
+    <path d="M134.6 33 Q144 30.5 154 35.5 L154 42 Q144 37.5 136.6 39.5 Z"/>
+  </g>
+</svg>

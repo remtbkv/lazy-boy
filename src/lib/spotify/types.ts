@@ -1,17 +1,23 @@
 // Domain + Spotify API types. The app works with the normalized `Track`; raw
 // Spotify JSON is only handled inside resources.ts.
 
-/** Normalized track used everywhere in the app. */
+/** Normalized track used everywhere in the app. The optional fields are only
+ *  populated where the source response carries them (e.g. playlist detail). */
 export type Track = {
   id: string;
   artist: string; // primary artist name
   title: string;
   uri: string;
+  album?: string;
+  albumImage?: string | null;
+  durationMs?: number;
+  addedAt?: string; // when added to the playlist (ISO), playlist detail only
 };
 
 export type Playlist = {
   id: string;
   name: string;
+  description: string;
   ownerId: string;
   ownerName: string;
   trackCount: number;
@@ -46,18 +52,29 @@ export type RawTrack = {
   uri: string;
   is_local?: boolean;
   type?: string; // "track" | "episode"
+  duration_ms?: number;
   artists: RawArtist[];
-  album?: { images: RawImage[] };
+  album?: { name?: string; images?: RawImage[] };
 };
 
-export type RawPlaylistTrackItem = { track: RawTrack | null };
+// The `/playlists/{id}/items` endpoint nests the track under `item`; the older
+// `/tracks` shape used `track`. Accept either.
+export type RawPlaylistTrackItem = {
+  item?: RawTrack | null;
+  track?: RawTrack | null;
+  added_at?: string;
+};
 export type RawSavedTrackItem = { track: RawTrack | null };
 
 export type RawPlaylist = {
   id: string;
   name: string;
+  description?: string | null;
   owner: { id: string; display_name?: string };
-  tracks: { total: number };
+  // Spotify returns the track-paging object under `tracks` for some responses
+  // and under `items` for others (both are `{ total, ... }`). Read either.
+  tracks?: { total: number };
+  items?: { total: number };
   images: RawImage[];
   public: boolean;
   collaborative: boolean;

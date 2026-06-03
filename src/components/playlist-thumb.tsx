@@ -16,7 +16,9 @@ export function PlaylistThumb({
       <img
         src={src}
         alt={name}
-        className={`aspect-square w-full rounded-md object-cover ${className}`}
+        loading="lazy"
+        decoding="async"
+        className={`aspect-square w-full rounded-md bg-muted object-cover ${className}`}
       />
     );
   }

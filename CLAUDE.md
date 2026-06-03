@@ -3,6 +3,11 @@
 Project context for AI coding sessions. Read this first. Keep it current.
 Role/persona prompts and the Next 16 API notes live in `AGENTS.md`.
 
+**Before debugging, read `docs/GOTCHAS.md`** — hard-won traps (Base UI's broken
+primitives, Spotify's `/tracks`→`/items` migration, the `allowedDevOrigins`
+hydration trap, Spotify dev-mode 403). It will save you the investigation. Access
+the app only at `http://127.0.0.1:3000`.
+
 ## What this is
 
 A Next.js web app to manage a user's Spotify library: merge/clean/compare playlists,
@@ -24,15 +29,28 @@ the dedupe/clean/queue-save algorithms — they are re-specified in `docs/FEATUR
 ```
 src/app/(auth)/          login page (unauthenticated shell)
 src/app/(app)/           authed shell: layout calls auth(), header tabs, feature pages
+                         me/, playlists/, playlists/[id]/, compare/, friends/, history/
 src/app/api/auth/        Auth.js route handler (NextAuth catch-all)
 src/app/api/tasks/       background-task progress polling endpoint
+src/app/api/playlists/   one page of playlists (incremental background load)
+src/app/api/history/     listen-history search (reads the local DB)
+src/app/api/now-playing/ live "what's playing"; null when idle (never stale)
 src/lib/auth.ts          Auth.js config + Spotify token refresh (centralized)
-src/lib/spotify/         client.ts (fetch+pagination+429), resources.ts, domain.ts, types.ts
+src/lib/session.ts       getSpotify(): server-only authed Spotify client
+src/lib/spotify/         client.ts (fetch+pagination+429/403), resources.ts, domain.ts, types.ts
 src/lib/tasks/           in-memory task registry (clean-playlist progress); swappable iface
-src/components/ui/       shadcn primitives (generated)
-src/components/          app-specific components
-docs/                    ARCHITECTURE, FEATURES, ROADMAP, CONVENTIONS
+src/lib/db.ts            SQLite listen-history store (better-sqlite3, data/listens.db)
+src/lib/format.ts        duration/time/day formatting (shared)
+src/lib/filter.ts        fuzzyFilter — substring+prefix name search (shared)
+src/components/ui/       UI primitives — Base UI under the hood, NOT Radix (see GOTCHAS.md)
+src/components/          app components + shared: album-thumb, sort-menu, floating-bar,
+                         now-playing, track-context-menu, playlists-client, playlist-grid,
+                         merge-panel, track-list, clean-panel, history-client, header
+docs/                    ARCHITECTURE, FEATURES, ROADMAP, CONVENTIONS, GOTCHAS, SECURITY
 ```
+
+**Reuse before adding:** formatting → `lib/format.ts`; name search → `lib/filter.ts`; album
+art → `album-thumb`; sort dropdown → `sort-menu`; bottom search pill → `floating-bar`.
 
 ## Core rules for this repo (in addition to global CLAUDE.md)
 

@@ -83,3 +83,43 @@ action layer reads the session directly.
   it makes it correct and testable independent of Spotify.
 - **Service layer chokepoint:** one place to handle Spotify's rate limits and pagination,
   which were the prototype's top operational pain.
+
+## Local listen-history store (`src/lib/db.ts`)
+
+A second data layer, independent of Spotify: a local **SQLite** file
+(`better-sqlite3`, `data/listens.db`, gitignored; native module declared in
+`serverExternalPackages`). Tables: `tracks`, `plays` (deduped on `played_at`),
+`contexts` (resolved playlist/album names), `meta`. Server-only (`import "server-only"`).
+
+- **Sync** (`history/actions.ts`) pulls `/me/player/recently-played`, records new plays, and
+  resolves any new playback contexts to names. Manual button for now → background poll later.
+- Reads: `searchHistory`, `getDailyStats`, `getLastSync`. The `/history` page renders day
+  cards + a searchable, scrollable log.
+- **Not yet user-scoped** — single-user only. Before multi-user/production, key rows by user
+  (or move to Postgres/Supabase). See `docs/SECURITY.md`.
+
+## Routes (`src/app/api/**`)
+
+- `auth/[...nextauth]` — Auth.js handler.
+- `tasks/[id]` — clean-playlist progress polling.
+- `playlists?offset=` — one page of playlists for the client's background load.
+- `history/search?q=` — local history search (no Spotify call → instant).
+- `now-playing` — live "what's playing"; returns `{ playing: null }` when idle (never stale).
+
+All check `auth()` and 401 on no session.
+
+## Player simulation
+
+- **Now-playing bar** (`components/now-playing.tsx`, mounted in the `(app)` layout): polls
+  `/api/now-playing` every ~12s while visible; renders only when there's genuine active
+  playback. No active device → nothing shown.
+- **Track right-click menu** (`components/track-context-menu.tsx`): Add to queue / Save to
+  Liked / Open in Spotify, via `addToQueueAction` / `saveToLikedAction`.
+
+## Shared client helpers (keep these DRY)
+
+- `lib/format.ts` — duration / listen-time / relative-time / day-label formatting.
+- `lib/filter.ts` — `fuzzyFilter` (substring + prefix-priority name search).
+- `components/album-thumb.tsx` — album art + music-note fallback.
+- `components/sort-menu.tsx` — the "Sort by ▾" dropdown.
+- `components/floating-bar.tsx` — the bottom-centered search/see-more pill.

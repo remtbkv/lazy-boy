@@ -13,8 +13,7 @@ export default function FriendsPage() {
           <CardDescription>See docs/ROADMAP.md, Phase 3.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-2 text-sm text-muted-foreground">
-          <p>· See what a friend is currently playing.</p>
-          <p>· Let friends queue songs for you, with a Do-Not-Disturb toggle.</p>
+          <p>· Let friends queue songs for you — held and delivered when you next have an active device.</p>
           <p>· A shared listening view backed by the persistent song store.</p>
         </CardContent>
       </Card>

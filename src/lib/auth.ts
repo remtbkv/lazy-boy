@@ -3,6 +3,12 @@
 
 import NextAuth, { customFetch } from "next-auth";
 import Spotify from "next-auth/providers/spotify";
+import {
+  getSpotifyTokens,
+  setSpotifyTokens,
+  clearSpotifyTokens,
+  type SpotifyTokens,
+} from "@/lib/db";
 
 // Spotify banned `localhost` redirect URIs (Nov 2025): only the loopback IP literal
 // `http://127.0.0.1:PORT` is allowed over HTTP. But Next.js normalizes 127.0.0.1 ->
@@ -45,33 +51,135 @@ type SpotifyToken = {
   error?: "RefreshAccessTokenError";
 };
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// `terminal` distinguishes a genuinely dead refresh token (revoked / re-consent
+// needed → force re-login) from a transient failure (token endpoint rate-limited,
+// network blip → keep the session and retry later). Only terminal failures should
+// log the user out; a transient one must not.
+class RefreshError extends Error {
+  terminal: boolean;
+  constructor(terminal: boolean, message: string) {
+    super(message);
+    this.name = "RefreshError";
+    this.terminal = terminal;
+  }
+}
+
 async function refreshAccessToken(refreshToken: string) {
   const basic = Buffer.from(
     `${process.env.SPOTIFY_CLIENT_ID}:${process.env.SPOTIFY_CLIENT_SECRET}`,
   ).toString("base64");
 
-  const res = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Authorization: `Basic ${basic}`,
-    },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-    }),
-  });
-  const data = await res.json();
-  if (!res.ok) throw data;
-  return {
-    accessToken: data.access_token as string,
-    // Spotify may or may not return a new refresh token.
-    refreshToken: (data.refresh_token as string | undefined) ?? refreshToken,
-    expiresAt: Math.floor(Date.now() / 1000) + (data.expires_in as number),
-  };
+  // Up to 3 tries with small, bounded backoff. Bounded so a slow token endpoint
+  // can't hang the page render — we'd rather keep the session and retry next load.
+  for (let attempt = 0; ; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(TOKEN_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Authorization: `Basic ${basic}`,
+        },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: refreshToken,
+        }),
+        // Hard timeout: a slow/hanging token endpoint must NOT block the page
+        // render (the layout awaits auth()). On timeout we fall back to the
+        // existing session and retry on a later request.
+        signal: AbortSignal.timeout(5000),
+      });
+    } catch (e) {
+      // Network error or timeout: at most one retry, so render is never blocked
+      // for more than ~10s before falling back to the current session.
+      if (attempt >= 1) throw new RefreshError(false, `network: ${String(e)}`);
+      await sleep(300 * (attempt + 1));
+      continue;
+    }
+
+    if (res.ok) {
+      const data = await res.json();
+      return {
+        accessToken: data.access_token as string,
+        // Spotify may or may not return a new refresh token.
+        refreshToken: (data.refresh_token as string | undefined) ?? refreshToken,
+        expiresAt: Math.floor(Date.now() / 1000) + (data.expires_in as number),
+      };
+    }
+
+    const data = await res.json().catch(() => ({}) as { error?: string });
+    // A revoked/invalid refresh token is the one case that truly needs re-login.
+    if (res.status === 400 && data?.error === "invalid_grant") {
+      throw new RefreshError(true, "invalid_grant");
+    }
+    // Rate-limited or server error: retry, then give up transiently (no logout).
+    if ((res.status === 429 || res.status >= 500) && attempt < 2) {
+      await sleep(300 * (attempt + 1));
+      continue;
+    }
+    throw new RefreshError(false, `token endpoint ${res.status}`);
+  }
+}
+
+// Guard against a cross-process rotation race wiping good tokens. A terminal
+// `invalid_grant` only means the refresh token *we* sent is dead — but if another
+// process already refreshed successfully in the meantime, the stored refresh token
+// has moved on and is still valid. Only clear when what's stored is still the exact
+// token we just failed with; otherwise someone else won the race, so keep theirs.
+function clearTokensIfStale(attemptedRefreshToken: string): void {
+  const current = getSpotifyTokens();
+  if (!current || current.refreshToken === attemptedRefreshToken) {
+    clearSpotifyTokens();
+  }
+}
+
+// In-process lock: concurrent requests that all see an expired token share ONE
+// refresh instead of each firing their own (which, with Spotify's rotating PKCE
+// refresh token, would invalidate each other and log the user out). The winner
+// writes the new tokens to the DB; everyone awaits the same promise.
+let inflightRefresh: Promise<SpotifyTokens> | null = null;
+function refreshShared(refreshToken: string): Promise<SpotifyTokens> {
+  if (!inflightRefresh) {
+    inflightRefresh = refreshAccessToken(refreshToken)
+      .then((fresh) => {
+        setSpotifyTokens(fresh);
+        return fresh;
+      })
+      .finally(() => {
+        inflightRefresh = null;
+      });
+  }
+  return inflightRefresh;
+}
+
+// Server-side, session-less access token for background jobs (e.g. the sync
+// scheduler) that run without a request. Reuses the same stored tokens and shared
+// refresh lock as the request path, so background and request refreshes coordinate
+// (no PKCE rotation races). Returns null when nobody's signed in or refresh is dead.
+export async function getValidAccessToken(): Promise<string | null> {
+  const stored = getSpotifyTokens();
+  if (!stored) return null;
+  if (Date.now() / 1000 < stored.expiresAt - 60) return stored.accessToken;
+  try {
+    const fresh = await refreshShared(stored.refreshToken);
+    return fresh.accessToken;
+  } catch (e) {
+    if (e instanceof RefreshError && e.terminal) clearTokensIfStale(stored.refreshToken);
+    return null;
+  }
 }
 
 export const { handlers, signIn, signOut, auth } = NextAuth({
+  // Persistent JWT session: the session cookie carries a 30-day expiry so you
+  // stay signed in across browser restarts. The Spotify access token inside it
+  // is short-lived (~1h) but is silently refreshed in the jwt callback below, so
+  // the long-lived session never forces a re-login as long as the refresh works.
+  session: {
+    strategy: "jwt",
+    maxAge: 30 * 24 * 60 * 60, // 30 days
+  },
   providers: [
     Spotify({
       clientId: process.env.SPOTIFY_CLIENT_ID,
@@ -100,36 +208,62 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
   callbacks: {
     async jwt({ token, account }) {
       const t = token as SpotifyToken;
-      // Initial sign-in: persist tokens from the provider.
+      // Initial sign-in: stash tokens in the DB (the source of truth) and keep the
+      // cookie lean. The DB lets concurrent refreshes coordinate (see refreshShared).
       if (account) {
-        t.accessToken = account.access_token;
-        t.refreshToken = account.refresh_token;
-        t.expiresAt = account.expires_at;
+        setSpotifyTokens({
+          accessToken: account.access_token!,
+          refreshToken: account.refresh_token!,
+          expiresAt: account.expires_at!,
+        });
+        delete t.accessToken;
+        delete t.refreshToken;
+        delete t.expiresAt;
+        delete t.error;
+        return t;
+      }
+
+      let stored = getSpotifyTokens();
+      // Migrate older sessions that kept tokens in the cookie into the DB once.
+      if (!stored && t.refreshToken && t.accessToken && t.expiresAt) {
+        stored = {
+          accessToken: t.accessToken,
+          refreshToken: t.refreshToken,
+          expiresAt: t.expiresAt,
+        };
+        setSpotifyTokens(stored);
+        delete t.accessToken;
+        delete t.refreshToken;
+        delete t.expiresAt;
+      }
+      if (!stored) {
+        t.error = "RefreshAccessTokenError";
         return t;
       }
       // Still valid (>60s headroom)?
-      if (t.expiresAt && Date.now() / 1000 < t.expiresAt - 60) {
-        return t;
-      }
-      // Expired: refresh.
-      if (!t.refreshToken) {
-        t.error = "RefreshAccessTokenError";
-        return t;
-      }
-      try {
-        const refreshed = await refreshAccessToken(t.refreshToken);
-        t.accessToken = refreshed.accessToken;
-        t.refreshToken = refreshed.refreshToken;
-        t.expiresAt = refreshed.expiresAt;
+      if (Date.now() / 1000 < stored.expiresAt - 60) {
         delete t.error;
-      } catch {
-        t.error = "RefreshAccessTokenError";
+        return t;
+      }
+      // Expired: refresh through the shared lock, always using the latest token.
+      try {
+        await refreshShared(stored.refreshToken);
+        delete t.error;
+      } catch (e) {
+        if (e instanceof RefreshError && e.terminal) {
+          // Refresh token is genuinely dead → real re-login required, unless another
+          // process already rotated to a fresh one (then this failure is a stale race).
+          clearTokensIfStale(stored.refreshToken);
+          if (getSpotifyTokens()) delete t.error;
+          else t.error = "RefreshAccessTokenError";
+        }
+        // Transient failure: keep the session; the next request retries.
       }
       return t;
     },
     async session({ session, token }) {
       const t = token as SpotifyToken;
-      session.accessToken = t.accessToken;
+      session.accessToken = getSpotifyTokens()?.accessToken;
       session.error = t.error;
       return session;
     },

@@ -1,11 +1,13 @@
 import * as React from "react"
-import { Input as InputPrimitive } from "@base-ui/react/input"
 
 import { cn } from "@/lib/utils"
 
+// Native input. The Base UI input primitive did not propagate onChange to React
+// state in this setup (controlled value snapped back / never updated), so typing
+// appeared to do nothing. A plain <input> behaves correctly.
 function Input({ className, type, ...props }: React.ComponentProps<"input">) {
   return (
-    <InputPrimitive
+    <input
       type={type}
       data-slot="input"
       className={cn(
