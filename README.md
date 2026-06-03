@@ -8,7 +8,7 @@ playlists. Clean rewrite of an earlier Flask/Django prototype.
 
 ```bash
 npm install
-cp .env.example .env.local   # fill in Spotify credentials + NEXTAUTH_SECRET
+cp .env.example .env.local   # fill in the values (see comments in that file)
 npm run dev                  # http://127.0.0.1:3000
 ```
 
@@ -18,13 +18,21 @@ npm run dev                  # http://127.0.0.1:3000
 2. Add this Redirect URI: `http://127.0.0.1:3000/api/auth/callback/spotify`
 3. Put the Client ID/Secret in `.env.local`.
 
-Generate `NEXTAUTH_SECRET` with `openssl rand -base64 32`.
+Generate `AUTH_SECRET` with `openssl rand -base64 32`.
 
 ## Features
 
 Merge playlists · Clean playlist (remove already-saved songs, with live progress) · Find
-duplicates · Remove songs → new playlist · Liked songs → mirror playlist · Save current queue
-· Compare another user's playlists (savable song diff). See `docs/FEATURES.md`.
+duplicates · Liked songs → mirror playlist · Save current queue · Listening history
+(auto-synced) · Compare another user's playlists (savable song diff). See `docs/FEATURES.md`.
+
+## Deployment
+
+Runs on Vercel. The listen-history + token store is **libSQL/Turso** (`TURSO_DATABASE_URL`,
+`TURSO_AUTH_TOKEN`); locally it falls back to a SQLite file when those are unset. History is
+kept current by a GitHub Actions cron (`.github/workflows/sync.yml`, every 30 min) plus an
+on-app-load sync. See `docs/ARCHITECTURE.md` and `docs/GOTCHAS.md` for the full setup and the
+`.vercel.app` / `AUTH_URL` / redirect-URI details.
 
 ## For contributors / AI agents
 

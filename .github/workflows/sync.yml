@@ -1,0 +1,34 @@
+name: sync-listen-history
+
+# Spotify's /me/player/recently-played only returns the last 50 plays and can't be
+# paged back further, so accurate history requires polling often enough that fewer
+# than 50 plays accumulate between runs. 50 plays ≈ 3h of nonstop listening, so a
+# 30-minute poll has a wide safety margin even for heavy listeners. This runs server
+# -side (hits the deployed cron endpoint with the stored token) whether or not the
+# app is open — which Vercel Hobby's once-a-day cron limit can't do for free.
+#
+# Setup: add two repo secrets (Settings → Secrets and variables → Actions):
+#   APP_URL      e.g. https://lazy-boy-spotify.vercel.app
+#   CRON_SECRET  same value as the Vercel env var
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+# Don't pile up runs if one is slow; a missed tick is harmless (next run catches up).
+concurrency:
+  group: sync-listen-history
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping cron sync endpoint
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          curl -fsS --max-time 60 \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "${APP_URL%/}/api/cron/sync"

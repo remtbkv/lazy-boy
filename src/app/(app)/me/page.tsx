@@ -97,7 +97,7 @@ export default async function MePage() {
 
       <p className="border-t border-border/60 pt-6 text-sm text-muted-foreground">
         <span className="font-semibold text-foreground">Lazy Boy</span> does Spotify stuff for you{" "}
-        <span className="italic text-muted-foreground/50">(but he&apos;s not the lazy one, it seems)</span>
+        <span className="italic text-muted-foreground/50">(but he&apos;s not the lazy one)</span>
       </p>
     </div>
   );

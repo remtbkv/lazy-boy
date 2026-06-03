@@ -32,7 +32,7 @@ the user-scoping item below is handled by row-level security instead.)
       runtime (omitted now because a naive CSP breaks the app).
 - [ ] **Rate limiting** on route handlers / server actions (e.g. per-IP or per-user) to protect
       both this app and the Spotify quota.
-- [ ] **Input validation** on route params (`offset`, `q`, track `uri`/`id`) — currently
+- [ ] **Input validation** on route params (`q`, `day`, track `uri`/`id`) — currently
       lightly coerced; tighten before exposing publicly.
 - [ ] **HTTPS enforced** end-to-end (HSTS is set, but confirm the host redirects HTTP→HTTPS).
 - [ ] **No token/secret logging.** Keep the temporary `console.log` debugging out of committed

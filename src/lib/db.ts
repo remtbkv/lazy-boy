@@ -267,17 +267,6 @@ export async function getLastSync(): Promise<string | null> {
   return getMeta("last_sync");
 }
 
-/** Record how many plays the most recent sync added (manual or background), so the
- *  UI / future stats can show sync activity. Single-user for now; key per user later. */
-export async function setLastSyncStats(added: number): Promise<void> {
-  await setMeta("last_sync_added", String(added));
-}
-
-export async function getLastSyncStats(): Promise<{ added: number } | null> {
-  const v = await getMeta("last_sync_added");
-  return v == null ? null : { added: Number(v) };
-}
-
 // ---- playlists (persistent library cache; avoids re-scanning Spotify per load) ----
 export type StoredPlaylist = {
   id: string;

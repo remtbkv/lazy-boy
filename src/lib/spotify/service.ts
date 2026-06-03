@@ -7,10 +7,10 @@ import {
   findDuplicates,
   intersect,
   mergeUnique,
-  removeByIds,
   subtract,
 } from "./domain";
 import type { Playlist, Track } from "./types";
+import { exactTime } from "@/lib/format";
 
 export type Progress = (collected: number, total: number) => void;
 
@@ -37,9 +37,6 @@ export class Service {
   }
   myPlaylistsAll() {
     return this.resources.myPlaylistsAll();
-  }
-  myPlaylistsPage(offset = 0, limit = 50) {
-    return this.resources.myPlaylistsPage(offset, limit);
   }
   playlist(id: string) {
     return this.resources.playlist(id);
@@ -70,9 +67,6 @@ export class Service {
   }
   pausePlayback() {
     return this.resources.pausePlayback();
-  }
-  seek(positionMs: number) {
-    return this.resources.seek(positionMs);
   }
   saveTrack(id: string) {
     return this.resources.saveTrack(id);
@@ -151,17 +145,6 @@ export class Service {
   async findDuplicates(playlistId: string): Promise<Track[]> {
     const tracks = await this.resources.playlistTracks(playlistId);
     return findDuplicates(tracks);
-  }
-
-  /** New playlist = original minus the given track ids. */
-  async removeTracks(playlistId: string, ids: string[]): Promise<{ id: string; name: string; removed: number }> {
-    const pl = await this.resources.playlist(playlistId);
-    const tracks = await this.resources.playlistTracks(playlistId);
-    const kept = removeByIds(tracks, new Set(ids));
-    const removed = tracks.length - kept.length;
-    const newId = await this.resources.createPlaylist(`${removed} removed: ${pl.name}`);
-    await this.resources.addItems(newId, kept.map((t) => t.uri));
-    return { id: newId, name: `${removed} removed: ${pl.name}`, removed };
   }
 
   /** Mirror liked songs into a maintained playlist (exact replace). */
@@ -268,14 +251,7 @@ export class Service {
     await sleep(800);
     // Stamp each save with the local date/time so every queue snapshot is a
     // distinct playlist (e.g. "Saved queue — Jun 2, 2026, 3:25 PM").
-    const stamp = new Date().toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    });
-    const name = `Saved queue — ${stamp}`;
+    const name = `Saved queue — ${exactTime(new Date().toISOString())}`;
     const id = await this.resources.createPlaylist(name);
     await this.resources.addItems(id, collected.map((t) => t.uri));
     return { id, name, count: collected.length };

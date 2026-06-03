@@ -94,10 +94,16 @@ SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped 
 (`import "server-only"`). **Every function is async** (the DB is over the network).
 
 - **Sync core** (`sync/history.ts`, `syncRecentPlays`) pulls `/me/player/recently-played`,
-  records new plays, resolves new playback contexts to names. Triggered three ways (no
-  `setInterval` — serverless can't run one): the manual button (`history/actions.ts`),
-  on app load (`SyncOnLoad` → `POST /api/sync`, debounced server-side to ≥5 min), and a
-  daily Vercel Cron (`/api/cron/sync`, `CRON_SECRET`-guarded; schedule in `vercel.json`).
+  records new plays (deduped on `played_at`), resolves new playback contexts to names.
+  **Why polling, not a webhook:** Spotify's recently-played endpoint returns only the
+  **last 50 plays** and can't page back further, so completeness depends on polling often
+  enough that <50 plays accumulate between runs (50 ≈ 3h of nonstop listening). Triggered
+  three ways (no `setInterval` — serverless can't run one): the manual button
+  (`history/actions.ts`); on app load (`SyncOnLoad` → `POST /api/sync`, debounced
+  server-side to ≥5 min); and — the one that guarantees coverage when the app is closed —
+  a **GitHub Actions cron every 30 min** (`.github/workflows/sync.yml`) hitting
+  `/api/cron/sync` with the stored token. A daily Vercel Cron (`vercel.json`) is a
+  secondary backstop. All scheduled hits share `/api/cron/sync` (`CRON_SECRET`-guarded).
 - Reads: `searchHistory`, `getDailyStats`, `getLastSync`. The `/history` page renders day
   cards + a searchable, scrollable log.
 - **Token refresh coordination:** the `meta` table doubles as a cross-instance mutex
@@ -110,11 +116,12 @@ SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped 
 
 - `auth/[...nextauth]` — Auth.js handler.
 - `tasks/[id]` — clean-playlist progress polling.
-- `playlists?offset=` — one page of playlists for the client's background load.
+- `playlists/sync` (POST) — one full library scan → DB; client fires it when the store is stale.
 - `history/search?q=` — local history search (no Spotify call → instant).
 - `now-playing` — live "what's playing"; returns `{ playing: null }` when idle (never stale).
 - `sync` (POST) — on-load history sync; server skips if synced <5 min ago.
-- `cron/sync` (GET) — daily Vercel Cron backstop; `CRON_SECRET`-guarded, session-less.
+- `cron/sync` (GET) — scheduled history sync (GitHub Actions every 30 min + Vercel daily);
+  `CRON_SECRET`-guarded, session-less (uses the stored token).
 
 All check `auth()` and 401 on no session, except `cron/sync` (cron secret, no session).
 

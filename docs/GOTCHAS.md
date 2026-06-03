@@ -86,10 +86,10 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   instant and never block/rate-limit on a library scan. `playlists-sync.tsx`
   (client) fires `POST /api/playlists/sync` when the store is empty or >15 min
   stale; the sync does the one full scan off the render path, then `router.refresh()`
-  shows fresh data. `me_id` + `playlists_synced_at` live in the `meta` table. The
-  old per-page `/api/playlists?offset=` waterfall is gone (the route file remains
-  but is unused). `playlist-grid.tsx` still collapses to 3 rows with see-more +
-  fuzzy search; thumbnails are lazy.
+  shows fresh data. `me_id` + `playlists_synced_at` live in the `meta` table. (The
+  old per-page `/api/playlists?offset=` waterfall and its `myPlaylistsPage` chain
+  were deleted — the only playlists route now is `/sync`.) `playlist-grid.tsx`
+  still collapses to 3 rows with see-more + fuzzy search; thumbnails are lazy.
 - **Listen-history backend (`src/lib/db.ts`):** **libSQL/Turso** (`@libsql/client`),
   so it persists on Vercel's serverless runtime. `TURSO_DATABASE_URL` +
   `TURSO_AUTH_TOKEN` select the remote DB; with both unset (dev) it falls back to a
@@ -98,14 +98,23 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   `sync/history.ts`. Tables: `tracks`, `plays` (deduped on `played_at`), `contexts`
   (resolved playlist/album names for the "From" column). The `/history` page shows
   per-day cards + a searchable log.
-- **History sync runs without `setInterval`** (serverless has no long-running
-  process). Three triggers, one shared core (`syncRecentPlays`): the manual
-  "Sync recent plays" button, an **on-load** ping (`SyncOnLoad` → `POST /api/sync`,
-  server skips if synced <5 min ago), and a **daily Vercel Cron** backstop
-  (`/api/cron/sync`, guarded by `CRON_SECRET`; see `vercel.json`). Hobby crons run
-  ~once/day — tighten the schedule on Pro. `date(..., 'localtime')` in the day
-  queries is the *server's* localtime, i.e. **UTC on Turso**, so deployed day
-  buckets are UTC (internally consistent; revisit if you want true local days).
+- **`recently-played` only returns the last 50 plays — this drives the whole sync
+  design.** Spotify caps that endpoint at 50 and won't page back further, so any play
+  that scrolls off before you poll is **gone forever**. Completeness therefore depends
+  on polling often enough that <50 plays pile up between runs (50 ≈ 3h of nonstop
+  listening). A heavy user can do hundreds of plays/day, so a once-a-day poll loses
+  most of them — don't "optimize" the sync down to infrequent.
+- **History sync runs without `setInterval`** (serverless has no long-running process).
+  Triggers, one shared core (`syncRecentPlays`): the manual "Sync recent plays" button;
+  an **on-load** ping (`SyncOnLoad` → `POST /api/sync`, server skips if synced <5 min ago);
+  and the coverage guarantee — a **GitHub Actions cron every 30 min**
+  (`.github/workflows/sync.yml`) hitting `/api/cron/sync` with the stored token, so it
+  runs even when the app is closed (free; Vercel Hobby caps its own crons at ~once/day).
+  The Vercel daily cron (`vercel.json`) stays as a secondary backstop. The GitHub workflow
+  needs two repo secrets: `APP_URL` and `CRON_SECRET`.
+- **Day buckets are UTC in prod.** `date(..., 'localtime')` runs on the DB server, which
+  is **UTC on Turso**, so deployed per-day grouping is UTC (internally consistent;
+  revisit if you want true local-time days).
 
 ## Verifying UI with Playwright
 

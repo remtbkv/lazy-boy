@@ -23,7 +23,8 @@ Legend: `[x]` done · `[~]` partial / seam in place · `[ ]` not started
 - [x] Merge playlists
 - [x] Clean playlist (background task with live counter)
 - [x] Find duplicates
-- [x] Remove songs → new playlist
+- [ ] Remove songs → new playlist — backend was never wired to UI; removed as dead code
+      in the cleanup pass (restore from git history if/when a UI is built)
 - [x] Liked songs → mirror playlist
 - [x] Save queue (uses the real `GET /v1/me/player/queue` endpoint)
 
@@ -38,8 +39,10 @@ Legend: `[x]` done · `[~]` partial / seam in place · `[ ]` not started
       `src/lib/db.ts`. DONE: listen history synced from `/me/player/recently-played`
       (`tracks`/`plays`/`contexts` tables), the `/history` page (per-day cards + searchable
       log with play counts, last-played, album art, duration, resolved "From" playlist
-      names). Background sync now runs on app load (`/api/sync`) + a daily Vercel Cron
-      (`/api/cron/sync`), replacing the dev-only `setInterval` scheduler. TODO: "where
+      names). Background sync runs on app load (`/api/sync`) + a GitHub Actions cron every
+      30 min + a daily Vercel Cron (both → `/api/cron/sync`), replacing the dev-only
+      `setInterval` scheduler. The 30-min cadence is deliberate: `recently-played` only
+      returns the last 50 plays, so polling must outrun a heavy listener. TODO: "where
       saved" (which playlists contain a song) is not implemented yet.
 
 ## Phase 3 — user behavior (`future.txt`)

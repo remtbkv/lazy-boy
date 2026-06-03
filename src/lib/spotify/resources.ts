@@ -3,7 +3,6 @@
 
 import { HttpClient } from "./client";
 import type {
-  Paging,
   Playlist,
   RawPlaylist,
   RawPlaylistTrackItem,
@@ -72,8 +71,8 @@ function chunk<T>(arr: T[], size: number): T[][] {
 // The full playlist list paginates the whole library yet changes rarely, and
 // both the Me stats and the Playlists grid re-fetch it on every navigation.
 // Cache it briefly per access token (single-user app) so revisiting a page is
-// instant instead of re-scanning. Native Spotify order is preserved so callers
-// that page (myPlaylistsPage) can slice it; createPlaylist busts the entry.
+// instant instead of re-scanning. Native Spotify order is preserved;
+// createPlaylist busts the entry.
 const PLAYLISTS_TTL_MS = 60_000;
 const playlistsCache = new Map<string, { at: number; items: Playlist[] }>();
 
@@ -131,24 +130,6 @@ export class Resources {
     return [...items]
       .filter((p) => !onlyMine || p.ownerId === me)
       .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
-  }
-
-  /** One page of the user's playlists (native Spotify order) plus the grand
-   *  total, so the UI can render the first page fast and load the rest later.
-   *  Slices the cached library when it's warm so revisits don't re-page the API;
-   *  falls back to a single-page fetch on a cold cache to keep first paint fast. */
-  async myPlaylistsPage(
-    offset = 0,
-    limit = 50,
-  ): Promise<{ items: Playlist[]; total: number }> {
-    const cached = this.peekPlaylists();
-    if (cached) {
-      return { items: cached.slice(offset, offset + limit), total: cached.length };
-    }
-    const page = await this.http.get<Paging<RawPlaylist>>(
-      `/me/playlists?limit=${limit}&offset=${offset}`,
-    );
-    return { items: page.items.map(normPlaylist), total: page.total };
   }
 
   async playlist(id: string): Promise<Playlist> {

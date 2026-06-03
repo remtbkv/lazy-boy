@@ -86,21 +86,6 @@ export async function syncLikedAction(): Promise<
   }
 }
 
-export async function removeTracksAction(
-  playlistId: string,
-  ids: string[],
-): Promise<ActionResult<{ name: string; removed: number }>> {
-  try {
-    if (ids.length === 0) throw new Error("No tracks selected.");
-    const sp = await getSpotify();
-    const r = await sp.removeTracks(playlistId, ids);
-    revalidatePath(`/playlists/${playlistId}`);
-    return { ok: true, name: r.name, removed: r.removed };
-  } catch (e) {
-    return fail(e);
-  }
-}
-
 export async function saveCompareDiffAction(
   name: string,
   uris: string[],
@@ -178,7 +163,4 @@ export async function playerPreviousAction(): Promise<ActionResult> {
 }
 export async function playerSetPlayingAction(play: boolean): Promise<ActionResult> {
   return playerControl((sp) => (play ? sp.resumePlayback() : sp.pausePlayback()));
-}
-export async function playerSeekAction(positionMs: number): Promise<ActionResult> {
-  return playerControl((sp) => sp.seek(positionMs));
 }

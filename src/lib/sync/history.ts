@@ -4,7 +4,6 @@ import {
   recordPlays,
   recordContexts,
   unresolvedContextUris,
-  setLastSyncStats,
   type PlayRecord,
   type ContextRecord,
 } from "@/lib/db";
@@ -41,6 +40,5 @@ export async function syncRecentPlays(sp: Spotify): Promise<{ added: number }> {
   }
   await recordContexts(resolved);
 
-  await setLastSyncStats(added);
   return { added };
 }
