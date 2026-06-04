@@ -182,10 +182,11 @@ export async function playPlaylistTrackAction(
 }
 
 // "Pick up where you left off": start the chosen playlist on the active device at the
-// song *after* the FURTHEST one you've reached in playlist order — not the last one by
-// time. Assumes in-order (non-shuffled) listening: we take the max playlist position
-// among tracks you've played from it, so rewinding/skipping back doesn't drag your
-// resume point backward. No history for that playlist → start from the top. Needs an
+// song *after* where you left off. Assumes in-order (non-shuffled) listening. The
+// leave-off point is the end of the longest in-order run of songs you've played
+// (small skips allowed) — NOT just the farthest-down song, so rewinding doesn't drag it
+// backward AND a one-off accidental play deep in the list doesn't jump you ahead past
+// songs you never heard. No history for that playlist → start from the top. Needs an
 // active device + Premium, like the other transport controls.
 export async function resumePlaylistAction(
   playlistId: string,
@@ -208,13 +209,31 @@ export async function resumePlaylistAction(
     }
     if (tracks.length === 0) throw new Error("This playlist has no playable tracks.");
 
-    // Furthest position reached = the last index (in playlist order) you've played.
-    let maxIdx = -1;
-    for (let i = 0; i < tracks.length; i++) {
-      if (playedIds.has(tracks[i].id)) maxIdx = i;
+    // Positions (in playlist order) of tracks you've played from this playlist.
+    const playedPos: number[] = [];
+    for (let i = 0; i < tracks.length; i++) if (playedIds.has(tracks[i].id)) playedPos.push(i);
+
+    // Leave-off point = the end of the LONGEST in-order run, tolerating small skips (a
+    // gap of up to GAP positions between consecutive plays still counts as the same run).
+    // This is robust against accidents: a one-off play deep in the list is its own
+    // length-1 run and won't win, so we never skip you past songs you haven't heard.
+    const GAP = 10;
+    let bestEnd = -1;
+    let bestLen = 0;
+    let runStart = 0;
+    for (let k = 1; k <= playedPos.length; k++) {
+      const broke = k === playedPos.length || playedPos[k] - playedPos[k - 1] > GAP;
+      if (broke) {
+        const len = k - runStart;
+        if (len > bestLen) {
+          bestLen = len;
+          bestEnd = playedPos[k - 1];
+        }
+        runStart = k;
+      }
     }
-    const fromTop = maxIdx < 0;
-    const startIdx = fromTop ? 0 : Math.min(maxIdx + 1, tracks.length - 1); // the next song
+    const fromTop = bestEnd < 0;
+    const startIdx = fromTop ? 0 : Math.min(bestEnd + 1, tracks.length - 1); // the next song
     const start = tracks[startIdx];
     await sp.playContext(uri, start.uri);
     return { ok: true, track: start.title, fromTop };
