@@ -5,7 +5,13 @@ import { auth, signIn, signOut } from "@/lib/auth";
 import { getSpotify } from "@/lib/session";
 import { spotifyClient, SpotifyError } from "@/lib/spotify";
 import { runTask } from "@/lib/tasks/registry";
-import { clearSpotifyTokens, lastPlayedInContext, removeCachedPlaylistTrack } from "@/lib/db";
+import {
+  clearSpotifyTokens,
+  getPlaylistTracks,
+  lastPlayedInContext,
+  removeCachedPlaylistTrack,
+  storePlaylistTracks,
+} from "@/lib/db";
 
 export type ActionResult<T = object> =
   | ({ ok: true } & T)
@@ -183,12 +189,23 @@ export async function resumePlaylistAction(
   playlistId: string,
 ): Promise<ActionResult<{ track: string; fromTop: boolean }>> {
   try {
-    const sp = await getSpotify();
     const uri = `spotify:playlist:${playlistId}`;
-    const tracks = await sp.playlistTracks(playlistId);
+    // Read the cached track list (instant) and the last-played track in parallel with
+    // auth, instead of re-paginating the whole playlist from Spotify before playing —
+    // that live scan was the lag. Only cold (never-cached) playlists fall back to a live
+    // fetch, and we cache that result for next time.
+    const [sp, cached, last] = await Promise.all([
+      getSpotify(),
+      getPlaylistTracks(playlistId),
+      lastPlayedInContext(uri),
+    ]);
+    let tracks = cached;
+    if (tracks.length === 0) {
+      tracks = await sp.playlistTracks(playlistId);
+      if (tracks.length > 0) void storePlaylistTracks(playlistId, tracks);
+    }
     if (tracks.length === 0) throw new Error("This playlist has no playable tracks.");
 
-    const last = await lastPlayedInContext(uri);
     let startIdx = 0;
     let fromTop = true;
     if (last) {
