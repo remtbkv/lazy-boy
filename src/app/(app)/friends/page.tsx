@@ -4,7 +4,7 @@ export default function FriendsPage() {
   return (
     <div className="space-y-8">
       {/* The nav already says "Friends" — make the status the heading. */}
-      <h1 className="text-4xl font-bold tracking-tight">Coming soon</h1>
+      {/* <h1 className="text-4xl font-bold tracking-tight">Coming soon</h1> */}
       <Card className="max-w-xl">
         <CardHeader>
           <CardTitle className="text-base">On the roadmap</CardTitle>

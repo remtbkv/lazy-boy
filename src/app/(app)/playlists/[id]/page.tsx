@@ -127,7 +127,7 @@ async function Tracks({
     return (
       <div className="rounded-lg border border-border bg-card p-6 text-center text-sm text-muted-foreground">
         {status === 403
-          ? "This playlist belongs to another account, so Spotify won't let this app read its tracks (the app is in Spotify development mode). Your own playlists load fine."
+          ? "This playlist belongs to another account, so Spotify won't let this app read its tracks. Sorry, the API update is bad."
           : "Couldn't load this playlist's tracks — Spotify rate-limited the request. Refresh to try again."}
       </div>
     );
