@@ -181,6 +181,11 @@ export async function playPlaylistTrackAction(
   return playerControl((sp) => sp.playContext(`spotify:playlist:${playlistId}`, trackUri));
 }
 
+// Double-click a track outside a playlist (e.g. in history) → just play that track.
+export async function playTrackAction(trackUri: string): Promise<ActionResult> {
+  return playerControl((sp) => sp.playTracks([trackUri]));
+}
+
 // "Pick up where you left off": start the chosen playlist on the active device at the
 // song *after* where you left off. Assumes in-order (non-shuffled) listening. The
 // leave-off point is the end of the longest in-order run of songs you've played

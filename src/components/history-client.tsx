@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
+import { playTrackAction } from "@/app/(app)/actions";
 import { syncHistoryAction } from "@/app/(app)/history/actions";
 import { AlbumThumb } from "@/components/album-thumb";
 import { FloatingBar } from "@/components/floating-bar";
@@ -9,6 +11,8 @@ import { HoverTip } from "@/components/hover-tip";
 import { useNowPlaying } from "@/components/now-playing-context";
 import { PlayingBars } from "@/components/playing-bars";
 import { SortMenu } from "@/components/sort-menu";
+import { TrackContextMenu } from "@/components/track-context-menu";
+import type { Track } from "@/lib/spotify";
 import { dayLabel, exactTime, formatDuration, formatListenTime, timeAgo } from "@/lib/format";
 
 type Sort = "recent" | "plays" | "title" | "artist" | "album";
@@ -314,6 +318,27 @@ function TrackTable({
 }) {
   const { playing } = useNowPlaying();
   const currentId = playing?.track.id;
+  const [menu, setMenu] = useState<{ x: number; y: number; track: Track } | null>(null);
+
+  // Double-click → play just that song; right-click → the same action menu as in a
+  // playlist (Add to queue / Save to Liked / Share — no "remove", since it's not a
+  // playlist). History rows are TrackStats, so map them to the menu's Track shape.
+  const toTrack = (t: TrackStats): Track => ({
+    id: t.id,
+    uri: t.uri,
+    title: t.name,
+    artist: t.artist,
+    album: t.album ?? undefined,
+    albumImage: t.albumImage,
+    durationMs: t.durationMs ?? undefined,
+  });
+  const play = (t: TrackStats) => {
+    window.getSelection?.()?.removeAllRanges();
+    playTrackAction(t.uri).then((r) => {
+      if (!r.ok) toast.error(r.error);
+    });
+  };
+
   return (
     <div className="max-h-[calc(100vh-29rem)] min-h-[200px] overflow-y-auto rounded-lg border border-border">
       {/* Fixed layout: column widths stay constant and long text clips (then scrolls
@@ -338,9 +363,15 @@ function TrackTable({
             <tr
               key={t.id}
               className={
-                "border-b border-border last:border-0 transition-colors hover:bg-accent/30" +
+                "cursor-default border-b border-border last:border-0 transition-colors hover:bg-accent/30" +
                 (isCurrent ? " bg-white/5" : "")
               }
+              onDoubleClick={() => play(t)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setMenu({ x: e.clientX, y: e.clientY, track: toTrack(t) });
+              }}
             >
               <td className="px-4 py-2">
                 <div className="flex min-w-0 items-center gap-3">
@@ -393,6 +424,14 @@ function TrackTable({
           ) : null}
         </tbody>
       </table>
+      {menu ? (
+        <TrackContextMenu
+          track={menu.track}
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+        />
+      ) : null}
     </div>
   );
 }

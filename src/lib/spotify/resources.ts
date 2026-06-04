@@ -270,6 +270,12 @@ export class Resources {
     });
   }
 
+  /** Play specific track URIs on the active device (no playlist context — e.g. playing
+   *  a single song from history). 404 if no active device. */
+  async playTracks(uris: string[]): Promise<void> {
+    await this.http.put("/me/player/play", { uris });
+  }
+
   /** Transport controls for the active device. Each 404s with no active device. */
   async nextTrack(): Promise<void> {
     await this.http.post("/me/player/next");

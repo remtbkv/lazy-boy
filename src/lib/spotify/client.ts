@@ -12,6 +12,11 @@ const MAX_RETRIES = 3;
 // caps bound how long any single wait can be.
 const RATE_LIMIT_RETRIES = { fast: 3, patient: 12 };
 const RETRY_AFTER_CAP_S = { fast: 5, patient: 30 };
+// Spotify 403s both transiently (burst) and permanently (e.g. reading another user's
+// playlist items while the app is in development mode). We can't tell them apart from
+// the response, so retry only ONCE — enough to ride out a transient blip, but a real
+// "forbidden" fails fast instead of burning calls and stalling the page.
+const FORBIDDEN_RETRIES = 1;
 
 export class SpotifyError extends Error {
   status: number;
@@ -46,7 +51,8 @@ export class HttpClient {
   ): Promise<Response> {
     const url = path.startsWith("http") ? path : `${BASE}${path}`;
     let rateLimited = 0; // 429s get their own generous budget
-    let transient = 0; // 403/timeout get a smaller one
+    let transient = 0; // network errors / timeouts
+    let forbidden = 0; // 403s — retried once (see FORBIDDEN_RETRIES)
     for (;;) {
       // Respect a global cooldown before sending: don't add to a throttle in progress.
       const cooldown = cooldownUntil - Date.now();
@@ -94,12 +100,11 @@ export class HttpClient {
         }
         // Out of retries — return the 429; the cooldown above keeps others off Spotify.
       }
-      // Spotify also returns 403 transiently under burst load (not just true
-      // "forbidden"). Retry a few times with backoff before giving up, so a
-      // single throttled request doesn't crash the page.
-      if (res.status === 403 && transient < MAX_RETRIES) {
-        transient++;
-        await sleep(transient * 500);
+      // 403: one quick retry for a transient blip, then give up (a genuine "forbidden",
+      // e.g. another user's playlist in dev mode, won't recover and shouldn't burn calls).
+      if (res.status === 403 && forbidden < FORBIDDEN_RETRIES) {
+        forbidden++;
+        await sleep(500);
         continue;
       }
       return res;

@@ -115,17 +115,20 @@ async function Tracks({
 }) {
   const sp = await getSpotify();
   let tracks: Track[] | null = null;
+  let status = 0;
   try {
     tracks = await sp.playlistTracks(id);
-  } catch {
+  } catch (e) {
+    status = e instanceof SpotifyError ? e.status : 0;
     tracks = null;
   }
 
   if (!tracks) {
     return (
       <div className="rounded-lg border border-border bg-card p-6 text-center text-sm text-muted-foreground">
-        Couldn&apos;t load this playlist&apos;s tracks — Spotify rate-limited the
-        request. Refresh to try again.
+        {status === 403
+          ? "This playlist belongs to another account, so Spotify won't let this app read its tracks (the app is in Spotify development mode). Your own playlists load fine."
+          : "Couldn't load this playlist's tracks — Spotify rate-limited the request. Refresh to try again."}
       </div>
     );
   }

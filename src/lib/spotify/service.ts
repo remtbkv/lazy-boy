@@ -59,6 +59,9 @@ export class Service {
   playContext(contextUri: string, offsetUri?: string) {
     return this.resources.playContext(contextUri, offsetUri);
   }
+  playTracks(uris: string[]) {
+    return this.resources.playTracks(uris);
+  }
   nextTrack() {
     return this.resources.nextTrack();
   }
