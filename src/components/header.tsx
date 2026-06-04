@@ -27,9 +27,6 @@ const TABS = [
 export function Header({ name, image }: { name: string; image: string | null }) {
   const pathname = usePathname();
   const router = useRouter();
-  // Refs to the tab links so arrow navigation can move keyboard focus to the
-  // destination — otherwise the focus ring is left stranded on the tab you came from.
-  const linkRefs = useRef<(HTMLAnchorElement | null)[]>([]);
 
   // Left/right arrows move between the header tabs — except while typing in a
   // field (search pills, inputs), where arrows should move the caret. Reads the
@@ -54,9 +51,6 @@ export function Header({ name, image }: { name: string; image: string | null }) 
       if (to !== from) {
         e.preventDefault();
         router.push(TABS[to].href);
-        // Move focus with the navigation so the focus ring follows to the new tab
-        // instead of lingering on the one we left.
-        linkRefs.current[to]?.focus();
       }
     }
     window.addEventListener("keydown", onKey);
@@ -127,18 +121,18 @@ export function Header({ name, image }: { name: string; image: string | null }) 
         </Link>
 
         <nav className="flex items-center gap-0.5 sm:gap-1">
-          {TABS.map((tab, i) => {
+          {TABS.map((tab) => {
             const active =
               pathname === tab.href || pathname.startsWith(tab.href + "/");
             return (
               <Link
                 key={tab.href}
                 href={tab.href}
-                ref={(el) => {
-                  linkRefs.current[i] = el;
-                }}
                 className={cn(
-                  "rounded-md px-2 py-1.5 text-sm font-semibold transition-colors sm:px-3",
+                  // No focus ring on the tabs — the gray active highlight is the only
+                  // indicator, so there's no fast-ring / lagging-highlight mismatch while
+                  // a page loads.
+                  "rounded-md px-2 py-1.5 text-sm font-semibold outline-none transition-colors focus-visible:outline-none sm:px-3",
                   active
                     ? "bg-secondary text-foreground"
                     : "text-foreground/70 hover:text-foreground",
