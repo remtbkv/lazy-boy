@@ -4,9 +4,10 @@ import { getSpotify } from "@/lib/session";
 import { getAllTimeStats, getDailyStats, getLastSync } from "@/lib/db";
 import { syncRecentPlays } from "@/lib/sync/history";
 
-// Manual "Sync recent plays": pulls the latest plays for the signed-in user into
-// the store and returns refreshed day stats. The same core also runs on app load
-// (/api/sync) and via a daily Vercel Cron backstop (/api/cron/sync).
+// Used by the history page's auto-refresh (every minute while the tab is open, no
+// button): pulls the latest plays for the signed-in user into the store and returns
+// refreshed day stats so the view updates in place. The same core also runs on app
+// load + every 2 min via /api/sync, and on a schedule via /api/cron/sync.
 export async function syncHistoryAction() {
   try {
     const sp = await getSpotify();

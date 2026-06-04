@@ -3,11 +3,12 @@ import { spotifyClient } from "@/lib/spotify";
 import { getLastSync } from "@/lib/db";
 import { syncRecentPlays } from "@/lib/sync/history";
 
-// On-load history sync (replaces the old setInterval scheduler, which can't run on
-// serverless). The client pings this when the app is opened; the server decides
-// whether a sync is actually due, so frequent navigation doesn't hammer Spotify.
-// A daily Vercel Cron (/api/cron/sync) backs this up for when the app isn't open.
-const STALE_MS = 5 * 60 * 1000;
+// In-app history sync. SyncOnLoad pings this on load, every 2 min while open, and on
+// tab-focus; this server-side debounce coalesces those (and multiple tabs / quick
+// navigations) so we only actually hit Spotify when a sync is genuinely due. Kept just
+// under the client's 2-min cadence so each real poll goes through. Times the app is
+// closed are covered by the GitHub Actions cron (every 5 min) → /api/cron/sync.
+const STALE_MS = 60 * 1000;
 
 export async function POST() {
   const session = await auth();

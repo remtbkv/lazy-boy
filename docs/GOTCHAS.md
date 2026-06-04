@@ -104,14 +104,18 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   on polling often enough that <50 plays pile up between runs (50 ≈ 3h of nonstop
   listening). A heavy user can do hundreds of plays/day, so a once-a-day poll loses
   most of them — don't "optimize" the sync down to infrequent.
-- **History sync runs without `setInterval`** (serverless has no long-running process).
-  Triggers, one shared core (`syncRecentPlays`): the manual "Sync recent plays" button;
-  an **on-load** ping (`SyncOnLoad` → `POST /api/sync`, server skips if synced <5 min ago);
-  and the coverage guarantee — a **GitHub Actions cron every 30 min**
-  (`.github/workflows/sync.yml`) hitting `/api/cron/sync` with the stored token, so it
-  runs even when the app is closed (free; Vercel Hobby caps its own crons at ~once/day).
-  The Vercel daily cron (`vercel.json`) stays as a secondary backstop. The GitHub workflow
-  needs two repo secrets: `APP_URL` and `CRON_SECRET`.
+- **History sync runs without `setInterval`** (serverless has no long-running process),
+  and there is **no manual sync button** — it's fully automatic. One shared core
+  (`syncRecentPlays`), triggered by: **in-app polling** while the site is open
+  (`SyncOnLoad` → `POST /api/sync` on load, every 2 min, and on tab-focus; server skips
+  if synced <60 s ago — so an open tab is effectively live, and `/history` also refreshes
+  its view each minute); and the **app-closed coverage** path — a **GitHub Actions cron**
+  (`.github/workflows/sync.yml`) every 5 min (GitHub's hard floor; can't go to 2 min, and
+  runs best-effort) hitting `/api/cron/sync` with the stored token (free; Vercel Hobby
+  caps its own crons at ~once/day, kept as a secondary backstop). The GitHub workflow
+  needs two repo secrets: `APP_URL` and `CRON_SECRET`. Want a tighter app-closed cadence
+  than 5 min? GitHub can't do it — use an external pinger (e.g. cron-job.org, 1-min free)
+  hitting `/api/cron/sync` with the same bearer secret.
 - **Day buckets are UTC in prod.** `date(..., 'localtime')` runs on the DB server, which
   is **UTC on Turso**, so deployed per-day grouping is UTC (internally consistent;
   revisit if you want true local-time days).

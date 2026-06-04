@@ -1,18 +1,21 @@
 name: sync-listen-history
 
 # Spotify's /me/player/recently-played only returns the last 50 plays and can't be
-# paged back further, so accurate history requires polling often enough that fewer
-# than 50 plays accumulate between runs. 50 plays ≈ 3h of nonstop listening, so a
-# 30-minute poll has a wide safety margin even for heavy listeners. This runs server
-# -side (hits the deployed cron endpoint with the stored token) whether or not the
-# app is open — which Vercel Hobby's once-a-day cron limit can't do for free.
+# paged back further, so completeness requires polling often enough that fewer than 50
+# plays accumulate between runs (50 ≈ 3h of nonstop listening). This is the "app is
+# closed" capture path — it hits the deployed cron endpoint with the stored token
+# regardless of whether the site is open, which Vercel Hobby's once-a-day cron can't.
+# Set to GitHub's minimum cadence (*/5); GitHub enforces a 5-minute floor on scheduled
+# workflows and runs them best-effort, so the real interval can be a bit longer — still
+# far under the 50-play cap. (When the site IS open, SyncOnLoad polls every 2 min for
+# near-live updates; see src/components/sync-on-load.tsx.)
 #
 # Setup: add two repo secrets (Settings → Secrets and variables → Actions):
 #   APP_URL      e.g. https://lazy-boy-spotify.vercel.app
 #   CRON_SECRET  same value as the Vercel env var
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
 # Don't pile up runs if one is slow; a missed tick is harmless (next run catches up).

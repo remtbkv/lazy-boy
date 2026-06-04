@@ -97,13 +97,16 @@ SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped 
   records new plays (deduped on `played_at`), resolves new playback contexts to names.
   **Why polling, not a webhook:** Spotify's recently-played endpoint returns only the
   **last 50 plays** and can't page back further, so completeness depends on polling often
-  enough that <50 plays accumulate between runs (50 ≈ 3h of nonstop listening). Triggered
-  three ways (no `setInterval` — serverless can't run one): the manual button
-  (`history/actions.ts`); on app load (`SyncOnLoad` → `POST /api/sync`, debounced
-  server-side to ≥5 min); and — the one that guarantees coverage when the app is closed —
-  a **GitHub Actions cron every 30 min** (`.github/workflows/sync.yml`) hitting
-  `/api/cron/sync` with the stored token. A daily Vercel Cron (`vercel.json`) is a
-  secondary backstop. All scheduled hits share `/api/cron/sync` (`CRON_SECRET`-guarded).
+  enough that <50 plays accumulate between runs (50 ≈ 3h of nonstop listening). There is
+  **no manual sync button** — it's all automatic. Triggered (no `setInterval` — serverless
+  can't run one): in-app while the site is open (`SyncOnLoad` syncs on load, every 2 min,
+  and on tab-focus → `POST /api/sync`, debounced server-side to ~60 s, so an open tab is
+  effectively live; the `/history` page also refreshes its own view each minute via
+  `syncHistoryAction`); and — the coverage path for when the app is closed — a **GitHub
+  Actions cron** (`.github/workflows/sync.yml`) every 5 min (GitHub's hard floor for
+  scheduled workflows, run best-effort) hitting `/api/cron/sync` with the stored token.
+  A daily Vercel Cron (`vercel.json`) is a secondary backstop. All scheduled hits share
+  `/api/cron/sync` (`CRON_SECRET`-guarded).
 - Reads: `searchHistory`, `getDailyStats`, `getLastSync`. The `/history` page renders day
   cards + a searchable, scrollable log.
 - **Token refresh coordination:** the `meta` table doubles as a cross-instance mutex
@@ -120,7 +123,7 @@ SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped 
 - `history/search?q=` — local history search (no Spotify call → instant).
 - `now-playing` — live "what's playing"; returns `{ playing: null }` when idle (never stale).
 - `sync` (POST) — on-load history sync; server skips if synced <5 min ago.
-- `cron/sync` (GET) — scheduled history sync (GitHub Actions every 30 min + Vercel daily);
+- `cron/sync` (GET) — scheduled history sync (GitHub Actions every 5 min + Vercel daily);
   `CRON_SECRET`-guarded, session-less (uses the stored token).
 
 All check `auth()` and 401 on no session, except `cron/sync` (cron secret, no session).
