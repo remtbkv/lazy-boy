@@ -9,7 +9,6 @@ import { FloatingBar } from "@/components/floating-bar";
 import { HoverScroll } from "@/components/hover-scroll";
 import { HoverTip } from "@/components/hover-tip";
 import { useNowPlaying } from "@/components/now-playing-context";
-import { PlayingBars } from "@/components/playing-bars";
 import { SortMenu } from "@/components/sort-menu";
 import { TrackContextMenu } from "@/components/track-context-menu";
 import type { Track } from "@/lib/spotify";
@@ -316,7 +315,7 @@ function TrackTable({
   empty: string;
   loading?: boolean;
 }) {
-  const { playing } = useNowPlaying();
+  const { playing, refresh, setPlaying } = useNowPlaying();
   const currentId = playing?.track.id;
   const [menu, setMenu] = useState<{ x: number; y: number; track: Track } | null>(null);
 
@@ -335,7 +334,20 @@ function TrackTable({
   const play = (t: TrackStats) => {
     window.getSelection?.()?.removeAllRanges();
     playTrackAction(t.uri).then((r) => {
-      if (!r.ok) toast.error(r.error);
+      if (!r.ok) {
+        toast.error(r.error);
+        return;
+      }
+      // Move the "now playing" highlight to this row immediately (optimistic), instead
+      // of waiting up to a full poll cycle; then reconcile with Spotify a beat later.
+      setPlaying({
+        track: { id: t.id, title: t.name, artist: t.artist, albumImage: t.albumImage },
+        isPlaying: true,
+        progressMs: 0,
+        durationMs: t.durationMs ?? 0,
+        context: null,
+      });
+      setTimeout(refresh, 700);
     });
   };
 
@@ -375,16 +387,7 @@ function TrackTable({
             >
               <td className="px-4 py-2">
                 <div className="flex min-w-0 items-center gap-3">
-                  {/* Currently playing: overlay a small equalizer on the art — clear
-                      "still playing" cue without an icon or shifting the layout. */}
-                  <span className="relative inline-flex shrink-0">
-                    <AlbumThumb src={t.albumImage} />
-                    {isCurrent ? (
-                      <span className="absolute inset-0 flex items-center justify-center rounded-md bg-black/55">
-                        <PlayingBars />
-                      </span>
-                    ) : null}
-                  </span>
+                  <AlbumThumb src={t.albumImage} />
                   <div className="min-w-0 flex-1">
                     <HoverScroll
                       className={"font-medium" + (isCurrent ? " text-[#1db954]" : "")}

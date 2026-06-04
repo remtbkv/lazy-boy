@@ -44,7 +44,7 @@ export function TrackList({
   playlistId?: string;
   canRemove?: boolean;
 }) {
-  const { playing, toggle } = useNowPlaying();
+  const { playing, toggle, refresh, setPlaying } = useNowPlaying();
   const currentId = playing?.track.id;
   const isPlayingNow = playing?.isPlaying ?? false;
   const dupes = new Set(duplicateIds);
@@ -62,7 +62,19 @@ export function TrackList({
     if (!playlistId) return;
     window.getSelection?.()?.removeAllRanges();
     playPlaylistTrackAction(playlistId, t.uri).then((r) => {
-      if (!r.ok) toast.error(r.error);
+      if (!r.ok) {
+        toast.error(r.error);
+        return;
+      }
+      // Show the now-playing highlight on this row right away, then reconcile.
+      setPlaying({
+        track: { id: t.id, title: t.title, artist: t.artist, albumImage: t.albumImage ?? null },
+        isPlaying: true,
+        progressMs: 0,
+        durationMs: t.durationMs ?? 0,
+        context: null,
+      });
+      setTimeout(refresh, 700);
     });
   }
 
