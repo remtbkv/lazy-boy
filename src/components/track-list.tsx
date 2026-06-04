@@ -2,6 +2,8 @@
 
 import { useMemo, useState } from "react";
 import { Clock3 } from "lucide-react";
+import { toast } from "sonner";
+import { playPlaylistTrackAction } from "@/app/(app)/actions";
 import { AlbumThumb } from "@/components/album-thumb";
 import { SortMenu } from "@/components/sort-menu";
 import { TrackContextMenu } from "@/components/track-context-menu";
@@ -47,6 +49,17 @@ export function TrackList({
   // URIs removed this session — filtered out immediately so the row disappears
   // without waiting on the server revalidation.
   const [removed, setRemoved] = useState<Set<string>>(new Set());
+
+  // Double-click a row → play that track within the playlist context, so playback
+  // continues through the rest of the playlist (like Spotify). Clears the accidental
+  // word-selection a double-click makes on the title text.
+  function play(t: Track) {
+    if (!playlistId) return;
+    window.getSelection?.()?.removeAllRanges();
+    playPlaylistTrackAction(playlistId, t.uri).then((r) => {
+      if (!r.ok) toast.error(r.error);
+    });
+  }
 
   function selectSort(k: Sort) {
     if (k === "original") {
@@ -119,9 +132,11 @@ export function TrackList({
           {sorted.map((t, i) => (
             <li key={`${t.id}-${i}`}>
               <div
-                className="grid grid-cols-[1.5rem_1fr_auto] items-center gap-3 px-3 py-2 hover:bg-accent/30 md:grid-cols-[1.5rem_2fr_1.4fr_auto]"
+                className="grid cursor-default grid-cols-[1.5rem_1fr_auto] items-center gap-3 px-3 py-2 hover:bg-accent/30 md:grid-cols-[1.5rem_2fr_1.4fr_auto]"
+                onDoubleClick={() => play(t)}
                 onContextMenu={(e) => {
                   e.preventDefault();
+                  e.stopPropagation(); // don't let the menu's own outside-click closer fire
                   setMenu({ x: e.clientX, y: e.clientY, track: t });
                 }}
               >

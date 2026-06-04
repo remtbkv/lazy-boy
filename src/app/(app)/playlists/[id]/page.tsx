@@ -3,11 +3,17 @@ import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { notFound } from "next/navigation";
 import { getSpotify } from "@/lib/session";
-import { getMeId } from "@/lib/db";
+import {
+  getMeId,
+  getPlaylistTracks,
+  getPlaylistTracksSyncedAt,
+  storePlaylistTracks,
+} from "@/lib/db";
 import { findDuplicates } from "@/lib/spotify/domain";
 import { SpotifyError, type Track } from "@/lib/spotify";
 import { CleanMenu } from "@/components/clean-menu";
 import { PlaylistThumb } from "@/components/playlist-thumb";
+import { PlaylistTracksSync } from "@/components/playlist-tracks-sync";
 import { TrackList } from "@/components/track-list";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -30,7 +36,11 @@ export default async function PlaylistDetailPage({
   }
 
   // Hide the owner line when it's the user's own playlist — they know.
-  const meId = await getMeId();
+  const [meId, cachedTracks, tracksSyncedAt] = await Promise.all([
+    getMeId(),
+    getPlaylistTracks(id),
+    getPlaylistTracksSyncedAt(id),
+  ]);
   const isMine = !!meId && playlist.ownerId === meId;
 
   return (
@@ -66,19 +76,31 @@ export default async function PlaylistDetailPage({
         <CleanMenu playlistId={id} />
       </div>
 
-      {/* The track list paginates and can be slow / rate-limited, so it streams
-          in behind the header instead of blocking the whole page. */}
-      <Suspense fallback={<TracksSkeleton />}>
-        <Tracks id={id} canRemove={isMine} />
-      </Suspense>
+      {/* Serve the cached track list instantly (no Spotify pagination on render);
+          a background refresh updates it when it's empty or >30 min stale. First
+          ever visit (cold cache) streams a live fetch that also fills the cache. */}
+      {cachedTracks.length > 0 ? (
+        <>
+          <TrackList
+            tracks={cachedTracks}
+            duplicateIds={findDuplicates(cachedTracks).map((t) => t.id)}
+            playlistId={id}
+            canRemove={isMine}
+          />
+          <PlaylistTracksSync playlistId={id} syncedAt={tracksSyncedAt} />
+        </>
+      ) : (
+        <Suspense fallback={<TracksSkeleton />}>
+          <Tracks id={id} canRemove={isMine} />
+        </Suspense>
+      )}
     </div>
   );
 }
 
+// Cold-cache path: fetch live from Spotify, fill the cache for next time, render.
 async function Tracks({ id, canRemove }: { id: string; canRemove: boolean }) {
   const sp = await getSpotify();
-  // Fetch in the try; build the JSX outside it (a render-time throw wouldn't be
-  // caught here anyway — that's what the route's error boundary is for).
   let tracks: Track[] | null = null;
   try {
     tracks = await sp.playlistTracks(id);
@@ -95,6 +117,7 @@ async function Tracks({ id, canRemove }: { id: string; canRemove: boolean }) {
     );
   }
 
+  await storePlaylistTracks(id, tracks);
   const duplicateIds = findDuplicates(tracks).map((t) => t.id);
   return (
     <TrackList

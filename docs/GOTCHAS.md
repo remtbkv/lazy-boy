@@ -88,8 +88,17 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   stale; the sync does the one full scan off the render path, then `router.refresh()`
   shows fresh data. `me_id` + `playlists_synced_at` live in the `meta` table. (The
   old per-page `/api/playlists?offset=` waterfall and its `myPlaylistsPage` chain
-  were deleted — the only playlists route now is `/sync`.) `playlist-grid.tsx`
-  still collapses to 3 rows with see-more + fuzzy search; thumbnails are lazy.
+  were deleted.) `playlist-grid.tsx` still collapses to 3 rows with see-more + fuzzy
+  search; thumbnails are lazy.
+- **Playlist detail pages serve cached tracks, not a live Spotify scan.** Paginating a
+  playlist's tracks from Spotify on every visit was the main slowness. Tracks are now
+  cached per playlist in `playlist_tracks` (+ `tracks`), read on render via
+  `getPlaylistTracks`; `PlaylistTracksSync` re-fetches via `POST /api/playlists/[id]/tracks`
+  when the cache is empty or >30 min stale, then `router.refresh()`. Cold cache (first
+  visit) streams a live fetch that fills the cache. Slight staleness (a track or two) is
+  acceptable; `removeFromPlaylistAction` updates the cache so removes don't reappear. Do
+  NOT bulk-refresh every playlist's tracks on a schedule — that's a Spotify-rate-limit
+  trap; refresh per-playlist on visit instead.
 - **Listen-history backend (`src/lib/db.ts`):** **libSQL/Turso** (`@libsql/client`),
   so it persists on Vercel's serverless runtime. `TURSO_DATABASE_URL` +
   `TURSO_AUTH_TOKEN` select the remote DB; with both unset (dev) it falls back to a

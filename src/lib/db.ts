@@ -6,6 +6,7 @@ import "server-only";
 import path from "node:path";
 import fs from "node:fs";
 import { createClient, type Client, type InStatement } from "@libsql/client";
+import type { Track } from "@/lib/spotify/types";
 
 export type PlayRecord = {
   trackId: string;
@@ -93,6 +94,14 @@ async function init(): Promise<Client> {
       track_count INTEGER,
       position INTEGER
     );
+    CREATE TABLE IF NOT EXISTS playlist_tracks (
+      playlist_id TEXT NOT NULL,
+      position INTEGER NOT NULL,
+      track_id TEXT NOT NULL,
+      added_at TEXT,
+      PRIMARY KEY (playlist_id, position)
+    );
+    CREATE INDEX IF NOT EXISTS idx_pltracks_pl ON playlist_tracks (playlist_id);
   `);
   // Migrate older DBs that predate the album/duration columns.
   const info = await client.execute("PRAGMA table_info(tracks)");
@@ -335,6 +344,72 @@ export async function getPlaylistsSyncedAt(): Promise<string | null> {
 
 export async function getMeId(): Promise<string | null> {
   return getMeta("me_id");
+}
+
+// ---- playlist tracks (cached per playlist so detail pages load instantly) ----
+/** Replace a playlist's cached track list (kept in playlist order). */
+export async function storePlaylistTracks(playlistId: string, tracks: Track[]): Promise<void> {
+  const client = await getClient();
+  const stmts: InStatement[] = [
+    { sql: "DELETE FROM playlist_tracks WHERE playlist_id = :pid", args: { pid: playlistId } },
+  ];
+  tracks.forEach((t, i) => {
+    stmts.push({
+      sql: `INSERT INTO tracks (id, name, artist, uri, album, album_image, duration_ms)
+            VALUES (:id, :name, :artist, :uri, :album, :albumImage, :durationMs)
+            ON CONFLICT(id) DO UPDATE SET name = excluded.name, artist = excluded.artist,
+              album = excluded.album, album_image = excluded.album_image,
+              duration_ms = excluded.duration_ms`,
+      args: {
+        id: t.id,
+        name: t.title,
+        artist: t.artist,
+        uri: t.uri,
+        album: t.album ?? null,
+        albumImage: t.albumImage ?? null,
+        durationMs: t.durationMs ?? null,
+      },
+    });
+    stmts.push({
+      sql: `INSERT INTO playlist_tracks (playlist_id, position, track_id, added_at)
+            VALUES (:pid, :pos, :tid, :added)`,
+      args: { pid: playlistId, pos: i, tid: t.id, added: t.addedAt ?? null },
+    });
+  });
+  stmts.push({
+    sql: `INSERT INTO meta (key, value) VALUES (:k, :v)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    args: { k: `pltracks_at:${playlistId}`, v: new Date().toISOString() },
+  });
+  await client.batch(stmts, "write");
+}
+
+/** A playlist's cached tracks in playlist order (empty if never cached). */
+export async function getPlaylistTracks(playlistId: string): Promise<Track[]> {
+  const client = await getClient();
+  const res = await client.execute({
+    sql: `SELECT t.id, t.name AS title, t.artist, t.uri, t.album,
+            t.album_image AS albumImage, t.duration_ms AS durationMs, pt.added_at AS addedAt
+          FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id
+          WHERE pt.playlist_id = :pid ORDER BY pt.position`,
+    args: { pid: playlistId },
+  });
+  return res.rows as unknown as Track[];
+}
+
+export async function getPlaylistTracksSyncedAt(playlistId: string): Promise<string | null> {
+  return getMeta(`pltracks_at:${playlistId}`);
+}
+
+/** Drop one track from a playlist's cache (after a remove) so it doesn't reappear on
+ *  the next render before the background refresh. */
+export async function removeCachedPlaylistTrack(playlistId: string, uri: string): Promise<void> {
+  const client = await getClient();
+  await client.execute({
+    sql: `DELETE FROM playlist_tracks
+          WHERE playlist_id = :pid AND track_id IN (SELECT id FROM tracks WHERE uri = :uri)`,
+    args: { pid: playlistId, uri },
+  });
 }
 
 /** The most recently played track from a given playback context (e.g. a playlist

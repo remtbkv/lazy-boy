@@ -34,13 +34,9 @@ export function ResumePanel({ playlists }: { playlists: Item[] }) {
     start(async () => {
       const r = await resumePlaylistAction(p.id);
       setBusyId(null);
-      if (r.ok) {
-        toast.success(
-          r.fromTop ? `Playing "${p.name}" from the top` : `Resuming "${p.name}" — ${r.track}`,
-        );
-      } else {
-        toast.error(r.error);
-      }
+      // No success toast — you'll hear the music start. Only surface failures
+      // (e.g. no active device), which otherwise look like nothing happened.
+      if (!r.ok) toast.error(r.error);
     });
   }
 

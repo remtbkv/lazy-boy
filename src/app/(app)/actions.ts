@@ -5,7 +5,7 @@ import { auth, signIn, signOut } from "@/lib/auth";
 import { getSpotify } from "@/lib/session";
 import { spotifyClient, SpotifyError } from "@/lib/spotify";
 import { runTask } from "@/lib/tasks/registry";
-import { clearSpotifyTokens, lastPlayedInContext } from "@/lib/db";
+import { clearSpotifyTokens, lastPlayedInContext, removeCachedPlaylistTrack } from "@/lib/db";
 
 export type ActionResult<T = object> =
   | ({ ok: true } & T)
@@ -131,6 +131,7 @@ export async function removeFromPlaylistAction(
   try {
     const sp = await getSpotify();
     await sp.removeFromPlaylist(playlistId, uri);
+    await removeCachedPlaylistTrack(playlistId, uri); // keep the cache in step
     revalidatePath(`/playlists/${playlistId}`);
     return { ok: true };
   } catch (e) {
@@ -163,6 +164,15 @@ export async function playerPreviousAction(): Promise<ActionResult> {
 }
 export async function playerSetPlayingAction(play: boolean): Promise<ActionResult> {
   return playerControl((sp) => (play ? sp.resumePlayback() : sp.pausePlayback()));
+}
+
+// Double-click a track in a playlist → play it within that playlist's context (so the
+// queue continues through the rest of the playlist, like Spotify).
+export async function playPlaylistTrackAction(
+  playlistId: string,
+  trackUri: string,
+): Promise<ActionResult> {
+  return playerControl((sp) => sp.playContext(`spotify:playlist:${playlistId}`, trackUri));
 }
 
 // "Pick up where you left off": start the chosen playlist on the active device at the

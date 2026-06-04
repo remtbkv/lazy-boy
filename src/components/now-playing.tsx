@@ -93,11 +93,12 @@ export function NowPlaying() {
     // synchronous render cascade, so the set-state-in-effect rule misfires here.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     poll();
-    // Poll gently — the progress bar interpolates locally between polls, so a
-    // tight interval just adds Spotify API load (and rate-limit risk).
+    // Poll every 6s — snappy enough that a track change shows quickly. The progress
+    // bar interpolates locally between polls; this uses the lightweight
+    // currently-playing endpoint (not recently-played), so it's gentle on rate limits.
     const id = setInterval(() => {
       if (document.visibilityState === "visible") poll();
-    }, 12000);
+    }, 6000);
     return () => {
       aliveRef.current = false;
       clearInterval(id);
