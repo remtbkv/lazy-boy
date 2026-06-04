@@ -28,10 +28,23 @@ export function Header({ name, image }: { name: string; image: string | null }) 
   const pathname = usePathname();
   const router = useRouter();
 
-  // Left/right arrows move between the header tabs — except while typing in a
-  // field (search pills, inputs), where arrows should move the caret. Reads the
-  // live URL (not the closured pathname, which lags a tick) so rapid presses
-  // don't skip or no-op.
+  // Left/right arrows move between the header tabs — except while typing in a field
+  // (search pills, inputs), where arrows should move the caret. We track the tab we're
+  // heading to in a ref rather than reading the URL: client-side router.push doesn't
+  // update the location synchronously, so a fast burst of presses would keep seeing the
+  // old tab and get swallowed. The ref advances on every press so 3 presses move 3 tabs;
+  // a separate effect resyncs it to the real route once a burst settles (and for
+  // mouse/direct navigation).
+  const targetIndex = useRef(-1);
+  const lastKeyAt = useRef(0);
+
+  useEffect(() => {
+    if (Date.now() - lastKeyAt.current < 500) return; // don't clobber a burst in flight
+    targetIndex.current = TABS.findIndex(
+      (t) => pathname === t.href || pathname.startsWith(t.href + "/"),
+    );
+  }, [pathname]);
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
@@ -40,16 +53,15 @@ export function Header({ name, image }: { name: string; image: string | null }) 
       if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) {
         return;
       }
-      const here = window.location.pathname;
-      const cur = TABS.findIndex(
-        (t) => here === t.href || here.startsWith(t.href + "/"),
-      );
-      const from = cur === -1 ? 0 : cur;
-      const to = e.key === "ArrowRight"
-        ? Math.min(TABS.length - 1, from + 1)
-        : Math.max(0, from - 1);
+      const from = targetIndex.current < 0 ? 0 : targetIndex.current;
+      const to =
+        e.key === "ArrowRight"
+          ? Math.min(TABS.length - 1, from + 1)
+          : Math.max(0, from - 1);
       if (to !== from) {
         e.preventDefault();
+        lastKeyAt.current = Date.now();
+        targetIndex.current = to; // advance synchronously so the next press builds on it
         router.push(TABS[to].href);
       }
     }

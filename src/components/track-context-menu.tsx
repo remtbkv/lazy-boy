@@ -93,7 +93,7 @@ export function TrackContextMenu({
       {playlistId ? (
         <Item
           icon={<CircleMinus className="size-4" />}
-          label="Remove from this playlist"
+          label="Remove from playlist"
           disabled={pending}
           onClick={() =>
             run(
@@ -106,7 +106,7 @@ export function TrackContextMenu({
       ) : null}
       <Item
         icon={<Heart className="size-4" />}
-        label="Save to your Liked Songs"
+        label="Save to Liked Songs"
         disabled={pending}
         onClick={() => run(() => saveToLikedAction(track.id), "Saved to Liked Songs")}
       />
