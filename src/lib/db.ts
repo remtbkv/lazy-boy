@@ -112,6 +112,13 @@ async function init(): Promise<Client> {
   return client;
 }
 
+// libSQL Row objects aren't plain objects (they carry a prototype + indexed access), so
+// React warns when a Server Component passes them straight to a Client Component. Spread
+// each into a plain object so query results cross the RSC boundary cleanly.
+function plainRows(rows: readonly unknown[]): unknown[] {
+  return rows.map((r) => ({ ...(r as object) }));
+}
+
 /** Insert plays, deduped on (track, played_at). Returns how many were new. */
 export async function recordPlays(plays: PlayRecord[]): Promise<number> {
   if (plays.length === 0) return 0;
@@ -181,7 +188,7 @@ export async function unresolvedContextUris(): Promise<{ uri: string; type: stri
      FROM plays p LEFT JOIN contexts c ON c.uri = p.context_uri
      WHERE p.context_uri IS NOT NULL AND c.uri IS NULL`,
   );
-  return res.rows as unknown as { uri: string; type: string }[];
+  return plainRows(res.rows) as unknown as { uri: string; type: string }[];
 }
 
 // `source` is the context (playlist/album name, or type) of the MOST RECENT play
@@ -220,7 +227,7 @@ export async function searchHistory(query: string, limit = 100): Promise<TrackSt
       sql: `${SELECT_TRACK} GROUP BY t.id ORDER BY lastPlayed DESC LIMIT ?`,
       args: [limit],
     });
-    return res.rows as unknown as TrackStats[];
+    return plainRows(res.rows) as unknown as TrackStats[];
   }
   const like = `%${q}%`;
   const res = await client.execute({
@@ -228,7 +235,7 @@ export async function searchHistory(query: string, limit = 100): Promise<TrackSt
           GROUP BY t.id ORDER BY plays DESC, lastPlayed DESC LIMIT ?`,
     args: [like, like, limit],
   });
-  return res.rows as unknown as TrackStats[];
+  return plainRows(res.rows) as unknown as TrackStats[];
 }
 
 /** Most-played tracks all-time, capped so the list never balloons to thousands.
@@ -240,7 +247,7 @@ export async function getAllTimePlays(limit: number): Promise<TrackStats[]> {
           ORDER BY plays DESC, lastPlayed DESC, t.name ASC LIMIT ?`,
     args: [limit],
   });
-  return res.rows as unknown as TrackStats[];
+  return plainRows(res.rows) as unknown as TrackStats[];
 }
 
 /** All-time totals across every recorded play (for the history "All time" card). */
@@ -259,7 +266,7 @@ export async function getAllTimeStats(): Promise<{
        COALESCE(SUM(ms), 0) AS durationMs
      FROM listened`,
   );
-  return res.rows[0] as unknown as { plays: number; uniqueTracks: number; durationMs: number };
+  return ({ ...res.rows[0] }) as unknown as { plays: number; uniqueTracks: number; durationMs: number };
 }
 
 /** Per-day plays / unique songs / listening time, most recent first. */
@@ -287,7 +294,7 @@ export async function getDailyStats(offsetMin = 0, days = 14): Promise<DayStats[
           FROM listened GROUP BY day ORDER BY day DESC LIMIT ?`,
     args: [days],
   });
-  return res.rows as unknown as DayStats[];
+  return plainRows(res.rows) as unknown as DayStats[];
 }
 
 /** Tracks played on a specific local day (YYYY-MM-DD), most-played first.
@@ -300,7 +307,7 @@ export async function getPlaysByDay(day: string, offsetMin = 0): Promise<TrackSt
           GROUP BY t.id ORDER BY plays DESC, lastPlayed DESC`,
     args: { day },
   });
-  return res.rows as unknown as TrackStats[];
+  return plainRows(res.rows) as unknown as TrackStats[];
 }
 
 export async function getLastSync(): Promise<string | null> {
@@ -355,7 +362,7 @@ export async function getStoredPlaylists(): Promise<StoredPlaylist[]> {
     `SELECT id, name, owner_id AS ownerId, image, track_count AS trackCount
      FROM playlists ORDER BY position`,
   );
-  return res.rows as unknown as StoredPlaylist[];
+  return plainRows(res.rows) as unknown as StoredPlaylist[];
 }
 
 export async function getPlaylistsSyncedAt(): Promise<string | null> {
@@ -431,7 +438,7 @@ export async function getPlaylistTracks(playlistId: string): Promise<Track[]> {
           WHERE pt.playlist_id = :pid ORDER BY pt.position`,
     args: { pid: playlistId },
   });
-  return res.rows as unknown as Track[];
+  return plainRows(res.rows) as unknown as Track[];
 }
 
 /** Drop one track from a playlist's cache (after a remove) so it doesn't reappear on
