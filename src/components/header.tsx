@@ -18,7 +18,7 @@ import {
 import { cn } from "@/lib/utils";
 
 const TABS = [
-  { href: "/me", label: "Me" },
+  { href: "/home", label: "Home" },
   { href: "/playlists", label: "Playlists" },
   { href: "/history", label: "History" },
   { href: "/friends", label: "Friends" },
@@ -122,7 +122,7 @@ export function Header({ name, image }: { name: string; image: string | null }) 
   return (
     <header className="sticky top-0 z-40 border-b border-border bg-background/80 backdrop-blur">
       <div className="mx-auto flex h-16 w-full max-w-5xl items-center gap-3 px-4 sm:gap-6 sm:px-6">
-        <Link href="/me" aria-label="Lazy Boy" className="flex items-center">
+        <Link href="/home" aria-label="Lazy Boy" className="flex items-center">
           <img src="/icon.svg" alt="Lazy Boy" className="size-8" />
         </Link>
 

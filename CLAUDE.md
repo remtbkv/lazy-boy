@@ -29,7 +29,7 @@ the dedupe/clean/queue-save algorithms — they are re-specified in `docs/FEATUR
 ```
 src/app/(auth)/          login page (unauthenticated shell)
 src/app/(app)/           authed shell: layout calls auth(), header tabs, feature pages
-                         me/, playlists/, playlists/[id]/, compare/, friends/, history/
+                         home/, playlists/, playlists/[id]/, compare/, friends/, history/
 src/app/api/auth/        Auth.js route handler (NextAuth catch-all)
 src/app/api/tasks/       background-task progress polling endpoint
 src/app/api/playlists/sync  one full library scan → DB (client fires when stale)

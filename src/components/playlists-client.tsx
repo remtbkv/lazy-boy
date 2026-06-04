@@ -51,7 +51,7 @@ export function PlaylistsClient({
   return (
     <div className="space-y-6">
       {/* Compact, extensible action toolbar. Each action is a pill — add more by
-          dropping another button in. Full explanations live on the Me page. */}
+          dropping another button in. Full explanations live on the Home page. */}
       <div className="flex flex-wrap items-center gap-2.5">
         <HoverTip
           label={SAVE_QUEUE_HINT}

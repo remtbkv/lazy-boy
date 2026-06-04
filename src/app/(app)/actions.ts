@@ -17,7 +17,7 @@ function fail(e: unknown): { ok: false; error: string } {
 
 // ---- auth ----
 export async function login() {
-  await signIn("spotify", { redirectTo: "/me" });
+  await signIn("spotify", { redirectTo: "/home" });
 }
 export async function logout() {
   await clearSpotifyTokens();

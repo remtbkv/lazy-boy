@@ -81,7 +81,7 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
 ## Architecture added recently
 
 - **Persistent playlist library (DB-backed):** the full library is stored in
-  libSQL (`playlists` table in `src/lib/db.ts`, native order). `/me` and
+  libSQL (`playlists` table in `src/lib/db.ts`, native order). `/home` and
   `/playlists` read it **on render — no Spotify call**, so pages are
   instant and never block/rate-limit on a library scan. `playlists-sync.tsx`
   (client) fires `POST /api/playlists/sync` when the store is empty or >15 min

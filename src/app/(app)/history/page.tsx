@@ -25,7 +25,7 @@ export default async function HistoryPage() {
   return (
     <div className="space-y-8">
       {/* The nav already says "History" — a single bigger heading, no subtitle. */}
-      <h1 className="text-4xl font-bold tracking-tight">Listening history</h1>
+      <h1 className="text-4xl font-bold tracking-tight">See stuff</h1>
       <HistoryClient
         initialDaily={daily}
         initialDay={initialDay}

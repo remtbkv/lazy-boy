@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 
 export default async function LoginPage() {
   const session = await auth();
-  if (session && !session.error) redirect("/me");
+  if (session && !session.error) redirect("/home");
 
   return (
     <main className="flex flex-1 items-center justify-center p-6">

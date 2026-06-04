@@ -26,7 +26,7 @@ function loadGreetings(): string[] {
   }
 }
 
-export default async function MePage() {
+export default async function HomePage() {
   const session = await auth();
   const name = session?.user?.name ?? "You";
   const first = name.split(" ")[0] || name;
