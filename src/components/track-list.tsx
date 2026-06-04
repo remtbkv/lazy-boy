@@ -1,10 +1,12 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Clock3 } from "lucide-react";
+import { Clock3, Pause, Play } from "lucide-react";
 import { toast } from "sonner";
 import { playPlaylistTrackAction } from "@/app/(app)/actions";
 import { AlbumThumb } from "@/components/album-thumb";
+import { HoverTip } from "@/components/hover-tip";
+import { useNowPlaying } from "@/components/now-playing-context";
 import { SortMenu } from "@/components/sort-menu";
 import { TrackContextMenu } from "@/components/track-context-menu";
 import { Badge } from "@/components/ui/badge";
@@ -42,6 +44,9 @@ export function TrackList({
   playlistId?: string;
   canRemove?: boolean;
 }) {
+  const { playing, toggle } = useNowPlaying();
+  const currentId = playing?.track.id;
+  const isPlayingNow = playing?.isPlaying ?? false;
   const dupes = new Set(duplicateIds);
   const [sort, setSort] = useState<Sort>("original");
   const [dir, setDir] = useState<"asc" | "desc">("asc");
@@ -129,10 +134,15 @@ export function TrackList({
         </div>
 
         <ul>
-          {sorted.map((t, i) => (
+          {sorted.map((t, i) => {
+            const isCurrent = !!currentId && currentId === t.id;
+            return (
             <li key={`${t.id}-${i}`}>
               <div
-                className="grid cursor-default grid-cols-[1.5rem_1fr_auto] items-center gap-3 px-3 py-2 hover:bg-accent/30 md:grid-cols-[1.5rem_2fr_1.4fr_auto]"
+                className={
+                  "grid cursor-default grid-cols-[1.5rem_1fr_auto] items-center gap-3 px-3 py-2 hover:bg-accent/30 md:grid-cols-[1.5rem_2fr_1.4fr_auto]" +
+                  (isCurrent ? " bg-white/5" : "")
+                }
                 onDoubleClick={() => play(t)}
                 onContextMenu={(e) => {
                   e.preventDefault();
@@ -140,14 +150,42 @@ export function TrackList({
                   setMenu({ x: e.clientX, y: e.clientY, track: t });
                 }}
               >
-                <span className="text-right text-xs tabular-nums text-muted-foreground">
-                  {i + 1}
+                <span className="flex items-center justify-end text-right text-xs tabular-nums text-muted-foreground">
+                  {isCurrent ? (
+                    <HoverTip label={isPlayingNow ? "Pause" : "Play"} placement="top">
+                      <button
+                        type="button"
+                        aria-label={isPlayingNow ? "Pause" : "Play"}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggle();
+                        }}
+                        onDoubleClick={(e) => e.stopPropagation()}
+                        className="flex size-5 items-center justify-center text-[#1db954]"
+                      >
+                        {isPlayingNow ? (
+                          <Pause className="size-3.5" fill="currentColor" />
+                        ) : (
+                          <Play className="size-3.5 translate-x-px" fill="currentColor" />
+                        )}
+                      </button>
+                    </HoverTip>
+                  ) : (
+                    i + 1
+                  )}
                 </span>
                 <div className="flex min-w-0 items-center gap-3">
                   <AlbumThumb src={t.albumImage} />
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="truncate text-sm select-text">{t.title}</span>
+                      <span
+                        className={
+                          "truncate text-sm select-text" +
+                          (isCurrent ? " text-[#1db954]" : "")
+                        }
+                      >
+                        {t.title}
+                      </span>
                       {dupes.has(t.id) ? (
                         <Badge variant="secondary" className="shrink-0 text-[10px]">
                           duplicate
@@ -167,7 +205,8 @@ export function TrackList({
                 </span>
               </div>
             </li>
-          ))}
+            );
+          })}
         </ul>
       </div>
 

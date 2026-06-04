@@ -76,6 +76,25 @@ export function PlaylistsClient({
           </ActionButton>
         </HoverTip>
         <HoverTip
+          label={RESUME_HINT}
+          delay={500}
+          placement="bottom"
+          tipClassName={TIP}
+          className="inline-flex"
+        >
+          <Button
+            variant="outline"
+            className={
+              CHIP + (resumeOpen ? " border-white/50 bg-accent text-foreground" : "")
+            }
+            aria-expanded={resumeOpen}
+            onClick={() => setResumeOpen((o) => !o)}
+          >
+            <Play className="size-4 text-foreground" />
+            Resume
+          </Button>
+        </HoverTip>
+        <HoverTip
           label={MERGE_HINT}
           delay={500}
           placement="bottom"
@@ -112,25 +131,6 @@ export function PlaylistsClient({
             <Heart className="size-4 text-foreground" />
             Sync liked
           </ActionButton>
-        </HoverTip>
-        <HoverTip
-          label={RESUME_HINT}
-          delay={500}
-          placement="bottom"
-          tipClassName={TIP}
-          className="inline-flex"
-        >
-          <Button
-            variant="outline"
-            className={
-              CHIP + (resumeOpen ? " border-white/50 bg-accent text-foreground" : "")
-            }
-            aria-expanded={resumeOpen}
-            onClick={() => setResumeOpen((o) => !o)}
-          >
-            <Play className="size-4 text-foreground" />
-            Resume
-          </Button>
         </HoverTip>
         <PlaylistsSync syncedAt={syncedAt} />
       </div>

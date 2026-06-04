@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Pause, Play, SkipBack, SkipForward } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -9,32 +9,18 @@ import {
   playerSetPlayingAction,
 } from "@/app/(app)/actions";
 import { HoverScroll } from "@/components/hover-scroll";
-
-type Track = {
-  id: string;
-  title: string;
-  artist: string;
-  albumImage: string | null;
-};
-type Playing = {
-  track: Track;
-  isPlaying: boolean;
-  progressMs: number;
-  durationMs: number;
-  context: { name: string; type: string } | null;
-} | null;
+import { useNowPlaying } from "@/components/now-playing-context";
 
 // Compact now-playing chip that lives in the header (to the left of the avatar).
 // At rest it just displays the song — album art, title/artist, and a thin in-track
 // progress bar. Hovering reveals a chip-width popover with the skip/pause controls
 // and where it's playing from.
 export function NowPlaying() {
-  const [playing, setPlaying] = useState<Playing>(null);
+  const { playing, setPlaying, refresh } = useNowPlaying();
   const [pos, setPos] = useState(0); // interpolated position, ms
   const [pending, setPending] = useState(false);
   const [open, setOpen] = useState(false); // controls popover (on hover)
   const rootRef = useRef<HTMLDivElement>(null);
-  const aliveRef = useRef(true);
   // Chip + popover share one width = the widest of title / artist / "from", capped,
   // so the popover never juts out wider than the chip. Measured from a hidden sizer.
   const sizerRef = useRef<HTMLDivElement>(null);
@@ -67,43 +53,18 @@ export function NowPlaying() {
     return () => cancelAnimationFrame(id);
   }, [playing?.track.title, playing?.track.artist, playing?.context?.name]);
 
-  const poll = useCallback(async () => {
-    try {
-      const res = await fetch("/api/now-playing", { cache: "no-store" });
-      if (!res.ok) return;
-      const data = (await res.json()) as { playing: Playing };
-      if (!aliveRef.current) return;
-      setPlaying(data.playing);
-      if (data.playing) {
-        base.current = {
-          progressMs: data.playing.progressMs,
-          at: Date.now(),
-          isPlaying: data.playing.isPlaying,
-        };
-        setPos(data.playing.progressMs);
-      }
-    } catch {
-      /* transient failure: keep showing whatever we had, don't flicker */
-    }
-  }, []);
-
+  // Re-anchor the local progress ticker whenever fresh data arrives from the shared
+  // poller (NowPlayingProvider), so the bar interpolates smoothly between updates.
   useEffect(() => {
-    aliveRef.current = true;
-    // poll() only setState()s after an awaited fetch — it's async, not a
-    // synchronous render cascade, so the set-state-in-effect rule misfires here.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    poll();
-    // Poll every 6s — snappy enough that a track change shows quickly. The progress
-    // bar interpolates locally between polls; this uses the lightweight
-    // currently-playing endpoint (not recently-played), so it's gentle on rate limits.
-    const id = setInterval(() => {
-      if (document.visibilityState === "visible") poll();
-    }, 6000);
-    return () => {
-      aliveRef.current = false;
-      clearInterval(id);
+    if (!playing) return;
+    base.current = {
+      progressMs: playing.progressMs,
+      at: Date.now(),
+      isPlaying: playing.isPlaying,
     };
-  }, [poll]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPos(playing.progressMs);
+  }, [playing]);
 
   // Advance the progress bar each second while playing (between polls).
   useEffect(() => {
@@ -139,7 +100,7 @@ export function NowPlaying() {
       .then((r) => {
         if (!r.ok) toast.error(r.error ?? "Playback control failed");
         // Give Spotify a beat to apply the change, then resync from the source.
-        return new Promise((res) => setTimeout(res, 400)).then(() => poll());
+        return new Promise((res) => setTimeout(res, 400)).then(() => refresh());
       })
       .finally(() => setPending(false));
   }

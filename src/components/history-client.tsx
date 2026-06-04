@@ -6,6 +6,8 @@ import { AlbumThumb } from "@/components/album-thumb";
 import { FloatingBar } from "@/components/floating-bar";
 import { HoverScroll } from "@/components/hover-scroll";
 import { HoverTip } from "@/components/hover-tip";
+import { useNowPlaying } from "@/components/now-playing-context";
+import { PlayingBars } from "@/components/playing-bars";
 import { SortMenu } from "@/components/sort-menu";
 import { dayLabel, exactTime, formatDuration, formatListenTime, timeAgo } from "@/lib/format";
 
@@ -292,6 +294,8 @@ function TrackTable({
   empty: string;
   loading?: boolean;
 }) {
+  const { playing } = useNowPlaying();
+  const currentId = playing?.track.id;
   return (
     <div className="max-h-[calc(100vh-29rem)] min-h-[200px] overflow-y-auto rounded-lg border border-border">
       {/* Fixed layout: column widths stay constant and long text clips (then scrolls
@@ -310,16 +314,34 @@ function TrackTable({
           </tr>
         </thead>
         <tbody>
-          {tracks.map((t) => (
+          {tracks.map((t) => {
+            const isCurrent = !!currentId && currentId === t.id;
+            return (
             <tr
               key={t.id}
-              className="border-b border-border last:border-0 transition-colors hover:bg-accent/30"
+              className={
+                "border-b border-border last:border-0 transition-colors hover:bg-accent/30" +
+                (isCurrent ? " bg-white/5" : "")
+              }
             >
               <td className="px-4 py-2">
                 <div className="flex min-w-0 items-center gap-3">
-                  <AlbumThumb src={t.albumImage} />
+                  {/* Currently playing: overlay a small equalizer on the art — clear
+                      "still playing" cue without an icon or shifting the layout. */}
+                  <span className="relative inline-flex shrink-0">
+                    <AlbumThumb src={t.albumImage} />
+                    {isCurrent ? (
+                      <span className="absolute inset-0 flex items-center justify-center rounded-md bg-black/55">
+                        <PlayingBars />
+                      </span>
+                    ) : null}
+                  </span>
                   <div className="min-w-0 flex-1">
-                    <HoverScroll className="font-medium">{t.name}</HoverScroll>
+                    <HoverScroll
+                      className={"font-medium" + (isCurrent ? " text-[#1db954]" : "")}
+                    >
+                      {t.name}
+                    </HoverScroll>
                     <HoverScroll className="text-xs text-muted-foreground">
                       {t.artist}
                     </HoverScroll>
@@ -342,7 +364,8 @@ function TrackTable({
                 <HoverScroll>{t.source ?? "—"}</HoverScroll>
               </td>
             </tr>
-          ))}
+            );
+          })}
           {tracks.length === 0 ? (
             <tr>
               <td colSpan={6} className="px-4 py-8 text-center text-muted-foreground">

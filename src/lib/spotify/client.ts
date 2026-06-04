@@ -24,6 +24,13 @@ export class SpotifyError extends Error {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Shared cooldown across ALL Spotify requests (module-scoped). When Spotify 429s, every
+// request — polls, syncs, page loads — should back off, not keep hammering: that's how a
+// brief throttle turns into a long block. A 429 sets this window; other requests check it
+// first and either wait briefly (patient/bulk work) or fail fast (interactive), instead
+// of all of them retrying into the throttle at once.
+let cooldownUntil = 0;
+
 export class HttpClient {
   // `patient` = ride out rate limits (background bulk work). Default false so
   // interactive callers fail fast.
@@ -41,6 +48,15 @@ export class HttpClient {
     let rateLimited = 0; // 429s get their own generous budget
     let transient = 0; // 403/timeout get a smaller one
     for (;;) {
+      // Respect a global cooldown before sending: don't add to a throttle in progress.
+      const cooldown = cooldownUntil - Date.now();
+      if (cooldown > 0) {
+        const capMs = (this.patient ? RETRY_AFTER_CAP_S.patient : RETRY_AFTER_CAP_S.fast) * 1000;
+        if (!this.patient && cooldown > capMs) {
+          throw new SpotifyError(429, "Spotify is rate-limiting — try again shortly.");
+        }
+        await sleep(Math.min(cooldown, capMs) + 250);
+      }
       let res: Response;
       try {
         res = await fetch(url, {
@@ -67,11 +83,16 @@ export class HttpClient {
       // callers give up quickly (UI degrades); patient callers ride it out.
       const rlMax = this.patient ? RATE_LIMIT_RETRIES.patient : RATE_LIMIT_RETRIES.fast;
       const rlCap = this.patient ? RETRY_AFTER_CAP_S.patient : RETRY_AFTER_CAP_S.fast;
-      if (res.status === 429 && rateLimited < rlMax) {
-        rateLimited++;
+      if (res.status === 429) {
         const retryAfter = Math.min(Number(res.headers.get("Retry-After") ?? "1"), rlCap);
-        await sleep((retryAfter + 0.25) * 1000);
-        continue;
+        // Make every other request back off too, not just this one.
+        cooldownUntil = Math.max(cooldownUntil, Date.now() + (retryAfter + 0.25) * 1000);
+        if (rateLimited < rlMax) {
+          rateLimited++;
+          await sleep((retryAfter + 0.25) * 1000);
+          continue;
+        }
+        // Out of retries — return the 429; the cooldown above keeps others off Spotify.
       }
       // Spotify also returns 403 transiently under burst load (not just true
       // "forbidden"). Retry a few times with backoff before giving up, so a

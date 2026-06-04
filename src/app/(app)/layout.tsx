@@ -4,6 +4,7 @@ import { Header } from "@/components/header";
 import { CleanProgressWatcher } from "@/components/clean-progress";
 import { SyncOnLoad } from "@/components/sync-on-load";
 import { TimezoneCookie } from "@/components/timezone-cookie";
+import { NowPlayingProvider } from "@/components/now-playing-context";
 
 export default async function AppLayout({
   children,
@@ -14,7 +15,7 @@ export default async function AppLayout({
   if (!session || session.error) redirect("/login");
 
   return (
-    <>
+    <NowPlayingProvider>
       <Header
         name={session.user?.name ?? "You"}
         image={session.user?.image ?? null}
@@ -25,6 +26,6 @@ export default async function AppLayout({
       <CleanProgressWatcher />
       <SyncOnLoad />
       <TimezoneCookie />
-    </>
+    </NowPlayingProvider>
   );
 }
