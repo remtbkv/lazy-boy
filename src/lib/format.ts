@@ -40,17 +40,9 @@ export function exactTime(iso: string): string {
   });
 }
 
-/** "Today" / "Yesterday" / "Mon, Jun 1" for a YYYY-MM-DD (local) day string. */
+/** Short month + day for a YYYY-MM-DD day string, e.g. "Jun 2". */
 export function dayLabel(day: string): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const local = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-  const today = new Date();
-  const yest = new Date(today);
-  yest.setDate(yest.getDate() - 1);
-  if (day === local(today)) return "Today";
-  if (day === local(yest)) return "Yesterday";
   return new Date(`${day}T00:00:00`).toLocaleDateString(undefined, {
-    weekday: "short",
     month: "short",
     day: "numeric",
   });
