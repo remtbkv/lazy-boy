@@ -17,12 +17,9 @@ export default async function PlaylistsPage() {
 
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Playlists</h1>
-        <p className="mt-1 text-muted-foreground">
-          Quick actions and your full library.
-        </p>
-      </div>
+      {/* The nav already says "Playlists" — don't repeat it. Promote the description
+          to the page heading instead. */}
+      <h1 className="text-4xl font-bold tracking-tight">Quick actions and your full library.</h1>
 
       <PlaylistsClient initialItems={items} syncedAt={syncedAt} />
     </div>

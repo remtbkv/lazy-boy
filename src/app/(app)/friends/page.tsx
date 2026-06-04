@@ -3,10 +3,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 export default function FriendsPage() {
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Friends</h1>
-        <p className="mt-1 text-muted-foreground">Coming soon.</p>
-      </div>
+      {/* The nav already says "Friends" — make the status the heading. */}
+      <h1 className="text-4xl font-bold tracking-tight">Coming soon</h1>
       <Card className="max-w-xl">
         <CardHeader>
           <CardTitle className="text-base">On the roadmap</CardTitle>

@@ -27,9 +27,13 @@ export function HoverTip({
 }) {
   const ref = useRef<HTMLSpanElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Once the wrapped control is clicked, suppress the tip until the pointer leaves —
+  // an info hint shouldn't hang around over the thing you just acted on.
+  const suppressed = useRef(false);
   const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
 
   function show() {
+    if (suppressed.current) return;
     const r = ref.current?.getBoundingClientRect();
     if (!r) return;
     const x = r.left + r.width / 2;
@@ -40,13 +44,27 @@ export function HoverTip({
     if (timer.current) clearTimeout(timer.current);
     setTip(null);
   }
+  function onLeave() {
+    suppressed.current = false; // re-arm for the next deliberate hover
+    hide();
+  }
+  function onDown() {
+    suppressed.current = true; // a click means "I've decided" — drop the hint
+    hide();
+  }
 
   const look =
     tipClassName ??
     "whitespace-nowrap rounded-md border border-border bg-popover px-2 py-1 text-xs text-foreground shadow-lg ring-1 ring-white/5";
 
   return (
-    <span ref={ref} className={className} onMouseEnter={show} onMouseLeave={hide}>
+    <span
+      ref={ref}
+      className={className}
+      onMouseEnter={show}
+      onMouseLeave={onLeave}
+      onPointerDown={onDown}
+    >
       {children}
       {tip
         ? createPortal(
