@@ -5,8 +5,8 @@ import { notFound } from "next/navigation";
 import { getSpotify } from "@/lib/session";
 import {
   getMeId,
+  getPlaylistSnapshot,
   getPlaylistTracks,
-  getPlaylistTracksSyncedAt,
   storePlaylistTracks,
 } from "@/lib/db";
 import { findDuplicates } from "@/lib/spotify/domain";
@@ -36,12 +36,15 @@ export default async function PlaylistDetailPage({
   }
 
   // Hide the owner line when it's the user's own playlist — they know.
-  const [meId, cachedTracks, tracksSyncedAt] = await Promise.all([
+  const [meId, cachedTracks, cachedSnapshot] = await Promise.all([
     getMeId(),
     getPlaylistTracks(id),
-    getPlaylistTracksSyncedAt(id),
+    getPlaylistSnapshot(id),
   ]);
   const isMine = !!meId && playlist.ownerId === meId;
+  // Only the playlist's snapshot_id changing means its tracks changed — so we refresh
+  // the cache exactly when (and only when) that differs, never on a blind timer.
+  const tracksStale = cachedTracks.length > 0 && cachedSnapshot !== (playlist.snapshot ?? null);
 
   return (
     <div className="space-y-8">
@@ -87,11 +90,13 @@ export default async function PlaylistDetailPage({
             playlistId={id}
             canRemove={isMine}
           />
-          <PlaylistTracksSync playlistId={id} syncedAt={tracksSyncedAt} />
+          {tracksStale ? (
+            <PlaylistTracksSync playlistId={id} snapshot={playlist.snapshot} />
+          ) : null}
         </>
       ) : (
         <Suspense fallback={<TracksSkeleton />}>
-          <Tracks id={id} canRemove={isMine} />
+          <Tracks id={id} canRemove={isMine} snapshot={playlist.snapshot} />
         </Suspense>
       )}
     </div>
@@ -99,7 +104,15 @@ export default async function PlaylistDetailPage({
 }
 
 // Cold-cache path: fetch live from Spotify, fill the cache for next time, render.
-async function Tracks({ id, canRemove }: { id: string; canRemove: boolean }) {
+async function Tracks({
+  id,
+  canRemove,
+  snapshot,
+}: {
+  id: string;
+  canRemove: boolean;
+  snapshot?: string;
+}) {
   const sp = await getSpotify();
   let tracks: Track[] | null = null;
   try {
@@ -117,7 +130,7 @@ async function Tracks({ id, canRemove }: { id: string; canRemove: boolean }) {
     );
   }
 
-  await storePlaylistTracks(id, tracks);
+  await storePlaylistTracks(id, tracks, snapshot);
   const duplicateIds = findDuplicates(tracks).map((t) => t.id);
   return (
     <TrackList

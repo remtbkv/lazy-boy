@@ -90,15 +90,18 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   old per-page `/api/playlists?offset=` waterfall and its `myPlaylistsPage` chain
   were deleted.) `playlist-grid.tsx` still collapses to 3 rows with see-more + fuzzy
   search; thumbnails are lazy.
-- **Playlist detail pages serve cached tracks, not a live Spotify scan.** Paginating a
-  playlist's tracks from Spotify on every visit was the main slowness. Tracks are now
-  cached per playlist in `playlist_tracks` (+ `tracks`), read on render via
-  `getPlaylistTracks`; `PlaylistTracksSync` re-fetches via `POST /api/playlists/[id]/tracks`
-  when the cache is empty or >30 min stale, then `router.refresh()`. Cold cache (first
-  visit) streams a live fetch that fills the cache. Slight staleness (a track or two) is
-  acceptable; `removeFromPlaylistAction` updates the cache so removes don't reappear. Do
-  NOT bulk-refresh every playlist's tracks on a schedule — that's a Spotify-rate-limit
-  trap; refresh per-playlist on visit instead.
+- **Playlist detail pages serve cached tracks, revalidated by `snapshot_id`.** Paginating a
+  playlist's tracks from Spotify on every visit was the main slowness. Tracks are cached per
+  playlist in `playlist_tracks` (+ `tracks`), read on render via `getPlaylistTracks`. The
+  page already fetches the playlist object for its header, which includes Spotify's
+  `snapshot_id` (changes only when the playlist's contents change). We store it
+  (`plsnap:<id>` in meta) and re-fetch tracks **only when it differs** — so an unchanged
+  playlist is never re-paginated, and a changed one is always caught. `PlaylistTracksSync`
+  is rendered only on a snapshot mismatch; it POSTs the new snapshot to
+  `/api/playlists/[id]/tracks`, which re-fetches + stores, then `router.refresh()`. Cold
+  cache streams a live fetch that fills it. `removeFromPlaylistAction` updates the cache so
+  removes don't reappear. Do NOT bulk-refresh every playlist on a schedule (rate-limit
+  trap) — revalidate per-playlist on visit via snapshot.
 - **Listen-history backend (`src/lib/db.ts`):** **libSQL/Turso** (`@libsql/client`),
   so it persists on Vercel's serverless runtime. `TURSO_DATABASE_URL` +
   `TURSO_AUTH_TOKEN` select the remote DB; with both unset (dev) it falls back to a

@@ -1,15 +1,22 @@
+import { timingSafeEqual } from "node:crypto";
 import { getValidAccessToken } from "@/lib/auth";
 import { spotifyClient } from "@/lib/spotify";
 import { syncRecentPlays } from "@/lib/sync/history";
 
-// Daily backstop sync, triggered by Vercel Cron (see vercel.json). Runs without a
-// session using the stored token, so history stays current even when the app hasn't
-// been opened. Vercel sends `Authorization: Bearer $CRON_SECRET`; we reject anything
-// else so the endpoint can't be triggered by randoms. Hobby crons run ~once/day; bump
-// the schedule (and this stays unchanged) if you move to Pro.
+// Constant-time string compare so the cron secret can't be guessed via response timing.
+function safeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ab.length === bb.length && timingSafeEqual(ab, bb);
+}
+
+// Backstop sync, triggered by the schedulers (GitHub Actions every 5 min + Vercel daily
+// cron, see vercel.json). Runs without a session using the stored token, so history stays
+// current even when the app hasn't been opened. Callers send `Authorization: Bearer
+// $CRON_SECRET`; anything else is rejected so the endpoint can't be triggered by randoms.
 export async function GET(req: Request) {
   const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.get("authorization") !== `Bearer ${secret}`) {
+  if (secret && !safeEqual(req.headers.get("authorization") ?? "", `Bearer ${secret}`)) {
     return Response.json({ ok: false, error: "forbidden" }, { status: 401 });
   }
   const token = await getValidAccessToken();

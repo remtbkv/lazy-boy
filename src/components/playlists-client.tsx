@@ -58,24 +58,6 @@ export function PlaylistsClient({
           dropping another button in. Full explanations live on the Home page. */}
       <div className="flex flex-wrap items-center gap-2.5">
         <HoverTip
-          label={SAVE_QUEUE_HINT}
-          delay={500}
-          placement="bottom"
-          tipClassName={TIP}
-          className="inline-flex"
-        >
-          <ActionButton
-            action={saveQueueAction}
-            pendingText="Saving…"
-            success={(r) => `Saved ${r.count} to "${r.name}"`}
-            variant="outline"
-            className={CHIP}
-          >
-            <ListPlus className="size-4 text-foreground" />
-            Save queue
-          </ActionButton>
-        </HoverTip>
-        <HoverTip
           label={RESUME_HINT}
           delay={500}
           placement="bottom"
@@ -93,6 +75,24 @@ export function PlaylistsClient({
             <Play className="size-4 text-foreground" />
             Resume
           </Button>
+        </HoverTip>
+        <HoverTip
+          label={SAVE_QUEUE_HINT}
+          delay={500}
+          placement="bottom"
+          tipClassName={TIP}
+          className="inline-flex"
+        >
+          <ActionButton
+            action={saveQueueAction}
+            pendingText="Saving…"
+            success={(r) => `Saved ${r.count} to "${r.name}"`}
+            variant="outline"
+            className={CHIP}
+          >
+            <ListPlus className="size-4 text-foreground" />
+            Save queue
+          </ActionButton>
         </HoverTip>
         <HoverTip
           label={MERGE_HINT}

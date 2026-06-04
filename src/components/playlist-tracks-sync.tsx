@@ -3,29 +3,32 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 
-// Background refresh for a single playlist's cached tracks. The detail page renders the
-// cached list instantly; this fires a re-fetch when that cache is empty or older than
-// 30 min, then refreshes the view. Per-playlist cooldown (module scope) so bouncing
-// between playlists doesn't spam Spotify.
-const STALE_MS = 30 * 60 * 1000;
+// Re-fetches a playlist's tracks into the cache, then refreshes the view. The detail
+// page renders this ONLY when the playlist's Spotify snapshot_id differs from the cached
+// one (or the cache is empty), so an unchanged playlist is never re-paginated. It just
+// fires once on mount; the cooldown (keyed by playlist + snapshot) guards double-fires
+// without blocking a genuinely new snapshot.
 const COOLDOWN_MS = 60 * 1000;
 const lastAttempt = new Map<string, number>();
 
 export function PlaylistTracksSync({
   playlistId,
-  syncedAt,
+  snapshot,
 }: {
   playlistId: string;
-  syncedAt: string | null;
+  snapshot?: string;
 }) {
   const router = useRouter();
   useEffect(() => {
-    const stale = !syncedAt || Date.now() - new Date(syncedAt).getTime() > STALE_MS;
-    if (!stale) return;
-    if (Date.now() - (lastAttempt.get(playlistId) ?? 0) < COOLDOWN_MS) return;
-    lastAttempt.set(playlistId, Date.now());
+    const key = `${playlistId}:${snapshot ?? ""}`;
+    if (Date.now() - (lastAttempt.get(key) ?? 0) < COOLDOWN_MS) return;
+    lastAttempt.set(key, Date.now());
     let mounted = true;
-    fetch(`/api/playlists/${playlistId}/tracks`, { method: "POST" })
+    fetch(`/api/playlists/${playlistId}/tracks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ snapshot }),
+    })
       .then((r) => r.json())
       .then((d) => {
         if (mounted && d.ok) router.refresh();
@@ -34,6 +37,6 @@ export function PlaylistTracksSync({
     return () => {
       mounted = false;
     };
-  }, [playlistId, syncedAt, router]);
+  }, [playlistId, snapshot, router]);
   return null;
 }

@@ -347,8 +347,13 @@ export async function getMeId(): Promise<string | null> {
 }
 
 // ---- playlist tracks (cached per playlist so detail pages load instantly) ----
-/** Replace a playlist's cached track list (kept in playlist order). */
-export async function storePlaylistTracks(playlistId: string, tracks: Track[]): Promise<void> {
+/** Replace a playlist's cached track list (kept in playlist order). `snapshot` is the
+ *  playlist's Spotify snapshot_id, stored so we can skip re-fetching when unchanged. */
+export async function storePlaylistTracks(
+  playlistId: string,
+  tracks: Track[],
+  snapshot?: string,
+): Promise<void> {
   const client = await getClient();
   const stmts: InStatement[] = [
     { sql: "DELETE FROM playlist_tracks WHERE playlist_id = :pid", args: { pid: playlistId } },
@@ -381,7 +386,19 @@ export async function storePlaylistTracks(playlistId: string, tracks: Track[]): 
           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     args: { k: `pltracks_at:${playlistId}`, v: new Date().toISOString() },
   });
+  if (snapshot) {
+    stmts.push({
+      sql: `INSERT INTO meta (key, value) VALUES (:k, :v)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      args: { k: `plsnap:${playlistId}`, v: snapshot },
+    });
+  }
   await client.batch(stmts, "write");
+}
+
+/** The Spotify snapshot_id of the cached tracks, if known. */
+export async function getPlaylistSnapshot(playlistId: string): Promise<string | null> {
+  return getMeta(`plsnap:${playlistId}`);
 }
 
 /** A playlist's cached tracks in playlist order (empty if never cached). */
@@ -395,10 +412,6 @@ export async function getPlaylistTracks(playlistId: string): Promise<Track[]> {
     args: { pid: playlistId },
   });
   return res.rows as unknown as Track[];
-}
-
-export async function getPlaylistTracksSyncedAt(playlistId: string): Promise<string | null> {
-  return getMeta(`pltracks_at:${playlistId}`);
 }
 
 /** Drop one track from a playlist's cache (after a remove) so it doesn't reappear on

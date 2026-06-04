@@ -59,6 +59,7 @@ function normPlaylist(raw: RawPlaylist): Playlist {
     image: raw.images?.[0]?.url ?? null,
     public: raw.public,
     collaborative: raw.collaborative,
+    snapshot: raw.snapshot_id,
   };
 }
 

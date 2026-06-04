@@ -24,6 +24,9 @@ export type Playlist = {
   image: string | null;
   public: boolean;
   collaborative: boolean;
+  // Changes only when the playlist's contents change — used to skip re-fetching a
+  // playlist's tracks when nothing has changed.
+  snapshot?: string;
 };
 
 export type SpotifyUser = {
@@ -78,4 +81,5 @@ export type RawPlaylist = {
   images: RawImage[];
   public: boolean;
   collaborative: boolean;
+  snapshot_id?: string;
 };
