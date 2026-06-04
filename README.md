@@ -1,6 +1,8 @@
-# LAZY BOY
+# What Am I?
 
 Next.js web app (claude slop + careful, loving human guidance) which, at its core, fixes an annoying issue in Spotify where "duplicates" aren't properly recognized, as there could be the same song but in a different (e.g. deluxe) album by the same artist, and the song will not be flagged as a duplicate. So I personally did not like this and so made a very simple app initially to just "clean" out a playlist by removing all real duplicates. Then added more functionality. Welcome to Lazy Boy.
+
+Note that due to a web api update from Spotify, developer apps in "development mode" can no longer be used by other users unless manually whitelisted by the creator (me). So if you want to use this you either ask me to whitelist you (don't) or just set it up yourself (easy nowadays). Instructions are below.
 
 ## Quick start
 
