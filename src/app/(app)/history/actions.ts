@@ -2,6 +2,7 @@
 
 import { getSpotify } from "@/lib/session";
 import { getAllTimeStats, getDailyStats, getLastSync } from "@/lib/db";
+import { tzOffsetMinutes } from "@/lib/tz";
 import { syncRecentPlays } from "@/lib/sync/history";
 
 // Used by the history page's auto-refresh (every minute while the tab is open, no
@@ -12,8 +13,9 @@ export async function syncHistoryAction() {
   try {
     const sp = await getSpotify();
     const { added } = await syncRecentPlays(sp);
+    const tz = await tzOffsetMinutes();
     const [daily, lastSync, allTime] = await Promise.all([
-      getDailyStats(),
+      getDailyStats(tz),
       getLastSync(),
       getAllTimeStats(),
     ]);

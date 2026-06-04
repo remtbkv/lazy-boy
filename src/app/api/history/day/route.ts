@@ -1,5 +1,6 @@
 import { auth } from "@/lib/auth";
 import { getPlaysByDay } from "@/lib/db";
+import { tzOffsetMinutes } from "@/lib/tz";
 
 // Songs played on one local day (YYYY-MM-DD), read from the local store — instant.
 export async function GET(req: Request) {
@@ -11,5 +12,5 @@ export async function GET(req: Request) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
     return Response.json({ error: "bad day" }, { status: 400 });
   }
-  return Response.json({ results: await getPlaysByDay(day) });
+  return Response.json({ results: await getPlaysByDay(day, await tzOffsetMinutes()) });
 }

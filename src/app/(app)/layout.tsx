@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth";
 import { Header } from "@/components/header";
 import { CleanProgressWatcher } from "@/components/clean-progress";
 import { SyncOnLoad } from "@/components/sync-on-load";
+import { TimezoneCookie } from "@/components/timezone-cookie";
 
 export default async function AppLayout({
   children,
@@ -23,6 +24,7 @@ export default async function AppLayout({
       </main>
       <CleanProgressWatcher />
       <SyncOnLoad />
+      <TimezoneCookie />
     </>
   );
 }

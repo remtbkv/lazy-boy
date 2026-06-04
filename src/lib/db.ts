@@ -37,7 +37,7 @@ export type TrackStats = {
 };
 
 export type DayStats = {
-  day: string; // YYYY-MM-DD (server-localtime; UTC on Turso)
+  day: string; // YYYY-MM-DD in the user's local zone (see localDay / offsetMin)
   plays: number;
   uniqueTracks: number;
   durationMs: number;
@@ -236,10 +236,21 @@ export async function getAllTimeStats(): Promise<{
 }
 
 /** Per-day plays / unique songs / listening time, most recent first. */
-export async function getDailyStats(days = 14): Promise<DayStats[]> {
+// SQLite date() modifier that shifts UTC timestamps into the *user's* local day.
+// `offsetMin` = minutes to ADD to UTC for the user's zone (+120 = UTC+2, −240 = UTC−4),
+// sent from the browser (Turso itself runs in UTC, so 'localtime' would mean UTC). It's
+// client-supplied, so it's clamped to a valid tz range and integer-ized before inlining.
+// One current offset is applied to all rows, so a play within ~1h of a *past* DST change
+// can land a day off — acceptable for personal history.
+function localDay(col: string, offsetMin: number): string {
+  const m = Math.max(-720, Math.min(840, Math.round(offsetMin) || 0));
+  return `date(${col}, '${m >= 0 ? "+" : ""}${m} minutes')`;
+}
+
+export async function getDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
   const client = await getClient();
   const res = await client.execute({
-    sql: `SELECT date(p.played_at, 'localtime') AS day,
+    sql: `SELECT ${localDay("p.played_at", offsetMin)} AS day,
             COUNT(*) AS plays,
             COUNT(DISTINCT p.track_id) AS uniqueTracks,
             COALESCE(SUM(t.duration_ms), 0) AS durationMs
@@ -252,11 +263,11 @@ export async function getDailyStats(days = 14): Promise<DayStats[]> {
 
 /** Tracks played on a specific local day (YYYY-MM-DD), most-played first.
  *  `plays`/`lastPlayed`/`source` are scoped to that day, not all-time. */
-export async function getPlaysByDay(day: string): Promise<TrackStats[]> {
+export async function getPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]> {
   const client = await getClient();
   const res = await client.execute({
     sql: `${SELECT_TRACK}
-          WHERE date(p.played_at, 'localtime') = :day
+          WHERE ${localDay("p.played_at", offsetMin)} = :day
           GROUP BY t.id ORDER BY plays DESC, lastPlayed DESC`,
     args: { day },
   });

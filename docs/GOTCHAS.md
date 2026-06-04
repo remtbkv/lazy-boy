@@ -116,9 +116,14 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   needs two repo secrets: `APP_URL` and `CRON_SECRET`. Want a tighter app-closed cadence
   than 5 min? GitHub can't do it — use an external pinger (e.g. cron-job.org, 1-min free)
   hitting `/api/cron/sync` with the same bearer secret.
-- **Day buckets are UTC in prod.** `date(..., 'localtime')` runs on the DB server, which
-  is **UTC on Turso**, so deployed per-day grouping is UTC (internally consistent;
-  revisit if you want true local-time days).
+- **Day buckets use the user's timezone, sent from the browser — never `'localtime'`.**
+  Turso runs in UTC, so `date(played_at, 'localtime')` would bucket by UTC and plays after
+  UTC-midnight show up on "tomorrow." Spotify's API has no user timezone, so `TimezoneCookie`
+  writes the browser's UTC offset to a `tzoffset` cookie; `tzOffsetMinutes()` reads it and
+  `getDailyStats`/`getPlaysByDay` apply it via `date(played_at, '±N minutes')` (`localDay()`
+  in `db.ts`). Caveat: one current offset is applied to all rows, so plays within ~1h of a
+  *past* DST change can land a day off — fine for personal history. Cron-context callers
+  (no request) get offset 0, but they don't compute day buckets, so it doesn't matter.
 
 ## Verifying UI with Playwright
 
