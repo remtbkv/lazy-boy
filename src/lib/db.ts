@@ -196,6 +196,21 @@ const SELECT_TRACK = `
        WHERE p2.track_id = t.id ORDER BY p2.played_at DESC LIMIT 1) AS source
   FROM tracks t JOIN plays p ON p.track_id = t.id`;
 
+// Estimated time *actually* listened for each play (for `plays p JOIN tracks t`): the gap
+// until the next play, capped at the song's length. So a skipped/partial play counts only
+// the few seconds it ran; a fully-played one counts ~its length; and stopping then resuming
+// hours later is capped at the song length (not the idle gap). This corrects the old
+// "every play = full song length" over-count, using only the recently-played timestamps we
+// already store — no extra Spotify calls. 10-min fallback when a track's duration is unknown.
+const LISTENED_MS = `MIN(
+  COALESCE(t.duration_ms, 600000),
+  COALESCE(
+    (CAST(strftime('%s', LEAD(p.played_at) OVER (ORDER BY p.played_at)) AS INTEGER)
+      - CAST(strftime('%s', p.played_at) AS INTEGER)) * 1000,
+    COALESCE(t.duration_ms, 600000)
+  )
+)`;
+
 /** Search history by track name or artist; "" returns most recently played. */
 export async function searchHistory(query: string, limit = 100): Promise<TrackStats[]> {
   const client = await getClient();
@@ -236,10 +251,13 @@ export async function getAllTimeStats(): Promise<{
 }> {
   const client = await getClient();
   const res = await client.execute(
-    `SELECT COUNT(*) AS plays,
-       COUNT(DISTINCT p.track_id) AS uniqueTracks,
-       COALESCE(SUM(t.duration_ms), 0) AS durationMs
-     FROM plays p JOIN tracks t ON t.id = p.track_id`,
+    `WITH listened AS (
+       SELECT p.track_id AS tid, ${LISTENED_MS} AS ms
+       FROM plays p JOIN tracks t ON t.id = p.track_id
+     )
+     SELECT COUNT(*) AS plays, COUNT(DISTINCT tid) AS uniqueTracks,
+       COALESCE(SUM(ms), 0) AS durationMs
+     FROM listened`,
   );
   return res.rows[0] as unknown as { plays: number; uniqueTracks: number; durationMs: number };
 }
@@ -259,12 +277,14 @@ function localDay(col: string, offsetMin: number): string {
 export async function getDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
   const client = await getClient();
   const res = await client.execute({
-    sql: `SELECT ${localDay("p.played_at", offsetMin)} AS day,
-            COUNT(*) AS plays,
-            COUNT(DISTINCT p.track_id) AS uniqueTracks,
-            COALESCE(SUM(t.duration_ms), 0) AS durationMs
-          FROM plays p JOIN tracks t ON t.id = p.track_id
-          GROUP BY day ORDER BY day DESC LIMIT ?`,
+    sql: `WITH listened AS (
+            SELECT ${localDay("p.played_at", offsetMin)} AS day, p.track_id AS tid,
+              ${LISTENED_MS} AS ms
+            FROM plays p JOIN tracks t ON t.id = p.track_id
+          )
+          SELECT day, COUNT(*) AS plays, COUNT(DISTINCT tid) AS uniqueTracks,
+            COALESCE(SUM(ms), 0) AS durationMs
+          FROM listened GROUP BY day ORDER BY day DESC LIMIT ?`,
     args: [days],
   });
   return res.rows as unknown as DayStats[];

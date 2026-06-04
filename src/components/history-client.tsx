@@ -78,6 +78,8 @@ export function HistoryClient({
   allTime: AllTimeStats;
   initialResults: TrackStats[];
 }) {
+  const { playing } = useNowPlaying();
+  const nowPlayingId = playing?.track.id;
   const [daily, setDaily] = useState(initialDaily);
   const [allTime, setAllTime] = useState(initialAllTime);
   const [query, setQuery] = useState("");
@@ -161,11 +163,17 @@ export function HistoryClient({
     }
   }, [searching]);
 
-  // Auto-sync every minute (visible tab only): pull any new plays and refresh the
-  // current view in place — without yanking the user to today or showing a toast.
+  // Pull new plays and update the view in place — no manual refresh, no toast, no
+  // yanking the user back to today. Kept in a ref (updated every render) so the triggers
+  // below always run the latest version without re-subscribing. Debounced so the
+  // track-change trigger and the fallback timer can't double-fire.
+  const lastRefresh = useRef(0);
+  const doRefresh = useRef(async () => {});
   useEffect(() => {
-    const id = setInterval(async () => {
+    doRefresh.current = async () => {
       if (document.visibilityState !== "visible") return;
+      if (Date.now() - lastRefresh.current < 15000) return;
+      lastRefresh.current = Date.now();
       try {
         const r = await syncHistoryAction();
         if (!r.ok) return;
@@ -182,9 +190,19 @@ export function HistoryClient({
       } catch {
         /* ignore background sync hiccups */
       }
-    }, 60000);
+    };
+  });
+
+  // Refresh the moment the playing track changes (a finished song lands in
+  // recently-played → it shows up here right away), plus a slow fallback for when
+  // playback is idle/stopped.
+  useEffect(() => {
+    void doRefresh.current();
+  }, [nowPlayingId]);
+  useEffect(() => {
+    const id = setInterval(() => void doRefresh.current(), 120000);
     return () => clearInterval(id);
-  }, [allSelected, selectedDay, searching, query]);
+  }, []);
 
   const empty = daily.length === 0;
 
@@ -218,7 +236,7 @@ export function HistoryClient({
                     <div className="mt-2 text-2xl font-bold tabular-nums">{d.plays}</div>
                     <div className="text-xs text-muted-foreground">plays</div>
                     <div className="mt-2 text-xs text-muted-foreground">
-                      {d.uniqueTracks} songs · {formatListenTime(d.durationMs)}
+                      {formatListenTime(d.durationMs)} listened
                     </div>
                   </button>
                 );
@@ -240,7 +258,7 @@ export function HistoryClient({
               </div>
               <div className="text-xs text-muted-foreground">plays</div>
               <div className="mt-2 text-xs text-muted-foreground">
-                {allTime.uniqueTracks.toLocaleString()} songs · {formatListenTime(allTime.durationMs)}
+                {formatListenTime(allTime.durationMs)} listened
               </div>
             </button>
           </div>
