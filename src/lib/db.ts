@@ -337,6 +337,24 @@ export async function getMeId(): Promise<string | null> {
   return getMeta("me_id");
 }
 
+/** The most recently played track from a given playback context (e.g. a playlist
+ *  URI), or null if we've never recorded a play from it. Used to resume a playlist
+ *  from where you left off. */
+export async function lastPlayedInContext(
+  contextUri: string,
+): Promise<{ trackId: string; uri: string } | null> {
+  const client = await getClient();
+  const res = await client.execute({
+    sql: `SELECT t.id AS trackId, t.uri AS uri
+          FROM plays p JOIN tracks t ON t.id = p.track_id
+          WHERE p.context_uri = :uri
+          ORDER BY p.played_at DESC LIMIT 1`,
+    args: { uri: contextUri },
+  });
+  const r = res.rows[0];
+  return r ? { trackId: String(r.trackId), uri: String(r.uri) } : null;
+}
+
 /** Resolved name for a playback context uri, if we've cached it before. */
 export async function getContextName(uri: string): Promise<string | null> {
   const client = await getClient();

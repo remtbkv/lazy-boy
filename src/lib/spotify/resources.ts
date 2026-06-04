@@ -260,6 +260,15 @@ export class Resources {
     await this.http.post(`/me/player/queue?uri=${encodeURIComponent(uri)}`);
   }
 
+  /** Start playback of a context (playlist/album) on the active device, optionally
+   *  jumping to a specific track URI within it. 404 if no active device. */
+  async playContext(contextUri: string, offsetUri?: string): Promise<void> {
+    await this.http.put("/me/player/play", {
+      context_uri: contextUri,
+      ...(offsetUri ? { offset: { uri: offsetUri } } : {}),
+    });
+  }
+
   /** Transport controls for the active device. Each 404s with no active device. */
   async nextTrack(): Promise<void> {
     await this.http.post("/me/player/next");

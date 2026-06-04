@@ -5,7 +5,7 @@ import { auth, signIn, signOut } from "@/lib/auth";
 import { getSpotify } from "@/lib/session";
 import { spotifyClient, SpotifyError } from "@/lib/spotify";
 import { runTask } from "@/lib/tasks/registry";
-import { clearSpotifyTokens } from "@/lib/db";
+import { clearSpotifyTokens, lastPlayedInContext } from "@/lib/db";
 
 export type ActionResult<T = object> =
   | ({ ok: true } & T)
@@ -163,4 +163,38 @@ export async function playerPreviousAction(): Promise<ActionResult> {
 }
 export async function playerSetPlayingAction(play: boolean): Promise<ActionResult> {
   return playerControl((sp) => (play ? sp.resumePlayback() : sp.pausePlayback()));
+}
+
+// "Pick up where you left off": start the chosen playlist on the active device at the
+// song *after* the most recent one we recorded you playing from it (so you continue
+// rather than replay). No history for that playlist → start from the top. Needs an
+// active device + Premium, like the other transport controls.
+export async function resumePlaylistAction(
+  playlistId: string,
+): Promise<ActionResult<{ track: string; fromTop: boolean }>> {
+  try {
+    const sp = await getSpotify();
+    const uri = `spotify:playlist:${playlistId}`;
+    const tracks = await sp.playlistTracks(playlistId);
+    if (tracks.length === 0) throw new Error("This playlist has no playable tracks.");
+
+    const last = await lastPlayedInContext(uri);
+    let startIdx = 0;
+    let fromTop = true;
+    if (last) {
+      const i = tracks.findIndex((t) => t.id === last.trackId);
+      if (i >= 0) {
+        startIdx = Math.min(i + 1, tracks.length - 1); // the next song; clamp at the end
+        fromTop = false;
+      }
+    }
+    const start = tracks[startIdx];
+    await sp.playContext(uri, start.uri);
+    return { ok: true, track: start.title, fromTop };
+  } catch (e) {
+    if (e instanceof SpotifyError && (e.status === 404 || e.status === 403)) {
+      return { ok: false, error: "No active device — start playing on Spotify first." };
+    }
+    return fail(e);
+  }
 }

@@ -1,11 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { GitMerge, Heart, ListPlus } from "lucide-react";
+import { GitMerge, Heart, ListPlus, Play } from "lucide-react";
 import { saveQueueAction, syncLikedAction } from "@/app/(app)/actions";
 import { ActionButton } from "@/components/action-button";
 import { HoverTip } from "@/components/hover-tip";
 import { MergePanel } from "@/components/merge-panel";
+import { ResumePanel } from "@/components/resume-panel";
 import { PlaylistGrid } from "@/components/playlist-grid";
 import { PlaylistsSync } from "@/components/playlists-sync";
 import { Button } from "@/components/ui/button";
@@ -33,6 +34,8 @@ const MERGE_HINT =
   "Combines the playlists you pick into one new playlist, kept in the order you choose them.";
 const SYNC_LIKED_HINT =
   "Mirrors your Liked Songs into a normal playlist — handy if you want to share them or just see them as a list.";
+const RESUME_HINT =
+  "Resumes a playlist on your active device from the song right after the last one you played from it.";
 
 // Renders the persisted library instantly. A background sync (PlaylistsSync)
 // refreshes the store when it's stale, then the server data is revalidated —
@@ -47,6 +50,7 @@ export function PlaylistsClient({
   const items = initialItems;
   const total = items.length;
   const [mergeOpen, setMergeOpen] = useState(false);
+  const [resumeOpen, setResumeOpen] = useState(false);
 
   return (
     <div className="space-y-6">
@@ -109,8 +113,39 @@ export function PlaylistsClient({
             Sync liked
           </ActionButton>
         </HoverTip>
+        <HoverTip
+          label={RESUME_HINT}
+          delay={500}
+          placement="bottom"
+          tipClassName={TIP}
+          className="inline-flex"
+        >
+          <Button
+            variant="outline"
+            className={
+              CHIP + (resumeOpen ? " border-white/50 bg-accent text-foreground" : "")
+            }
+            aria-expanded={resumeOpen}
+            onClick={() => setResumeOpen((o) => !o)}
+          >
+            <Play className="size-4 text-foreground" />
+            Resume
+          </Button>
+        </HoverTip>
         <PlaylistsSync syncedAt={syncedAt} />
       </div>
+
+      {resumeOpen ? (
+        <div className="max-w-lg">
+          <ResumePanel
+            playlists={items.map((p) => ({
+              id: p.id,
+              name: p.name,
+              trackCount: p.trackCount,
+            }))}
+          />
+        </div>
+      ) : null}
 
       {mergeOpen ? (
         <div className="max-w-lg">

@@ -27,6 +27,11 @@ Legend: `[x]` done · `[~]` partial / seam in place · `[ ]` not started
       in the cleanup pass (restore from git history if/when a UI is built)
 - [x] Liked songs → mirror playlist
 - [x] Save queue (uses the real `GET /v1/me/player/queue` endpoint)
+- [x] Pick up where you left off — "Resume" pill picks a playlist and starts it on the
+      active device at the song after the last one you played from it (via listen-history
+      `lastPlayedInContext` + `playContext`). `resume-panel.tsx`, `resumePlaylistAction`.
+- [x] Right-click a track in a playlist → Remove from playlist / Save to Liked / Add to
+      queue / Share (copy link). `track-context-menu.tsx`, wired in `track-list.tsx`.
 
 ## Phase 2 — high priority (`future.txt`)
 

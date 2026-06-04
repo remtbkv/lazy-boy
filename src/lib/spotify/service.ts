@@ -56,6 +56,9 @@ export class Service {
   addToQueue(uri: string) {
     return this.resources.addToQueue(uri);
   }
+  playContext(contextUri: string, offsetUri?: string) {
+    return this.resources.playContext(contextUri, offsetUri);
+  }
   nextTrack() {
     return this.resources.nextTrack();
   }
