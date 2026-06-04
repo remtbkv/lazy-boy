@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 
-// Keeps listen-history current without a sync button: pings POST /api/sync once when
+// Keeps listen-history current automatically: pings POST /api/sync once when
 // the app loads, then every 2 minutes while the tab is visible, and again whenever the
 // tab regains focus — so opening (or returning to) the site shows plays right up to the
 // moment. 2 min comfortably beats a song's length, so an open tab stays effectively

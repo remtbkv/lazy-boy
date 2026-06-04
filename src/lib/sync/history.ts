@@ -10,9 +10,8 @@ import {
 
 type Spotify = ReturnType<typeof spotifyClient>;
 
-// Core listen-history sync, shared by the manual "Sync recent plays" button and
-// the on-load /api/sync (session-bound client) and the daily /api/cron/sync
-// backstop (stored-token client).
+// Core listen-history sync, shared by the on-load /api/sync (session-bound client)
+// and the /api/cron/sync backstop (stored-token client).
 // Pulls the last ~50 plays into the local store and resolves any new playback
 // contexts (playlist/album names). recordPlays() stamps `last_sync`.
 export async function syncRecentPlays(sp: Spotify): Promise<{ added: number }> {

@@ -445,22 +445,16 @@ export async function removeCachedPlaylistTrack(playlistId: string, uri: string)
   });
 }
 
-/** The most recently played track from a given playback context (e.g. a playlist
- *  URI), or null if we've never recorded a play from it. Used to resume a playlist
- *  from where you left off. */
-export async function lastPlayedInContext(
-  contextUri: string,
-): Promise<{ trackId: string; uri: string } | null> {
+/** The set of track ids ever played from a given playback context (e.g. a playlist
+ *  URI). Resume uses this to find the *furthest* track reached in playlist order, so
+ *  rewinding/skipping back doesn't move your resume point backward. */
+export async function playedTrackIdsInContext(contextUri: string): Promise<Set<string>> {
   const client = await getClient();
   const res = await client.execute({
-    sql: `SELECT t.id AS trackId, t.uri AS uri
-          FROM plays p JOIN tracks t ON t.id = p.track_id
-          WHERE p.context_uri = :uri
-          ORDER BY p.played_at DESC LIMIT 1`,
+    sql: `SELECT DISTINCT track_id FROM plays WHERE context_uri = :uri`,
     args: { uri: contextUri },
   });
-  const r = res.rows[0];
-  return r ? { trackId: String(r.trackId), uri: String(r.uri) } : null;
+  return new Set(res.rows.map((r) => String(r.track_id)));
 }
 
 /** Resolved name for a playback context uri, if we've cached it before. */

@@ -8,7 +8,7 @@ import { runTask } from "@/lib/tasks/registry";
 import {
   clearSpotifyTokens,
   getPlaylistTracks,
-  lastPlayedInContext,
+  playedTrackIdsInContext,
   removeCachedPlaylistTrack,
   storePlaylistTracks,
 } from "@/lib/db";
@@ -182,22 +182,24 @@ export async function playPlaylistTrackAction(
 }
 
 // "Pick up where you left off": start the chosen playlist on the active device at the
-// song *after* the most recent one we recorded you playing from it (so you continue
-// rather than replay). No history for that playlist → start from the top. Needs an
+// song *after* the FURTHEST one you've reached in playlist order — not the last one by
+// time. Assumes in-order (non-shuffled) listening: we take the max playlist position
+// among tracks you've played from it, so rewinding/skipping back doesn't drag your
+// resume point backward. No history for that playlist → start from the top. Needs an
 // active device + Premium, like the other transport controls.
 export async function resumePlaylistAction(
   playlistId: string,
 ): Promise<ActionResult<{ track: string; fromTop: boolean }>> {
   try {
     const uri = `spotify:playlist:${playlistId}`;
-    // Read the cached track list (instant) and the last-played track in parallel with
+    // Read the cached track list (instant) and the played-track set in parallel with
     // auth, instead of re-paginating the whole playlist from Spotify before playing —
     // that live scan was the lag. Only cold (never-cached) playlists fall back to a live
     // fetch, and we cache that result for next time.
-    const [sp, cached, last] = await Promise.all([
+    const [sp, cached, playedIds] = await Promise.all([
       getSpotify(),
       getPlaylistTracks(playlistId),
-      lastPlayedInContext(uri),
+      playedTrackIdsInContext(uri),
     ]);
     let tracks = cached;
     if (tracks.length === 0) {
@@ -206,15 +208,13 @@ export async function resumePlaylistAction(
     }
     if (tracks.length === 0) throw new Error("This playlist has no playable tracks.");
 
-    let startIdx = 0;
-    let fromTop = true;
-    if (last) {
-      const i = tracks.findIndex((t) => t.id === last.trackId);
-      if (i >= 0) {
-        startIdx = Math.min(i + 1, tracks.length - 1); // the next song; clamp at the end
-        fromTop = false;
-      }
+    // Furthest position reached = the last index (in playlist order) you've played.
+    let maxIdx = -1;
+    for (let i = 0; i < tracks.length; i++) {
+      if (playedIds.has(tracks[i].id)) maxIdx = i;
     }
+    const fromTop = maxIdx < 0;
+    const startIdx = fromTop ? 0 : Math.min(maxIdx + 1, tracks.length - 1); // the next song
     const start = tracks[startIdx];
     await sp.playContext(uri, start.uri);
     return { ok: true, track: start.title, fromTop };
