@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useTransition, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useTransition, type ReactNode } from "react";
 import { CircleMinus, Heart, ListPlus, Share2 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -77,45 +77,59 @@ export function TrackContextMenu({
     onClose();
   }
 
-  const left = Math.min(x, window.innerWidth - 234);
-  const top = Math.min(y, window.innerHeight - 180);
+  // Keep the menu fully on-screen by measuring its real size (it sizes to its content,
+  // so this stays correct no matter what the labels are) and nudging it inward from the
+  // cursor if it would overflow. useLayoutEffect runs before paint, so there's no flash.
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ left: x, top: y });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const pad = 8;
+    setPos({
+      left: Math.max(pad, Math.min(x, window.innerWidth - r.width - pad)),
+      top: Math.max(pad, Math.min(y, window.innerHeight - r.height - pad)),
+    });
+  }, [x, y]);
 
   return (
     <div
-      className="fixed z-50 w-56 overflow-hidden rounded-lg border border-border bg-popover p-1 text-sm shadow-2xl shadow-black/50 ring-1 ring-white/5"
-      style={{ left, top }}
+      ref={ref}
+      className="fixed z-50 w-max max-w-[calc(100vw-1rem)] overflow-hidden rounded-lg border border-border bg-popover p-1 text-sm shadow-2xl shadow-black/50 ring-1 ring-white/5"
+      style={{ left: pos.left, top: pos.top }}
       onClick={(e) => e.stopPropagation()}
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();
       }}
     >
-      {playlistId ? (
-        <Item
-          icon={<CircleMinus className="size-4" />}
-          label="Remove from playlist"
-          disabled={pending}
-          onClick={() =>
-            run(
-              () => removeFromPlaylistAction(playlistId, track.uri),
-              "Removed from playlist",
-              () => onRemoved?.(track),
-            )
-          }
-        />
-      ) : null}
-      <Item
-        icon={<Heart className="size-4" />}
-        label="Save to Liked Songs"
-        disabled={pending}
-        onClick={() => run(() => saveToLikedAction(track.id), "Saved to Liked Songs")}
-      />
       <Item
         icon={<ListPlus className="size-4" />}
         label="Add to queue"
         disabled={pending}
         onClick={() => run(() => addToQueueAction(track.uri), "Added to queue")}
       />
+      <Item
+        icon={<Heart className="size-4" />}
+        label="Save to Liked Songs"
+        disabled={pending}
+        onClick={() => run(() => saveToLikedAction(track.id), "Saved to Liked Songs")}
+      />
+      {playlistId ? (
+        <Item
+        icon={<CircleMinus className="size-4" />}
+        label="Remove from playlist"
+        disabled={pending}
+        onClick={() =>
+          run(
+            () => removeFromPlaylistAction(playlistId, track.uri),
+            "Removed from playlist",
+            () => onRemoved?.(track),
+          )
+        }
+        />
+      ) : null}
       <Item icon={<Share2 className="size-4" />} label="Share" onClick={share} />
     </div>
   );
@@ -137,7 +151,7 @@ function Item({
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+      className="flex w-full items-center gap-2.5 whitespace-nowrap rounded-md px-2.5 py-2 text-left text-foreground transition-colors hover:bg-accent disabled:opacity-50"
     >
       <span className="text-muted-foreground">{icon}</span>
       {label}
