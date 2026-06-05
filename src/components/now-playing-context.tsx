@@ -29,6 +29,7 @@ type NowPlayingValue = {
   refresh: () => void;
   setPlaying: React.Dispatch<React.SetStateAction<Playing>>;
   toggle: () => void;
+  playOptimistic: (track: NowPlayingTrack, durationMs?: number) => void;
 };
 
 const Ctx = createContext<NowPlayingValue | null>(null);
@@ -40,16 +41,21 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
   const [playing, setPlaying] = useState<Playing>(null);
   const aliveRef = useRef(true);
   const playingRef = useRef<Playing>(null);
+  // After an optimistic change, ignore poll results briefly so a mid-flight 6s poll
+  // (carrying the pre-change state) can't clobber it and cause a visible flicker.
+  const suppressUntil = useRef(0);
   useEffect(() => {
     playingRef.current = playing; // keep the ref current for toggle() without reading state in render
   }, [playing]);
 
   const refresh = useCallback(async () => {
+    if (Date.now() < suppressUntil.current) return;
     try {
       const res = await fetch("/api/now-playing", { cache: "no-store" });
       if (!res.ok) return;
       const data = (await res.json()) as { playing: Playing };
-      if (aliveRef.current) setPlaying(data.playing);
+      // Re-check after the await — an optimistic change may have happened mid-fetch.
+      if (aliveRef.current && Date.now() >= suppressUntil.current) setPlaying(data.playing);
     } catch {
       /* transient — keep the last known state rather than flicker */
     }
@@ -69,22 +75,44 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     };
   }, [refresh]);
 
+  // Show a track as playing immediately (e.g. double-click a song); the next poll confirms.
+  const playOptimistic = useCallback((track: NowPlayingTrack, durationMs = 0) => {
+    suppressUntil.current = Date.now() + 2000;
+    setPlaying({ track, isPlaying: true, progressMs: 0, durationMs, context: null });
+  }, []);
+
   // Toggle play/pause for whatever's playing (used by the track-list row button).
   const toggle = useCallback(() => {
     const cur = playingRef.current;
     if (!cur) return;
     const next = !cur.isPlaying;
+    suppressUntil.current = Date.now() + 2000;
     setPlaying((p) => (p ? { ...p, isPlaying: next } : p)); // optimistic
-    playerSetPlayingAction(next).finally(() => {
-      setTimeout(() => refresh(), 400); // resync from Spotify
+    playerSetPlayingAction(next).then((r) => {
+      if (!r.ok) {
+        suppressUntil.current = 0; // failed → drop the optimistic flip, show real state
+        refresh();
+      }
     });
   }, [refresh]);
 
-  return <Ctx.Provider value={{ playing, refresh, setPlaying, toggle }}>{children}</Ctx.Provider>;
+  return (
+    <Ctx.Provider value={{ playing, refresh, setPlaying, toggle, playOptimistic }}>
+      {children}
+    </Ctx.Provider>
+  );
 }
 
 export function useNowPlaying(): NowPlayingValue {
   const v = useContext(Ctx);
   // Inert fallback if used outside the provider (shouldn't happen in the app shell).
-  return v ?? { playing: null, refresh: () => {}, setPlaying: () => {}, toggle: () => {} };
+  return (
+    v ?? {
+      playing: null,
+      refresh: () => {},
+      setPlaying: () => {},
+      toggle: () => {},
+      playOptimistic: () => {},
+    }
+  );
 }

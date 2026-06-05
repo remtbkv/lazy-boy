@@ -1,4 +1,4 @@
-# CLAUDE.md — Spotify Claude Manager
+# CLAUDE.md — Lazy Boy
 
 Project context for AI coding sessions. Read this first. Keep it current.
 Role/persona prompts and the Next 16 API notes live in `AGENTS.md`.

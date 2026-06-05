@@ -7,10 +7,11 @@ import {
   getMeId,
   getPlaylistSnapshot,
   getPlaylistTracks,
+  getStoredPlaylists,
   storePlaylistTracks,
 } from "@/lib/db";
 import { findDuplicates } from "@/lib/spotify/domain";
-import { SpotifyError, type Track } from "@/lib/spotify";
+import { SpotifyError, type Playlist, type Track } from "@/lib/spotify";
 import { CleanMenu } from "@/components/clean-menu";
 import { PlaylistThumb } from "@/components/playlist-thumb";
 import { PlaylistTracksSync } from "@/components/playlist-tracks-sync";
@@ -25,14 +26,28 @@ export default async function PlaylistDetailPage({
   const { id } = await params;
   const sp = await getSpotify();
 
-  // Only the playlist header is awaited (one fast call). A 404 means it's gone;
-  // any other failure bubbles to the error boundary.
-  let playlist;
+  // Header (one fast call). A 404 means it's gone. Any other failure (a global cooldown
+  // after a 429, a dev-mode 403, a transient blip) must NOT take down the whole page —
+  // the cached track list below still works — so fall back to the cached library row for
+  // the header and let the page render degraded instead of hitting the error boundary.
+  let playlist: Playlist;
   try {
     playlist = await sp.playlist(id);
   } catch (e) {
     if (e instanceof SpotifyError && e.status === 404) notFound();
-    throw e;
+    const cached = (await getStoredPlaylists()).find((p) => p.id === id);
+    if (!cached) throw e; // nothing cached either → let the boundary handle it
+    playlist = {
+      id,
+      name: cached.name,
+      description: "",
+      ownerId: cached.ownerId ?? "",
+      ownerName: cached.ownerId ?? "",
+      trackCount: cached.trackCount,
+      image: cached.image,
+      public: false,
+      collaborative: false,
+    };
   }
 
   // Hide the owner line when it's the user's own playlist — they know.

@@ -315,7 +315,7 @@ function TrackTable({
   empty: string;
   loading?: boolean;
 }) {
-  const { playing, refresh, setPlaying } = useNowPlaying();
+  const { playing, playOptimistic } = useNowPlaying();
   const currentId = playing?.track.id;
   const [menu, setMenu] = useState<{ x: number; y: number; track: Track } | null>(null);
 
@@ -338,16 +338,12 @@ function TrackTable({
         toast.error(r.error);
         return;
       }
-      // Move the "now playing" highlight to this row immediately (optimistic), instead
-      // of waiting up to a full poll cycle; then reconcile with Spotify a beat later.
-      setPlaying({
-        track: { id: t.id, title: t.name, artist: t.artist, albumImage: t.albumImage },
-        isPlaying: true,
-        progressMs: 0,
-        durationMs: t.durationMs ?? 0,
-        context: null,
-      });
-      setTimeout(refresh, 700);
+      // Move the "now playing" highlight to this row immediately (optimistic) instead
+      // of waiting up to a full poll cycle; the poll confirms shortly after.
+      playOptimistic(
+        { id: t.id, title: t.name, artist: t.artist, albumImage: t.albumImage },
+        t.durationMs ?? 0,
+      );
     });
   };
 

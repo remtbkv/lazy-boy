@@ -44,7 +44,7 @@ export function TrackList({
   playlistId?: string;
   canRemove?: boolean;
 }) {
-  const { playing, toggle, refresh, setPlaying } = useNowPlaying();
+  const { playing, toggle, playOptimistic } = useNowPlaying();
   const currentId = playing?.track.id;
   const isPlayingNow = playing?.isPlaying ?? false;
   const dupes = new Set(duplicateIds);
@@ -66,15 +66,11 @@ export function TrackList({
         toast.error(r.error);
         return;
       }
-      // Show the now-playing highlight on this row right away, then reconcile.
-      setPlaying({
-        track: { id: t.id, title: t.title, artist: t.artist, albumImage: t.albumImage ?? null },
-        isPlaying: true,
-        progressMs: 0,
-        durationMs: t.durationMs ?? 0,
-        context: null,
-      });
-      setTimeout(refresh, 700);
+      // Show the now-playing highlight on this row right away; the poll confirms.
+      playOptimistic(
+        { id: t.id, title: t.title, artist: t.artist, albumImage: t.albumImage ?? null },
+        t.durationMs ?? 0,
+      );
     });
   }
 

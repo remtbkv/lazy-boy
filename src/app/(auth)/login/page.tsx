@@ -17,7 +17,7 @@ export default async function LoginPage() {
             className="mx-auto w-44"
           />
           <h1 className="text-2xl font-semibold tracking-tight">
-            Spotify Claude Manager
+            Lazy Boy
           </h1>
           <p className="text-sm text-muted-foreground">
             Merge, clean, and compare your playlists. Connect your Spotify account to

@@ -155,8 +155,15 @@ async function playerControl(
     await fn(sp);
     return { ok: true };
   } catch (e) {
-    if (e instanceof SpotifyError && (e.status === 404 || e.status === 403)) {
-      return { ok: false, error: "No active device — start playing on Spotify first." };
+    if (e instanceof SpotifyError) {
+      // 404 = no active device; 403 on a player command is usually "Premium required"
+      // (or a transient restriction) — don't mislabel it as a device problem.
+      if (e.status === 404) {
+        return { ok: false, error: "No active device — start playing on Spotify first." };
+      }
+      if (e.status === 403) {
+        return { ok: false, error: "Playback needs Spotify Premium and an active device." };
+      }
     }
     return fail(e);
   }
@@ -237,14 +244,22 @@ export async function resumePlaylistAction(
         runStart = k;
       }
     }
-    const fromTop = bestEnd < 0;
-    const startIdx = fromTop ? 0 : Math.min(bestEnd + 1, tracks.length - 1); // the next song
+    // If your run already reached the last track, you've finished the playlist — start
+    // over from the top rather than replaying the final song.
+    const finished = bestEnd >= 0 && bestEnd + 1 >= tracks.length;
+    const fromTop = bestEnd < 0 || finished;
+    const startIdx = fromTop ? 0 : bestEnd + 1;
     const start = tracks[startIdx];
     await sp.playContext(uri, start.uri);
     return { ok: true, track: start.title, fromTop };
   } catch (e) {
-    if (e instanceof SpotifyError && (e.status === 404 || e.status === 403)) {
-      return { ok: false, error: "No active device — start playing on Spotify first." };
+    if (e instanceof SpotifyError) {
+      if (e.status === 404) {
+        return { ok: false, error: "No active device — start playing on Spotify first." };
+      }
+      if (e.status === 403) {
+        return { ok: false, error: "Playback needs Spotify Premium and an active device." };
+      }
     }
     return fail(e);
   }

@@ -15,7 +15,7 @@ instead of re-investigating. (Pairs with `CLAUDE.md`, `AGENTS.md`, and the other
   runtime never hydrates, and **every interactive element silently does nothing**
   (dead buttons, dead inputs). If you ever see "buttons do nothing," check this
   and hydration FIRST — it's almost never the component.
-- **Project location: `~/projects/spotify_claude_manager`.** It used to live in a
+- **Project location: `~/projects/lazyboy`.** It used to live in a
   OneDrive cloud-synced folder, where file watching was unreliable and the dev
   server served stale compiled code; it was moved to `~/projects` on 2026-06-01 to
   fix that, so HMR is now reliable. If a change still "isn't taking effect" (e.g.
