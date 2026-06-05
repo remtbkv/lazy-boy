@@ -6,6 +6,7 @@ import { getSpotify } from "@/lib/session";
 import { spotifyClient, SpotifyError } from "@/lib/spotify";
 import { runTask } from "@/lib/tasks/registry";
 import { cleanPhase1, reconcileClean } from "@/lib/clean/run";
+import { syncLibrary } from "@/lib/sync/library";
 import {
   clearSpotifyTokens,
   deletePlaylistFromDb,
@@ -56,7 +57,9 @@ export async function mergeAction(
 export async function startCleanAction(
   playlistId: string,
   backup?: boolean,
-): Promise<ActionResult<{ name: string; kept: number; removed: number; taskId: string }>> {
+): Promise<
+  ActionResult<{ name: string; kept: number; removed: number; taskId?: string; unique?: boolean }>
+> {
   try {
     const session = await auth();
     if (!session?.accessToken) throw new Error("Not authenticated");
@@ -64,6 +67,10 @@ export async function startCleanAction(
     const useBackup = backup ?? (await getCleanBackupPref());
     // Patient client: the writes are bulk work, so ride out rate limits.
     const { result, ctx } = await cleanPhase1(spotifyClient(token, true), playlistId, useBackup);
+    // Nothing removed → no playlist created, nothing to reconcile.
+    if (!ctx || result.unique) {
+      return { ok: true, name: result.name, kept: result.kept, removed: 0, unique: true };
+    }
     const task = runTask("clean-reconcile", () =>
       reconcileClean(spotifyClient(token, true), ctx),
     );
@@ -84,20 +91,56 @@ export async function setCleanBackupAction(on: boolean): Promise<ActionResult> {
   }
 }
 
+/** Resync the backend index (playlists + tracks + Liked) with Spotify as a background
+ *  task; returns a task id whose progress (songs looked through / total) the client
+ *  polls — so it keeps running and stays visible across a refresh. */
+export async function startSyncAction(): Promise<ActionResult<{ taskId: string }>> {
+  try {
+    const session = await auth();
+    if (!session?.accessToken) throw new Error("Not authenticated");
+    const token = session.accessToken;
+    const task = runTask("sync-backend", (onProgress) =>
+      syncLibrary(spotifyClient(token, true), onProgress),
+    );
+    return { ok: true, taskId: task.id };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
 /** Start playing a playlist on the active device, like double-clicking it in Spotify.
  *  Shuffle is left at whatever the device is already set to. */
 export async function playPlaylistAction(playlistId: string): Promise<ActionResult> {
   return playerControl((sp) => sp.playContext(`spotify:playlist:${playlistId}`));
 }
 
-/** Delete (unfollow) one of the user's playlists, then drop it from the local store. */
-export async function deletePlaylistAction(playlistId: string): Promise<ActionResult> {
+/** Delete (unfollow) one of the user's playlists, then drop it from the local store.
+ *  If Spotify says it's already gone (404 — the local index was stale), treat that as a
+ *  clean, silent removal AND kick off a background resync, since other things may have
+ *  changed too. The resync is non-blocking — it never holds up this action. */
+export async function deletePlaylistAction(
+  playlistId: string,
+): Promise<ActionResult<{ alreadyGone?: boolean }>> {
   try {
-    const sp = await getSpotify();
-    await sp.deletePlaylist(playlistId);
+    const session = await auth();
+    if (!session?.accessToken) throw new Error("Not authenticated");
+    const token = session.accessToken;
+    let alreadyGone = false;
+    try {
+      await spotifyClient(token).deletePlaylist(playlistId);
+    } catch (e) {
+      if (e instanceof SpotifyError && e.status === 404) alreadyGone = true;
+      else throw e;
+    }
     await deletePlaylistFromDb(playlistId);
     revalidatePath("/playlists");
-    return { ok: true };
+    if (alreadyGone) {
+      // Fire-and-forget background resync (the registry runs it; we don't await).
+      runTask("sync-backend", (onProgress) =>
+        syncLibrary(spotifyClient(token, true), onProgress),
+      );
+    }
+    return { ok: true, alreadyGone };
   } catch (e) {
     return fail(e);
   }

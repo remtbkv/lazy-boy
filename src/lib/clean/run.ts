@@ -24,11 +24,13 @@ export type CleanContext = {
 };
 
 export type CleanResult = {
-  id: string;
+  id?: string;
   name: string;
   kept: number;
   removed: number;
   backupId?: string;
+  // True when nothing was a duplicate — no "Cleaned: …" playlist was created.
+  unique?: boolean;
 };
 
 export type ReconcileResult = {
@@ -45,7 +47,7 @@ export async function cleanPhase1(
   sp: Spotify,
   targetId: string,
   backup: boolean,
-): Promise<{ result: CleanResult; ctx: CleanContext }> {
+): Promise<{ result: CleanResult; ctx: CleanContext | null }> {
   // Cold start only: with no index yet we'd clean against an empty library and remove
   // nothing, so build it once here. Normally the hourly cron keeps it warm.
   if (!(await getLibrarySyncedAt())) await syncLibrary(sp);
@@ -63,6 +65,16 @@ export async function cleanPhase1(
 
   const name = `Cleaned: ${target.name}`;
   const backupName = `Dupes removed from: ${target.name}`;
+
+  // Nothing's a duplicate → don't create a redundant full-copy "Cleaned: X"; the caller
+  // just tells the user the playlist is unique. (No reconcile either.)
+  if (removed.length === 0) {
+    return {
+      result: { name, kept: kept.length, removed: 0, unique: true },
+      ctx: null,
+    };
+  }
+
   const cleanedId = await sp.createPlaylist(name);
   await sp.addItems(cleanedId, kept.map((t) => t.uri));
 

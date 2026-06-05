@@ -132,7 +132,7 @@ export function PlaylistsClient({
           <ActionButton
             action={saveQueueAction}
             pendingText="Saving…"
-            success={(r) => `Saved ${r.count} to "${r.name}"`}
+            success={(r) => `Saved to "${r.name}"`}
             variant="outline"
             className={CHIP}
           >

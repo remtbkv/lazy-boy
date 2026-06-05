@@ -13,7 +13,6 @@ import {
 } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { fuzzyFilter } from "@/lib/filter";
 
 type Item = { id: string; name: string; trackCount: number };
@@ -58,7 +57,7 @@ export function MergePanel({
     startTransition(async () => {
       const res = await mergeAction(ids);
       if (res.ok) {
-        toast.success(`Created "${res.name}" with ${res.count} tracks`);
+        toast.success(`Created "${res.name}"`);
         setSelected(new Set());
       } else {
         toast.error(res.error);
@@ -95,7 +94,7 @@ export function MergePanel({
           </p>
         ) : null}
 
-        <ScrollArea className="h-64 rounded-md border border-border">
+        <div className="thin-scroll max-h-64 overflow-y-auto rounded-md border border-border">
           <ul className="divide-y divide-border">
             {filtered.map((p) => {
               const isChecked = selected.has(p.id);
@@ -132,7 +131,7 @@ export function MergePanel({
               </li>
             ) : null}
           </ul>
-        </ScrollArea>
+        </div>
 
         {chosen.length > 0 ? (
           <p className="truncate text-xs text-muted-foreground">

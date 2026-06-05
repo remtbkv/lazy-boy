@@ -24,7 +24,8 @@ const LIKED_FULL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 // costs that sweep + a one-item Liked probe and nothing else.
 export async function syncLibrary(
   sp: Spotify,
-  onProgress?: (collected: number, total: number) => void,
+  // Reports songs looked through so far / total songs across the owned library + Liked.
+  onProgress?: (processed: number, total: number) => void,
 ): Promise<void> {
   const [me, playlists] = await Promise.all([sp.me(), sp.myPlaylistsAll()]);
   await storePlaylists(
@@ -38,28 +39,36 @@ export async function syncLibrary(
     me.id,
   );
 
-  // Only owned playlists feed the library union; re-fetch tracks just for the ones
-  // whose snapshot_id changed since we last cached them.
+  // Probe Liked up front so we know the full song total for progress.
+  const head = await sp.savedTracksHead();
   const owned = playlists.filter((p) => p.ownerId === me.id);
-  let done = 0;
+  const total = owned.reduce((n, p) => n + p.trackCount, 0) + head.total;
+  let processed = 0;
+  onProgress?.(0, total);
+
+  // Only owned playlists feed the library union; re-fetch tracks just for the ones
+  // whose snapshot_id changed since we last cached them. Either way every playlist's
+  // songs count toward "looked through".
   for (const p of owned) {
     const cachedSnapshot = await getPlaylistSnapshot(p.id);
     if (!p.snapshot || cachedSnapshot !== p.snapshot) {
       const tracks = await sp.playlistTracks(p.id);
       await storePlaylistTracks(p.id, tracks, p.snapshot);
     }
-    onProgress?.(++done, owned.length);
+    processed += p.trackCount;
+    onProgress?.(processed, total);
   }
 
   // Liked Songs: skip the full page-through when the cheap probe matches, unless the
   // last full sync is over a day old.
-  const head = await sp.savedTracksHead();
   const sig = await getLikedSignals();
   const savedAt = await getSavedSyncedAt();
   const stale = !savedAt || Date.now() - Date.parse(savedAt) > LIKED_FULL_MAX_AGE_MS;
   if (stale || sig.total !== head.total || sig.topAddedAt !== head.topAddedAt) {
     await storeSavedTracks(await sp.savedTracks());
   }
+  processed += head.total;
+  onProgress?.(processed, total);
 
   await setLibrarySyncedAt();
 }

@@ -629,6 +629,58 @@ export async function getSongListens(
   };
 }
 
+export type FoundArtist = {
+  artist: string;
+  songCount: number;
+  albumImage: string | null;
+};
+
+/** Artists who appear in any playlist whose name matches `query`, one row per artist
+ *  (case-insensitive), with how many of their songs you have and a sample image. */
+export async function searchPlaylistArtists(query: string, limit = 12): Promise<FoundArtist[]> {
+  const q = query.trim();
+  if (!q) return [];
+  const client = await getClient();
+  const res = await client.execute({
+    sql: `SELECT t.artist,
+            COUNT(DISTINCT lower(t.name)) AS songCount,
+            MAX(t.album_image) AS albumImage
+          FROM tracks t JOIN playlist_tracks pt ON pt.track_id = t.id
+          WHERE t.artist LIKE :like
+          GROUP BY lower(t.artist)
+          ORDER BY (CASE WHEN t.artist LIKE :prefix THEN 0 ELSE 1 END),
+                   songCount DESC, t.artist
+          LIMIT :limit`,
+    args: { like: `%${q}%`, prefix: `${q}%`, limit },
+  });
+  return plainRows(res.rows) as unknown as FoundArtist[];
+}
+
+/** Listen history for an artist: total plays of any of their songs + recent timestamps. */
+export async function getArtistListens(
+  artist: string,
+  limit = 12,
+): Promise<{ total: number; recent: string[] }> {
+  const client = await getClient();
+  const a = artist.toLowerCase();
+  const [tot, rec] = await Promise.all([
+    client.execute({
+      sql: `SELECT COUNT(*) AS total FROM plays p JOIN tracks t ON t.id = p.track_id
+            WHERE lower(t.artist) = :a`,
+      args: { a },
+    }),
+    client.execute({
+      sql: `SELECT p.played_at AS playedAt FROM plays p JOIN tracks t ON t.id = p.track_id
+            WHERE lower(t.artist) = :a ORDER BY p.played_at DESC LIMIT :limit`,
+      args: { a, limit },
+    }),
+  ]);
+  return {
+    total: Number(tot.rows[0].total),
+    recent: rec.rows.map((r) => String(r.playedAt)),
+  };
+}
+
 /** The set of track ids ever played from a given playback context (e.g. a playlist
  *  URI). Resume uses this to find the *furthest* track reached in playlist order, so
  *  rewinding/skipping back doesn't move your resume point backward. */

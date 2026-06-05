@@ -12,7 +12,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { fuzzyFilter } from "@/lib/filter";
 
 type Item = { id: string; name: string; trackCount: number };
@@ -56,7 +55,7 @@ export function ResumePanel({ playlists }: { playlists: Item[] }) {
           placeholder="Search playlists…"
           className="h-9"
         />
-        <ScrollArea className="h-64 rounded-md border border-border">
+        <div className="thin-scroll max-h-64 overflow-y-auto rounded-md border border-border">
           <ul className="divide-y divide-border">
             {filtered.map((p) => (
               <li key={p.id}>
@@ -80,7 +79,7 @@ export function ResumePanel({ playlists }: { playlists: Item[] }) {
               </li>
             ) : null}
           </ul>
-        </ScrollArea>
+        </div>
       </CardContent>
     </Card>
   );

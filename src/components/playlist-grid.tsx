@@ -133,6 +133,7 @@ export function PlaylistGrid({
                 href={`/playlists/${p.id}`}
                 onContextMenu={(e) => {
                   e.preventDefault();
+                  e.stopPropagation();
                   setMenu({ x: e.clientX, y: e.clientY, p });
                 }}
                 className="group block rounded-lg border border-border bg-card p-3 transition-colors hover:border-white/25 hover:bg-accent/40"

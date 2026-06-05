@@ -34,19 +34,23 @@ export function PlaylistContextMenu({
   onDeleted: (id: string) => void;
 }) {
   const [pending, start] = useTransition();
-  const [confirmDelete, setConfirmDelete] = useState(false);
 
   useEffect(() => {
     const close = () => onClose();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
-    window.addEventListener("click", close);
-    window.addEventListener("contextmenu", close);
-    window.addEventListener("scroll", close, true);
-    window.addEventListener("resize", close);
-    window.addEventListener("keydown", onKey);
+    // Arm the dismiss listeners on the next frame so the trailing events of the
+    // right-click that opened the menu (mouseup/contextmenu) don't instantly close it.
+    const raf = requestAnimationFrame(() => {
+      window.addEventListener("click", close);
+      window.addEventListener("contextmenu", close);
+      window.addEventListener("scroll", close, true);
+      window.addEventListener("resize", close);
+      window.addEventListener("keydown", onKey);
+    });
     return () => {
+      cancelAnimationFrame(raf);
       window.removeEventListener("click", close);
       window.removeEventListener("contextmenu", close);
       window.removeEventListener("scroll", close, true);
@@ -58,9 +62,9 @@ export function PlaylistContextMenu({
   function play() {
     onClose();
     start(async () => {
+      // No success toast — the music starting on the device is obvious enough.
       const r = await playPlaylistAction(playlist.id);
-      if (r.ok) toast.success(`Playing "${playlist.name}"`);
-      else toast.error(r.error);
+      if (!r.ok) toast.error(r.error);
     });
   }
 
@@ -72,8 +76,12 @@ export function PlaylistContextMenu({
         toast.error(r.error);
         return;
       }
+      if (r.unique) {
+        toast.success("This playlist is unique");
+        return;
+      }
       toast.success(`Created "${r.name}" — kept ${r.kept}, removed ${r.removed}`);
-      writeCleanActive({ taskId: r.taskId, playlistId: playlist.id });
+      if (r.taskId) writeCleanActive({ taskId: r.taskId, playlistId: playlist.id });
     });
   }
 
@@ -82,7 +90,9 @@ export function PlaylistContextMenu({
     start(async () => {
       const r = await deletePlaylistAction(playlist.id);
       if (r.ok) {
-        toast.success(`Deleted "${playlist.name}"`);
+        // If it was already gone (stale index), remove it silently — no toast.
+        // Otherwise a plain "Deleted"; the tile vanishing makes it clear which one.
+        if (!r.alreadyGone) toast.success("Deleted");
         onDeleted(playlist.id);
       } else {
         toast.error(r.error);
@@ -102,12 +112,12 @@ export function PlaylistContextMenu({
       left: Math.max(pad, Math.min(x, window.innerWidth - r.width - pad)),
       top: Math.max(pad, Math.min(y, window.innerHeight - r.height - pad)),
     });
-  }, [x, y, confirmDelete]);
+  }, [x, y]);
 
   return (
     <div
       ref={ref}
-      className="fixed z-50 w-max max-w-[calc(100vw-1rem)] overflow-hidden rounded-lg border border-border bg-popover p-1 text-sm shadow-2xl shadow-black/50 ring-1 ring-white/5"
+      className="fixed z-50 w-max min-w-44 max-w-[calc(100vw-1rem)] overflow-hidden rounded-lg border border-border bg-popover p-1 text-sm shadow-2xl shadow-black/50 ring-1 ring-white/5"
       style={{ left: pos.left, top: pos.top }}
       onClick={(e) => e.stopPropagation()}
       onContextMenu={(e) => {
@@ -115,41 +125,9 @@ export function PlaylistContextMenu({
         e.stopPropagation();
       }}
     >
-      {confirmDelete ? (
-        <div className="w-56 p-2">
-          <p className="px-1 pb-2 text-sm">
-            Delete <span className="font-medium">{playlist.name}</span>?
-          </p>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              disabled={pending}
-              onClick={del}
-              className="flex-1 rounded-md bg-red-600/90 px-2.5 py-1.5 text-center font-medium text-white transition-colors hover:bg-red-600 disabled:opacity-50"
-            >
-              Delete
-            </button>
-            <button
-              type="button"
-              onClick={() => setConfirmDelete(false)}
-              className="flex-1 rounded-md border border-border px-2.5 py-1.5 text-center transition-colors hover:bg-accent"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      ) : (
-        <>
-          <Item icon={<Play className="size-4" />} label="Play" disabled={pending} onClick={play} />
-          <Item icon={<Brush className="size-4" />} label="Clean" disabled={pending} onClick={clean} />
-          <Item
-            icon={<Trash2 className="size-4" />}
-            label="Delete"
-            disabled={pending}
-            onClick={() => setConfirmDelete(true)}
-          />
-        </>
-      )}
+      <Item icon={<Play className="size-4" />} label="Play" disabled={pending} onClick={play} />
+      <Item icon={<Brush className="size-4" />} label="Clean" disabled={pending} onClick={clean} />
+      <Item icon={<Trash2 className="size-4" />} label="Delete" disabled={pending} onClick={del} />
     </div>
   );
 }
