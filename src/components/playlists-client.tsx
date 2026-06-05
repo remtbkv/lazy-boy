@@ -1,9 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { GitMerge, Heart, ListPlus, Play } from "lucide-react";
-import { saveQueueAction, syncLikedAction } from "@/app/(app)/actions";
+import { Brush, GitMerge, ListPlus, Play, Search } from "lucide-react";
+import { saveQueueAction } from "@/app/(app)/actions";
 import { ActionButton } from "@/components/action-button";
+import { CleanPanel } from "@/components/clean-panel";
+import { FindPanel } from "@/components/find-panel";
 import { HoverTip } from "@/components/hover-tip";
 import { MergePanel } from "@/components/merge-panel";
 import { ResumePanel } from "@/components/resume-panel";
@@ -32,10 +34,12 @@ const SAVE_QUEUE_HINT =
   "Skips through your queue to log each track, saves them to a new playlist, then drops you back where you were.";
 const MERGE_HINT =
   "Combines the playlists you pick into one new playlist, kept in the order you choose them.";
-const SYNC_LIKED_HINT =
-  "Mirrors your Liked Songs into a normal playlist — handy if you want to share them or just see them as a list.";
 const RESUME_HINT =
   "Resumes a playlist on your active device from the song right after the last one you played from it.";
+const CLEAN_HINT =
+  "Find a playlist and strip out songs already in your library. The original stays put; a new “Cleaned: …” playlist holds the rest.";
+const FIND_HINT =
+  "Look up any song that's in one of your playlists and see when you last listened to it — a quick reference without digging through History.";
 
 // Renders the persisted library instantly. A background sync (PlaylistsSync)
 // refreshes the store when it's stale, then the server data is revalidated —
@@ -43,14 +47,18 @@ const RESUME_HINT =
 export function PlaylistsClient({
   initialItems,
   syncedAt,
+  backupPref,
 }: {
   initialItems: PlaylistItem[];
   syncedAt: string | null;
+  backupPref: boolean;
 }) {
   const items = initialItems;
   const total = items.length;
   const [mergeOpen, setMergeOpen] = useState(false);
   const [resumeOpen, setResumeOpen] = useState(false);
+  const [cleanOpen, setCleanOpen] = useState(false);
+  const [findOpen, setFindOpen] = useState(false);
 
   return (
     <div className="space-y-6">
@@ -74,6 +82,44 @@ export function PlaylistsClient({
           >
             <Play className="size-4 text-foreground" />
             Resume
+          </Button>
+        </HoverTip>
+        <HoverTip
+          label={CLEAN_HINT}
+          delay={500}
+          placement="bottom"
+          tipClassName={TIP}
+          className="inline-flex"
+        >
+          <Button
+            variant="outline"
+            className={
+              CHIP + (cleanOpen ? " border-white/50 bg-accent text-foreground" : "")
+            }
+            aria-expanded={cleanOpen}
+            onClick={() => setCleanOpen((o) => !o)}
+          >
+            <Brush className="size-4 text-foreground" />
+            Clean playlist
+          </Button>
+        </HoverTip>
+        <HoverTip
+          label={FIND_HINT}
+          delay={500}
+          placement="bottom"
+          tipClassName={TIP}
+          className="inline-flex"
+        >
+          <Button
+            variant="outline"
+            className={
+              CHIP + (findOpen ? " border-white/50 bg-accent text-foreground" : "")
+            }
+            aria-expanded={findOpen}
+            onClick={() => setFindOpen((o) => !o)}
+          >
+            <Search className="size-4 text-foreground" />
+            Find
           </Button>
         </HoverTip>
         <HoverTip
@@ -114,24 +160,6 @@ export function PlaylistsClient({
             Merge
           </Button>
         </HoverTip>
-        <HoverTip
-          label={SYNC_LIKED_HINT}
-          delay={500}
-          placement="bottom"
-          tipClassName={TIP}
-          className="inline-flex"
-        >
-          <ActionButton
-            action={syncLikedAction}
-            pendingText="Syncing…"
-            success={(r) => `"${r.name}" now has ${r.count} songs`}
-            variant="outline"
-            className={CHIP}
-          >
-            <Heart className="size-4 text-foreground" />
-            Sync liked
-          </ActionButton>
-        </HoverTip>
         <PlaylistsSync syncedAt={syncedAt} />
       </div>
 
@@ -144,6 +172,25 @@ export function PlaylistsClient({
               trackCount: p.trackCount,
             }))}
           />
+        </div>
+      ) : null}
+
+      {cleanOpen ? (
+        <div className="max-w-lg">
+          <CleanPanel
+            playlists={items.map((p) => ({
+              id: p.id,
+              name: p.name,
+              trackCount: p.trackCount,
+            }))}
+            initialBackup={backupPref}
+          />
+        </div>
+      ) : null}
+
+      {findOpen ? (
+        <div className="max-w-lg">
+          <FindPanel />
         </div>
       ) : null}
 

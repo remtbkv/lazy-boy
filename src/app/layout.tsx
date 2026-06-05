@@ -35,7 +35,10 @@ export default function RootLayout({
           back in with `select-text` so it can still be copied. */}
       <body className="flex min-h-full select-none flex-col">
         {children}
-        <Toaster richColors position="top-center" />
+        {/* Subtle, Spotify-style toasts: neutral, centered, low on the screen — sitting
+            just above the bottom search pill (FloatingBar spans ~24–62px from the bottom)
+            with a small gap, so it lands in the same spot on every page. */}
+        <Toaster position="bottom-center" offset="4.5rem" />
       </body>
     </html>
   );

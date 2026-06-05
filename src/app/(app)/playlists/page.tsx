@@ -1,12 +1,17 @@
-import { getStoredPlaylists, getPlaylistsSyncedAt } from "@/lib/db";
+import {
+  getCleanBackupPref,
+  getStoredPlaylists,
+  getPlaylistsSyncedAt,
+} from "@/lib/db";
 import { PlaylistsClient } from "@/components/playlists-client";
 
 export default async function PlaylistsPage() {
   // Served from the local store — instant. The client triggers a background sync
   // when it's empty or stale (see PlaylistsClient → PlaylistsSync).
-  const [stored, syncedAt] = await Promise.all([
+  const [stored, syncedAt, backupPref] = await Promise.all([
     getStoredPlaylists(),
     getPlaylistsSyncedAt(),
+    getCleanBackupPref(),
   ]);
   const items = stored.map((p) => ({
     id: p.id,
@@ -21,7 +26,7 @@ export default async function PlaylistsPage() {
           to the page heading instead. */}
       <h1 className="text-4xl font-bold tracking-tight">Do stuff</h1>
 
-      <PlaylistsClient initialItems={items} syncedAt={syncedAt} />
+      <PlaylistsClient initialItems={items} syncedAt={syncedAt} backupPref={backupPref} />
     </div>
   );
 }

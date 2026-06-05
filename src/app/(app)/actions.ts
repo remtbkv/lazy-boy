@@ -5,11 +5,15 @@ import { auth, signIn, signOut } from "@/lib/auth";
 import { getSpotify } from "@/lib/session";
 import { spotifyClient, SpotifyError } from "@/lib/spotify";
 import { runTask } from "@/lib/tasks/registry";
+import { cleanPhase1, reconcileClean } from "@/lib/clean/run";
 import {
   clearSpotifyTokens,
+  deletePlaylistFromDb,
+  getCleanBackupPref,
   getPlaylistTracks,
   playedTrackIdsInContext,
   removeCachedPlaylistTrack,
+  setCleanBackupPref,
   storePlaylistTracks,
 } from "@/lib/db";
 
@@ -45,22 +49,55 @@ export async function mergeAction(
   }
 }
 
-/** Kicks off the clean as a background task; returns a task id to poll. */
+/** Clean a playlist. Phase 1 runs now against the persistent library index (fast) and
+ *  its result comes straight back. Phase 2 — refresh the index from Spotify and reconcile
+ *  the cleaned playlist — runs in the background; `taskId` lets the UI report any fixups.
+ *  `backup` omitted → the user's saved global preference. */
 export async function startCleanAction(
   playlistId: string,
-  backup: boolean,
-): Promise<ActionResult<{ taskId: string }>> {
+  backup?: boolean,
+): Promise<ActionResult<{ name: string; kept: number; removed: number; taskId: string }>> {
   try {
     const session = await auth();
     if (!session?.accessToken) throw new Error("Not authenticated");
     const token = session.accessToken;
-    const task = runTask("clean-playlist", async (onProgress) => {
-      // Patient client: the library scan is a long bulk job, so ride out rate
-      // limits instead of failing. Interactive requests use a fail-fast client.
-      const sp = spotifyClient(token, true);
-      return sp.cleanPlaylist(playlistId, { backup, onProgress });
-    });
-    return { ok: true, taskId: task.id };
+    const useBackup = backup ?? (await getCleanBackupPref());
+    // Patient client: the writes are bulk work, so ride out rate limits.
+    const { result, ctx } = await cleanPhase1(spotifyClient(token, true), playlistId, useBackup);
+    const task = runTask("clean-reconcile", () =>
+      reconcileClean(spotifyClient(token, true), ctx),
+    );
+    revalidatePath("/playlists");
+    return { ok: true, name: result.name, kept: result.kept, removed: result.removed, taskId: task.id };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+/** Persist the global "back up removed songs" preference for Clean. */
+export async function setCleanBackupAction(on: boolean): Promise<ActionResult> {
+  try {
+    await setCleanBackupPref(on);
+    return { ok: true };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+/** Start playing a playlist on the active device, like double-clicking it in Spotify.
+ *  Shuffle is left at whatever the device is already set to. */
+export async function playPlaylistAction(playlistId: string): Promise<ActionResult> {
+  return playerControl((sp) => sp.playContext(`spotify:playlist:${playlistId}`));
+}
+
+/** Delete (unfollow) one of the user's playlists, then drop it from the local store. */
+export async function deletePlaylistAction(playlistId: string): Promise<ActionResult> {
+  try {
+    const sp = await getSpotify();
+    await sp.deletePlaylist(playlistId);
+    await deletePlaylistFromDb(playlistId);
+    revalidatePath("/playlists");
+    return { ok: true };
   } catch (e) {
     return fail(e);
   }
@@ -72,19 +109,6 @@ export async function saveQueueAction(): Promise<
   try {
     const sp = await getSpotify();
     const r = await sp.saveQueue();
-    revalidatePath("/playlists");
-    return { ok: true, name: r.name, count: r.count };
-  } catch (e) {
-    return fail(e);
-  }
-}
-
-export async function syncLikedAction(): Promise<
-  ActionResult<{ name: string; count: number }>
-> {
-  try {
-    const sp = await getSpotify();
-    const r = await sp.syncLikedToPlaylist();
     revalidatePath("/playlists");
     return { ok: true, name: r.name, count: r.count };
   } catch (e) {
@@ -126,7 +150,13 @@ export async function saveToLikedAction(trackId: string): Promise<ActionResult> 
     await sp.saveTrack(trackId);
     return { ok: true };
   } catch (e) {
-    return fail(e);
+    // A 403 here means the session lacks the `user-library-modify` grant (e.g. it was
+    // authorized before that scope was added) — surface a clean, actionable message
+    // instead of Spotify's raw error JSON.
+    if (e instanceof SpotifyError && e.status === 403) {
+      return { ok: false, error: "Couldn't save — log out and back in to allow library changes." };
+    }
+    return { ok: false, error: "Couldn't save to Liked Songs." };
   }
 }
 

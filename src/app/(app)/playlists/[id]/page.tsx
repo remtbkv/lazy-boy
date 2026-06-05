@@ -11,8 +11,8 @@ import {
   storePlaylistTracks,
 } from "@/lib/db";
 import { findDuplicates } from "@/lib/spotify/domain";
+import { formatListenTime } from "@/lib/format";
 import { SpotifyError, type Playlist, type Track } from "@/lib/spotify";
-import { CleanMenu } from "@/components/clean-menu";
 import { PlaylistThumb } from "@/components/playlist-thumb";
 import { PlaylistTracksSync } from "@/components/playlist-tracks-sync";
 import { TrackList } from "@/components/track-list";
@@ -60,9 +60,11 @@ export default async function PlaylistDetailPage({
   // Only the playlist's snapshot_id changing means its tracks changed — so we refresh
   // the cache exactly when (and only when) that differs, never on a blind timer.
   const tracksStale = cachedTracks.length > 0 && cachedSnapshot !== (playlist.snapshot ?? null);
+  // Total playlist length, summed from the cached tracks (shown once we have them).
+  const totalMs = cachedTracks.reduce((sum, t) => sum + (t.durationMs ?? 0), 0);
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <Link
         href="/playlists"
         className="inline-flex w-fit items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:border-white/25 hover:bg-accent hover:text-foreground"
@@ -87,11 +89,9 @@ export default async function PlaylistDetailPage({
           <p className="mt-1.5 text-sm text-muted-foreground">
             {isMine ? null : <>{playlist.ownerName} · </>}
             {playlist.trackCount} tracks
+            {totalMs > 0 ? ` · ${formatListenTime(totalMs)}` : null}
           </p>
         </div>
-        {/* Clean lives here as a header action (popover) rather than a side column,
-            so the track list gets the full width. */}
-        <CleanMenu playlistId={id} />
       </div>
 
       {/* Serve the cached track list instantly (no Spotify pagination on render);

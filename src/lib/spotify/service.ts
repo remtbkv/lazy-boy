@@ -82,6 +82,33 @@ export class Service {
     return this.resources.removeItems(playlistId, [uri]);
   }
 
+  // Lower-level passthroughs used by the sync + clean orchestration modules
+  // (src/lib/sync, src/lib/clean), which compose Spotify writes with the DB store.
+  createPlaylist(name: string, isPublic = false) {
+    return this.resources.createPlaylist(name, isPublic);
+  }
+  addItems(playlistId: string, uris: string[]) {
+    return this.resources.addItems(playlistId, uris);
+  }
+  addItemsAt(playlistId: string, uris: string[], position: number) {
+    return this.resources.addItemsAt(playlistId, uris, position);
+  }
+  removeItems(playlistId: string, uris: string[]) {
+    return this.resources.removeItems(playlistId, uris);
+  }
+  replaceItems(playlistId: string, uris: string[]) {
+    return this.resources.replaceItems(playlistId, uris);
+  }
+  savedTracks() {
+    return this.resources.savedTracks();
+  }
+  savedTracksHead() {
+    return this.resources.savedTracksHead();
+  }
+  deletePlaylist(playlistId: string) {
+    return this.resources.unfollowPlaylist(playlistId);
+  }
+
   /** Union of the user's entire library (liked + every owned playlist), deduped.
    *  `exceptPlaylistId` lets "clean" exclude the target itself. */
   async libraryTracks(exceptPlaylistId?: string, onProgress?: Progress): Promise<Track[]> {
@@ -124,43 +151,10 @@ export class Service {
     return { id: newId, name, count: merged.length };
   }
 
-  /** Clean: new playlist with tracks already saved elsewhere removed. Long-running. */
-  async cleanPlaylist(
-    targetId: string,
-    opts: { backup?: boolean; onProgress?: Progress } = {},
-  ): Promise<{ id: string; name: string; kept: number; removed: number; backupId?: string }> {
-    const target = await this.resources.playlist(targetId);
-    const targetTracks = await this.resources.playlistTracks(targetId);
-    const library = await this.libraryTracks(targetId, opts.onProgress);
-
-    const kept = subtract(targetTracks, library);
-    const removed = intersect(targetTracks, library);
-
-    const cleanedId = await this.resources.createPlaylist(`Cleaned: ${target.name}`);
-    await this.resources.addItems(cleanedId, kept.map((t) => t.uri));
-
-    let backupId: string | undefined;
-    if (opts.backup && removed.length > 0) {
-      backupId = await this.resources.createPlaylist(`Dupes removed from: ${target.name}`);
-      await this.resources.addItems(backupId, removed.map((t) => t.uri));
-    }
-    return { id: cleanedId, name: `Cleaned: ${target.name}`, kept: kept.length, removed: removed.length, backupId };
-  }
-
   /** Duplicates within a single playlist. */
   async findDuplicates(playlistId: string): Promise<Track[]> {
     const tracks = await this.resources.playlistTracks(playlistId);
     return findDuplicates(tracks);
-  }
-
-  /** Mirror liked songs into a maintained playlist (exact replace). */
-  async syncLikedToPlaylist(): Promise<{ id: string; count: number; name: string }> {
-    const name = "Liked songs as playlist";
-    const existing = (await this.resources.myPlaylists(true)).find((p) => p.name === name);
-    const id = existing?.id ?? (await this.resources.createPlaylist(name));
-    const liked = dedupeByKey(await this.resources.savedTracks());
-    await this.resources.replaceItems(id, liked.map((t) => t.uri));
-    return { id, count: liked.length, name };
   }
 
   /** Save the current playback queue to a playlist (Premium + active device).

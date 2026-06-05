@@ -67,7 +67,7 @@ export type RawPlaylistTrackItem = {
   track?: RawTrack | null;
   added_at?: string;
 };
-export type RawSavedTrackItem = { track: RawTrack | null };
+export type RawSavedTrackItem = { track: RawTrack | null; added_at?: string };
 
 export type RawPlaylist = {
   id: string;

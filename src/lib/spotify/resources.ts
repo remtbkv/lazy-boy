@@ -163,6 +163,9 @@ export class Resources {
     const pl = await this.http.post<{ id: string }>(`/me/playlists`, {
       name,
       public: isPublic,
+      // Always blank — never let a placeholder ("no"/null/a coerced boolean) land in the
+      // description, which is public-facing in the user's Spotify.
+      description: "",
     });
     // A new playlist makes the cached library stale; drop it so the next read
     // (Me stats, grid) reflects the addition.
@@ -176,6 +179,23 @@ export class Resources {
     for (const batch of chunk(uris, CHUNK)) {
       await this.http.post(`/playlists/${playlistId}/items`, { uris: batch });
     }
+  }
+
+  /** Insert track URIs starting at `position` (playlist order), batched. Used by the
+   *  clean reconcile to put a wrongly-removed track back where it belongs. */
+  async addItemsAt(playlistId: string, uris: string[], position: number): Promise<void> {
+    let pos = position;
+    for (const batch of chunk(uris, CHUNK)) {
+      await this.http.post(`/playlists/${playlistId}/items`, { uris: batch, position: pos });
+      pos += batch.length;
+    }
+  }
+
+  /** Delete (unfollow) one of the user's own playlists. Spotify has no hard "delete";
+   *  removing your follow is how a playlist disappears from your library. */
+  async unfollowPlaylist(playlistId: string): Promise<void> {
+    await this.http.delete(`/playlists/${playlistId}/followers`);
+    playlistsCache.delete(this.accessToken);
   }
 
   /** Replace a playlist's contents with the given URIs (clears, then adds). */
@@ -204,7 +224,22 @@ export class Resources {
       "/me/tracks?limit=50",
       onProgress,
     );
-    return items.map((i) => normTrack(i.track)).filter((t): t is Track => t !== null);
+    const out: Track[] = [];
+    for (const i of items) {
+      const t = normTrack(i.track);
+      if (t) out.push({ ...t, addedAt: i.added_at });
+    }
+    return out;
+  }
+
+  /** Cheap Liked-Songs change-probe: total count + the newest added_at, without
+   *  paging the whole list. `/me/tracks` is ordered newest-first, so item 0's
+   *  added_at is the latest add. Lets a sync skip the full re-fetch when nothing changed. */
+  async savedTracksHead(): Promise<{ total: number; topAddedAt: string | null }> {
+    const page = await this.http.get<{ total: number; items: RawSavedTrackItem[] }>(
+      "/me/tracks?limit=1",
+    );
+    return { total: page.total ?? 0, topAddedAt: page.items[0]?.added_at ?? null };
   }
 
   // ---- player ----
@@ -329,11 +364,11 @@ export class Resources {
     await this.http.put(`/me/player/volume?volume_percent=${v}`);
   }
 
-  /** Save a track to the user's Liked Songs. The Feb 2026 API changes removed
-   *  `PUT /me/tracks` for Development-Mode apps in favour of the generic library
-   *  endpoint, which takes Spotify URIs rather than bare IDs. */
+  /** Save a track to the user's Liked Songs via the documented endpoint, `PUT
+   *  /me/tracks?ids=…` (the read side uses GET /me/tracks too). Needs the
+   *  `user-library-modify` scope; works for the app owner even in Development Mode. */
   async saveTrack(id: string): Promise<void> {
-    await this.http.put(`/me/library`, { uris: [`spotify:track:${id}`] });
+    await this.http.put(`/me/tracks?ids=${encodeURIComponent(id)}`);
   }
 
   /** The user's last-played tracks with timestamps and the context (playlist/

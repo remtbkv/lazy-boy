@@ -2,6 +2,17 @@ import { timingSafeEqual } from "node:crypto";
 import { getValidAccessToken } from "@/lib/auth";
 import { spotifyClient } from "@/lib/spotify";
 import { syncRecentPlays } from "@/lib/sync/history";
+import { syncLibrary } from "@/lib/sync/library";
+import { getLibrarySyncedAt } from "@/lib/db";
+
+// Rebuild the library index at most hourly (snapshot-diffing makes a run cheap, but no
+// need to do it every 5-minute tick).
+async function maybeSyncLibrary(token: string): Promise<string> {
+  const at = await getLibrarySyncedAt();
+  if (at && Date.now() - Date.parse(at) < 55 * 60 * 1000) return "fresh";
+  await syncLibrary(spotifyClient(token, true));
+  return "synced";
+}
 
 // Constant-time string compare so the cron secret can't be guessed via response timing.
 function safeEqual(a: string, b: string): boolean {
@@ -26,7 +37,9 @@ export async function GET(req: Request) {
   }
   try {
     const { added } = await syncRecentPlays(spotifyClient(token));
-    return Response.json({ ok: true, added });
+    // Heavier, lower-frequency upkeep — each self-gates so this stays cheap on most ticks.
+    const library = await maybeSyncLibrary(token);
+    return Response.json({ ok: true, added, library });
   } catch (e) {
     return Response.json(
       { ok: false, error: e instanceof Error ? e.message : "sync failed" },

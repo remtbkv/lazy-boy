@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState, useTransition, type ReactNode } from "react";
-import { CircleMinus, Heart, ListPlus, Share2 } from "lucide-react";
+import { CircleMinus, CirclePlus, ListPlus } from "lucide-react";
 import { toast } from "sonner";
 import {
   addToQueueAction,
@@ -111,7 +111,7 @@ export function TrackContextMenu({
         onClick={() => run(() => addToQueueAction(track.uri), "Added to queue")}
       />
       <Item
-        icon={<Heart className="size-4" />}
+        icon={<CirclePlus className="size-4" />}
         label="Save to Liked Songs"
         disabled={pending}
         onClick={() => run(() => saveToLikedAction(track.id), "Saved to Liked Songs")}
@@ -130,8 +130,31 @@ export function TrackContextMenu({
         }
         />
       ) : null}
-      <Item icon={<Share2 className="size-4" />} label="Share" onClick={share} />
+      <Item icon={<ShareIcon />} label="Share" onClick={share} />
     </div>
+  );
+}
+
+// lucide's `Share` with a shorter arrow — its shaft (v13) pokes too far down vs
+// Spotify's; trimmed to v9 so the arrow sits cleanly above the box. Same 24×24 grid and
+// stroke conventions as the other lucide icons here.
+function ShareIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="size-4"
+      aria-hidden
+    >
+      <path d="M8 9H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-2" />
+      <path d="m8 6 4-4 4 4" />
+      <path d="M12 2v11" />
+    </svg>
   );
 }
 

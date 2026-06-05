@@ -218,10 +218,14 @@ export function HistoryClient({
         </div>
       ) : (
         <>
-          {/* Day cards scroll horizontally; the all-time card stays parked on the
-              right, outside that scroll, as a fixed reference point. */}
+          {/* Day cards scroll horizontally inside a framed tray (same border as the song
+              table below); the all-time card sits outside that tray on the right, so the
+              scrollable days read as one group, clearly separate from the fixed all-time
+              reference. flex-1 + min-w-0 makes the tray take the leftover width and clip
+              its own overflow, so it can never run under the all-time card. */}
           <div className="flex items-stretch gap-3">
-            <div className="flex min-w-0 flex-initial gap-3 overflow-x-auto pb-2">
+            <div className="min-w-0 flex-1 rounded-xl border border-border bg-white/[0.02] p-2">
+              <div className="thin-scroll flex gap-3 overflow-x-auto pb-1">
               {daily.map((d) => {
                 const active = !allSelected && d.day === selectedDay;
                 return (
@@ -231,8 +235,8 @@ export function HistoryClient({
                     onClick={() => selectDay(d.day)}
                     aria-pressed={active}
                     className={
-                      "min-w-[140px] shrink-0 rounded-xl border p-3 text-left transition-colors hover:border-white/40 hover:bg-white/10 " +
-                      (active ? "border-white/40 bg-white/10" : "border-border bg-card")
+                      "min-w-[140px] shrink-0 rounded-xl border p-3 text-left transition-colors hover:border-white/20 hover:bg-white/[0.04] " +
+                      (active ? "border-white/25 bg-white/[0.06]" : "border-border bg-card")
                     }
                   >
                     <div className="text-sm font-semibold">{dayLabel(d.day)}</div>
@@ -244,6 +248,7 @@ export function HistoryClient({
                   </button>
                 );
               })}
+              </div>
             </div>
 
             <button
@@ -251,8 +256,8 @@ export function HistoryClient({
               onClick={selectAllTime}
               aria-pressed={allSelected}
               className={
-                "min-w-[150px] shrink-0 rounded-xl border p-3 text-left transition-colors hover:border-white/40 hover:bg-white/10 " +
-                (allSelected ? "border-white/40 bg-white/10" : "border-white/15 bg-secondary/40")
+                "min-w-[150px] shrink-0 rounded-xl border p-3 text-left transition-colors hover:border-white/20 hover:bg-white/[0.04] " +
+                (allSelected ? "border-white/25 bg-white/[0.06]" : "border-white/15 bg-secondary/40")
               }
             >
               <div className="text-sm font-semibold">All time</div>
@@ -348,7 +353,7 @@ function TrackTable({
   };
 
   return (
-    <div className="max-h-[calc(100vh-29rem)] min-h-[200px] overflow-y-auto rounded-lg border border-border">
+    <div className="thin-scroll max-h-[calc(100vh-29rem)] overflow-y-auto rounded-lg border border-border">
       {/* Fixed layout: column widths stay constant and long text clips (then scrolls
           on hover) instead of widening the table into a horizontal scroll. Song and
           Album get the generous, roughly-equal flexible columns; From is narrower;

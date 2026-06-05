@@ -1,0 +1,65 @@
+import "server-only";
+import { spotifyClient } from "@/lib/spotify";
+import {
+  getLikedSignals,
+  getPlaylistSnapshot,
+  getSavedSyncedAt,
+  setLibrarySyncedAt,
+  storePlaylists,
+  storePlaylistTracks,
+  storeSavedTracks,
+} from "@/lib/db";
+
+type Spotify = ReturnType<typeof spotifyClient>;
+
+// Re-fetch the full Liked list at least once a day even when the cheap change-probe
+// says nothing moved — a safety net against the rare add+remove-in-one-window that
+// leaves count and newest-added_at unchanged.
+const LIKED_FULL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+// Build/refresh the persistent library index the clean reads from: the playlist list,
+// each OWNED playlist's tracks (only re-fetched when its snapshot_id changed), and
+// Liked Songs (only re-fetched when the cheap count/newest-added probe shifts). One
+// `/me/playlists` sweep hands us every snapshot_id, so a steady-state run usually
+// costs that sweep + a one-item Liked probe and nothing else.
+export async function syncLibrary(
+  sp: Spotify,
+  onProgress?: (collected: number, total: number) => void,
+): Promise<void> {
+  const [me, playlists] = await Promise.all([sp.me(), sp.myPlaylistsAll()]);
+  await storePlaylists(
+    playlists.map((p) => ({
+      id: p.id,
+      name: p.name,
+      ownerId: p.ownerId,
+      image: p.image,
+      trackCount: p.trackCount,
+    })),
+    me.id,
+  );
+
+  // Only owned playlists feed the library union; re-fetch tracks just for the ones
+  // whose snapshot_id changed since we last cached them.
+  const owned = playlists.filter((p) => p.ownerId === me.id);
+  let done = 0;
+  for (const p of owned) {
+    const cachedSnapshot = await getPlaylistSnapshot(p.id);
+    if (!p.snapshot || cachedSnapshot !== p.snapshot) {
+      const tracks = await sp.playlistTracks(p.id);
+      await storePlaylistTracks(p.id, tracks, p.snapshot);
+    }
+    onProgress?.(++done, owned.length);
+  }
+
+  // Liked Songs: skip the full page-through when the cheap probe matches, unless the
+  // last full sync is over a day old.
+  const head = await sp.savedTracksHead();
+  const sig = await getLikedSignals();
+  const savedAt = await getSavedSyncedAt();
+  const stale = !savedAt || Date.now() - Date.parse(savedAt) > LIKED_FULL_MAX_AGE_MS;
+  if (stale || sig.total !== head.total || sig.topAddedAt !== head.topAddedAt) {
+    await storeSavedTracks(await sp.savedTracks());
+  }
+
+  await setLibrarySyncedAt();
+}

@@ -108,14 +108,16 @@ export function TrackList({
   }, [tracks, sort, dir, removed]);
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-sm text-muted-foreground">
-          {tracks.length} tracks
-          {dupes.size > 0
-            ? ` · ${dupes.size} duplicate${dupes.size === 1 ? "" : "s"}`
-            : ""}
-        </p>
+    <div className="space-y-2">
+      {/* Track count + length live in the playlist header (next to the cover); don't
+          repeat the count here. Keep only the duplicates note (shown nowhere else) and
+          the sort control. */}
+      <div className="flex items-center justify-end gap-2">
+        {dupes.size > 0 ? (
+          <p className="mr-auto text-sm text-muted-foreground">
+            {dupes.size} duplicate{dupes.size === 1 ? "" : "s"}
+          </p>
+        ) : null}
         <SortMenu
           value={sort}
           direction={sort === "original" ? undefined : dir}
@@ -130,7 +132,7 @@ export function TrackList({
           list just flows and the page scrolls normally. */}
       {/* Sizes to its content — one song shows just one row — and only scrolls once
           it would exceed the cap. */}
-      <div className="rounded-lg border border-border sm:max-h-[calc(100vh-27rem)] sm:overflow-y-auto">
+      <div className="thin-scroll rounded-lg border border-border sm:max-h-[calc(100vh-25rem)] sm:overflow-y-auto">
         {/* column header — sticks while the list scrolls inside the box (desktop) */}
         <div className="z-10 grid grid-cols-[1.5rem_1fr_auto] items-center gap-3 border-b border-border bg-background px-3 py-2 text-xs font-medium uppercase tracking-wide text-muted-foreground sm:sticky sm:top-0 md:grid-cols-[1.5rem_2fr_1.4fr_auto]">
           <span className="text-right">#</span>

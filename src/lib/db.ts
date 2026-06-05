@@ -102,6 +102,11 @@ async function init(): Promise<Client> {
       PRIMARY KEY (playlist_id, position)
     );
     CREATE INDEX IF NOT EXISTS idx_pltracks_pl ON playlist_tracks (playlist_id);
+    CREATE TABLE IF NOT EXISTS saved_tracks (
+      track_id TEXT PRIMARY KEY,
+      added_at TEXT,
+      position INTEGER
+    );
   `);
   // Migrate older DBs that predate the album/duration columns.
   const info = await client.execute("PRAGMA table_info(tracks)");
@@ -341,6 +346,13 @@ export async function storePlaylists(rows: StoredPlaylist[], meId: string | null
       },
     }),
   );
+  // Drop cached tracks for playlists that no longer exist (deleted/unfollowed), so a
+  // stale playlist can't keep feeding the library union. Runs after the re-insert
+  // above, so the subquery sees the fresh list.
+  stmts.push({
+    sql: "DELETE FROM playlist_tracks WHERE playlist_id NOT IN (SELECT id FROM playlists)",
+    args: [],
+  });
   stmts.push({
     sql: `INSERT INTO meta (key, value) VALUES ('playlists_synced_at', :v)
           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
@@ -452,6 +464,171 @@ export async function removeCachedPlaylistTrack(playlistId: string, uri: string)
   });
 }
 
+/** Remove a playlist and all its cached tracks/snapshot from the store (after the
+ *  user deletes/unfollows it on Spotify). */
+export async function deletePlaylistFromDb(playlistId: string): Promise<void> {
+  const client = await getClient();
+  await client.batch(
+    [
+      { sql: "DELETE FROM playlists WHERE id = :id", args: { id: playlistId } },
+      { sql: "DELETE FROM playlist_tracks WHERE playlist_id = :id", args: { id: playlistId } },
+      { sql: "DELETE FROM meta WHERE key IN (:a, :b)", args: { a: `plsnap:${playlistId}`, b: `pltracks_at:${playlistId}` } },
+    ],
+    "write",
+  );
+}
+
+// ---- saved tracks (Liked Songs index; the other half of "the library") ----
+/** Replace the stored Liked Songs with a fresh full list, in liked order, and stamp
+ *  the cheap change-signals (count + newest added_at) used to skip future re-fetches. */
+export async function storeSavedTracks(tracks: Track[]): Promise<void> {
+  const client = await getClient();
+  const stmts: InStatement[] = [{ sql: "DELETE FROM saved_tracks", args: [] }];
+  tracks.forEach((t, i) => {
+    stmts.push({
+      sql: `INSERT INTO tracks (id, name, artist, uri, album, album_image, duration_ms)
+            VALUES (:id, :name, :artist, :uri, :album, :albumImage, :durationMs)
+            ON CONFLICT(id) DO UPDATE SET name = excluded.name, artist = excluded.artist,
+              album = excluded.album, album_image = excluded.album_image,
+              duration_ms = excluded.duration_ms`,
+      args: {
+        id: t.id,
+        name: t.title,
+        artist: t.artist,
+        uri: t.uri,
+        album: t.album ?? null,
+        albumImage: t.albumImage ?? null,
+        durationMs: t.durationMs ?? null,
+      },
+    });
+    stmts.push({
+      sql: `INSERT INTO saved_tracks (track_id, added_at, position) VALUES (:tid, :added, :pos)`,
+      args: { tid: t.id, added: t.addedAt ?? null, pos: i },
+    });
+  });
+  stmts.push(metaStmt("liked_total", String(tracks.length)));
+  stmts.push(metaStmt("liked_top_added_at", tracks[0]?.addedAt ?? ""));
+  stmts.push(metaStmt("saved_synced_at", new Date().toISOString()));
+  await client.batch(stmts, "write");
+}
+
+/** The cheap Liked-Songs change-signals (count + newest added_at). */
+export async function getLikedSignals(): Promise<{ total: number; topAddedAt: string | null }> {
+  const total = await getMeta("liked_total");
+  const top = await getMeta("liked_top_added_at");
+  return { total: total ? Number(total) : 0, topAddedAt: top || null };
+}
+
+export async function getSavedSyncedAt(): Promise<string | null> {
+  return getMeta("saved_synced_at");
+}
+
+// ---- the library union (for clean): Liked Songs + every OWNED playlist's tracks ----
+/** Every track you "own" — Liked Songs plus all tracks in playlists you own — as a
+ *  flat list (deduping is left to the pure domain layer, which keys on artist+title).
+ *  `exceptPlaylistId` excludes the clean target itself. Reads entirely from the store. */
+export async function getLibraryTracks(exceptPlaylistId?: string): Promise<Track[]> {
+  const client = await getClient();
+  const meId = await getMeId();
+  const res = await client.execute({
+    sql: `
+      SELECT t.id, t.name AS title, t.artist, t.uri, t.album,
+        t.album_image AS albumImage, t.duration_ms AS durationMs
+      FROM saved_tracks st JOIN tracks t ON t.id = st.track_id
+      UNION
+      SELECT t.id, t.name AS title, t.artist, t.uri, t.album,
+        t.album_image AS albumImage, t.duration_ms AS durationMs
+      FROM playlist_tracks pt
+        JOIN tracks t ON t.id = pt.track_id
+        JOIN playlists p ON p.id = pt.playlist_id
+      WHERE p.owner_id = :meId AND pt.playlist_id <> :except`,
+    args: { meId, except: exceptPlaylistId ?? "" },
+  });
+  return plainRows(res.rows) as unknown as Track[];
+}
+
+export async function getLibrarySyncedAt(): Promise<string | null> {
+  return getMeta("library_synced_at");
+}
+export async function setLibrarySyncedAt(): Promise<void> {
+  await setMeta("library_synced_at", new Date().toISOString());
+}
+
+// ---- preferences / background-job bookkeeping (meta-backed) ----
+/** Whether "Clean" backs removed songs up to a separate playlist. Persisted globally
+ *  (DB, so it follows the user across devices), defaulting to on. */
+export async function getCleanBackupPref(): Promise<boolean> {
+  const v = await getMeta("clean_backup_pref");
+  return v === null ? true : v === "1";
+}
+export async function setCleanBackupPref(on: boolean): Promise<void> {
+  await setMeta("clean_backup_pref", on ? "1" : "0");
+}
+
+// ---- find: songs that appear in any playlist + their listen times ----
+export type FoundSong = {
+  id: string;
+  title: string;
+  artist: string;
+  album: string | null;
+  albumImage: string | null;
+  playlistCount: number;
+};
+
+/** Songs in any playlist whose title matches `query` (case-insensitive substring), one
+ *  row per distinct (artist, title), prefix matches first. For the Find quick-lookup. */
+export async function searchPlaylistSongs(query: string, limit = 12): Promise<FoundSong[]> {
+  const q = query.trim();
+  if (!q) return [];
+  const client = await getClient();
+  const res = await client.execute({
+    sql: `SELECT t.id, t.name AS title, t.artist, t.album, t.album_image AS albumImage,
+            COUNT(DISTINCT pt.playlist_id) AS playlistCount
+          FROM tracks t JOIN playlist_tracks pt ON pt.track_id = t.id
+          WHERE t.name LIKE :like
+          GROUP BY lower(t.artist), lower(t.name)
+          ORDER BY (CASE WHEN t.name LIKE :prefix THEN 0 ELSE 1 END),
+                   playlistCount DESC, t.name
+          LIMIT :limit`,
+    args: { like: `%${q}%`, prefix: `${q}%`, limit },
+  });
+  return plainRows(res.rows) as unknown as FoundSong[];
+}
+
+/** Listen history for the song matching `trackId`'s (artist, title): total plays + most
+ *  recent timestamps. Keyed on artist+title so any release of the same song counts
+ *  (matches the app's song identity). */
+export async function getSongListens(
+  trackId: string,
+  limit = 12,
+): Promise<{ total: number; recent: string[] }> {
+  const client = await getClient();
+  const keyRes = await client.execute({
+    sql: "SELECT lower(artist) AS a, lower(name) AS n FROM tracks WHERE id = ?",
+    args: [trackId],
+  });
+  if (!keyRes.rows[0]) return { total: 0, recent: [] };
+  const a = String(keyRes.rows[0].a);
+  const n = String(keyRes.rows[0].n);
+  const [tot, rec] = await Promise.all([
+    client.execute({
+      sql: `SELECT COUNT(*) AS total FROM plays p JOIN tracks t ON t.id = p.track_id
+            WHERE lower(t.artist) = :a AND lower(t.name) = :n`,
+      args: { a, n },
+    }),
+    client.execute({
+      sql: `SELECT p.played_at AS playedAt FROM plays p JOIN tracks t ON t.id = p.track_id
+            WHERE lower(t.artist) = :a AND lower(t.name) = :n
+            ORDER BY p.played_at DESC LIMIT :limit`,
+      args: { a, n, limit },
+    }),
+  ]);
+  return {
+    total: Number(tot.rows[0].total),
+    recent: rec.rows.map((r) => String(r.playedAt)),
+  };
+}
+
 /** The set of track ids ever played from a given playback context (e.g. a playlist
  *  URI). Resume uses this to find the *furthest* track reached in playlist order, so
  *  rewinding/skipping back doesn't move your resume point backward. */
@@ -521,6 +698,15 @@ export async function acquireLock(name: string, ttlMs: number): Promise<boolean>
 export async function releaseLock(name: string): Promise<void> {
   const client = await getClient();
   await client.execute({ sql: "DELETE FROM meta WHERE key = ?", args: [`lock:${name}`] });
+}
+
+/** Build an upsert statement for a single meta key (for batching). */
+function metaStmt(key: string, value: string): InStatement {
+  return {
+    sql: `INSERT INTO meta (key, value) VALUES (:k, :v)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    args: { k: key, v: value },
+  };
 }
 
 async function setMeta(key: string, value: string): Promise<void> {

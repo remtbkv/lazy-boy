@@ -73,7 +73,7 @@ export default async function HomePage() {
           href="/playlists"
           icon={<ListMusic />}
           title="Playlists"
-          desc={"Merge, remove songs saved elsewhere, save your precious queue.\nSome random stuff as well."}
+          desc={"Merge, remove songs saved elsewhere, save your precious queue.\nMore random stuff as well."}
         />
         <ToolCard
           href="/history"

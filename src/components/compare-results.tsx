@@ -77,7 +77,7 @@ function EntryCard({ entry }: { entry: CompareEntry }) {
         {list.length === 0 ? (
           <p className="text-sm text-muted-foreground">Nothing here.</p>
         ) : (
-          <ul className="max-h-64 space-y-1 overflow-y-auto pr-1">
+          <ul className="thin-scroll max-h-64 space-y-1 overflow-y-auto pr-1">
             {list.map((t, i) => (
               <li key={`${t.id}-${i}`} className="flex items-baseline gap-2 text-sm">
                 <span className="truncate">{t.title}</span>

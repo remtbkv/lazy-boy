@@ -5,6 +5,7 @@ import Link from "next/link";
 import { ArrowUp } from "lucide-react";
 import { PlaylistThumb } from "@/components/playlist-thumb";
 import { FloatingBar } from "@/components/floating-bar";
+import { PlaylistContextMenu } from "@/components/playlist-context-menu";
 import { SortMenu } from "@/components/sort-menu";
 import { fuzzyFilter } from "@/lib/filter";
 
@@ -48,9 +49,18 @@ export function PlaylistGrid({
   }
   const sectionRef = useRef<HTMLElement | null>(null);
 
+  // Right-click menu + optimistic hide of just-deleted playlists (the server
+  // revalidation catches up a moment later).
+  const [menu, setMenu] = useState<{ x: number; y: number; p: Item } | null>(null);
+  const [deleted, setDeleted] = useState<Set<string>>(new Set());
+
   const filtered = useMemo(
-    () => fuzzyFilter(playlists, query, (p) => p.name),
-    [playlists, query],
+    () => fuzzyFilter(
+      playlists.filter((p) => !deleted.has(p.id)),
+      query,
+      (p) => p.name,
+    ),
+    [playlists, query, deleted],
   );
 
   // All client-side over the loaded list, so it's instant. "Recents" keeps
@@ -121,6 +131,10 @@ export function PlaylistGrid({
             <li key={p.id}>
               <Link
                 href={`/playlists/${p.id}`}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setMenu({ x: e.clientX, y: e.clientY, p });
+                }}
                 className="group block rounded-lg border border-border bg-card p-3 transition-colors hover:border-white/25 hover:bg-accent/40"
               >
                 <PlaylistThumb src={p.image} name={p.name} />
@@ -149,6 +163,16 @@ export function PlaylistGrid({
         placeholder="Search playlists…"
         action={action}
       />
+
+      {menu ? (
+        <PlaylistContextMenu
+          playlist={{ id: menu.p.id, name: menu.p.name }}
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+          onDeleted={(id) => setDeleted((s) => new Set(s).add(id))}
+        />
+      ) : null}
     </section>
   );
 }
