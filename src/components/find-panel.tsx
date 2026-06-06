@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { AlbumThumb } from "@/components/album-thumb";
 import {
   Card,
@@ -23,11 +24,31 @@ type FoundSong = {
 };
 type FoundArtist = { artist: string; songCount: number; albumImage: string | null };
 type Listens = { total: number; recent: string[] };
+type SongLocation = {
+  playlistId: string;
+  playlistName: string;
+  trackId: string;
+  position: number;
+  title?: string;
+};
 type Selected =
   | { kind: "song"; item: FoundSong }
   | { kind: "artist"; item: FoundArtist };
 
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+
+function dedupeBy<T>(arr: T[], key: (x: T) => string): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const x of arr) {
+    const k = key(x);
+    if (!seen.has(k)) {
+      seen.add(k);
+      out.push(x);
+    }
+  }
+  return out;
+}
 
 // Quick lookup of a song OR an artist in your playlists (toggle between the two so the
 // results stay clean), then see when you last listened to it. All from the local store.
@@ -37,6 +58,7 @@ export function FindPanel() {
   const [results, setResults] = useState<(FoundSong | FoundArtist)[]>([]);
   const [selected, setSelected] = useState<Selected | null>(null);
   const [listens, setListens] = useState<Listens | null>(null);
+  const [locations, setLocations] = useState<SongLocation[]>([]);
   const [loading, setLoading] = useState(false);
   const searchReq = useRef(0);
   const listenReq = useRef(0);
@@ -44,16 +66,21 @@ export function FindPanel() {
   async function select(sel: Selected) {
     setSelected(sel);
     setListens(null);
+    setLocations([]);
     setLoading(true);
     const id = ++listenReq.current;
-    const url =
+    const param =
       sel.kind === "song"
-        ? `/api/find/listens?id=${encodeURIComponent(sel.item.id)}`
-        : `/api/find/listens?artist=${encodeURIComponent(sel.item.artist)}`;
-    const res = await fetch(url);
+        ? `id=${encodeURIComponent(sel.item.id)}`
+        : `artist=${encodeURIComponent(sel.item.artist)}`;
+    const [listenRes, locRes] = await Promise.all([
+      fetch(`/api/find/listens?${param}`),
+      fetch(`/api/find/locations?${param}`),
+    ]);
     if (id !== listenReq.current) return;
     setLoading(false);
-    if (res.ok) setListens((await res.json()) as Listens);
+    if (listenRes.ok) setListens((await listenRes.json()) as Listens);
+    if (locRes.ok) setLocations(((await locRes.json()).locations ?? []) as SongLocation[]);
   }
 
   useEffect(() => {
@@ -65,6 +92,7 @@ export function FindPanel() {
         setResults([]);
         setSelected(null);
         setListens(null);
+        setLocations([]);
         return;
       }
       const res = await fetch(`/api/find?q=${encodeURIComponent(q)}&mode=${mode}`);
@@ -95,6 +123,7 @@ export function FindPanel() {
     setResults([]);
     setSelected(null);
     setListens(null);
+    setLocations([]);
   }
 
   return (
@@ -102,8 +131,7 @@ export function FindPanel() {
       <CardHeader>
         <CardTitle className="text-base">Find {mode === "song" ? "a song" : "an artist"}</CardTitle>
         <CardDescription>
-          Look up a {mode} in your playlists and see when you last listened — no trip to
-          History needed.
+          Search among your playlists and see the last time you listened.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -179,7 +207,9 @@ export function FindPanel() {
                       ? ` · in ${plural(selected.item.playlistCount, "playlist")}`
                       : ""}
                   </p>
-                  <ul className="space-y-1 text-sm">
+                  {/* Each play is its own row; caps at ~4 with a thin scrollbar so the
+                      rest scroll rather than running down the card. */}
+                  <ul className="thin-scroll max-h-28 space-y-1 overflow-y-auto pr-1 text-sm">
                     {listens.recent.map((iso, i) => (
                       <li key={i} className="flex items-baseline justify-between gap-3">
                         <span>{timeAgo(iso)}</span>
@@ -191,45 +221,38 @@ export function FindPanel() {
               )
             ) : null}
 
-            {results.length > 1 ? (
+            {locations.length > 0 ? (
               <div className="border-t border-border pt-2">
-                <p className="mb-1.5 text-xs text-muted-foreground">Other matches</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {results
-                    .filter((r) =>
-                      mode === "song"
-                        ? (r as FoundSong).id !== (selected.item as FoundSong).id
-                        : (r as FoundArtist).artist !== (selected.item as FoundArtist).artist,
-                    )
-                    .map((r) => {
-                      const label =
-                        mode === "song"
-                          ? `${(r as FoundSong).title} — ${(r as FoundSong).artist}`
-                          : (r as FoundArtist).artist;
-                      const key = mode === "song" ? (r as FoundSong).id : (r as FoundArtist).artist;
-                      return (
-                        <button
-                          key={key}
-                          type="button"
-                          onClick={() =>
-                            select(
-                              mode === "song"
-                                ? { kind: "song", item: r as FoundSong }
-                                : { kind: "artist", item: r as FoundArtist },
-                            )
-                          }
-                          className="max-w-full truncate rounded-full border border-border px-2.5 py-1 text-xs transition-colors hover:bg-accent"
-                        >
-                          {label}
-                        </button>
-                      );
-                    })}
-                </div>
+                <p className="mb-1.5 text-xs text-muted-foreground">
+                  {selected.kind === "song" ? "Song" : "Artist"} found in
+                </p>
+                {/* Up to ~3 visible, the rest scroll (thin bar). */}
+                <ul className="thin-scroll max-h-24 space-y-0.5 overflow-y-auto pr-1">
+                  {dedupeBy(locations, (l) =>
+                    selected.kind === "song" ? l.playlistId : `${l.title}|${l.playlistId}`,
+                  ).map((loc) => (
+                    <li key={`${loc.playlistId}-${loc.trackId}-${loc.position}`}>
+                      <Link
+                        href={`/playlists/${loc.playlistId}?t=${loc.trackId}`}
+                        className="block truncate rounded-md px-2 py-1 text-sm transition-colors hover:bg-accent/40"
+                      >
+                        {selected.kind === "artist" ? (
+                          <>
+                            {loc.title}
+                            <span className="text-muted-foreground"> · {loc.playlistName}</span>
+                          </>
+                        ) : (
+                          loc.playlistName
+                        )}
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
               </div>
             ) : null}
           </div>
         ) : query.trim() && results.length > 1 ? (
-          <div className="thin-scroll max-h-40 overflow-y-auto rounded-md border border-border">
+          <div className="thin-scroll max-h-44 overflow-y-auto rounded-md border border-border">
             <ul className="divide-y divide-border">
               {results.map((r) => {
                 const isSong = mode === "song";
@@ -275,11 +298,7 @@ export function FindPanel() {
           <p className="px-1 py-4 text-center text-sm text-muted-foreground">
             No {mode === "song" ? "songs" : "artists"} in your playlists match “{query.trim()}”.
           </p>
-        ) : (
-          <p className="px-1 py-2 text-sm text-muted-foreground">
-            Type {mode === "song" ? "a song" : "an artist"} name to look it up.
-          </p>
-        )}
+        ) : null}
       </CardContent>
     </Card>
   );

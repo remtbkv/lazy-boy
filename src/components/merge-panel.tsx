@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState, useTransition } from "react";
-import { toast } from "sonner";
+import { toast } from "@/lib/toast";
 import { mergeAction } from "@/app/(app)/actions";
 import { Button } from "@/components/ui/button";
 import {

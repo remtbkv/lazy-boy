@@ -7,6 +7,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { createClient, type Client, type InStatement } from "@libsql/client";
 import type { Track } from "@/lib/spotify/types";
+import { CLEANED_PREFIX, BACKUP_PREFIX } from "@/lib/clean/names";
 
 export type PlayRecord = {
   trackId: string;
@@ -541,8 +542,14 @@ export async function getLibraryTracks(exceptPlaylistId?: string): Promise<Track
       FROM playlist_tracks pt
         JOIN tracks t ON t.id = pt.track_id
         JOIN playlists p ON p.id = pt.playlist_id
-      WHERE p.owner_id = :meId AND pt.playlist_id <> :except`,
-    args: { meId, except: exceptPlaylistId ?? "" },
+      WHERE p.owner_id = :meId AND pt.playlist_id <> :except
+        AND p.name NOT LIKE :cleanedLike AND p.name NOT LIKE :backupLike`,
+    args: {
+      meId,
+      except: exceptPlaylistId ?? "",
+      cleanedLike: CLEANED_PREFIX + "%",
+      backupLike: BACKUP_PREFIX + "%",
+    },
   });
   return plainRows(res.rows) as unknown as Track[];
 }
@@ -600,7 +607,7 @@ export async function searchPlaylistSongs(query: string, limit = 12): Promise<Fo
  *  (matches the app's song identity). */
 export async function getSongListens(
   trackId: string,
-  limit = 12,
+  limit = 100,
 ): Promise<{ total: number; recent: string[] }> {
   const client = await getClient();
   const keyRes = await client.execute({
@@ -659,7 +666,7 @@ export async function searchPlaylistArtists(query: string, limit = 12): Promise<
 /** Listen history for an artist: total plays of any of their songs + recent timestamps. */
 export async function getArtistListens(
   artist: string,
-  limit = 12,
+  limit = 100,
 ): Promise<{ total: number; recent: string[] }> {
   const client = await getClient();
   const a = artist.toLowerCase();
@@ -679,6 +686,52 @@ export async function getArtistListens(
     total: Number(tot.rows[0].total),
     recent: rec.rows.map((r) => String(r.playedAt)),
   };
+}
+
+export type SongLocation = {
+  playlistId: string;
+  playlistName: string;
+  trackId: string; // the track id AT this position (for the jump-to anchor)
+  position: number; // 0-based index in that playlist
+  title?: string; // only set for the artist view (which song this row is)
+};
+
+/** Every owned playlist that contains the song matching `trackId` (by artist+title),
+ *  with the track id + position there so the UI can deep-link to that exact spot. */
+export async function getSongPlaylists(trackId: string, limit = 25): Promise<SongLocation[]> {
+  const client = await getClient();
+  const meId = await getMeId();
+  const res = await client.execute({
+    sql: `SELECT p.id AS playlistId, p.name AS playlistName, pt.track_id AS trackId, pt.position AS position
+          FROM playlist_tracks pt
+            JOIN tracks t ON t.id = pt.track_id
+            JOIN playlists p ON p.id = pt.playlist_id
+            JOIN (SELECT lower(artist) AS a, lower(name) AS n FROM tracks WHERE id = :id) k
+          WHERE lower(t.artist) = k.a AND lower(t.name) = k.n AND p.owner_id = :meId
+          ORDER BY p.name, pt.position
+          LIMIT :limit`,
+    args: { id: trackId, meId, limit },
+  });
+  return plainRows(res.rows) as unknown as SongLocation[];
+}
+
+/** An artist's songs across the user's owned playlists — one row per (song, playlist)
+ *  with the position there, so the UI can list them and deep-link to each. */
+export async function getArtistSongLocations(artist: string, limit = 50): Promise<SongLocation[]> {
+  const client = await getClient();
+  const meId = await getMeId();
+  const res = await client.execute({
+    sql: `SELECT p.id AS playlistId, p.name AS playlistName, pt.track_id AS trackId,
+            pt.position AS position, t.name AS title
+          FROM tracks t
+            JOIN playlist_tracks pt ON pt.track_id = t.id
+            JOIN playlists p ON p.id = pt.playlist_id
+          WHERE lower(t.artist) = :a AND p.owner_id = :meId
+          ORDER BY t.name, p.name, pt.position
+          LIMIT :limit`,
+    args: { a: artist.toLowerCase(), meId, limit },
+  });
+  return plainRows(res.rows) as unknown as SongLocation[];
 }
 
 /** The set of track ids ever played from a given playback context (e.g. a playlist

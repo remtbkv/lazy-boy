@@ -26,8 +26,8 @@ export function PlaylistThumb({
     <div
       className={`flex aspect-square w-full items-center justify-center rounded-md bg-gradient-to-br from-secondary to-muted text-muted-foreground ${className}`}
     >
-      <svg viewBox="0 0 24 24" className="size-1/3" fill="currentColor" aria-hidden>
-        <path d="M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm12-2a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+      <svg viewBox="0 0 24 24" className="size-1/3" fill="currentColor" fillRule="evenodd" aria-hidden>
+        <path d="M6 3h15v15.167a3.5 3.5 0 1 1-3.5-3.5H19V5H8v13.167a3.5 3.5 0 1 1-3.5-3.5H6V3zm0 13.667H4.5a1.5 1.5 0 1 0 1.5 1.5v-1.5zm13 0h-1.5a1.5 1.5 0 1 0 1.5 1.5v-1.5z" />
       </svg>
     </div>
   );

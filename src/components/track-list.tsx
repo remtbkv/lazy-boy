@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Clock3, Pause, Play } from "lucide-react";
-import { toast } from "sonner";
+import { toast } from "@/lib/toast";
 import { playPlaylistTrackAction } from "@/app/(app)/actions";
 import { AlbumThumb } from "@/components/album-thumb";
 import { HoverTip } from "@/components/hover-tip";
@@ -54,6 +55,10 @@ export function TrackList({
   // URIs removed this session — filtered out immediately so the row disappears
   // without waiting on the server revalidation.
   const [removed, setRemoved] = useState<Set<string>>(new Set());
+
+  // Deep-link from Find: `?t=<trackId>` scrolls that row into view and flashes it.
+  const targetTrackId = useSearchParams().get("t");
+  const scrolledFor = useRef<string | null>(null);
 
   // Double-click a row → play that track within the playlist context, so playback
   // continues through the rest of the playlist (like Spotify). Clears the accidental
@@ -107,6 +112,18 @@ export function TrackList({
     return arr;
   }, [tracks, sort, dir, removed]);
 
+  // Once the rows are in the DOM, scroll the deep-linked track into view and flash it.
+  useEffect(() => {
+    if (!targetTrackId || scrolledFor.current === targetTrackId) return;
+    const raf = requestAnimationFrame(() => {
+      const el = document.getElementById(`t-${targetTrackId}`);
+      if (!el) return;
+      scrolledFor.current = targetTrackId;
+      el.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [targetTrackId, sorted]);
+
   return (
     <div className="space-y-2">
       {/* Track count + length live in the playlist header (next to the cover); don't
@@ -147,11 +164,15 @@ export function TrackList({
           {sorted.map((t, i) => {
             const isCurrent = !!currentId && currentId === t.id;
             return (
-            <li key={`${t.id}-${i}`}>
+            <li key={`${t.id}-${i}`} id={`t-${t.id}`} className="scroll-mt-24">
               <div
                 className={
-                  "grid cursor-default grid-cols-[1.5rem_1fr_auto] items-center gap-3 px-3 py-2 hover:bg-accent/30 md:grid-cols-[1.5rem_2fr_1.4fr_auto]" +
-                  (isCurrent ? " bg-white/5" : "")
+                  "grid cursor-default grid-cols-[1.5rem_1fr_auto] items-center gap-3 px-3 py-2 transition-colors hover:bg-accent/30 md:grid-cols-[1.5rem_2fr_1.4fr_auto]" +
+                  (targetTrackId && targetTrackId === t.id
+                    ? " bg-white/10 ring-1 ring-inset ring-white/30"
+                    : isCurrent
+                      ? " bg-white/5"
+                      : "")
                 }
                 onDoubleClick={() => play(t)}
                 onContextMenu={(e) => {

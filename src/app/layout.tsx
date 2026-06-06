@@ -38,7 +38,7 @@ export default function RootLayout({
         {/* Subtle, Spotify-style toasts: neutral, centered, low on the screen — sitting
             just above the bottom search pill (FloatingBar spans ~24–62px from the bottom)
             with a small gap, so it lands in the same spot on every page. */}
-        <Toaster position="bottom-center" offset="4.5rem" />
+        <Toaster position="bottom-center" offset="6rem" />
       </body>
     </html>
   );

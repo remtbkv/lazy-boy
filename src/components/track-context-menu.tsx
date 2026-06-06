@@ -2,7 +2,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState, useTransition, type ReactNode } from "react";
 import { CircleMinus, CirclePlus, ListPlus } from "lucide-react";
-import { toast } from "sonner";
+import { toast } from "@/lib/toast";
 import {
   addToQueueAction,
   removeFromPlaylistAction,

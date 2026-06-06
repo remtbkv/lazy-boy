@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { toast } from "sonner";
+import { toast } from "@/lib/toast";
 import { playTrackAction } from "@/app/(app)/actions";
 import { syncHistoryAction } from "@/app/(app)/history/actions";
 import { AlbumThumb } from "@/components/album-thumb";

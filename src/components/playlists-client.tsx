@@ -55,10 +55,10 @@ export function PlaylistsClient({
 }) {
   const items = initialItems;
   const total = items.length;
-  const [mergeOpen, setMergeOpen] = useState(false);
-  const [resumeOpen, setResumeOpen] = useState(false);
-  const [cleanOpen, setCleanOpen] = useState(false);
-  const [findOpen, setFindOpen] = useState(false);
+  // Only one quick-action panel open at a time — opening one replaces the other.
+  const [openPanel, setOpenPanel] = useState<null | "resume" | "clean" | "find" | "merge">(null);
+  const toggle = (p: "resume" | "clean" | "find" | "merge") =>
+    setOpenPanel((o) => (o === p ? null : p));
 
   return (
     <div className="space-y-6">
@@ -75,10 +75,10 @@ export function PlaylistsClient({
           <Button
             variant="outline"
             className={
-              CHIP + (resumeOpen ? " border-white/50 bg-accent text-foreground" : "")
+              CHIP + (openPanel === "resume" ? " border-white/50 bg-accent text-foreground" : "")
             }
-            aria-expanded={resumeOpen}
-            onClick={() => setResumeOpen((o) => !o)}
+            aria-expanded={openPanel === "resume"}
+            onClick={() => toggle("resume")}
           >
             <Play className="size-4 text-foreground" />
             Resume
@@ -94,10 +94,10 @@ export function PlaylistsClient({
           <Button
             variant="outline"
             className={
-              CHIP + (cleanOpen ? " border-white/50 bg-accent text-foreground" : "")
+              CHIP + (openPanel === "clean" ? " border-white/50 bg-accent text-foreground" : "")
             }
-            aria-expanded={cleanOpen}
-            onClick={() => setCleanOpen((o) => !o)}
+            aria-expanded={openPanel === "clean"}
+            onClick={() => toggle("clean")}
           >
             <Brush className="size-4 text-foreground" />
             Clean playlist
@@ -113,10 +113,10 @@ export function PlaylistsClient({
           <Button
             variant="outline"
             className={
-              CHIP + (findOpen ? " border-white/50 bg-accent text-foreground" : "")
+              CHIP + (openPanel === "find" ? " border-white/50 bg-accent text-foreground" : "")
             }
-            aria-expanded={findOpen}
-            onClick={() => setFindOpen((o) => !o)}
+            aria-expanded={openPanel === "find"}
+            onClick={() => toggle("find")}
           >
             <Search className="size-4 text-foreground" />
             Find
@@ -151,10 +151,10 @@ export function PlaylistsClient({
             variant="outline"
             className={
               CHIP +
-              (mergeOpen ? " border-white/50 bg-accent text-foreground" : "")
+              (openPanel === "merge" ? " border-white/50 bg-accent text-foreground" : "")
             }
-            aria-expanded={mergeOpen}
-            onClick={() => setMergeOpen((o) => !o)}
+            aria-expanded={openPanel === "merge"}
+            onClick={() => toggle("merge")}
           >
             <GitMerge className="size-4 text-foreground" />
             Merge
@@ -163,7 +163,7 @@ export function PlaylistsClient({
         <PlaylistsSync syncedAt={syncedAt} />
       </div>
 
-      {resumeOpen ? (
+      {openPanel === "resume" ? (
         <div className="max-w-lg">
           <ResumePanel
             playlists={items.map((p) => ({
@@ -175,7 +175,7 @@ export function PlaylistsClient({
         </div>
       ) : null}
 
-      {cleanOpen ? (
+      {openPanel === "clean" ? (
         <div className="max-w-lg">
           <CleanPanel
             playlists={items.map((p) => ({
@@ -188,13 +188,13 @@ export function PlaylistsClient({
         </div>
       ) : null}
 
-      {findOpen ? (
+      {openPanel === "find" ? (
         <div className="max-w-lg">
           <FindPanel />
         </div>
       ) : null}
 
-      {mergeOpen ? (
+      {openPanel === "merge" ? (
         <div className="max-w-lg">
           <MergePanel
             playlists={items.map((p) => ({

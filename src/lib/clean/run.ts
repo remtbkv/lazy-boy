@@ -9,6 +9,7 @@ import {
   storePlaylistTracks,
 } from "@/lib/db";
 import { syncLibrary } from "@/lib/sync/library";
+import { cleanedName, backupName as makeBackupName } from "@/lib/clean/names";
 
 type Spotify = ReturnType<typeof spotifyClient>;
 
@@ -63,8 +64,8 @@ export async function cleanPhase1(
   const kept = subtract(targetTracks, library);
   const removed = intersect(targetTracks, library);
 
-  const name = `Cleaned: ${target.name}`;
-  const backupName = `Dupes removed from: ${target.name}`;
+  const name = cleanedName(target.name);
+  const backupName = makeBackupName(target.name);
 
   // Nothing's a duplicate → don't create a redundant full-copy "Cleaned: X"; the caller
   // just tells the user the playlist is unique. (No reconcile either.)
