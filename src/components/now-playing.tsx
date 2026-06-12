@@ -3,11 +3,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Pause, Play, SkipBack, SkipForward } from "lucide-react";
 import { toast } from "@/lib/toast";
-import {
-  playerNextAction,
-  playerPreviousAction,
-  playerSetPlayingAction,
-} from "@/app/(app)/actions";
+import { playerNextAction, playerPreviousAction } from "@/app/(app)/actions";
 import { HoverScroll } from "@/components/hover-scroll";
 import { useNowPlaying } from "@/components/now-playing-context";
 
@@ -16,7 +12,7 @@ import { useNowPlaying } from "@/components/now-playing-context";
 // progress bar. Hovering reveals a chip-width popover with the skip/pause controls
 // and where it's playing from.
 export function NowPlaying() {
-  const { playing, setPlaying, refresh } = useNowPlaying();
+  const { playing, toggle: ctxToggle, refresh } = useNowPlaying();
   const [pos, setPos] = useState(0); // interpolated position, ms
   const [pending, setPending] = useState(false);
   const [open, setOpen] = useState(false); // controls popover (on hover)
@@ -89,6 +85,11 @@ export function NowPlaying() {
     if (closeTimer.current) clearTimeout(closeTimer.current);
     closeTimer.current = setTimeout(() => setOpen(false), 150);
   };
+  // Clear a pending close on unmount — playback ending unmounts this mid-hover, and the
+  // stray timer would otherwise fire setOpen on a gone component.
+  useEffect(() => () => {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+  }, []);
 
   if (!playing) return null;
   const { track, isPlaying, durationMs, context } = playing;
@@ -107,10 +108,17 @@ export function NowPlaying() {
 
   function toggle() {
     const next = !isPlaying;
-    // Optimistic: flip the icon and freeze/resume the local ticker immediately.
+    // Freeze/resume the local ticker immediately; the context owns the optimistic
+    // state flip AND the poll suppression (flipping state here directly would let a
+    // mid-flight 6s poll snap the icon back). Pass `pos` so the bar doesn't jump
+    // back to the last polled position.
     base.current = { progressMs: pos, at: Date.now(), isPlaying: next };
-    setPlaying((p) => (p ? { ...p, isPlaying: next, progressMs: pos } : p));
-    run(() => playerSetPlayingAction(next));
+    setPending(true);
+    ctxToggle(pos)
+      .then((r) => {
+        if (!r.ok) toast.error(r.error ?? "Playback control failed");
+      })
+      .finally(() => setPending(false));
   }
 
   const art = (cls: string) =>
@@ -157,12 +165,19 @@ export function NowPlaying() {
         }}
         className="flex items-center gap-2.5 rounded-xl px-1 py-1 text-left transition-colors hover:bg-secondary/60 sm:gap-3 sm:px-2.5 sm:py-2"
       >
-        {art("size-8 shrink-0 rounded-md object-cover sm:size-9")}
-        <span className="hidden min-w-0 sm:block" style={{ width: boxW ?? undefined }}>
-          <HoverScroll className="text-xs font-medium leading-tight">{track.title}</HoverScroll>
-          <HoverScroll className="text-[11px] leading-tight text-muted-foreground">
-            {track.artist}
-          </HoverScroll>
+        <span key={`art-${track.id}`} className="np-swap flex shrink-0">
+          {art("size-8 rounded-md object-cover sm:size-9")}
+        </span>
+        <span
+          className="hidden min-w-0 transition-[width] duration-300 ease-out sm:block"
+          style={{ width: boxW ?? undefined }}
+        >
+          <span key={track.id} className="np-swap block">
+            <HoverScroll className="text-xs font-medium leading-tight">{track.title}</HoverScroll>
+            <HoverScroll className="text-[11px] leading-tight text-muted-foreground">
+              {track.artist}
+            </HoverScroll>
+          </span>
           {/* Minimal in-track progress: fills left→right as the song plays, sitting
               right under the title so a glance reads as "you're here in this song". */}
           <span className="mt-1 block h-0.5 w-full overflow-hidden rounded-full bg-white/15">

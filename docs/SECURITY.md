@@ -6,14 +6,16 @@ the user-scoping item below is handled by row-level security instead.)
 
 ## Already in place
 
-- **Tokens never reach the browser.** The Spotify access/refresh tokens live in the
-  encrypted Auth.js JWT and are only read server-side (Server Components, actions, route
-  handlers). `src/lib/session.ts` is `server-only`.
+- **Tokens never reach the browser.** The Spotify access/refresh tokens live in the DB
+  (source of truth; the Auth.js JWT cookie is kept lean) and are only read server-side
+  (Server Components, actions, route handlers). `src/lib/session.ts` is `server-only`.
 - **One auth gate.** The `(app)` layout calls `auth()` and redirects unauthenticated users;
   every API route also checks `auth()` and returns 401.
 - **Centralized token refresh** in `src/lib/auth.ts` (no scattered token handling).
 - **No SQL injection.** All libSQL (`@libsql/client`) queries use bound params (`:name`/`?`).
-- **Cron auth.** `/api/cron/sync` is session-less; it checks `Authorization: Bearer $CRON_SECRET`.
+- **Cron auth (fail-closed).** `/api/cron/sync` is session-less; it requires
+  `Authorization: Bearer $CRON_SECRET`. An unset `CRON_SECRET` rejects every caller (it does
+  not wave them through), so the endpoint can't be triggered anonymously in a misconfigured deploy.
 - **CSRF.** Auth.js protects its routes; Next.js server actions are POST-only with origin checks.
 - **Baseline security headers** in `next.config.ts` (`X-Content-Type-Options`,
   `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`, HSTS).
@@ -39,3 +41,9 @@ the user-scoping item below is handled by row-level security instead.)
       code (none currently); scrub any error reporting of tokens.
 - [ ] `allowedDevOrigins` is dev-only and harmless in prod, but review it isn't masking a real
       CORS need.
+
+---
+
+**Related:** [ARCHITECTURE → Auth & tokens](ARCHITECTURE.md#auth--tokens) (how refresh is
+coordinated) · [GOTCHAS → Per-instance server state / Production security](GOTCHAS.md) ·
+[ROADMAP](ROADMAP.md) (multi-user is Phase 3+).

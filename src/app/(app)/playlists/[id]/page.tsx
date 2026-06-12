@@ -7,12 +7,12 @@ import {
   getMeId,
   getPlaylistSnapshot,
   getPlaylistTracks,
-  getStoredPlaylists,
+  getStoredPlaylist,
   storePlaylistTracks,
 } from "@/lib/db";
 import { findDuplicates } from "@/lib/spotify/domain";
 import { formatListenTime } from "@/lib/format";
-import { SpotifyError, type Playlist, type Track } from "@/lib/spotify";
+import { SpotifyError, type Track, type Playlist } from "@/lib/spotify";
 import { PlaylistThumb } from "@/components/playlist-thumb";
 import { PlaylistTracksSync } from "@/components/playlist-tracks-sync";
 import { TrackList } from "@/components/track-list";
@@ -24,43 +24,64 @@ export default async function PlaylistDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const sp = await getSpotify();
 
-  // Header (one fast call). A 404 means it's gone. Any other failure (a global cooldown
-  // after a 429, a dev-mode 403, a transient blip) must NOT take down the whole page —
-  // the cached track list below still works — so fall back to the cached library row for
-  // the header and let the page render degraded instead of hitting the error boundary.
-  let playlist: Playlist;
-  try {
-    playlist = await sp.playlist(id);
-  } catch (e) {
-    if (e instanceof SpotifyError && e.status === 404) notFound();
-    const cached = (await getStoredPlaylists()).find((p) => p.id === id);
-    if (!cached) throw e; // nothing cached either → let the boundary handle it
-    playlist = {
-      id,
-      name: cached.name,
-      description: "",
-      ownerId: cached.ownerId ?? "",
-      ownerName: cached.ownerId ?? "",
-      trackCount: cached.trackCount,
-      image: cached.image,
-      public: false,
-      collaborative: false,
-    };
-  }
-
-  // Hide the owner line when it's the user's own playlist — they know.
-  const [meId, cachedTracks, cachedSnapshot] = await Promise.all([
+  // Render entirely from the local store — no Spotify call on the critical path. A live
+  // call here (even the single "get header" one) blocks the whole page for the full
+  // Retry-After window whenever Spotify is rate-limiting, which is what made detail pages
+  // take 10+ seconds. Freshness is checked in the background instead (PlaylistTracksSync),
+  // which only re-paginates when the snapshot_id actually changed.
+  const [meId, cachedTracks, cachedSnapshot, stored] = await Promise.all([
     getMeId(),
     getPlaylistTracks(id),
     getPlaylistSnapshot(id),
+    getStoredPlaylist(id),
   ]);
-  const isMine = !!meId && playlist.ownerId === meId;
-  // Only the playlist's snapshot_id changing means its tracks changed — so we refresh
-  // the cache exactly when (and only when) that differs, never on a blind timer.
-  const tracksStale = cachedTracks.length > 0 && cachedSnapshot !== (playlist.snapshot ?? null);
-  // Total playlist length, summed from the cached tracks (shown once we have them).
+  let cached = stored;
+  // If the cold path below fetches the live header, hand it to <Tracks> so it doesn't
+  // re-fetch the same playlist a second time.
+  let coldLive: Playlist | undefined;
+
+  // Only when we have nothing cached at all (unknown id — e.g. a stale link to a deleted
+  // playlist) do we have to ask Spotify, both for the header and to surface a real 404.
+  if (!cached && cachedTracks.length === 0) {
+    const sp = await getSpotify();
+    try {
+      const live = await sp.playlist(id);
+      coldLive = live;
+      cached = {
+        id,
+        name: live.name,
+        ownerId: live.ownerId,
+        image: live.image,
+        trackCount: live.trackCount,
+      };
+    } catch (e) {
+      if (e instanceof SpotifyError && e.status === 404) notFound();
+      // Rate-limited or another transient blip and nothing cached to fall back on —
+      // show a friendly note instead of a 500 error page.
+      return (
+        <div className="space-y-6">
+          <Link
+            href="/playlists"
+            className="inline-flex w-fit items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:border-white/25 hover:bg-accent hover:text-foreground"
+          >
+            <ArrowLeft className="size-4" />
+            All playlists
+          </Link>
+          <div className="rounded-lg border border-border bg-card p-6 text-center text-sm text-muted-foreground">
+            Couldn&apos;t load this playlist right now — Spotify rate-limited the request.
+            Refresh to try again.
+          </div>
+        </div>
+      );
+    }
+  }
+
+  const name = cached?.name ?? "Playlist";
+  const image = cached?.image ?? null;
+  const ownerId = cached?.ownerId ?? null;
+  const trackCount = cached?.trackCount ?? cachedTracks.length;
+  const isMine = !!meId && ownerId === meId;
   const totalMs = cachedTracks.reduce((sum, t) => sum + (t.durationMs ?? 0), 0);
 
   return (
@@ -75,28 +96,21 @@ export default async function PlaylistDetailPage({
 
       <div className="flex flex-col gap-6 sm:flex-row sm:items-end">
         <div className="w-40 shrink-0">
-          <PlaylistThumb src={playlist.image} name={playlist.name} />
+          <PlaylistThumb src={image} name={name} />
         </div>
         <div className="min-w-0 flex-1">
-          <h1 className="truncate text-3xl font-bold tracking-tight select-text">
-            {playlist.name}
-          </h1>
-          {playlist.description ? (
-            <p className="mt-1.5 line-clamp-2 text-sm text-foreground/80 select-text">
-              {playlist.description}
-            </p>
-          ) : null}
+          <h1 className="truncate text-3xl font-bold tracking-tight select-text">{name}</h1>
           <p className="mt-1.5 text-sm text-muted-foreground">
-            {isMine ? null : <>{playlist.ownerName} · </>}
-            {playlist.trackCount} tracks
+            {isMine || !ownerId ? null : <>{ownerId} · </>}
+            {trackCount} tracks
             {totalMs > 0 ? ` · ${formatListenTime(totalMs)}` : null}
           </p>
         </div>
       </div>
 
-      {/* Serve the cached track list instantly (no Spotify pagination on render);
-          a background refresh updates it when it's empty or >30 min stale. First
-          ever visit (cold cache) streams a live fetch that also fills the cache. */}
+      {/* Serve the cached track list instantly (no Spotify pagination on render); a
+          background check refreshes it only when the playlist's snapshot_id changed.
+          First ever visit (cold cache) streams a live fetch that also fills the cache. */}
       {cachedTracks.length > 0 ? (
         <>
           <TrackList
@@ -105,34 +119,43 @@ export default async function PlaylistDetailPage({
             playlistId={id}
             canRemove={isMine}
           />
-          {tracksStale ? (
-            <PlaylistTracksSync playlistId={id} snapshot={playlist.snapshot} />
-          ) : null}
+          <PlaylistTracksSync playlistId={id} snapshot={cachedSnapshot ?? undefined} />
         </>
       ) : (
         <Suspense fallback={<TracksSkeleton />}>
-          <Tracks id={id} canRemove={isMine} snapshot={playlist.snapshot} />
+          <Tracks id={id} canRemove={isMine} live={coldLive} />
         </Suspense>
       )}
     </div>
   );
 }
 
-// Cold-cache path: fetch live from Spotify, fill the cache for next time, render.
+// Cold-cache path: fetch live from Spotify, fill the cache (with the real snapshot so
+// future visits stay on the fast cache path), render.
 async function Tracks({
   id,
   canRemove,
-  snapshot,
+  live,
 }: {
   id: string;
   canRemove: boolean;
-  snapshot?: string;
+  live?: Playlist;
 }) {
   const sp = await getSpotify();
   let tracks: Track[] | null = null;
+  let snapshot: string | undefined;
   let status = 0;
   try {
-    tracks = await sp.playlistTracks(id);
+    // Reuse the header the cold path already fetched (if any) — only the track list is
+    // still missing — instead of paying for a second sp.playlist(id) call.
+    if (live) {
+      snapshot = live.snapshot;
+      tracks = await sp.playlistTracks(id);
+    } else {
+      const [pl, tr] = await Promise.all([sp.playlist(id), sp.playlistTracks(id)]);
+      snapshot = pl.snapshot;
+      tracks = tr;
+    }
   } catch (e) {
     status = e instanceof SpotifyError ? e.status : 0;
     tracks = null;

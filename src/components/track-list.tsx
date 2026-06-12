@@ -48,17 +48,28 @@ export function TrackList({
   const { playing, toggle, playOptimistic } = useNowPlaying();
   const currentId = playing?.track.id;
   const isPlayingNow = playing?.isPlaying ?? false;
-  const dupes = new Set(duplicateIds);
+  const dupes = useMemo(() => new Set(duplicateIds), [duplicateIds]);
   const [sort, setSort] = useState<Sort>("original");
   const [dir, setDir] = useState<"asc" | "desc">("asc");
   const [menu, setMenu] = useState<{ x: number; y: number; track: Track } | null>(null);
   // URIs removed this session — filtered out immediately so the row disappears
   // without waiting on the server revalidation.
   const [removed, setRemoved] = useState<Set<string>>(new Set());
+  // Once the server list changes it's authoritative — drop the optimistic set, or a
+  // track later re-added to the playlist would stay hidden until a full remount.
+  // (Adjust-state-during-render, per React's "you might not need an effect".)
+  const [prevTracks, setPrevTracks] = useState(tracks);
+  if (prevTracks !== tracks) {
+    setPrevTracks(tracks);
+    if (removed.size) setRemoved(new Set());
+  }
 
-  // Deep-link from Find: `?t=<trackId>` scrolls that row into view and flashes it.
+  // Deep-link from Find: `?t=<trackId>` scrolls that row into view and flashes it. The
+  // flash is a soft wash that fades out on its own, so it's a brief "here it is" cue
+  // rather than a persistent selection.
   const targetTrackId = useSearchParams().get("t");
   const scrolledFor = useRef<string | null>(null);
+  const [flashId, setFlashId] = useState<string | null>(null);
 
   // Double-click a row → play that track within the playlist context, so playback
   // continues through the rest of the playlist (like Spotify). Clears the accidental
@@ -120,9 +131,20 @@ export function TrackList({
       if (!el) return;
       scrolledFor.current = targetTrackId;
       el.scrollIntoView({ block: "center", behavior: "smooth" });
+      setFlashId(targetTrackId);
     });
     return () => cancelAnimationFrame(raf);
   }, [targetTrackId, sorted]);
+
+  // Clear the flash after it has played, on its own timer keyed to flashId — so a
+  // background refresh (which re-renders `sorted`) can't cancel the cleanup and leave the
+  // highlight stuck on. The CSS animation ends at opacity 0 regardless; this just resets
+  // the marker so the same row can flash again later.
+  useEffect(() => {
+    if (!flashId) return;
+    const timeout = setTimeout(() => setFlashId(null), 1700);
+    return () => clearTimeout(timeout);
+  }, [flashId]);
 
   return (
     <div className="space-y-2">
@@ -167,12 +189,8 @@ export function TrackList({
             <li key={`${t.id}-${i}`} id={`t-${t.id}`} className="scroll-mt-24">
               <div
                 className={
-                  "grid cursor-default grid-cols-[1.5rem_1fr_auto] items-center gap-3 px-3 py-2 transition-colors hover:bg-accent/30 md:grid-cols-[1.5rem_2fr_1.4fr_auto]" +
-                  (targetTrackId && targetTrackId === t.id
-                    ? " bg-white/10 ring-1 ring-inset ring-white/30"
-                    : isCurrent
-                      ? " bg-white/5"
-                      : "")
+                  "relative grid cursor-default grid-cols-[1.5rem_1fr_auto] items-center gap-3 px-3 py-2 transition-colors hover:bg-accent/30 md:grid-cols-[1.5rem_2fr_1.4fr_auto]" +
+                  (isCurrent ? " bg-white/5" : "")
                 }
                 onDoubleClick={() => play(t)}
                 onContextMenu={(e) => {
@@ -181,6 +199,15 @@ export function TrackList({
                   setMenu({ x: e.clientX, y: e.clientY, track: t });
                 }}
               >
+                {/* Deep-link flash — a soft, rounded wash that pops in and fades on its
+                    own (CSS flash-pulse; rests at opacity 0 so it's never a stuck box). */}
+                <div
+                  aria-hidden
+                  className={
+                    "pointer-events-none absolute inset-y-1 inset-x-2 rounded-xl bg-white/[0.07] opacity-0 " +
+                    (flashId === t.id ? "flash-pulse" : "")
+                  }
+                />
                 <span className="flex items-center justify-end text-right text-xs tabular-nums text-muted-foreground">
                   {isCurrent ? (
                     <HoverTip label={isPlayingNow ? "Pause" : "Play"} placement="top">

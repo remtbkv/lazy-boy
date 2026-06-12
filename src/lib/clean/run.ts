@@ -60,7 +60,9 @@ export async function cleanPhase1(
     if (targetTracks.length) await storePlaylistTracks(targetId, targetTracks, target.snapshot);
   }
 
-  const library = await getLibraryTracks(targetId);
+  // Other cleaned playlists count as library (so a song kept in an earlier clean is purged
+  // here); only this target's own "Cleaned: <name>" output is excluded — see getLibraryTracks.
+  const library = await getLibraryTracks(targetId, target.name);
   const kept = subtract(targetTracks, library);
   const removed = intersect(targetTracks, library);
 
@@ -101,7 +103,7 @@ export async function reconcileClean(sp: Spotify, ctx: CleanContext): Promise<Re
   const targetFresh = await sp.playlistTracks(ctx.targetId);
   if (targetFresh.length) await storePlaylistTracks(ctx.targetId, targetFresh, target.snapshot);
 
-  const libraryFresh = await getLibraryTracks(ctx.targetId);
+  const libraryFresh = await getLibraryTracks(ctx.targetId, target.name);
   const keptFresh = subtract(targetFresh, libraryFresh);
   const removedFresh = intersect(targetFresh, libraryFresh);
 

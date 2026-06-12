@@ -2,6 +2,7 @@
 // operations the UI calls. Specs in docs/FEATURES.md.
 
 import { Resources } from "./resources";
+import type { TokenSource } from "./client";
 import {
   dedupeByKey,
   findDuplicates,
@@ -25,8 +26,8 @@ export class Service {
   // `patient` rides out rate limits for background bulk work (e.g. cleaning a
   // playlist); forwarded to Resources/HttpClient. Interactive callers omit it so
   // they fail fast and let the UI degrade rather than hang.
-  constructor(accessToken: string, patient = false) {
-    this.resources = new Resources(accessToken, patient);
+  constructor(token: TokenSource, patient = false) {
+    this.resources = new Resources(token, patient);
   }
 
   me() {
@@ -244,7 +245,7 @@ export class Service {
     }
 
     if (collected.length === 0) {
-      throw new Error("Your queue is empty — add songs, then save.");
+      throw new Error("Nothing to save from queue.");
     }
     // Let any player-command throttling settle before the playlist write, so the
     // save itself isn't refused on the back of all the rapid skipping.

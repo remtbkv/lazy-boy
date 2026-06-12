@@ -1,9 +1,9 @@
 "use client";
 
 import { useMemo, useState, useTransition } from "react";
-import { Play } from "lucide-react";
 import { toast } from "@/lib/toast";
 import { resumePlaylistAction } from "@/app/(app)/actions";
+import { PlaylistThumb } from "@/components/playlist-thumb";
 import {
   Card,
   CardContent,
@@ -14,7 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { fuzzyFilter } from "@/lib/filter";
 
-type Item = { id: string; name: string; trackCount: number };
+type Item = { id: string; name: string; trackCount: number; image: string | null };
 
 // Pick a playlist → playback resumes on the active device from the song after the
 // last one you played from it (server figures that out from listen history).
@@ -44,8 +44,7 @@ export function ResumePanel({ playlists }: { playlists: Item[] }) {
       <CardHeader>
         <CardTitle className="text-base">Pick up where you left off</CardTitle>
         <CardDescription>
-          Pick a playlist — playback resumes on your active device from the song after the
-          last one you played from it (or the top if it&apos;s new to you).
+          Begins playback at last listened index of a playlist
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -55,7 +54,8 @@ export function ResumePanel({ playlists }: { playlists: Item[] }) {
           placeholder="Search playlists…"
           className="h-9"
         />
-        <div className="thin-scroll max-h-64 overflow-y-auto rounded-md border border-border">
+        {/* Taller rows with real playlist art; the cap shows ~4 rows before scrolling. */}
+        <div className="thin-scroll max-h-[15.25rem] overflow-y-auto rounded-md border border-border">
           <ul className="divide-y divide-border">
             {filtered.map((p) => (
               <li key={p.id}>
@@ -65,7 +65,9 @@ export function ResumePanel({ playlists }: { playlists: Item[] }) {
                   onClick={() => resume(p)}
                   className="flex w-full items-center gap-3 px-3 py-2 text-left outline-none transition-colors hover:bg-accent/40 focus-visible:bg-accent/40 disabled:opacity-50"
                 >
-                  <Play className="size-4 shrink-0 text-muted-foreground" />
+                  <span className="size-11 shrink-0">
+                    <PlaylistThumb src={p.image} name="" />
+                  </span>
                   <span className="flex-1 truncate text-sm">{p.name}</span>
                   <span className="text-xs text-muted-foreground">
                     {busyId === p.id ? "…" : p.trackCount}

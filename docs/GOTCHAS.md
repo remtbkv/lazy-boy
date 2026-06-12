@@ -89,7 +89,11 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   shows fresh data. `me_id` + `playlists_synced_at` live in the `meta` table. (The
   old per-page `/api/playlists?offset=` waterfall and its `myPlaylistsPage` chain
   were deleted.) `playlist-grid.tsx` still collapses to 3 rows with see-more + fuzzy
-  search; thumbnails are lazy.
+  search; thumbnails are lazy. **Creating a playlist must also write the store** — the
+  grid renders only from the DB, so merge / save-queue / clean / save-diff call
+  `recordNewPlaylist()` (→ `db.upsertStoredPlaylist`, position −1 = sorts first) right
+  after the Spotify create; without that the new playlist is invisible until the next
+  full sync (up to 15 min).
 - **Playlist detail pages serve cached tracks, revalidated by `snapshot_id`.** Paginating a
   playlist's tracks from Spotify on every visit was the main slowness. Tracks are cached per
   playlist in `playlist_tracks` (+ `tracks`), read on render via `getPlaylistTracks`. The
@@ -166,7 +170,77 @@ Shared helpers were extracted — use them instead of re-writing:
 The `(app)` pages stream their data (Suspense) so a slow/rate-limited Spotify call never
 blocks the whole page — keep that pattern.
 
+## Per-instance server state is invisible across serverless instances
+
+Three things live in module/`globalThis` memory, so they're shared only *within one Node
+process*, not across a multi-instance deploy (e.g. Vercel):
+
+- **Task registry** (`lib/tasks/registry.ts`) — the instance that polls `/api/tasks/[id]`
+  may not be the one that ran the task → progress can 404 in production. (It now sweeps
+  finished tasks after 10 min so a long-lived process doesn't leak them, but the
+  cross-instance gap needs the Redis/DB swap in ROADMAP Phase 3.)
+- **Spotify rate-limit cooldown** (`lib/spotify/client.ts`, `cooldownUntil`) — a 429 only
+  backs off requests on the same instance.
+- **Playlist cache** (`lib/spotify/resources.ts`) — one process-wide entry (intentionally
+  not keyed by access token, which only caused a guaranteed miss + leak on each hourly token
+  rotation); each instance has its own.
+
+All three are acceptable for local/single-instance use. What genuinely *coordinates* across
+instances is anything that goes through the DB — notably the token-refresh lock (`meta`
+table). When something must be correct multi-instance, put it in the DB, not module scope.
+
+## Background tasks outlive the access token — pass a token getter
+
+A clean reconcile or full library sync can run longer than Spotify's ~1 h access token. Don't
+hand a background task a fixed token string — it'll 401 mid-run. Pass a `TokenSource` getter
+(`refreshingToken()` in `actions.ts`; `startLibrarySync` and the cron route build the same
+getter from `getValidAccessToken`) so the client refreshes through the shared lock as
+needed. Interactive request-path callers still pass the plain string (fresh for the request).
+
+## Server actions must rethrow Next's control-flow errors
+
+`getSpotify()` handles a dead session by calling `redirect("/login")` — which works by
+**throwing**. A server action that wraps it in `try/catch` and maps the error to a result
+turns that redirect into a literal `"NEXT_REDIRECT"` error toast. Every catch that can see
+`getSpotify()` (or anything else that may `redirect()`) starts with
+`unstable_rethrow(e)` from `next/navigation` — see `fail()` in `(app)/actions.ts`. Keep
+that line first in any new action's catch.
+
+## POSTs are never blind-retried
+
+`client.ts` retries network errors/timeouts — but only for non-POST methods. A timed-out
+POST may still have been applied by Spotify, and the POSTs here aren't idempotent
+(add-items again = duplicate tracks; create-playlist again = a second playlist;
+next-track again = double skip). GET/PUT/DELETE re-send safely. Don't "fix" a flaky POST
+by adding it back to the retry loop.
+
+## Dead playback contexts are negative-cached
+
+`contextName()` returns `null` only for 403/404 (dev-mode forbidden / deleted) and the
+history sync records those as a `contexts` row with `name = NULL` — that row is what stops
+the same dead URI being re-fetched on *every* sync (displays fall back to the context type
+via `COALESCE`). Transient failures throw instead and stay unresolved for the next sync.
+The cache is self-healing: negative rows carry a `checked_at` and are re-tried after ~30
+days (`NEGATIVE_RECHECK_MS`), never-seen contexts always first — so if the app ever leaves
+dev mode, names fill in on their own within a month. No manual cleanup.
+
+## FloatingBar measures its previous sibling
+
+The bottom search pill computes the page's bottom padding from
+`wrap.previousElementSibling` — "the last real content element". Anything `position:fixed`
+rendered between the content and `<FloatingBar>` poisons that measurement (its rect is
+viewport-relative) and zeroes the clearance. Keep fixed-position extras (back-to-top etc.)
+*after* the pill in JSX; DOM order doesn't matter visually for fixed elements.
+
 ## Production security
 
 See `docs/SECURITY.md` before any public deploy. Biggest item: the listen-history DB is
-**not user-scoped** (single-user). Baseline security headers are in `next.config.ts`.
+**not user-scoped** (single-user). `/api/cron/sync` is **fail-closed** — it requires
+`CRON_SECRET` to be set (and matched); an unset secret rejects every caller, so the schedulers
+won't run until it's configured. Baseline security headers are in `next.config.ts`.
+
+---
+
+**Related:** [ARCHITECTURE](ARCHITECTURE.md) (the design these traps sit under) ·
+[CONVENTIONS](CONVENTIONS.md) · [SECURITY](SECURITY.md) · the repo root `AGENTS.md`
+(Next 16 API notes) and `CLAUDE.md` (project overview).

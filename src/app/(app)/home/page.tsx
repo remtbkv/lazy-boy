@@ -1,11 +1,9 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import type { ReactNode } from "react";
-import Link from "next/link";
-import { Clock3, GitCompare, ListMusic, Users } from "lucide-react";
 import { auth } from "@/lib/auth";
-import { getStoredPlaylists, getMeId, getPlaylistsSyncedAt } from "@/lib/db";
+import { getStoredPlaylists, getMeId, getPlaylistsSyncedAt, getCleanBackupPref } from "@/lib/db";
 import { PlaylistsSync } from "@/components/playlists-sync";
+import { QuickActions } from "@/components/quick-actions";
 import { GreetingHeading } from "@/components/greeting-heading";
 
 // Playful greetings live in src/content/greetings.md (one is picked at random per
@@ -43,10 +41,11 @@ export default async function HomePage() {
 
   // Read the library from the store — no Spotify call on render.
   // PlaylistsSync refreshes it in the background when it's empty or stale.
-  const [playlists, meId, syncedAt] = await Promise.all([
+  const [playlists, meId, syncedAt, backupPref] = await Promise.all([
     getStoredPlaylists(),
     getMeId(),
     getPlaylistsSyncedAt(),
+    getCleanBackupPref(),
   ]);
   const owned = meId ? playlists.filter((p) => p.ownerId === meId).length : 0;
   const totalSongs = playlists.reduce((n, p) => n + p.trackCount, 0);
@@ -68,64 +67,21 @@ export default async function HomePage() {
         <PlaylistsSync syncedAt={syncedAt} />
       </header>
 
-      <section className="grid gap-4 sm:grid-cols-2">
-        <ToolCard
-          href="/playlists"
-          icon={<ListMusic />}
-          title="Playlists"
-          desc={"Merge, remove songs saved elsewhere, save your precious queue.\nMore random stuff as well."}
-        />
-        <ToolCard
-          href="/history"
-          icon={<Clock3 />}
-          title="Listening history"
-          desc="Every song you've played. When, how often, and where from."
-        />
-        <ToolCard
-          href="/compare"
-          icon={<GitCompare />}
-          title="Compare a friend"
-          desc="Via songs saved and listened to."
-        />
-        <ToolCard
-          href="/friends"
-          icon={<Users />}
-          title="Friends"
-          desc="Have some fun together."
-        />
-      </section>
+      <QuickActions
+        playlists={playlists.map((p) => ({
+          id: p.id,
+          name: p.name,
+          trackCount: p.trackCount,
+          image: p.image,
+          // Lets the Subtract panel offer in-place removal only on playlists you own.
+          mine: !!meId && p.ownerId === meId,
+        }))}
+        backupPref={backupPref}
+      />
 
       <p className="border-t border-border/60 pt-6 text-sm text-muted-foreground">
-        <span className="font-semibold text-foreground">Lazy Boy</span> does Spotify stuff for you{" "}
-        <span className="italic text-muted-foreground/50">(but he&apos;s not the lazy one)</span>
+        Just do this yourself, man.
       </p>
     </div>
-  );
-}
-
-function ToolCard({
-  href,
-  icon,
-  title,
-  desc,
-}: {
-  href: string;
-  icon: ReactNode;
-  title: string;
-  desc: string;
-}) {
-  return (
-    <Link
-      href={href}
-      className="group rounded-xl border border-border bg-card p-5 transition-all hover:-translate-y-0.5 hover:border-white/25 hover:bg-accent/30"
-    >
-      <div className="flex items-center gap-3">
-        <span className="flex size-9 items-center justify-center rounded-lg bg-white/5 text-foreground transition-colors group-hover:bg-white/10 [&_svg]:size-[18px]">
-          {icon}
-        </span>
-        <h2 className="font-semibold">{title}</h2>
-      </div>
-      <p className="mt-2.5 text-sm text-muted-foreground whitespace-pre-line">{desc}</p>
-    </Link>
   );
 }

@@ -1,5 +1,6 @@
 "use server";
 
+import { unstable_rethrow } from "next/navigation";
 import { getSpotify } from "@/lib/session";
 import { getAllTimeStats, getDailyStats, getLastSync } from "@/lib/db";
 import { tzOffsetMinutes } from "@/lib/tz";
@@ -21,6 +22,8 @@ export async function syncHistoryAction() {
     ]);
     return { ok: true as const, added, daily, lastSync, allTime };
   } catch (e) {
+    // Don't map getSpotify()'s login redirect into an error result (see actions.ts fail()).
+    unstable_rethrow(e);
     return { ok: false as const, error: e instanceof Error ? e.message : "Sync failed" };
   }
 }

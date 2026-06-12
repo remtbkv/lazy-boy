@@ -33,9 +33,25 @@ export async function syncRecentPlays(sp: Spotify): Promise<{ added: number }> {
   // Resolve names for any contexts we don't have yet (cap per sync to be gentle).
   const pending = (await unresolvedContextUris()).slice(0, 20);
   const resolved: ContextRecord[] = [];
-  for (const c of pending) {
-    const r = await sp.contextName(c.uri);
-    if (r) resolved.push({ uri: c.uri, name: r.name, type: r.type });
+  // Resolve in small concurrent batches: faster than one-at-a-time, but still gentle on
+  // Spotify's rate limit (the client's shared cooldown backs the whole batch off on a 429).
+  // contextName returns null only for permanent failures (403/404) — record those with a
+  // null name as a negative cache, so dead contexts stop being re-fetched on every sync.
+  // Transient failures throw; those stay unresolved and retry next sync.
+  for (let i = 0; i < pending.length; i += 4) {
+    const batch = await Promise.all(
+      pending.slice(i, i + 4).map(async (c) => {
+        try {
+          const r = await sp.contextName(c.uri);
+          return r
+            ? { uri: c.uri, name: r.name, type: r.type }
+            : { uri: c.uri, name: null, type: c.type };
+        } catch {
+          return null; // transient — leave unresolved for the next sync
+        }
+      }),
+    );
+    for (const r of batch) if (r) resolved.push(r);
   }
   await recordContexts(resolved);
 

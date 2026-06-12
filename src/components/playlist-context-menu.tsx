@@ -85,7 +85,15 @@ export function PlaylistContextMenu({
     });
   }
 
+  // Delete is destructive and sits one row under Clean — require a second click.
+  // First click arms the row ("Delete?"); the second actually fires.
+  const [confirming, setConfirming] = useState(false);
+
   function del() {
+    if (!confirming) {
+      setConfirming(true);
+      return;
+    }
     onClose();
     start(async () => {
       const r = await deletePlaylistAction(playlist.id);
@@ -127,7 +135,13 @@ export function PlaylistContextMenu({
     >
       <Item icon={<Play className="size-4" />} label="Play" disabled={pending} onClick={play} />
       <Item icon={<Brush className="size-4" />} label="Clean" disabled={pending} onClick={clean} />
-      <Item icon={<Trash2 className="size-4" />} label="Delete" disabled={pending} onClick={del} />
+      <Item
+        icon={<Trash2 className="size-4" />}
+        label={confirming ? "Delete? Click again" : "Delete"}
+        danger={confirming}
+        disabled={pending}
+        onClick={del}
+      />
     </div>
   );
 }
@@ -137,20 +151,25 @@ function Item({
   label,
   onClick,
   disabled,
+  danger = false,
 }: {
   icon: ReactNode;
   label: string;
   onClick: () => void;
   disabled?: boolean;
+  danger?: boolean;
 }) {
   return (
     <button
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className="flex w-full items-center gap-2.5 whitespace-nowrap rounded-md px-2.5 py-2 text-left text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+      className={
+        "flex w-full items-center gap-2.5 whitespace-nowrap rounded-md px-2.5 py-2 text-left transition-colors hover:bg-accent disabled:opacity-50" +
+        (danger ? " text-red-400" : " text-foreground")
+      }
     >
-      <span className="text-muted-foreground">{icon}</span>
+      <span className={danger ? "text-red-400" : "text-muted-foreground"}>{icon}</span>
       {label}
     </button>
   );

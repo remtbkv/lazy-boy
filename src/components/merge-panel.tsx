@@ -70,8 +70,7 @@ export function MergePanel({
       <CardHeader>
         <CardTitle className="text-base">Merge playlists</CardTitle>
         <CardDescription>
-          Pick two or more. We create a new playlist combining them, in order, with
-          duplicate songs removed.
+          Creates new merged playlist with crossover songs removed.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -103,6 +102,7 @@ export function MergePanel({
                   <div
                     role="checkbox"
                     aria-checked={isChecked}
+                    aria-label={p.name}
                     tabIndex={0}
                     onClick={() => toggle(p.id)}
                     onKeyDown={(e) => {

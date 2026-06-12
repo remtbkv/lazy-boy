@@ -73,14 +73,19 @@ export function FindPanel() {
       sel.kind === "song"
         ? `id=${encodeURIComponent(sel.item.id)}`
         : `artist=${encodeURIComponent(sel.item.artist)}`;
-    const [listenRes, locRes] = await Promise.all([
-      fetch(`/api/find/listens?${param}`),
-      fetch(`/api/find/locations?${param}`),
-    ]);
-    if (id !== listenReq.current) return;
-    setLoading(false);
-    if (listenRes.ok) setListens((await listenRes.json()) as Listens);
-    if (locRes.ok) setLocations(((await locRes.json()).locations ?? []) as SongLocation[]);
+    try {
+      const [listenRes, locRes] = await Promise.all([
+        fetch(`/api/find/listens?${param}`),
+        fetch(`/api/find/locations?${param}`),
+      ]);
+      if (id !== listenReq.current) return;
+      if (listenRes.ok) setListens((await listenRes.json()) as Listens);
+      if (locRes.ok) setLocations(((await locRes.json()).locations ?? []) as SongLocation[]);
+    } catch {
+      /* network blip — fall through so loading clears instead of sticking forever */
+    } finally {
+      if (id === listenReq.current) setLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -119,7 +124,9 @@ export function FindPanel() {
   function switchMode(m: Mode) {
     if (m === mode) return;
     setMode(m);
-    setQuery("");
+    // Keep the typed query — the search effect re-runs it in the new mode. Clear only
+    // the previous mode's results/selection so stale matches don't flash before the
+    // new search lands.
     setResults([]);
     setSelected(null);
     setListens(null);
@@ -131,7 +138,7 @@ export function FindPanel() {
       <CardHeader>
         <CardTitle className="text-base">Find {mode === "song" ? "a song" : "an artist"}</CardTitle>
         <CardDescription>
-          Search among your playlists and see the last time you listened.
+          Search among your playlists to find last played instances of a song or artist.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -207,13 +214,15 @@ export function FindPanel() {
                       ? ` · in ${plural(selected.item.playlistCount, "playlist")}`
                       : ""}
                   </p>
-                  {/* Each play is its own row; caps at ~4 with a thin scrollbar so the
-                      rest scroll rather than running down the card. */}
-                  <ul className="thin-scroll max-h-28 space-y-1 overflow-y-auto pr-1 text-sm">
-                    {listens.recent.map((iso, i) => (
-                      <li key={i} className="flex items-baseline justify-between gap-3">
+                  {/* Each play is its own row; capped to exactly three full rows (no
+                      half-row peeking — the scrollbar already signals there's more) and
+                      scrolls for the rest. Both columns share the size: the relative and
+                      exact times are the same fact, so only color separates them. */}
+                  <ul className="thin-scroll max-h-[4.25rem] space-y-1 overflow-y-auto pr-1 text-sm">
+                    {listens.recent.map((iso) => (
+                      <li key={iso} className="flex items-baseline justify-between gap-3">
                         <span>{timeAgo(iso)}</span>
-                        <span className="text-xs text-muted-foreground">{exactTime(iso)}</span>
+                        <span className="text-muted-foreground">{exactTime(iso)}</span>
                       </li>
                     ))}
                   </ul>

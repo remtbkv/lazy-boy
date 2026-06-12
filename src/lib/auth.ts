@@ -91,7 +91,7 @@ async function refreshAccessToken(refreshToken: string) {
         // Hard timeout: a slow/hanging token endpoint must NOT block the page
         // render (the layout awaits auth()). On timeout we fall back to the
         // existing session and retry on a later request.
-        signal: AbortSignal.timeout(5000),
+        signal: AbortSignal.timeout(3000),
       });
     } catch (e) {
       // Network error or timeout: at most one retry, so render is never blocked
@@ -163,7 +163,8 @@ async function coordinatedRefresh(triedToken: string): Promise<SpotifyTokens> {
   if (current && isFresh(current)) return current;
 
   for (let attempt = 0; attempt < 2; attempt++) {
-    if (await acquireLock("spotify_refresh", 15_000)) {
+    const lockOwner = await acquireLock("spotify_refresh", 15_000);
+    if (lockOwner) {
       try {
         current = await getSpotifyTokens(); // the winner may have just written
         if (current && isFresh(current)) return current;
@@ -171,11 +172,11 @@ async function coordinatedRefresh(triedToken: string): Promise<SpotifyTokens> {
         await setSpotifyTokens(updated);
         return updated;
       } finally {
-        await releaseLock("spotify_refresh");
+        await releaseLock("spotify_refresh", lockOwner);
       }
     }
     // Lost the lock — wait for whoever holds it to publish a fresh token.
-    const published = await waitForFreshToken(triedToken, 10_000);
+    const published = await waitForFreshToken(10_000);
     if (published) return published;
     // Holder stalled/crashed; loop to retry (its lock TTL has likely expired).
   }
@@ -185,15 +186,16 @@ async function coordinatedRefresh(triedToken: string): Promise<SpotifyTokens> {
   return updated;
 }
 
-async function waitForFreshToken(
-  triedToken: string,
-  timeoutMs: number,
-): Promise<SpotifyTokens | null> {
+// Freshness alone proves the winner published: callers only wait here after seeing an
+// expired stored token, so any fresh one is new. (Don't also require the refresh token
+// to have changed — Spotify doesn't always rotate it, and that check made losers stare
+// at a perfectly good token for the whole timeout, then refresh redundantly.)
+async function waitForFreshToken(timeoutMs: number): Promise<SpotifyTokens | null> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     await sleep(500);
     const t = await getSpotifyTokens();
-    if (t && t.refreshToken !== triedToken && isFresh(t)) return t;
+    if (t && isFresh(t)) return t;
   }
   return null;
 }
@@ -216,6 +218,10 @@ export async function getValidAccessToken(): Promise<string | null> {
 }
 
 export const { handlers, signIn, signOut, auth } = NextAuth({
+  // We serve on the loopback IP (127.0.0.1) and wrap the route handler, a non-standard
+  // host setup. Trust it explicitly so Auth.js never refuses the host with a generic
+  // "server configuration" error.
+  trustHost: true,
   // Persistent JWT session: the session cookie carries a 30-day expiry so you
   // stay signed in across browser restarts. The Spotify access token inside it
   // is short-lived (~1h) but is silently refreshed in the jwt callback below, so
@@ -255,14 +261,25 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       // Initial sign-in: stash tokens in the DB (the source of truth) and keep the
       // cookie lean. The DB lets concurrent refreshes coordinate (see refreshShared).
       if (account) {
-        await setSpotifyTokens({
+        const tokens = {
           accessToken: account.access_token!,
           refreshToken: account.refresh_token!,
           expiresAt: account.expires_at!,
-        });
-        delete t.accessToken;
-        delete t.refreshToken;
-        delete t.expiresAt;
+        };
+        try {
+          await setSpotifyTokens(tokens);
+          // Stored in the DB (the source of truth) — keep the cookie lean.
+          delete t.accessToken;
+          delete t.refreshToken;
+          delete t.expiresAt;
+        } catch {
+          // DB write failed (e.g. a transient Turso hiccup). Don't fail the whole
+          // login with a server error — keep the tokens in the JWT cookie instead; the
+          // migration path below moves them to the DB on a later request once it's back.
+          t.accessToken = tokens.accessToken;
+          t.refreshToken = tokens.refreshToken;
+          t.expiresAt = tokens.expiresAt;
+        }
         delete t.error;
         return t;
       }

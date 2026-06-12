@@ -75,7 +75,9 @@ Legend: `[x]` done · `[~]` partial / seam in place · `[ ]` not started
 - [ ] **AI playlist** — send playlist track titles to an LLM with formatting rules, get an
       organized playlist back, preview + confirm/retry-with-instructions, then create.
       (Natural fit for the Claude API; see `claude-api` skill.)
-- [ ] **Playlist subtracter "visualizer"** — visual diff/subtraction of playlists.
+- [x] **Playlist subtracter "visualizer"** — done for your *own* playlists as the Subtract
+      quick action (FEATURES §10): base − others, unique/shared split, save the diff or
+      strip the shared in place. The friend-vs-you variant stays blocked above.
 - [ ] **Visual merge-sort ranking** — rank songs by preference via pairwise comparisons.
 - [ ] **Synced jam over different wifi** — shared live queue across users (depends on Spotify
       queue API improving; explicitly "future, unlikely").
@@ -88,3 +90,9 @@ Legend: `[x]` done · `[~]` partial / seam in place · `[ ]` not started
   the real queue endpoint.
 - Can't mute volume on phone (403 `Cannot control device volume`) → not relevant now that we
   read the queue directly instead of muting + skipping.
+
+---
+
+**Related:** [ARCHITECTURE](ARCHITECTURE.md) (current design; the Phase-3 task-durability seam)
+· [FEATURES](FEATURES.md) (shipped behavior) · [SECURITY](SECURITY.md) (the multi-user
+prerequisites) · [GOTCHAS](GOTCHAS.md).

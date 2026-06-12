@@ -8,6 +8,7 @@ export async function GET(req: Request) {
   if (!session?.accessToken) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
-  const limit = Math.min(1000, Math.max(1, Number(new URL(req.url).searchParams.get("limit") ?? 300)));
+  // `|| 300` also covers NaN from a non-numeric param — NaN slips through min/max.
+  const limit = Math.min(1000, Math.max(1, Number(new URL(req.url).searchParams.get("limit")) || 300));
   return Response.json({ results: await getAllTimePlays(limit) });
 }

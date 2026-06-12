@@ -113,7 +113,7 @@ export function PlaylistGrid({
     >
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-          Your playlists · {count}
+          {count} playlists
           {loadingMore ? (
             <span className="ml-2 normal-case text-muted-foreground/70">loading…</span>
           ) : null}
@@ -147,6 +147,17 @@ export function PlaylistGrid({
         </ul>
       )}
 
+      <FloatingBar
+        query={query}
+        onQuery={setQuery}
+        placeholder="Search playlists…"
+        action={action}
+      />
+
+      {/* After FloatingBar on purpose: the pill measures its PREVIOUS sibling as "the
+          last content" for bottom clearance — this fixed button would make that
+          measurement garbage and zero out the padding. Both are fixed, so DOM order
+          doesn't change what you see. */}
       {showingAll && showTop ? (
         <button
           type="button"
@@ -157,13 +168,6 @@ export function PlaylistGrid({
           <ArrowUp className="size-4" />
         </button>
       ) : null}
-
-      <FloatingBar
-        query={query}
-        onQuery={setQuery}
-        placeholder="Search playlists…"
-        action={action}
-      />
 
       {menu ? (
         <PlaylistContextMenu

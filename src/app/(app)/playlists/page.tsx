@@ -1,17 +1,12 @@
-import {
-  getCleanBackupPref,
-  getStoredPlaylists,
-  getPlaylistsSyncedAt,
-} from "@/lib/db";
+import { getStoredPlaylists, getPlaylistsSyncedAt } from "@/lib/db";
 import { PlaylistsClient } from "@/components/playlists-client";
 
 export default async function PlaylistsPage() {
   // Served from the local store — instant. The client triggers a background sync
   // when it's empty or stale (see PlaylistsClient → PlaylistsSync).
-  const [stored, syncedAt, backupPref] = await Promise.all([
+  const [stored, syncedAt] = await Promise.all([
     getStoredPlaylists(),
     getPlaylistsSyncedAt(),
-    getCleanBackupPref(),
   ]);
   const items = stored.map((p) => ({
     id: p.id,
@@ -22,11 +17,11 @@ export default async function PlaylistsPage() {
 
   return (
     <div className="space-y-8">
-      {/* The nav already says "Playlists" — don't repeat it. Promote the description
-          to the page heading instead. */}
-      <h1 className="text-4xl font-bold tracking-tight">Do stuff</h1>
+      {/* The nav already says "Playlists" — don't repeat it. The quick actions moved to
+          Home, so this page is now just your library; the heading reflects that. */}
+      <h1 className="text-4xl font-bold tracking-tight">Your stuff</h1>
 
-      <PlaylistsClient initialItems={items} syncedAt={syncedAt} backupPref={backupPref} />
+      <PlaylistsClient initialItems={items} syncedAt={syncedAt} />
     </div>
   );
 }

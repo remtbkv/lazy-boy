@@ -52,3 +52,8 @@ Palette (CSS variables in `src/app/globals.css`, mapped to Tailwind/shadcn token
   `{ ok: false, error }` to the UI; pages can show a toast/inline message.
 - A `session.error === "RefreshAccessTokenError"` means re-login — the `(app)` layout
   redirects to `/login`.
+
+---
+
+**Related:** [ARCHITECTURE](ARCHITECTURE.md) (the layering these rules enforce) ·
+[FEATURES](FEATURES.md) (the `domain.keyOf` dedupe identity) · [GOTCHAS](GOTCHAS.md).

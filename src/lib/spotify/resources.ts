@@ -1,7 +1,7 @@
 // Typed Spotify endpoints + normalization to domain types. Built on HttpClient.
 // Everything above this layer works with Track/Playlist, never raw Spotify JSON.
 
-import { HttpClient } from "./client";
+import { HttpClient, SpotifyError, type TokenSource } from "./client";
 import type {
   Playlist,
   RawPlaylist,
@@ -71,19 +71,17 @@ function chunk<T>(arr: T[], size: number): T[][] {
 
 // The full playlist list paginates the whole library yet changes rarely, and
 // both the Me stats and the Playlists grid re-fetch it on every navigation.
-// Cache it briefly per access token (single-user app) so revisiting a page is
-// instant instead of re-scanning. Native Spotify order is preserved;
-// createPlaylist busts the entry.
+// Cache it briefly so revisiting a page is instant instead of re-scanning. One
+// process-wide entry: this is a single-user app, so keying by access token only bought
+// a guaranteed cache miss every hourly token rotation (and a leaked entry per rotation).
+// Native Spotify order is preserved; create/remove/unfollow bust it.
 const PLAYLISTS_TTL_MS = 60_000;
-const playlistsCache = new Map<string, { at: number; items: Playlist[] }>();
+let playlistsCache: { at: number; items: Playlist[] } | null = null;
 
 export class Resources {
   readonly http: HttpClient;
-  constructor(
-    private accessToken: string,
-    patient = false,
-  ) {
-    this.http = new HttpClient(accessToken, patient);
+  constructor(token: TokenSource, patient = false) {
+    this.http = new HttpClient(token, patient);
   }
 
   /** Whole library in native order, cached for a short TTL. */
@@ -93,14 +91,15 @@ export class Resources {
     const items = (
       await this.http.getAll<RawPlaylist>("/me/playlists?limit=50")
     ).map(normPlaylist);
-    playlistsCache.set(this.accessToken, { at: Date.now(), items });
+    playlistsCache = { at: Date.now(), items };
     return items;
   }
 
   /** Cached library if still fresh, else null — never triggers a fetch. */
   private peekPlaylists(): Playlist[] | null {
-    const hit = playlistsCache.get(this.accessToken);
-    return hit && Date.now() - hit.at < PLAYLISTS_TTL_MS ? hit.items : null;
+    return playlistsCache && Date.now() - playlistsCache.at < PLAYLISTS_TTL_MS
+      ? playlistsCache.items
+      : null;
   }
 
   // ---- current user ----
@@ -169,7 +168,7 @@ export class Resources {
     });
     // A new playlist makes the cached library stale; drop it so the next read
     // (Me stats, grid) reflects the addition.
-    playlistsCache.delete(this.accessToken);
+    playlistsCache = null;
     return pl.id;
   }
 
@@ -179,6 +178,9 @@ export class Resources {
     for (const batch of chunk(uris, CHUNK)) {
       await this.http.post(`/playlists/${playlistId}/items`, { uris: batch });
     }
+    // The cached library list now carries a stale snapshot/trackCount for this playlist;
+    // drop it so a sync inside the TTL doesn't skip the re-fetch (mirrors removeItems).
+    playlistsCache = null;
   }
 
   /** Insert track URIs starting at `position` (playlist order), batched. Used by the
@@ -195,7 +197,7 @@ export class Resources {
    *  removing your follow is how a playlist disappears from your library. */
   async unfollowPlaylist(playlistId: string): Promise<void> {
     await this.http.delete(`/playlists/${playlistId}/followers`);
-    playlistsCache.delete(this.accessToken);
+    playlistsCache = null;
   }
 
   /** Replace a playlist's contents with the given URIs (clears, then adds). */
@@ -213,7 +215,7 @@ export class Resources {
         items: batch.map((uri) => ({ uri })),
       });
     }
-    playlistsCache.delete(this.accessToken);
+    playlistsCache = null;
   }
 
   // ---- library ----
@@ -420,8 +422,13 @@ export class Resources {
     try {
       const d = await this.http.get<{ name: string }>(endpoint);
       return { name: d.name, type };
-    } catch {
-      return null;
+    } catch (e) {
+      // 403/404 are permanent for this context (dev-mode forbidden / deleted) — null
+      // tells the caller to negative-cache it so it isn't re-fetched every sync.
+      // Anything else (429, network) is transient: rethrow so it stays unresolved
+      // and gets retried next sync instead of being cached as dead.
+      if (e instanceof SpotifyError && (e.status === 403 || e.status === 404)) return null;
+      throw e;
     }
   }
 

@@ -31,11 +31,24 @@ Spotify HTTP — it goes through `resources.ts`. `domain.ts` imports nothing app
 
 - Auth.js v5 (`next-auth@beta`) with the built-in Spotify provider.
 - Scopes (ported from the prototype) requested at sign-in — see `src/lib/auth.ts`.
-- The Spotify **access token + refresh token + expiry** are stored in the encrypted JWT.
+- The Spotify **access/refresh tokens live in the DB** (`spotify_tokens` via `src/lib/db.ts`),
+  which is the single source of truth. The JWT cookie is kept lean (tokens deleted from it
+  after sign-in); a cookie copy is only retained as a fallback if the DB write fails, and an
+  older cookie-stored session is migrated into the DB on its next request.
 - The `jwt` callback refreshes the access token when it's within ~1 min of expiry, using
   `POST https://accounts.spotify.com/api/token` (grant_type=refresh_token). On failure it
   marks the session with `error: "RefreshAccessTokenError"` so the UI can prompt re-login.
+- **Refresh is coordinated**, not duplicated: an in-process lock (`refreshShared`) collapses
+  concurrent refreshes within one instance, and a cross-instance DB mutex
+  (`acquireLock`/`releaseLock` on the `meta` table) stops separate serverless instances from
+  racing Spotify's *rotating* refresh token into `invalid_grant`. Losers poll the DB and
+  accept any **fresh** token (Spotify doesn't always rotate the refresh token, so "did it
+  change" is the wrong signal). The lock is owner-tokened: `acquireLock` returns a token
+  that `releaseLock` requires, so a holder that overran its TTL can't free a lock someone
+  else has since taken.
 - `session` callback exposes `session.accessToken` (server-side use only) and `session.error`.
+- `getValidAccessToken()` is the session-less accessor for background jobs (cron, tasks) — it
+  reuses the same DB tokens and shared lock, so request and background refreshes coordinate.
 - This is the single place tokens are minted/refreshed — fixes the prototype's scattered
   `_ensure_token()` calls.
 
@@ -49,13 +62,21 @@ authed page is a child of that layout, so the gate is enforced once.
 
 ```ts
 // in a Server Component / action / route handler
-const session = await auth()
-const sp = spotifyClient(session.accessToken)   // src/lib/spotify
-const playlists = await sp.playlists.mine()
+const sp = await getSpotify()                 // src/lib/session — authed, redirects on a dead session
+const playlists = await sp.myPlaylists()
+
+// or bind a client to an explicit token (e.g. a background task's refreshing getter):
+const sp = spotifyClient(token)               // src/lib/spotify
 ```
 
-`spotifyClient(token)` returns the resource modules bound to that token. Nothing below the
-action layer reads the session directly.
+`spotifyClient(token)` returns a `Service` bound to that token. Nothing below the action
+layer reads the session directly.
+
+`token` is a `TokenSource` — either the request's access-token string (fresh for the
+request's lifetime) **or** a `() => Promise<string>` getter. Interactive callers pass the
+string; **background tasks pass a getter** (`refreshingToken()` in `actions.ts`) so a run
+that outlives the ~1 h token refreshes mid-flight instead of dying on a 401. See
+*Background tasks*.
 
 ## Background tasks (clean playlist)
 
@@ -64,10 +85,17 @@ action layer reads the session directly.
   `processed`, `total`, `result`, `error`.
 - The clean action starts the work (not awaited), returns a `taskId`. The client polls
   `GET /api/tasks/[id]` until `done|error`.
+- Long tasks (`reconcileClean`, `syncLibrary`) get a **refreshing token getter**, not a fixed
+  string, so the access token is renewed across a multi-minute run.
+- `createTask` runs a TTL sweep that evicts `done|error` tasks older than 10 min, so a
+  long-lived process doesn't accumulate finished tasks.
 - **Extension seam:** swap the Map for Redis/DB to make tasks survive refresh / multi-instance
   (ROADMAP Phase 3). The registry interface stays the same.
-- Caveat (documented, acceptable for now): in-memory tasks are per-server-instance and reset
-  on redeploy — fine for local/single-instance use.
+- **Serverless caveat:** the store is a per-instance `globalThis` Map. On a multi-instance host
+  (e.g. Vercel), the instance that polls `/api/tasks/[id]` may not be the one that ran the
+  task, so progress can 404 — fine for local/single-instance use; the Redis/DB swap is what
+  makes it production-safe. The same per-instance limit applies to the Spotify client's
+  rate-limit cooldown and the playlist cache (both module-scoped). See `docs/GOTCHAS.md`.
 
 ## Data fetching & caching
 
@@ -122,9 +150,10 @@ SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped 
 - `playlists/sync` (POST) — one full library scan → DB; client fires it when the store is stale.
 - `history/search?q=` — local history search (no Spotify call → instant).
 - `now-playing` — live "what's playing"; returns `{ playing: null }` when idle (never stale).
-- `sync` (POST) — on-load history sync; server skips if synced <5 min ago.
+- `sync` (POST) — on-load history sync; server debounces, skipping if synced <~60 s ago.
 - `cron/sync` (GET) — scheduled history sync (GitHub Actions every 5 min + Vercel daily);
-  `CRON_SECRET`-guarded, session-less (uses the stored token).
+  `CRON_SECRET`-guarded (fail-closed: an unset secret rejects all callers), session-less
+  (uses the stored token).
 
 All check `auth()` and 401 on no session, except `cron/sync` (cron secret, no session).
 
@@ -143,3 +172,9 @@ All check `auth()` and 401 on no session, except `cron/sync` (cron secret, no se
 - `components/album-thumb.tsx` — album art + music-note fallback.
 - `components/sort-menu.tsx` — the "Sort by ▾" dropdown.
 - `components/floating-bar.tsx` — the bottom-centered search/see-more pill.
+
+---
+
+**Related:** [GOTCHAS](GOTCHAS.md) (traps behind these choices) · [CONVENTIONS](CONVENTIONS.md)
+(code/theme rules) · [FEATURES](FEATURES.md) (what the operations do) ·
+[SECURITY](SECURITY.md) (token handling, pre-prod checklist) · [ROADMAP](ROADMAP.md).

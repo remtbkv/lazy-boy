@@ -37,12 +37,17 @@ export function TrackContextMenu({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
-    window.addEventListener("click", close);
-    window.addEventListener("contextmenu", close);
-    window.addEventListener("scroll", close, true);
-    window.addEventListener("resize", close);
-    window.addEventListener("keydown", onKey);
+    // Arm the dismiss listeners on the next frame so the trailing events of the
+    // right-click that opened the menu (mouseup/contextmenu) don't instantly close it.
+    const raf = requestAnimationFrame(() => {
+      window.addEventListener("click", close);
+      window.addEventListener("contextmenu", close);
+      window.addEventListener("scroll", close, true);
+      window.addEventListener("resize", close);
+      window.addEventListener("keydown", onKey);
+    });
     return () => {
+      cancelAnimationFrame(raf);
       window.removeEventListener("click", close);
       window.removeEventListener("contextmenu", close);
       window.removeEventListener("scroll", close, true);

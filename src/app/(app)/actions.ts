@@ -1,9 +1,11 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { auth, signIn, signOut } from "@/lib/auth";
+import { unstable_rethrow } from "next/navigation";
+import { auth, signIn, signOut, getValidAccessToken } from "@/lib/auth";
 import { getSpotify } from "@/lib/session";
-import { spotifyClient, SpotifyError } from "@/lib/spotify";
+import { spotifyClient, SpotifyError, type Track } from "@/lib/spotify";
+import { intersect, keyOf, subtract } from "@/lib/spotify/domain";
 import { runTask } from "@/lib/tasks/registry";
 import { cleanPhase1, reconcileClean } from "@/lib/clean/run";
 import { syncLibrary } from "@/lib/sync/library";
@@ -11,11 +13,13 @@ import {
   clearSpotifyTokens,
   deletePlaylistFromDb,
   getCleanBackupPref,
+  getMeId,
   getPlaylistTracks,
   playedTrackIdsInContext,
   removeCachedPlaylistTrack,
   setCleanBackupPref,
   storePlaylistTracks,
+  upsertStoredPlaylist,
 } from "@/lib/db";
 
 export type ActionResult<T = object> =
@@ -23,7 +27,28 @@ export type ActionResult<T = object> =
   | { ok: false; error: string };
 
 function fail(e: unknown): { ok: false; error: string } {
+  // getSpotify() redirects to /login on a dead session by THROWING Next's control-flow
+  // error; mapping it to a result would show the user a literal "NEXT_REDIRECT" toast
+  // instead of logging them out. Rethrow Next's internals, map only real errors.
+  unstable_rethrow(e);
   return { ok: false, error: e instanceof Error ? e.message : String(e) };
+}
+
+// A token getter for background tasks (clean reconcile, library sync) that can outlive
+// the ~1h access token. It refreshes through the shared cross-instance lock and caches
+// briefly, so a long run never dies on a mid-run 401 yet doesn't re-hit the DB per call.
+// (getValidAccessToken only returns a token with ≥60s headroom, so a sub-60s cache is safe.)
+function refreshingToken(): () => Promise<string> {
+  let cached = "";
+  let until = 0;
+  return async () => {
+    if (cached && Date.now() < until) return cached;
+    const t = await getValidAccessToken();
+    if (!t) throw new Error("Spotify session expired — log out and back in.");
+    cached = t;
+    until = Date.now() + 55_000;
+    return t;
+  };
 }
 
 // ---- auth ----
@@ -36,6 +61,20 @@ export async function logout() {
 }
 
 // ---- playlist tools ----
+
+// The grid renders from the DB store, so a playlist created on Spotify is invisible
+// until the next full library sync (up to 15 min) unless we insert its row now. The
+// next sync fills in the mosaic image and true position. Best-effort: the playlist
+// exists on Spotify either way, so store upkeep must never fail the action.
+async function recordNewPlaylist(id: string, name: string, trackCount: number): Promise<void> {
+  try {
+    const me = await getMeId();
+    await upsertStoredPlaylist({ id, name, ownerId: me, image: null, trackCount });
+  } catch {
+    /* next sync picks it up */
+  }
+}
+
 export async function mergeAction(
   sourceIds: string[],
 ): Promise<ActionResult<{ name: string; count: number; id: string }>> {
@@ -43,6 +82,7 @@ export async function mergeAction(
     if (sourceIds.length < 2) throw new Error("Pick at least two playlists.");
     const sp = await getSpotify();
     const r = await sp.mergePlaylists(sourceIds);
+    await recordNewPlaylist(r.id, r.name, r.count);
     revalidatePath("/playlists");
     return { ok: true, ...r };
   } catch (e) {
@@ -62,15 +102,20 @@ export async function startCleanAction(
 > {
   try {
     const session = await auth();
-    if (!session?.accessToken) throw new Error("Not authenticated");
-    const token = session.accessToken;
+    if (!session?.accessToken || session.error) throw new Error("Not authenticated");
+    // Background bulk work can outlive the access token → refreshing getter, not a fixed
+    // string (a 1h+ clean would otherwise 401 mid-run). Patient: ride out rate limits.
+    const token = refreshingToken();
     const useBackup = backup ?? (await getCleanBackupPref());
-    // Patient client: the writes are bulk work, so ride out rate limits.
     const { result, ctx } = await cleanPhase1(spotifyClient(token, true), playlistId, useBackup);
     // Nothing removed → no playlist created, nothing to reconcile.
     if (!ctx || result.unique) {
       return { ok: true, name: result.name, kept: result.kept, removed: 0, unique: true };
     }
+    // The new playlists show in the grid right away (reconcile's syncLibrary would
+    // also get there, but only after the whole background pass).
+    if (result.id) await recordNewPlaylist(result.id, result.name, result.kept);
+    if (ctx.backupId) await recordNewPlaylist(ctx.backupId, ctx.backupName, result.removed);
     const task = runTask("clean-reconcile", () =>
       reconcileClean(spotifyClient(token, true), ctx),
     );
@@ -97,8 +142,8 @@ export async function setCleanBackupAction(on: boolean): Promise<ActionResult> {
 export async function startSyncAction(): Promise<ActionResult<{ taskId: string }>> {
   try {
     const session = await auth();
-    if (!session?.accessToken) throw new Error("Not authenticated");
-    const token = session.accessToken;
+    if (!session?.accessToken || session.error) throw new Error("Not authenticated");
+    const token = refreshingToken();
     const task = runTask("sync-backend", (onProgress) =>
       syncLibrary(spotifyClient(token, true), onProgress),
     );
@@ -123,8 +168,10 @@ export async function deletePlaylistAction(
 ): Promise<ActionResult<{ alreadyGone?: boolean }>> {
   try {
     const session = await auth();
-    if (!session?.accessToken) throw new Error("Not authenticated");
-    const token = session.accessToken;
+    if (!session?.accessToken || session.error) throw new Error("Not authenticated");
+    // Getter, not a fixed string: the delete is quick, but the fire-and-forget resync
+    // below can outlive the token.
+    const token = refreshingToken();
     let alreadyGone = false;
     try {
       await spotifyClient(token).deletePlaylist(playlistId);
@@ -152,8 +199,100 @@ export async function saveQueueAction(): Promise<
   try {
     const sp = await getSpotify();
     const r = await sp.saveQueue();
+    await recordNewPlaylist(r.id, r.name, r.count);
     revalidatePath("/playlists");
     return { ok: true, name: r.name, count: r.count };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+// ---- subtract (set difference) ----
+
+export type SubtractTrack = {
+  id: string;
+  uri: string;
+  title: string;
+  artist: string;
+  albumImage: string | null;
+  durationMs: number | null; // not displayed — feeds the optimistic now-playing chip
+  /** For overlap tracks: the first subtracted playlist that contains it. */
+  in?: string;
+};
+
+// Tracks for a playlist — the cached index first (instant), live fetch + cache only
+// when the playlist has never been synced. Same pattern as resumePlaylistAction.
+async function playlistTracksCached(
+  sp: Awaited<ReturnType<typeof getSpotify>>,
+  id: string,
+): Promise<Track[]> {
+  const cached = await getPlaylistTracks(id);
+  if (cached.length) return cached;
+  const live = await sp.playlistTracks(id);
+  if (live.length) void storePlaylistTracks(id, live).catch(() => {});
+  return live;
+}
+
+/** Set difference for the Subtract panel: split the base playlist's tracks into those
+ *  unique to it (kept) and those that also appear in any of the subtracted playlists
+ *  (overlap, tagged with which playlist claims it). Reads the synced index, so it's
+ *  instant — and as fresh as the last library sync, like Clean's phase 1. */
+export async function subtractPreviewAction(
+  baseId: string,
+  others: { id: string; name: string }[],
+): Promise<ActionResult<{ kept: SubtractTrack[]; overlap: SubtractTrack[] }>> {
+  try {
+    if (others.length === 0) throw new Error("Pick at least one playlist to subtract.");
+    const sp = await getSpotify();
+    const [baseTracks, ...otherLists] = await Promise.all([
+      playlistTracksCached(sp, baseId),
+      ...others.map((o) => playlistTracksCached(sp, o.id)),
+    ]);
+    // Which subtracted playlist "claims" each song — the first one containing it.
+    const sourceByKey = new Map<string, string>();
+    otherLists.forEach((list, i) => {
+      for (const t of list) {
+        const k = keyOf(t);
+        if (!sourceByKey.has(k)) sourceByKey.set(k, others[i].name);
+      }
+    });
+    const allOthers = otherLists.flat();
+    const lite = (t: Track): SubtractTrack => ({
+      id: t.id,
+      uri: t.uri,
+      title: t.title,
+      artist: t.artist,
+      albumImage: t.albumImage ?? null,
+      durationMs: t.durationMs ?? null,
+    });
+    return {
+      ok: true,
+      kept: subtract(baseTracks, allOthers).map(lite),
+      overlap: intersect(baseTracks, allOthers).map((t) => ({
+        ...lite(t),
+        in: sourceByKey.get(keyOf(t)),
+      })),
+    };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+/** Remove a batch of tracks from a playlist in place (the Subtract panel's "remove
+ *  overlap from base"). Refreshes the cached track list + snapshot afterwards so the
+ *  index stays in step — the bulk version of removeFromPlaylistAction's upkeep. */
+export async function removeTracksAction(
+  playlistId: string,
+  uris: string[],
+): Promise<ActionResult<{ removed: number }>> {
+  try {
+    if (uris.length === 0) throw new Error("Nothing to remove.");
+    const sp = await getSpotify();
+    await sp.removeItems(playlistId, uris);
+    const [pl, fresh] = await Promise.all([sp.playlist(playlistId), sp.playlistTracks(playlistId)]);
+    await storePlaylistTracks(playlistId, fresh, pl.snapshot);
+    revalidatePath(`/playlists/${playlistId}`);
+    return { ok: true, removed: uris.length };
   } catch (e) {
     return fail(e);
   }
@@ -167,6 +306,8 @@ export async function saveCompareDiffAction(
     if (uris.length === 0) throw new Error("Nothing to save.");
     const sp = await getSpotify();
     const r = await sp.createFromUris(name, uris);
+    await recordNewPlaylist(r.id, name, r.count);
+    revalidatePath("/playlists");
     return { ok: true, count: r.count };
   } catch (e) {
     return fail(e);
@@ -180,6 +321,7 @@ export async function addToQueueAction(uri: string): Promise<ActionResult> {
     await sp.addToQueue(uri);
     return { ok: true };
   } catch (e) {
+    unstable_rethrow(e);
     if (e instanceof SpotifyError && (e.status === 404 || e.status === 403)) {
       return { ok: false, error: "No active device — start playing on Spotify first." };
     }
@@ -193,6 +335,7 @@ export async function saveToLikedAction(trackId: string): Promise<ActionResult> 
     await sp.saveTrack(trackId);
     return { ok: true };
   } catch (e) {
+    unstable_rethrow(e);
     // A 403 here means the session lacks the `user-library-modify` grant (e.g. it was
     // authorized before that scope was added) — surface a clean, actionable message
     // instead of Spotify's raw error JSON.
@@ -228,6 +371,7 @@ async function playerControl(
     await fn(sp);
     return { ok: true };
   } catch (e) {
+    unstable_rethrow(e);
     if (e instanceof SpotifyError) {
       // 404 = no active device; 403 on a player command is usually "Premium required"
       // (or a transient restriction) — don't mislabel it as a device problem.
@@ -290,7 +434,7 @@ export async function resumePlaylistAction(
     let tracks = cached;
     if (tracks.length === 0) {
       tracks = await sp.playlistTracks(playlistId);
-      if (tracks.length > 0) void storePlaylistTracks(playlistId, tracks);
+      if (tracks.length > 0) void storePlaylistTracks(playlistId, tracks).catch(() => {});
     }
     if (tracks.length === 0) throw new Error("This playlist has no playable tracks.");
 
@@ -326,6 +470,7 @@ export async function resumePlaylistAction(
     await sp.playContext(uri, start.uri);
     return { ok: true, track: start.title, fromTop };
   } catch (e) {
+    unstable_rethrow(e);
     if (e instanceof SpotifyError) {
       if (e.status === 404) {
         return { ok: false, error: "No active device — start playing on Spotify first." };

@@ -21,6 +21,10 @@ export function CleanProgressWatcher() {
   const [active, setActive] = useState(false);
 
   useEffect(() => {
+    // One tick at a time: a response slower than the 1s interval would otherwise
+    // overlap the next tick and both could see "done" → duplicate success toasts.
+    let inFlight = false;
+
     function stop() {
       if (timer.current) {
         clearInterval(timer.current);
@@ -30,6 +34,16 @@ export function CleanProgressWatcher() {
     }
 
     async function tick() {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        await poll();
+      } finally {
+        inFlight = false;
+      }
+    }
+
+    async function poll() {
       const a = readCleanActive();
       if (!a) {
         stop();

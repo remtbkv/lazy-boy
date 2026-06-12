@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState, useTransition } from "react";
-import { Brush, RefreshCw } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { RefreshCw } from "lucide-react";
 import { toast } from "@/lib/toast";
 import {
   setCleanBackupAction,
@@ -20,10 +20,11 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { HoverTip } from "@/components/hover-tip";
+import { PlaylistThumb } from "@/components/playlist-thumb";
 import { writeCleanActive } from "@/lib/clean-progress";
 import { fuzzyFilter } from "@/lib/filter";
 
-type Item = { id: string; name: string; trackCount: number };
+type Item = { id: string; name: string; trackCount: number; image: string | null };
 
 // localStorage key for the in-flight backend sync, so its progress survives a reload
 // and reappears when you reopen this panel.
@@ -94,26 +95,35 @@ export function CleanPanel({
   useEffect(() => {
     if (!syncTaskId) return;
     let stopped = false;
+    let inFlight = false; // one tick at a time — overlapping slow polls double-toast
     const finish = (msg?: () => void) => {
+      stopped = true; // a tick already past its own checks must not finish again
       localStorage.removeItem(SYNC_LS_KEY);
       setSyncTaskId(null);
       setSyncProgress(null);
       msg?.();
     };
     const tick = async () => {
-      const res = await fetch(`/api/tasks/${syncTaskId}`).catch(() => null);
-      if (!res || stopped) return;
-      if (res.status === 404) return finish();
-      if (!res.ok) return;
-      const task = (await res.json()) as {
-        status: string;
-        processed: number;
-        total: number;
-        error?: string;
-      };
-      setSyncProgress({ processed: task.processed ?? 0, total: task.total ?? 0 });
-      if (task.status === "done") finish(() => toast.success("Synced"));
-      else if (task.status === "error") finish(() => toast.error(task.error ?? "Sync failed"));
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const res = await fetch(`/api/tasks/${syncTaskId}`).catch(() => null);
+        if (!res || stopped) return;
+        if (res.status === 404) return finish();
+        if (!res.ok) return;
+        const task = (await res.json()) as {
+          status: string;
+          processed: number;
+          total: number;
+          error?: string;
+        };
+        if (stopped) return;
+        setSyncProgress({ processed: task.processed ?? 0, total: task.total ?? 0 });
+        if (task.status === "done") finish(() => toast.success("Synced"));
+        else if (task.status === "error") finish(() => toast.error(task.error ?? "Sync failed"));
+      } finally {
+        inFlight = false;
+      }
     };
     void tick();
     const iv = setInterval(tick, 1000);
@@ -123,15 +133,25 @@ export function CleanPanel({
     };
   }, [syncTaskId]);
 
+  // Guards a double-click during the action's round-trip — `syncing` only flips after
+  // the response, so without this two clicks start two full library scans.
+  const startingSync = useRef(false);
+
   async function startSync() {
-    const r = await startSyncAction();
-    if (!r.ok) {
-      toast.error(r.error);
-      return;
+    if (startingSync.current) return;
+    startingSync.current = true;
+    try {
+      const r = await startSyncAction();
+      if (!r.ok) {
+        toast.error(r.error);
+        return;
+      }
+      localStorage.setItem(SYNC_LS_KEY, r.taskId);
+      setSyncProgress({ processed: 0, total: 0 });
+      setSyncTaskId(r.taskId);
+    } finally {
+      startingSync.current = false;
     }
-    localStorage.setItem(SYNC_LS_KEY, r.taskId);
-    setSyncProgress({ processed: 0, total: 0 });
-    setSyncTaskId(r.taskId);
   }
 
   const syncing = !!syncTaskId;
@@ -147,8 +167,7 @@ export function CleanPanel({
       <CardHeader>
         <CardTitle className="text-base">Clean a playlist</CardTitle>
         <CardDescription>
-          Find a playlist and remove songs you&apos;ve already saved elsewhere into a new
-          &quot;Cleaned: …&quot; playlist. The original is left untouched.
+          Create new one with already-saved songs removed.
         </CardDescription>
         <CardAction>
           <HoverTip
@@ -181,6 +200,7 @@ export function CleanPanel({
         <div
           role="checkbox"
           aria-checked={backup}
+          aria-label="Back up removed songs to a separate playlist"
           tabIndex={0}
           onClick={toggleBackup}
           onKeyDown={(e) => {
@@ -195,9 +215,9 @@ export function CleanPanel({
           Back up removed songs to a separate playlist
         </div>
 
-        {/* Sizes to its content — a couple of matches stays small — and caps at ~4 rows,
-            scrolling (thin bar) for the rest so the card stays compact. */}
-        <div className="thin-scroll max-h-40 overflow-y-auto rounded-md border border-border">
+        {/* Sizes to its content — a couple of matches stays small — and caps at ~4 of
+            the taller art rows, scrolling (thin bar) for the rest. */}
+        <div className="thin-scroll max-h-[15.25rem] overflow-y-auto rounded-md border border-border">
           <ul className="divide-y divide-border">
             {filtered.map((p) => (
               <li key={p.id}>
@@ -207,7 +227,9 @@ export function CleanPanel({
                   onClick={() => clean(p)}
                   className="flex w-full items-center gap-3 px-3 py-2 text-left outline-none transition-colors hover:bg-accent/40 focus-visible:bg-accent/40 disabled:opacity-50"
                 >
-                  <Brush className="size-4 shrink-0 text-muted-foreground" />
+                  <span className="size-11 shrink-0">
+                    <PlaylistThumb src={p.image} name="" />
+                  </span>
                   <span className="flex-1 truncate text-sm">{p.name}</span>
                   <span className="text-xs text-muted-foreground">
                     {busyId === p.id ? "…" : p.trackCount}

@@ -41,6 +41,6 @@ reuse shadcn primitives, keep it light and uncluttered. No new color tokens with
 - `cookies()`, `headers()` are **async**: `const c = await cookies()`.
 - Route handler signature: `export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> })`.
 - `fetch` is **not cached by default**. We don't enable Cache Components; data is fetched fresh per request.
-- Middleware → **Proxy** (`src/proxy.ts`). We don't use it — auth gating is server-side in the `(app)` layout.
+- Middleware → **Proxy** (`src/proxy.ts`). We don't use it — auth gating is server-side in the `(app)` layout. Host canonicalization (`localhost` → `127.0.0.1`) is client-side via an inline script in the root layout (a server redirect loops — Next normalizes the two hosts to one origin).
 - Server Actions: `'use server'`, revalidate with `revalidatePath`/`revalidateTag` from `next/cache`.
 - Generated route types available: `PageProps<'/route'>`, `LayoutProps<'/route'>` from `next`.

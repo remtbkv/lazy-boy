@@ -97,6 +97,43 @@
   }
 }
 
+/* Deep-link "here it is" cue (Find → playlist row). Pops in quickly, holds briefly, then
+   fades out — and rests at opacity 0, so the highlight is always transient no matter what
+   re-renders mid-flash (never a stuck box). */
+@keyframes flash-pulse {
+  0% {
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  40% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+.flash-pulse {
+  animation: flash-pulse 1.7s ease-out forwards;
+}
+
+/* Now-playing chip: ease one song into the next (art + title/artist) instead of a hard
+   cut. Keyed by track id so it replays on each song change. */
+@keyframes np-swap {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.np-swap {
+  animation: np-swap 0.28s ease-out;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

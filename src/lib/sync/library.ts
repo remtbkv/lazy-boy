@@ -22,11 +22,19 @@ const LIKED_FULL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 // Liked Songs (only re-fetched when the cheap count/newest-added probe shifts). One
 // `/me/playlists` sweep hands us every snapshot_id, so a steady-state run usually
 // costs that sweep + a one-item Liked probe and nothing else.
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export async function syncLibrary(
   sp: Spotify,
   // Reports songs looked through so far / total songs across the owned library + Liked.
   onProgress?: (processed: number, total: number) => void,
+  // `paceMs`: pause this long after each *actual* playlist-track fetch. Background syncs
+  // pass a small value so the burst stays under Spotify's limit and never trips the shared
+  // 429 cooldown (which would freeze now-playing/navigation). Interactive callers (clean)
+  // leave it 0 for speed.
+  opts: { paceMs?: number } = {},
 ): Promise<void> {
+  const paceMs = opts.paceMs ?? 0;
   const [me, playlists] = await Promise.all([sp.me(), sp.myPlaylistsAll()]);
   await storePlaylists(
     playlists.map((p) => ({
@@ -54,6 +62,7 @@ export async function syncLibrary(
     if (!p.snapshot || cachedSnapshot !== p.snapshot) {
       const tracks = await sp.playlistTracks(p.id);
       await storePlaylistTracks(p.id, tracks, p.snapshot);
+      if (paceMs) await sleep(paceMs);
     }
     processed += p.trackCount;
     onProgress?.(processed, total);

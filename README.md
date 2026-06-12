@@ -28,18 +28,24 @@ Merge playlists · Clean playlist (remove already-saved songs) · Save current q
 
 Runs on Vercel. The listen-history + token store is **libSQL/Turso** (`TURSO_DATABASE_URL`,
 `TURSO_AUTH_TOKEN`); locally it falls back to a SQLite file when those are unset. History is
-kept current by a GitHub Actions cron (`.github/workflows/sync.yml`, every 30 min) plus an
-on-app-load sync. See `docs/ARCHITECTURE.md` and `docs/GOTCHAS.md` for the full setup and the
-`.vercel.app` / `AUTH_URL` / redirect-URI details.
+kept current by a GitHub Actions cron (`.github/workflows/sync.yml`, every 5 min) plus an
+on-app-load sync; set **`CRON_SECRET`** (repo secret + Vercel env) or the cron endpoint
+fail-closes and won't run. See `docs/ARCHITECTURE.md` and `docs/GOTCHAS.md` for the full setup
+and the `.vercel.app` / `AUTH_URL` / redirect-URI details.
 
 ## For AI
 
 - `CLAUDE.md` — project context, rules, Next 16 gotchas. **Read first.**
 - `AGENTS.md` — working loop, personas, Next 16 API deltas.
-- `docs/ARCHITECTURE.md` — layers, auth, tasks.
+- `docs/ARCHITECTURE.md` — layers, auth/token coordination, background tasks, data/caching.
+- `docs/GOTCHAS.md` — hard-won traps (Base UI, Spotify API changes, per-instance state). **Read before debugging.**
 - `docs/FEATURES.md` — exact behavior/algorithms (the product value).
-- `docs/ROADMAP.md` — prioritized backlog (from the prototype's `future.txt`).
 - `docs/CONVENTIONS.md` — theme palette + code style.
+- `docs/SECURITY.md` — token handling + pre-production checklist.
+- `docs/ROADMAP.md` — prioritized backlog (from the prototype's `future.txt`).
+
+Each `docs/*.md` ends with a **Related** line linking the others, so you can follow the chain
+from whichever one you land in.
 
 ## Stack
 

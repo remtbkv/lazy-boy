@@ -22,7 +22,9 @@ export type PlayRecord = {
   contextUri: string | null;
 };
 
-export type ContextRecord = { uri: string; name: string; type: string };
+// `name: null` is a negative cache — the context is known-unresolvable (403/404), so it
+// stops being re-fetched every sync; displays fall back to the type via COALESCE.
+export type ContextRecord = { uri: string; name: string | null; type: string };
 
 export type TrackStats = {
   id: string;
@@ -56,8 +58,15 @@ const g = globalThis as unknown as { __listenDbReady?: Promise<Client> };
 
 function getClient(): Promise<Client> {
   if (g.__listenDbReady) return g.__listenDbReady;
-  g.__listenDbReady = init();
-  return g.__listenDbReady;
+  const ready = init();
+  g.__listenDbReady = ready;
+  // If init fails (a transient Turso/network blip on first use), drop the cached
+  // rejection so the next call retries — otherwise every DB call in this process
+  // fails forever until a restart.
+  ready.catch(() => {
+    if (g.__listenDbReady === ready) g.__listenDbReady = undefined;
+  });
+  return ready;
 }
 
 async function init(): Promise<Client> {
@@ -86,6 +95,10 @@ async function init(): Promise<Client> {
     CREATE TABLE IF NOT EXISTS contexts (uri TEXT PRIMARY KEY, name TEXT, type TEXT);
     CREATE INDEX IF NOT EXISTS idx_plays_track ON plays (track_id);
     CREATE INDEX IF NOT EXISTS idx_plays_played_at ON plays (played_at);
+    -- Song identity is (artist, title), case-insensitive: the listen-history lookups and
+    -- Find searches all filter/group on lower(artist)[, lower(name)]. Without this they
+    -- scan the whole tracks table on every call.
+    CREATE INDEX IF NOT EXISTS idx_tracks_artist_name ON tracks (lower(artist), lower(name));
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE IF NOT EXISTS playlists (
       id TEXT PRIMARY KEY,
@@ -108,6 +121,15 @@ async function init(): Promise<Client> {
       added_at TEXT,
       position INTEGER
     );
+    CREATE TABLE IF NOT EXISTS api_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts INTEGER NOT NULL,
+      method TEXT NOT NULL,
+      path TEXT NOT NULL,
+      status INTEGER NOT NULL,
+      retry_after INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_api_log_ts ON api_log (ts);
   `);
   // Migrate older DBs that predate the album/duration columns.
   const info = await client.execute("PRAGMA table_info(tracks)");
@@ -115,6 +137,12 @@ async function init(): Promise<Client> {
   if (!cols.has("album")) await client.execute("ALTER TABLE tracks ADD COLUMN album TEXT");
   if (!cols.has("album_image")) await client.execute("ALTER TABLE tracks ADD COLUMN album_image TEXT");
   if (!cols.has("duration_ms")) await client.execute("ALTER TABLE tracks ADD COLUMN duration_ms INTEGER");
+  // checked_at drives the negative-cache re-check (see unresolvedContextUris).
+  const ctxInfo = await client.execute("PRAGMA table_info(contexts)");
+  const ctxCols = new Set(ctxInfo.rows.map((r) => String(r.name)));
+  if (!ctxCols.has("checked_at")) {
+    await client.execute("ALTER TABLE contexts ADD COLUMN checked_at TEXT");
+  }
   return client;
 }
 
@@ -176,25 +204,42 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
 export async function recordContexts(contexts: ContextRecord[]): Promise<void> {
   if (contexts.length === 0) return;
   const client = await getClient();
+  const now = new Date().toISOString();
   await client.batch(
     contexts.map((c) => ({
-      sql: `INSERT INTO contexts (uri, name, type) VALUES (:uri, :name, :type)
-            ON CONFLICT(uri) DO UPDATE SET name = excluded.name`,
-      args: { uri: c.uri, name: c.name, type: c.type },
+      sql: `INSERT INTO contexts (uri, name, type, checked_at)
+            VALUES (:uri, :name, :type, :at)
+            ON CONFLICT(uri) DO UPDATE SET name = excluded.name, checked_at = excluded.checked_at`,
+      args: { uri: c.uri, name: c.name, type: c.type, at: now },
     })),
     "write",
   );
 }
 
-/** Context URIs in the store that don't yet have a resolved name. */
+// Negative-cached (name IS NULL) contexts get re-checked this often. Keeps the cache
+// self-healing — if the app ever leaves dev mode (403s lift) or a 404 was transient,
+// names appear within a month with no manual cleanup, at ~a few extra calls/month.
+const NEGATIVE_RECHECK_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Context URIs worth resolving: never-seen ones first, then negative-cached ones whose
+ *  re-check window has lapsed. Callers cap the batch, so the ordering keeps stale
+ *  re-checks from starving genuinely new contexts. */
 export async function unresolvedContextUris(): Promise<{ uri: string; type: string }[]> {
   const client = await getClient();
-  const res = await client.execute(
-    `SELECT DISTINCT p.context_uri AS uri, p.context_type AS type
-     FROM plays p LEFT JOIN contexts c ON c.uri = p.context_uri
-     WHERE p.context_uri IS NOT NULL AND c.uri IS NULL`,
+  const cutoff = new Date(Date.now() - NEGATIVE_RECHECK_MS).toISOString();
+  const res = await client.execute({
+    sql: `SELECT DISTINCT p.context_uri AS uri, p.context_type AS type,
+            (c.uri IS NULL) AS isNew
+          FROM plays p LEFT JOIN contexts c ON c.uri = p.context_uri
+          WHERE p.context_uri IS NOT NULL
+            AND (c.uri IS NULL
+                 OR (c.name IS NULL AND (c.checked_at IS NULL OR c.checked_at < :cutoff)))
+          ORDER BY isNew DESC`,
+    args: { cutoff },
+  });
+  return (plainRows(res.rows) as unknown as { uri: string; type: string }[]).map(
+    ({ uri, type }) => ({ uri, type }),
   );
-  return plainRows(res.rows) as unknown as { uri: string; type: string }[];
 }
 
 // `source` is the context (playlist/album name, or type) of the MOST RECENT play
@@ -224,21 +269,33 @@ const LISTENED_MS = `MIN(
   )
 )`;
 
-/** Search history by track name or artist; "" returns most recently played. */
-export async function searchHistory(query: string, limit = 100): Promise<TrackStats[]> {
+// One row per individual play (no GROUP BY): each listen keeps its own timestamp and the
+// context it was played from. `lastPlayed` carries that single play's time; `plays` is 1.
+const SELECT_PLAY = `
+  SELECT t.id, t.name, t.artist, t.uri, t.album, t.album_image AS albumImage,
+    t.duration_ms AS durationMs, 1 AS plays,
+    p.played_at AS lastPlayed, p.played_at AS firstPlayed,
+    COALESCE(c.name, p.context_type) AS source
+  FROM plays p JOIN tracks t ON t.id = p.track_id
+    LEFT JOIN contexts c ON c.uri = p.context_uri`;
+
+/** Search history by track name or artist; "" returns most recently played. Returns each
+ *  play as its own row (not collapsed into a per-song count), newest first, so you see the
+ *  actual time of every listen. */
+export async function searchHistory(query: string, limit = 300): Promise<TrackStats[]> {
   const client = await getClient();
   const q = query.trim();
   if (!q) {
     const res = await client.execute({
-      sql: `${SELECT_TRACK} GROUP BY t.id ORDER BY lastPlayed DESC LIMIT ?`,
+      sql: `${SELECT_PLAY} ORDER BY p.played_at DESC LIMIT ?`,
       args: [limit],
     });
     return plainRows(res.rows) as unknown as TrackStats[];
   }
   const like = `%${q}%`;
   const res = await client.execute({
-    sql: `${SELECT_TRACK} WHERE t.name LIKE ? OR t.artist LIKE ?
-          GROUP BY t.id ORDER BY plays DESC, lastPlayed DESC LIMIT ?`,
+    sql: `${SELECT_PLAY} WHERE t.name LIKE ? OR t.artist LIKE ?
+          ORDER BY p.played_at DESC LIMIT ?`,
     args: [like, like, limit],
   });
   return plainRows(res.rows) as unknown as TrackStats[];
@@ -261,18 +318,24 @@ export async function getAllTimeStats(): Promise<{
   plays: number;
   uniqueTracks: number;
   durationMs: number;
+  since: string | null; // earliest recorded play (ISO), null if none
 }> {
   const client = await getClient();
   const res = await client.execute(
     `WITH listened AS (
-       SELECT p.track_id AS tid, ${LISTENED_MS} AS ms
+       SELECT p.track_id AS tid, p.played_at AS played_at, ${LISTENED_MS} AS ms
        FROM plays p JOIN tracks t ON t.id = p.track_id
      )
      SELECT COUNT(*) AS plays, COUNT(DISTINCT tid) AS uniqueTracks,
-       COALESCE(SUM(ms), 0) AS durationMs
+       COALESCE(SUM(ms), 0) AS durationMs, MIN(played_at) AS since
      FROM listened`,
   );
-  return ({ ...res.rows[0] }) as unknown as { plays: number; uniqueTracks: number; durationMs: number };
+  return ({ ...res.rows[0] }) as unknown as {
+    plays: number;
+    uniqueTracks: number;
+    durationMs: number;
+    since: string | null;
+  };
 }
 
 /** Per-day plays / unique songs / listening time, most recent first. */
@@ -354,6 +417,18 @@ export async function storePlaylists(rows: StoredPlaylist[], meId: string | null
     sql: "DELETE FROM playlist_tracks WHERE playlist_id NOT IN (SELECT id FROM playlists)",
     args: [],
   });
+  // And their snapshot/staleness markers — a leftover plsnap could make a playlist that
+  // later reappears with the same snapshot_id skip its re-fetch against the purged cache.
+  stmts.push({
+    sql: `DELETE FROM meta WHERE key LIKE 'plsnap:%'
+          AND substr(key, 8) NOT IN (SELECT id FROM playlists)`,
+    args: [],
+  });
+  stmts.push({
+    sql: `DELETE FROM meta WHERE key LIKE 'pltracks_at:%'
+          AND substr(key, 13) NOT IN (SELECT id FROM playlists)`,
+    args: [],
+  });
   stmts.push({
     sql: `INSERT INTO meta (key, value) VALUES ('playlists_synced_at', :v)
           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
@@ -376,6 +451,34 @@ export async function getStoredPlaylists(): Promise<StoredPlaylist[]> {
      FROM playlists ORDER BY position`,
   );
   return plainRows(res.rows) as unknown as StoredPlaylist[];
+}
+
+/** One playlist's cached header row (name/owner/image/count) — used by the detail page so
+ *  it doesn't load the entire library just to read a single row. */
+export async function getStoredPlaylist(id: string): Promise<StoredPlaylist | null> {
+  const client = await getClient();
+  const res = await client.execute({
+    sql: `SELECT id, name, owner_id AS ownerId, image, track_count AS trackCount
+          FROM playlists WHERE id = :id`,
+    args: { id },
+  });
+  const rows = plainRows(res.rows) as unknown as StoredPlaylist[];
+  return rows[0] ?? null;
+}
+
+/** Insert one playlist row right after creating it on Spotify, so the grid shows it
+ *  immediately instead of waiting for the next full library sync. position -1 sorts it
+ *  first (Spotify also puts new playlists on top); the next full scan replaces the row
+ *  with real data (mosaic image, true position). */
+export async function upsertStoredPlaylist(p: StoredPlaylist): Promise<void> {
+  const client = await getClient();
+  await client.execute({
+    sql: `INSERT INTO playlists (id, name, owner_id, image, track_count, position)
+          VALUES (:id, :name, :ownerId, :image, :trackCount, -1)
+          ON CONFLICT(id) DO UPDATE SET name = excluded.name,
+            track_count = excluded.track_count`,
+    args: { id: p.id, name: p.name, ownerId: p.ownerId, image: p.image, trackCount: p.trackCount },
+  });
 }
 
 export async function getPlaylistsSyncedAt(): Promise<string | null> {
@@ -527,8 +630,18 @@ export async function getSavedSyncedAt(): Promise<string | null> {
 // ---- the library union (for clean): Liked Songs + every OWNED playlist's tracks ----
 /** Every track you "own" — Liked Songs plus all tracks in playlists you own — as a
  *  flat list (deduping is left to the pure domain layer, which keys on artist+title).
- *  `exceptPlaylistId` excludes the clean target itself. Reads entirely from the store. */
-export async function getLibraryTracks(exceptPlaylistId?: string): Promise<Track[]> {
+ *  `exceptPlaylistId` excludes the clean target itself.
+ *
+ *  Other `Cleaned: …` playlists DO count as library: they're real playlists you listen to,
+ *  so a song already kept in one cleaned playlist gets purged from later cleans (first clean
+ *  wins). The single exception is the target's OWN output, `Cleaned: <exceptName>` — it holds
+ *  exactly the songs this clean keeps, so counting it would make the reconcile pass treat
+ *  those as "saved elsewhere" and empty the playlist it just made. Backups (`Dupes removed
+ *  from: …`) are discard piles and never count. Reads entirely from the store. */
+export async function getLibraryTracks(
+  exceptPlaylistId?: string,
+  exceptName?: string,
+): Promise<Track[]> {
   const client = await getClient();
   const meId = await getMeId();
   const res = await client.execute({
@@ -543,11 +656,14 @@ export async function getLibraryTracks(exceptPlaylistId?: string): Promise<Track
         JOIN tracks t ON t.id = pt.track_id
         JOIN playlists p ON p.id = pt.playlist_id
       WHERE p.owner_id = :meId AND pt.playlist_id <> :except
-        AND p.name NOT LIKE :cleanedLike AND p.name NOT LIKE :backupLike`,
+        AND p.name <> :ownCleaned
+        AND p.name NOT LIKE :backupLike`,
     args: {
       meId,
       except: exceptPlaylistId ?? "",
-      cleanedLike: CLEANED_PREFIX + "%",
+      // The target's own cleaned output, excluded by exact name. With no target name there's
+      // nothing to exclude → a sentinel no real playlist matches.
+      ownCleaned: exceptName ? CLEANED_PREFIX + exceptName : " ",
       backupLike: BACKUP_PREFIX + "%",
     },
   });
@@ -582,22 +698,38 @@ export type FoundSong = {
   playlistCount: number;
 };
 
-/** Songs in any playlist whose title matches `query` (case-insensitive substring), one
- *  row per distinct (artist, title), prefix matches first. For the Find quick-lookup. */
+// Build a token-AND LIKE filter for `column`: every whitespace-separated token must
+// appear somewhere in it, so "old chinese" matches "older chinese parse" even when the
+// words aren't contiguous. Returns the WHERE fragment, its bound args, and a
+// firstPrefix/phrase pair for ranking exact-ish matches above forgiving ones.
+function tokenLike(column: string, query: string) {
+  const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const where = tokens.map((_, i) => `${column} LIKE :tok${i}`).join(" AND ");
+  const args: Record<string, string> = {};
+  tokens.forEach((t, i) => (args[`tok${i}`] = `%${t}%`));
+  return { where, args, firstPrefix: `${tokens[0] ?? ""}%`, phrase: `%${query}%` };
+}
+
+/** Songs in any playlist whose title matches `query` — forgiving, token-by-token: every
+ *  word in the query must appear, in any order (so "old chinese" finds "older chinese
+ *  parse"). One row per distinct (artist, title); contiguous/prefix matches rank first. */
 export async function searchPlaylistSongs(query: string, limit = 12): Promise<FoundSong[]> {
   const q = query.trim();
   if (!q) return [];
+  const { where, args, firstPrefix, phrase } = tokenLike("t.name", q);
+  if (!where) return [];
   const client = await getClient();
   const res = await client.execute({
     sql: `SELECT t.id, t.name AS title, t.artist, t.album, t.album_image AS albumImage,
             COUNT(DISTINCT pt.playlist_id) AS playlistCount
           FROM tracks t JOIN playlist_tracks pt ON pt.track_id = t.id
-          WHERE t.name LIKE :like
+          WHERE ${where}
           GROUP BY lower(t.artist), lower(t.name)
-          ORDER BY (CASE WHEN t.name LIKE :prefix THEN 0 ELSE 1 END),
+          ORDER BY (CASE WHEN t.name LIKE :phrase THEN 0 ELSE 1 END),
+                   (CASE WHEN t.name LIKE :firstPrefix THEN 0 ELSE 1 END),
                    playlistCount DESC, t.name
           LIMIT :limit`,
-    args: { like: `%${q}%`, prefix: `${q}%`, limit },
+    args: { ...args, phrase, firstPrefix, limit },
   });
   return plainRows(res.rows) as unknown as FoundSong[];
 }
@@ -610,29 +742,20 @@ export async function getSongListens(
   limit = 100,
 ): Promise<{ total: number; recent: string[] }> {
   const client = await getClient();
-  const keyRes = await client.execute({
-    sql: "SELECT lower(artist) AS a, lower(name) AS n FROM tracks WHERE id = ?",
-    args: [trackId],
+  // One round-trip: resolve the song's (artist, title) key in a CTE, then count and list
+  // its plays in the same statement. COUNT(*) OVER () is the full match count (computed
+  // before LIMIT), so the capped `recent` rows and the true `total` come back together.
+  const res = await client.execute({
+    sql: `WITH k AS (SELECT lower(artist) AS a, lower(name) AS n FROM tracks WHERE id = :id)
+          SELECT COUNT(*) OVER () AS total, p.played_at AS playedAt
+          FROM plays p JOIN tracks t ON t.id = p.track_id, k
+          WHERE lower(t.artist) = k.a AND lower(t.name) = k.n
+          ORDER BY p.played_at DESC LIMIT :limit`,
+    args: { id: trackId, limit },
   });
-  if (!keyRes.rows[0]) return { total: 0, recent: [] };
-  const a = String(keyRes.rows[0].a);
-  const n = String(keyRes.rows[0].n);
-  const [tot, rec] = await Promise.all([
-    client.execute({
-      sql: `SELECT COUNT(*) AS total FROM plays p JOIN tracks t ON t.id = p.track_id
-            WHERE lower(t.artist) = :a AND lower(t.name) = :n`,
-      args: { a, n },
-    }),
-    client.execute({
-      sql: `SELECT p.played_at AS playedAt FROM plays p JOIN tracks t ON t.id = p.track_id
-            WHERE lower(t.artist) = :a AND lower(t.name) = :n
-            ORDER BY p.played_at DESC LIMIT :limit`,
-      args: { a, n, limit },
-    }),
-  ]);
   return {
-    total: Number(tot.rows[0].total),
-    recent: rec.rows.map((r) => String(r.playedAt)),
+    total: res.rows[0] ? Number(res.rows[0].total) : 0,
+    recent: res.rows.map((r) => String(r.playedAt)),
   };
 }
 
@@ -642,23 +765,27 @@ export type FoundArtist = {
   albumImage: string | null;
 };
 
-/** Artists who appear in any playlist whose name matches `query`, one row per artist
- *  (case-insensitive), with how many of their songs you have and a sample image. */
+/** Artists who appear in any playlist whose name matches `query` — forgiving, token-by-
+ *  token like the song search — one row per artist, with how many of their songs you have
+ *  and a sample image. */
 export async function searchPlaylistArtists(query: string, limit = 12): Promise<FoundArtist[]> {
   const q = query.trim();
   if (!q) return [];
+  const { where, args, firstPrefix, phrase } = tokenLike("t.artist", q);
+  if (!where) return [];
   const client = await getClient();
   const res = await client.execute({
     sql: `SELECT t.artist,
             COUNT(DISTINCT lower(t.name)) AS songCount,
             MAX(t.album_image) AS albumImage
           FROM tracks t JOIN playlist_tracks pt ON pt.track_id = t.id
-          WHERE t.artist LIKE :like
+          WHERE ${where}
           GROUP BY lower(t.artist)
-          ORDER BY (CASE WHEN t.artist LIKE :prefix THEN 0 ELSE 1 END),
+          ORDER BY (CASE WHEN t.artist LIKE :phrase THEN 0 ELSE 1 END),
+                   (CASE WHEN t.artist LIKE :firstPrefix THEN 0 ELSE 1 END),
                    songCount DESC, t.artist
           LIMIT :limit`,
-    args: { like: `%${q}%`, prefix: `${q}%`, limit },
+    args: { ...args, phrase, firstPrefix, limit },
   });
   return plainRows(res.rows) as unknown as FoundArtist[];
 }
@@ -670,21 +797,17 @@ export async function getArtistListens(
 ): Promise<{ total: number; recent: string[] }> {
   const client = await getClient();
   const a = artist.toLowerCase();
-  const [tot, rec] = await Promise.all([
-    client.execute({
-      sql: `SELECT COUNT(*) AS total FROM plays p JOIN tracks t ON t.id = p.track_id
-            WHERE lower(t.artist) = :a`,
-      args: { a },
-    }),
-    client.execute({
-      sql: `SELECT p.played_at AS playedAt FROM plays p JOIN tracks t ON t.id = p.track_id
-            WHERE lower(t.artist) = :a ORDER BY p.played_at DESC LIMIT :limit`,
-      args: { a, limit },
-    }),
-  ]);
+  // One round-trip: window count gives the true total alongside the LIMIT-capped rows.
+  const res = await client.execute({
+    sql: `SELECT COUNT(*) OVER () AS total, p.played_at AS playedAt
+          FROM plays p JOIN tracks t ON t.id = p.track_id
+          WHERE lower(t.artist) = :a
+          ORDER BY p.played_at DESC LIMIT :limit`,
+    args: { a, limit },
+  });
   return {
-    total: Number(tot.rows[0].total),
-    recent: rec.rows.map((r) => String(r.playedAt)),
+    total: res.rows[0] ? Number(res.rows[0].total) : 0,
+    recent: res.rows.map((r) => String(r.playedAt)),
   };
 }
 
@@ -788,21 +911,28 @@ export async function clearSpotifyTokens(): Promise<void> {
 // refreshes across instances. This is a best-effort distributed lock: an atomic
 // compare-and-set on a `lock:<name>` row that only an expired/absent lock can win.
 /** Try to acquire `name` for `ttlMs`. Returns true iff acquired. */
-export async function acquireLock(name: string, ttlMs: number): Promise<boolean> {
+/** Try to take a short-lived cross-instance lock. Returns an owner token (pass it to
+ *  releaseLock) on success, null if the lock is held. The owner check stops a holder
+ *  that overran its TTL from releasing the lock someone else has since acquired. */
+export async function acquireLock(name: string, ttlMs: number): Promise<string | null> {
   const client = await getClient();
   const now = Date.now();
+  const exp = String(now + ttlMs);
   const res = await client.execute({
     sql: `INSERT INTO meta (key, value) VALUES (:k, :exp)
           ON CONFLICT(key) DO UPDATE SET value = :exp
           WHERE CAST(meta.value AS INTEGER) < :now`,
-    args: { k: `lock:${name}`, exp: String(now + ttlMs), now },
+    args: { k: `lock:${name}`, exp, now },
   });
-  return res.rowsAffected > 0;
+  return res.rowsAffected > 0 ? exp : null;
 }
 
-export async function releaseLock(name: string): Promise<void> {
+export async function releaseLock(name: string, owner: string): Promise<void> {
   const client = await getClient();
-  await client.execute({ sql: "DELETE FROM meta WHERE key = ?", args: [`lock:${name}`] });
+  await client.execute({
+    sql: "DELETE FROM meta WHERE key = ? AND value = ?",
+    args: [`lock:${name}`, owner],
+  });
 }
 
 /** Build an upsert statement for a single meta key (for batching). */
@@ -826,4 +956,67 @@ async function getMeta(key: string): Promise<string | null> {
   const client = await getClient();
   const res = await client.execute({ sql: "SELECT value FROM meta WHERE key = ?", args: [key] });
   return res.rows[0] ? String(res.rows[0].value) : null;
+}
+
+// ---- Spotify API request log ----------------------------------------------------------
+// Every outgoing Spotify call is recorded here (fire-and-forget from the HTTP client, so
+// it never slows a request), so a 429 can be analysed after the fact: how many calls we
+// made, over what window, and what wait Spotify demanded. Kept tiny — rows older than an
+// hour are pruned, since the limit is a per-second/minute window, not daily.
+const API_LOG_TTL_MS = 60 * 60 * 1000; // keep one hour
+let apiLogWrites = 0;
+
+export async function logSpotifyRequest(entry: {
+  method: string;
+  path: string;
+  status: number;
+  retryAfter: number | null;
+}): Promise<void> {
+  const client = await getClient();
+  // Store just the endpoint path (no host, no query string) — enough to see which calls
+  // dominate, without bloating rows or storing query params.
+  let p = entry.path;
+  try {
+    p = entry.path.startsWith("http") ? new URL(entry.path).pathname : entry.path.split("?")[0];
+  } catch {
+    /* keep the raw path */
+  }
+  await client.execute({
+    sql: `INSERT INTO api_log (ts, method, path, status, retry_after) VALUES (?, ?, ?, ?, ?)`,
+    args: [Date.now(), entry.method, p, entry.status, entry.retryAfter],
+  });
+  // Prune occasionally rather than on every write.
+  if (++apiLogWrites % 256 === 0) await pruneApiLog();
+}
+
+export async function pruneApiLog(): Promise<void> {
+  const client = await getClient();
+  await client.execute({
+    sql: `DELETE FROM api_log WHERE ts < ?`,
+    args: [Date.now() - API_LOG_TTL_MS],
+  });
+}
+
+/** Spotify-call counts (and how many were 429s) within recent windows, for understanding a
+ *  throttle. `seconds` = how far back the window reaches. Reads the last minute of the log. */
+export async function getApiLogSummary(): Promise<{
+  windows: { seconds: number; calls: number; rateLimited: number }[];
+}> {
+  const client = await getClient();
+  const now = Date.now();
+  const res = await client.execute({
+    sql: `SELECT ts, status FROM api_log WHERE ts > ? ORDER BY ts DESC`,
+    args: [now - 60_000],
+  });
+  const rows = res.rows.map((r) => ({ ts: Number(r.ts), status: Number(r.status) }));
+  const windows = [1, 5, 10, 30, 60].map((seconds) => {
+    const cutoff = now - seconds * 1000;
+    const inWin = rows.filter((r) => r.ts >= cutoff);
+    return {
+      seconds,
+      calls: inWin.length,
+      rateLimited: inWin.filter((r) => r.status === 429).length,
+    };
+  });
+  return { windows };
 }

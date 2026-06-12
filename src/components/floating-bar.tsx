@@ -86,6 +86,7 @@ export function FloatingBar({
           value={query}
           onChange={(e) => onQuery(e.target.value)}
           placeholder={placeholder}
+          aria-label={placeholder}
           className="w-44 bg-transparent text-sm outline-none placeholder:text-muted-foreground sm:w-64"
         />
         {query ? (

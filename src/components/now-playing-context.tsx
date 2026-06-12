@@ -28,7 +28,10 @@ type NowPlayingValue = {
   playing: Playing;
   refresh: () => void;
   setPlaying: React.Dispatch<React.SetStateAction<Playing>>;
-  toggle: () => void;
+  /** Optimistic play/pause. `progressMs` pins the position at flip time (the header
+   *  chip passes its interpolated position so the bar doesn't jump back to the last
+   *  polled value). Resolves with the action result so callers can toast failures. */
+  toggle: (progressMs?: number) => Promise<{ ok: boolean; error?: string }>;
   playOptimistic: (track: NowPlayingTrack, durationMs?: number) => void;
 };
 
@@ -48,14 +51,26 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     playingRef.current = playing; // keep the ref current for toggle() without reading state in render
   }, [playing]);
 
+  // Monotonic guard: refresh() is called from the 6s interval AND ad hoc (after
+  // next/prev) — a slow older response must not overwrite a newer one.
+  const refreshSeq = useRef(0);
+
   const refresh = useCallback(async () => {
     if (Date.now() < suppressUntil.current) return;
+    const seq = ++refreshSeq.current;
     try {
       const res = await fetch("/api/now-playing", { cache: "no-store" });
       if (!res.ok) return;
       const data = (await res.json()) as { playing: Playing };
-      // Re-check after the await — an optimistic change may have happened mid-fetch.
-      if (aliveRef.current && Date.now() >= suppressUntil.current) setPlaying(data.playing);
+      // Re-check after the await — an optimistic change may have happened mid-fetch,
+      // and a newer refresh may have already applied a fresher answer.
+      if (
+        aliveRef.current &&
+        seq === refreshSeq.current &&
+        Date.now() >= suppressUntil.current
+      ) {
+        setPlaying(data.playing);
+      }
     } catch {
       /* transient — keep the last known state rather than flicker */
     }
@@ -81,20 +96,29 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     setPlaying({ track, isPlaying: true, progressMs: 0, durationMs, context: null });
   }, []);
 
-  // Toggle play/pause for whatever's playing (used by the track-list row button).
-  const toggle = useCallback(() => {
-    const cur = playingRef.current;
-    if (!cur) return;
-    const next = !cur.isPlaying;
-    suppressUntil.current = Date.now() + 2000;
-    setPlaying((p) => (p ? { ...p, isPlaying: next } : p)); // optimistic
-    playerSetPlayingAction(next).then((r) => {
+  // Toggle play/pause for whatever's playing (track-list row button + header chip).
+  // Owns the optimistic flip AND the poll suppression — callers that flip state on
+  // their own would race the 6s poll (a mid-flight response would snap the icon back).
+  const toggle = useCallback(
+    async (progressMs?: number) => {
+      const cur = playingRef.current;
+      if (!cur) return { ok: true };
+      const next = !cur.isPlaying;
+      suppressUntil.current = Date.now() + 2000;
+      setPlaying((p) =>
+        p
+          ? { ...p, isPlaying: next, ...(progressMs !== undefined ? { progressMs } : {}) }
+          : p,
+      ); // optimistic
+      const r = await playerSetPlayingAction(next);
       if (!r.ok) {
         suppressUntil.current = 0; // failed → drop the optimistic flip, show real state
         refresh();
       }
-    });
-  }, [refresh]);
+      return r;
+    },
+    [refresh],
+  );
 
   return (
     <Ctx.Provider value={{ playing, refresh, setPlaying, toggle, playOptimistic }}>
@@ -111,7 +135,7 @@ export function useNowPlaying(): NowPlayingValue {
       playing: null,
       refresh: () => {},
       setPlaying: () => {},
-      toggle: () => {},
+      toggle: async () => ({ ok: true }),
       playOptimistic: () => {},
     }
   );

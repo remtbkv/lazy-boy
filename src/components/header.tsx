@@ -49,8 +49,17 @@ export function Header({ name, image }: { name: string; image: string | null }) 
     function onKey(e: KeyboardEvent) {
       if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.defaultPrevented) return; // another handler already used this press
       const el = document.activeElement as HTMLElement | null;
-      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) {
+      // Don't hijack arrows while typing — or while focus is inside an open menu
+      // (Base UI moves real focus to menu items; navigating away would destroy it).
+      if (
+        el &&
+        (el.tagName === "INPUT" ||
+          el.tagName === "TEXTAREA" ||
+          el.isContentEditable ||
+          el.closest('[role="menu"]'))
+      ) {
         return;
       }
       const from = targetIndex.current < 0 ? 0 : targetIndex.current;
@@ -124,6 +133,11 @@ export function Header({ name, image }: { name: string; image: string | null }) 
     if (openTimer.current) clearTimeout(openTimer.current);
     closeTimer.current = setTimeout(() => setMenuOpen(false), 150);
   };
+  // Drop any pending open/close timers on unmount so they can't fire setState afterwards.
+  useEffect(() => () => {
+    if (openTimer.current) clearTimeout(openTimer.current);
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+  }, []);
 
   return (
     <header className="sticky top-0 z-40 border-b border-border bg-background/80 backdrop-blur">
@@ -161,7 +175,15 @@ export function Header({ name, image }: { name: string; image: string | null }) 
         <div className="ml-auto flex items-center gap-3 sm:gap-8">
           <NowPlaying />
           <div onMouseEnter={openMenu} onMouseLeave={scheduleClose}>
-          <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+          <DropdownMenu
+            open={menuOpen}
+            onOpenChange={(o) => {
+              // Closing (item click / Escape) must also cancel a pending hover-open,
+              // or the 180ms timer re-opens the menu with no hover present.
+              if (!o && openTimer.current) clearTimeout(openTimer.current);
+              setMenuOpen(o);
+            }}
+          >
             <DropdownMenuTrigger
               aria-label="Account"
               render={

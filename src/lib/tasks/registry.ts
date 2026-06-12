@@ -32,7 +32,21 @@ export function createTask(label: string): Task {
     updatedAt: Date.now(),
   };
   store.set(task.id, task);
+  sweepFinished();
   return task;
+}
+
+// Evict long-finished tasks so the store doesn't grow without bound in a persistent
+// process. Only touches done/error tasks past the TTL — running ones are never dropped,
+// and the window is long enough that a client polling its result still finds it.
+const FINISHED_TTL_MS = 10 * 60 * 1000;
+function sweepFinished(): void {
+  const cutoff = Date.now() - FINISHED_TTL_MS;
+  for (const [id, t] of store) {
+    if ((t.status === "done" || t.status === "error") && t.updatedAt < cutoff) {
+      store.delete(id);
+    }
+  }
 }
 
 export function getTask(id: string): Task | undefined {

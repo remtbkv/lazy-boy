@@ -41,6 +41,23 @@ export function exactTime(iso: string): string {
   });
 }
 
+/** Compact exact time without the year, e.g. "Jun 6, 9:29 AM" — for dense rows where the
+ *  full year is noise. The full `exactTime` (with year) is fine as a hover tooltip. */
+export function exactTimeShort(iso: string): string {
+  return new Date(iso).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+/** Calendar date as m/d/yy with no zero-padding (e.g. "6/8/26"). Local time. */
+export function shortDate(iso: string): string {
+  const d = new Date(iso);
+  return `${d.getMonth() + 1}/${d.getDate()}/${String(d.getFullYear()).slice(-2)}`;
+}
+
 /** "Today" / "Yesterday", else short month + day (e.g. "Jun 2") — no weekday. */
 export function dayLabel(day: string): string {
   const pad = (n: number) => String(n).padStart(2, "0");

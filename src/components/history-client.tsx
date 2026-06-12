@@ -12,7 +12,7 @@ import { useNowPlaying } from "@/components/now-playing-context";
 import { SortMenu } from "@/components/sort-menu";
 import { TrackContextMenu } from "@/components/track-context-menu";
 import type { Track } from "@/lib/spotify";
-import { dayLabel, exactTime, formatDuration, formatListenTime, timeAgo } from "@/lib/format";
+import { dayLabel, exactTime, exactTimeShort, formatDuration, formatListenTime, shortDate, timeAgo } from "@/lib/format";
 
 type Sort = "recent" | "plays" | "title" | "artist" | "album";
 const SORTS: { key: Sort; label: string }[] = [
@@ -66,7 +66,7 @@ type TrackStats = {
   source: string | null;
 };
 type DayStats = { day: string; plays: number; uniqueTracks: number; durationMs: number };
-type AllTimeStats = { plays: number; uniqueTracks: number; durationMs: number };
+type AllTimeStats = { plays: number; uniqueTracks: number; durationMs: number; since: string | null };
 
 export function HistoryClient({
   initialDaily,
@@ -100,6 +100,7 @@ export function HistoryClient({
   // Search results (all-time) — only shown while there's a query.
   const [results, setResults] = useState(initialResults);
   const logRef = useRef<HTMLDivElement | null>(null);
+  const dayScrollRef = useRef<HTMLDivElement | null>(null);
   const searching = query.trim().length > 0;
 
   // Day/search lists read newest-first; the all-time list reads most-played. The
@@ -118,13 +119,29 @@ export function HistoryClient({
     [searching, results, dayTracks, sort, dir],
   );
 
+  // Monotonic request guards: rapid typing / day-clicks fire overlapping fetches, and
+  // the slower one can settle last and clobber the view with stale data. Each fetch
+  // captures the current sequence and only applies its result if it's still the latest.
+  // `searchReq` covers `results`; `dayReq` covers `dayTracks` (selectDay/selectAllTime
+  // and the background refresh all write it).
+  const searchReq = useRef(0);
+  const dayReq = useRef(0);
+
   async function runSearch(q: string) {
-    const res = await fetch(`/api/history/search?q=${encodeURIComponent(q)}`);
-    if (res.ok) setResults((await res.json()).results as TrackStats[]);
+    const seq = ++searchReq.current;
+    try {
+      const res = await fetch(`/api/history/search?q=${encodeURIComponent(q)}`);
+      if (res.ok && seq === searchReq.current) {
+        setResults((await res.json()).results as TrackStats[]);
+      }
+    } catch {
+      /* network blip — keep the current list; the next keystroke retries */
+    }
   }
 
   async function selectDay(day: string) {
     if (!allSelected && day === selectedDay) return;
+    const seq = ++dayReq.current;
     setAllSelected(false);
     setSelectedDay(day);
     setSort("recent");
@@ -132,27 +149,41 @@ export function HistoryClient({
     setDayLoading(true);
     try {
       const res = await fetch(`/api/history/day?day=${day}`);
-      if (res.ok) setDayTracks((await res.json()).results as TrackStats[]);
+      if (seq !== dayReq.current) return;
+      // On failure show empty, not the PREVIOUS day's rows under this day's heading.
+      setDayTracks(res.ok ? ((await res.json()).results as TrackStats[]) : []);
+    } catch {
+      if (seq === dayReq.current) setDayTracks([]);
     } finally {
-      setDayLoading(false);
+      if (seq === dayReq.current) setDayLoading(false);
     }
   }
 
   async function selectAllTime() {
     if (allSelected) return;
+    const seq = ++dayReq.current;
     setAllSelected(true);
     setSort("plays");
     setDir("desc");
     setDayLoading(true);
     try {
       const res = await fetch(`/api/history/all?limit=${ALL_TIME_LIMIT}`);
-      if (res.ok) setDayTracks((await res.json()).results as TrackStats[]);
+      if (seq !== dayReq.current) return;
+      setDayTracks(res.ok ? ((await res.json()).results as TrackStats[]) : []);
+    } catch {
+      if (seq === dayReq.current) setDayTracks([]);
     } finally {
-      setDayLoading(false);
+      if (seq === dayReq.current) setDayLoading(false);
     }
   }
 
+  // Skip the mount run: it would re-fetch the unfiltered list the server already
+  // rendered (`initialResults`) just to replace it with identical data. Clearing the
+  // query later still re-runs, restoring the full list.
+  const searchedOnce = useRef(false);
   useEffect(() => {
+    if (!searchedOnce.current && !query.trim()) return;
+    searchedOnce.current = true;
     const t = setTimeout(() => runSearch(query), 200);
     return () => clearTimeout(t);
   }, [query]);
@@ -182,14 +213,18 @@ export function HistoryClient({
         if (!r.ok) return;
         setDaily(r.daily);
         setAllTime(r.allTime);
+        // Don't bump the guards (this isn't a new user selection) — just refuse to apply
+        // if the user has since switched day/all or changed the search.
+        const daySeq = dayReq.current;
+        const searchSeq = searchReq.current;
         if (allSelected) {
           const a = await fetch(`/api/history/all?limit=${ALL_TIME_LIMIT}`);
-          if (a.ok) setDayTracks((await a.json()).results as TrackStats[]);
+          if (a.ok && daySeq === dayReq.current) setDayTracks((await a.json()).results as TrackStats[]);
         } else if (selectedDay) {
           const d = await fetch(`/api/history/day?day=${selectedDay}`);
-          if (d.ok) setDayTracks((await d.json()).results as TrackStats[]);
+          if (d.ok && daySeq === dayReq.current) setDayTracks((await d.json()).results as TrackStats[]);
         }
-        if (searching) await runSearch(query);
+        if (searching && searchSeq === searchReq.current) await runSearch(query);
       } catch {
         /* ignore background sync hiccups */
       }
@@ -209,6 +244,23 @@ export function HistoryClient({
 
   const empty = daily.length === 0;
 
+  // Let a plain mouse wheel scroll the day strip sideways (trackpads already swipe
+  // horizontally; this adds wheel support). Native non-passive listener so we can
+  // preventDefault — React's onWheel is passive and can't. Only hijacks the wheel when
+  // the strip actually overflows and the gesture is vertical-dominant.
+  useEffect(() => {
+    const el = dayScrollRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (el.scrollWidth <= el.clientWidth) return;
+      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+      el.scrollLeft += e.deltaY;
+      e.preventDefault();
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [empty]);
+
   return (
     <div className="space-y-6">
       {empty ? (
@@ -225,7 +277,7 @@ export function HistoryClient({
               its own overflow, so it can never run under the all-time card. */}
           <div className="flex items-stretch gap-3">
             <div className="min-w-0 flex-1 rounded-xl border border-border bg-white/[0.02] p-2">
-              <div className="thin-scroll flex gap-3 overflow-x-auto pb-1">
+              <div ref={dayScrollRef} className="thin-scroll flex gap-3 overflow-x-auto pb-1">
               {daily.map((d) => {
                 const active = !allSelected && d.day === selectedDay;
                 return (
@@ -268,6 +320,9 @@ export function HistoryClient({
               <div className="mt-2 text-xs text-muted-foreground">
                 {formatListenTime(allTime.durationMs)} listened
               </div>
+              {allTime.since ? (
+                <div className="text-xs text-muted-foreground">since {shortDate(allTime.since)}</div>
+              ) : null}
             </button>
           </div>
 
@@ -286,6 +341,7 @@ export function HistoryClient({
             </div>
             <TrackTable
               tracks={visibleTracks}
+              mode={searching ? "log" : "aggregate"}
               loading={!searching && dayLoading}
               empty={
                 searching
@@ -311,15 +367,21 @@ export function HistoryClient({
 }
 
 // Scrollable table for the day view and search results.
+// "aggregate" (day / all-time): one row per song with a Plays count + last-played.
+// "log" (search): one row per individual play with its own actual timestamp — listens
+// are never collapsed, so you see every time you played it.
 function TrackTable({
   tracks,
   empty,
+  mode = "aggregate",
   loading = false,
 }: {
   tracks: TrackStats[];
   empty: string;
+  mode?: "aggregate" | "log";
   loading?: boolean;
 }) {
+  const isLog = mode === "log";
   const { playing, playOptimistic } = useNowPlaying();
   const currentId = playing?.track.id;
   const [menu, setMenu] = useState<{ x: number; y: number; track: Track } | null>(null);
@@ -364,8 +426,14 @@ function TrackTable({
             <th className="px-4 py-2 font-medium">Song</th>
             <th className="hidden px-4 py-2 font-medium md:table-cell">Album</th>
             <th className="hidden w-20 px-4 py-2 text-right font-medium sm:table-cell">Length</th>
-            <th className="w-16 px-4 py-2 text-right font-medium">Plays</th>
-            <th className="hidden w-28 px-4 py-2 font-medium sm:table-cell">Last played</th>
+            {isLog ? null : <th className="w-16 px-4 py-2 text-right font-medium">Plays</th>}
+            <th
+              className={
+                "hidden px-4 py-2 font-medium sm:table-cell " + (isLog ? "w-36" : "w-28")
+              }
+            >
+              {isLog ? "Played" : "Last played"}
+            </th>
             <th className="hidden w-40 px-4 py-2 font-medium lg:table-cell">From</th>
           </tr>
         </thead>
@@ -374,7 +442,7 @@ function TrackTable({
             const isCurrent = !!currentId && currentId === t.id;
             return (
             <tr
-              key={t.id}
+              key={`${t.id}-${t.lastPlayed}`}
               className={
                 "cursor-default border-b border-border last:border-0 transition-colors hover:bg-accent/30" +
                 (isCurrent ? " bg-white/5" : "")
@@ -407,10 +475,15 @@ function TrackTable({
               <td className="hidden px-4 py-2 text-right tabular-nums text-muted-foreground sm:table-cell">
                 {formatDuration(t.durationMs)}
               </td>
-              <td className="px-4 py-2 text-right tabular-nums">{t.plays}</td>
+              {isLog ? null : (
+                <td className="px-4 py-2 text-right tabular-nums">{t.plays}</td>
+              )}
               <td className="hidden px-4 py-2 text-muted-foreground sm:table-cell">
-                <HoverTip label={exactTime(t.lastPlayed)} className="cursor-default">
-                  {timeAgo(t.lastPlayed)}
+                <HoverTip
+                  label={isLog ? timeAgo(t.lastPlayed) : exactTime(t.lastPlayed)}
+                  className="cursor-default"
+                >
+                  {isLog ? exactTimeShort(t.lastPlayed) : timeAgo(t.lastPlayed)}
                 </HoverTip>
               </td>
               <td className="hidden px-4 py-2 text-muted-foreground lg:table-cell">
@@ -421,7 +494,7 @@ function TrackTable({
           })}
           {tracks.length === 0 ? (
             <tr>
-              <td colSpan={6} className="px-4 py-8 text-center text-muted-foreground">
+              <td colSpan={isLog ? 5 : 6} className="px-4 py-8 text-center text-muted-foreground">
                 {loading ? "Loading…" : empty}
               </td>
             </tr>

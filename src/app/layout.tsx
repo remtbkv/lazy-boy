@@ -34,6 +34,18 @@ export default function RootLayout({
       {/* Chrome is non-selectable by default; content (song/playlist names) opts
           back in with `select-text` so it can still be copied. */}
       <body className="flex min-h-full select-none flex-col">
+        {/* Canonicalize the host to the loopback IP before anything renders. Spotify's
+            OAuth round-trip is pinned to 127.0.0.1, and browser cookies are per-host
+            (localhost ≠ 127.0.0.1), so starting on localhost breaks sign-in. A server
+            redirect can't fix it (Next's dev server treats the two as one origin and just
+            loops), but the browser distinguishes them — so we bounce localhost → 127.0.0.1
+            here, client-side. No-ops on 127.0.0.1 and on the deployed domain. */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              "if(location.hostname==='localhost'){location.replace('http://127.0.0.1'+(location.port?':'+location.port:'')+location.pathname+location.search+location.hash)}",
+          }}
+        />
         {children}
         {/* Subtle, Spotify-style toasts: neutral, centered, low on the screen — sitting
             just above the bottom search pill (FloatingBar spans ~24–62px from the bottom)

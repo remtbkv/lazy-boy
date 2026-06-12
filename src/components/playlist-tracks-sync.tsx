@@ -31,7 +31,9 @@ export function PlaylistTracksSync({
     })
       .then((r) => r.json())
       .then((d) => {
-        if (mounted && d.ok) router.refresh();
+        // Only refresh when the tracks actually changed — an unchanged snapshot returns
+        // {ok:true, changed:false} and must not trigger a needless re-render.
+        if (mounted && d.ok && d.changed) router.refresh();
       })
       .catch(() => {});
     return () => {

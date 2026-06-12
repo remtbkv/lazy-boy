@@ -73,7 +73,10 @@ art → `album-thumb`; sort dropdown → `sort-menu`; bottom search pill → `fl
 - `cookies()` and `headers()` are **async** — `await cookies()`.
 - Route handler 2nd arg: `{ params }: { params: Promise<{ id: string }> }`.
 - Middleware is renamed **Proxy** (`src/proxy.ts`). We avoid it: route protection is done
-  server-side in the `(app)` layout via `auth()`.
+  server-side in the `(app)` layout via `auth()`. Host canonicalization (`localhost` →
+  `127.0.0.1`, needed so the Spotify OAuth round-trip + cookies stay on one host) is done
+  **client-side** by an inline script in the root layout — a server redirect can't do it
+  because Next's dev server normalizes the two hosts to one origin and just loops.
 - We do **not** enable Cache Components. Data is user-specific and fetched fresh per request.
 
 ## Build / run

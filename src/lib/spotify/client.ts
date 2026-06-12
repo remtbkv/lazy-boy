@@ -2,6 +2,7 @@
 // Owns: auth header, JSON, pagination, 429/Retry-After backoff. No domain logic here.
 
 import type { Paging } from "./types";
+import { getApiLogSummary, logSpotifyRequest } from "@/lib/db";
 
 const BASE = "https://api.spotify.com/v1";
 const MAX_RETRIES = 3;
@@ -17,6 +18,9 @@ const RETRY_AFTER_CAP_S = { fast: 5, patient: 30 };
 // the response, so retry only ONCE — enough to ride out a transient blip, but a real
 // "forbidden" fails fast instead of burning calls and stalling the page.
 const FORBIDDEN_RETRIES = 1;
+// When Spotify's Retry-After is larger than this (seconds), it's a long ban, not a brief
+// burst throttle — stop retrying immediately instead of hammering a banned endpoint.
+const HARD_BAN_S = 120;
 
 export class SpotifyError extends Error {
   status: number;
@@ -36,13 +40,22 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // of all of them retrying into the throttle at once.
 let cooldownUntil = 0;
 
+// A bearer token, or a getter that returns a currently-valid one. Interactive callers
+// pass the request's token (fresh for the request's lifetime); long-running background
+// work passes a getter so a token that expires mid-run is refreshed, not used dead.
+export type TokenSource = string | (() => Promise<string>);
+
 export class HttpClient {
   // `patient` = ride out rate limits (background bulk work). Default false so
   // interactive callers fail fast.
   constructor(
-    private accessToken: string,
+    private token: TokenSource,
     private patient = false,
   ) {}
+
+  private async bearer(): Promise<string> {
+    return typeof this.token === "string" ? this.token : await this.token();
+  }
 
   private async raw(
     method: string,
@@ -68,7 +81,7 @@ export class HttpClient {
         res = await fetch(url, {
           method,
           headers: {
-            Authorization: `Bearer ${this.accessToken}`,
+            Authorization: `Bearer ${await this.bearer()}`,
             ...(body ? { "Content-Type": "application/json" } : {}),
           },
           body: body ? JSON.stringify(body) : undefined,
@@ -77,22 +90,53 @@ export class HttpClient {
           signal: AbortSignal.timeout(10000),
         });
       } catch (e) {
-        // Network error / timeout: retry a couple of times, then surface it.
-        if (transient++ < MAX_RETRIES) {
+        // Log the failed attempt too (network error / timeout), then retry or surface it.
+        void logSpotifyRequest({ method, path, status: 0, retryAfter: null }).catch(() => {});
+        // Never blind-retry a POST: a timeout doesn't mean Spotify didn't apply it, and
+        // POSTs here aren't idempotent (add items again = duplicate tracks; create
+        // playlist again = a second playlist; next/previous again = double skip).
+        // GET/PUT/DELETE are safe to re-send.
+        if (method !== "POST" && transient++ < MAX_RETRIES) {
           await sleep(transient * 500);
           continue;
         }
         throw e;
       }
 
+      // Record every outgoing call so a 429 can be analysed after the fact. Fire-and-forget
+      // (the DB write must never slow a Spotify request).
+      const rawRetryAfter =
+        res.status === 429 ? Number(res.headers.get("Retry-After") ?? "") || null : null;
+      void logSpotifyRequest({ method, path, status: res.status, retryAfter: rawRetryAfter }).catch(
+        () => {},
+      );
+
       // Rate limited: respect Retry-After (capped per-wait) and retry. Interactive
       // callers give up quickly (UI degrades); patient callers ride it out.
       const rlMax = this.patient ? RATE_LIMIT_RETRIES.patient : RATE_LIMIT_RETRIES.fast;
       const rlCap = this.patient ? RETRY_AFTER_CAP_S.patient : RETRY_AFTER_CAP_S.fast;
       if (res.status === 429) {
-        const retryAfter = Math.min(Number(res.headers.get("Retry-After") ?? "1"), rlCap);
+        const retryAfter = Math.min(rawRetryAfter ?? 1, rlCap);
         // Make every other request back off too, not just this one.
         cooldownUntil = Math.max(cooldownUntil, Date.now() + (retryAfter + 0.25) * 1000);
+        // On the first 429 of this call, log how hard we were hitting Spotify just before
+        // it throttled — the data we use to learn where the real limit is.
+        if (rateLimited === 0) {
+          void getApiLogSummary()
+            .then((s) => {
+              const w = s.windows.map((x) => `${x.seconds}s=${x.calls}`).join(" ");
+              console.warn(
+                `[spotify] rate-limited on ${method} ${path} — Spotify Retry-After=${rawRetryAfter ?? "?"}s; recent calls ${w}`,
+              );
+            })
+            .catch(() => {});
+        }
+        // If Spotify is asking us to wait far longer than we'd ever usefully retry (it
+        // hands out multi-hour bans when an endpoint is hammered), stop now: more calls
+        // can't succeed in any reasonable window and only risk deepening the ban.
+        if ((rawRetryAfter ?? 0) > HARD_BAN_S) {
+          return res;
+        }
         if (rateLimited < rlMax) {
           rateLimited++;
           await sleep((retryAfter + 0.25) * 1000);

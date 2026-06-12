@@ -5,57 +5,106 @@ import { useRouter } from "next/navigation";
 
 const STALE_MS = 15 * 60 * 1000; // re-sync the library at most every 15 min
 const COOLDOWN_MS = 60 * 1000; // after any attempt, don't re-fire for a while
+const REFRESH_EVERY_MS = 4000; // pull newly-cached data into the view this often, mid-sync
 
-// App-wide guards (module scope) so navigating between pages — each of which
-// mounts this — never spawns overlapping syncs or retries in a tight loop while
-// rate-limited. That spiral is what made the page feel "stuck".
+// App-wide guards (module scope) so navigating between pages — each of which mounts this —
+// never spawns overlapping syncs or retries in a tight loop while rate-limited.
 let inFlight = false;
 let lastAttempt = 0;
 
-// Fire-and-forget: if the stored library is empty or stale, kick a single
-// background sync and refresh the server data when it lands — without ever
-// blocking navigation or re-firing as you move around.
+// Fire-and-forget: if the stored library is empty or stale, kick a single background sync
+// task and poll it for progress, refreshing the view periodically so newly-cached
+// playlists/tracks appear as they land — never blocking navigation. The scan itself runs
+// server-side (paced, snapshot-gated, committing per playlist), so it finishes even if you
+// navigate away; this component just surfaces progress and integrates the results.
 export function PlaylistsSync({ syncedAt }: { syncedAt: string | null }) {
   const router = useRouter();
   const [syncing, setSyncing] = useState(false);
+  const [percent, setPercent] = useState<number | null>(null);
 
   useEffect(() => {
-    let mounted = true;
     const stale = !syncedAt || Date.now() - new Date(syncedAt).getTime() > STALE_MS;
     if (!stale) return;
-    // Something is already syncing, or we tried very recently — don't pile on.
-    // (Whoever fired the in-flight sync owns the indicator + refresh.)
     if (inFlight) return;
     if (Date.now() - lastAttempt < COOLDOWN_MS) return;
 
     inFlight = true;
     lastAttempt = Date.now();
-    // Reflect the background sync we're firing right here. The set-state-in-effect
-    // rule can't tell this from a pointless cascade, but it's the legitimate
-    // "show pending UI while an external op runs" case (one extra render on mount).
+    let mounted = true;
+    let pollId: ReturnType<typeof setInterval> | undefined;
+    let lastRefresh = Date.now();
+
+    // Reflect the background sync we're firing right here (legitimate "pending UI while an
+    // external op runs" case — one extra render on mount).
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSyncing(true);
+
+    const stop = (refresh: boolean) => {
+      if (pollId) clearInterval(pollId);
+      inFlight = false;
+      if (!mounted) return;
+      setSyncing(false);
+      setPercent(null);
+      if (refresh) router.refresh();
+    };
+
     fetch("/api/playlists/sync", { method: "POST" })
       .then((r) => r.json())
       .then((d) => {
-        // Only refresh if still on this page — never yank a page you navigated to.
-        if (mounted && d.ok) router.refresh();
+        // Unmounted while the kickoff was in flight — don't create an interval nobody
+        // can clear (cleanup already ran with pollId still undefined).
+        if (!mounted) return;
+        if (!d.ok || !d.taskId) {
+          stop(false);
+          return;
+        }
+        pollId = setInterval(async () => {
+          try {
+            const res = await fetch(`/api/tasks/${d.taskId}`, { cache: "no-store" });
+            // 404 = the task is gone for good (registry sweep, server restart, other
+            // serverless instance) — stop, or this polls every 1.5s forever with the
+            // "syncing…" label stuck.
+            if (res.status === 404) {
+              stop(true);
+              return;
+            }
+            if (!res.ok) return;
+            const task = (await res.json()) as {
+              status: string;
+              processed: number;
+              total: number;
+            };
+            if (mounted && task.total > 0) {
+              setPercent(Math.min(99, Math.round((task.processed / task.total) * 100)));
+            }
+            // Integrate incremental progress into the view, throttled.
+            if (Date.now() - lastRefresh > REFRESH_EVERY_MS) {
+              lastRefresh = Date.now();
+              if (mounted) router.refresh();
+            }
+            if (task.status === "done" || task.status === "error") stop(true);
+          } catch {
+            /* transient poll hiccup — keep going */
+          }
+        }, 1500);
       })
-      .catch(() => {})
-      .finally(() => {
-        inFlight = false;
-        if (mounted) setSyncing(false);
-      });
+      .catch(() => stop(false));
 
     return () => {
       mounted = false;
+      if (pollId) clearInterval(pollId);
+      inFlight = false;
+      // A dep-change re-run (fresh syncedAt arriving mid-poll) returns early at the
+      // staleness check — reset here so "syncing…" can't stick with no poller alive.
+      setSyncing(false);
+      setPercent(null);
     };
   }, [syncedAt, router]);
 
   if (!syncing) return null;
   return (
     <span className="text-xs text-muted-foreground/70" aria-live="polite">
-      syncing…
+      syncing{percent != null ? ` ${percent}%` : "…"}
     </span>
   );
 }
