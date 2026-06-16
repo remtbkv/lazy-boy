@@ -3,6 +3,7 @@
 // on demand. Backed by libSQL (Turso) so it persists on Vercel's serverless
 // runtime; falls back to a local SQLite file in dev when TURSO_DATABASE_URL is unset.
 import "server-only";
+import { cache } from "react";
 import path from "node:path";
 import fs from "node:fs";
 import { createClient, type Client, type InStatement } from "@libsql/client";
@@ -116,6 +117,9 @@ async function init(): Promise<Client> {
       PRIMARY KEY (playlist_id, position)
     );
     CREATE INDEX IF NOT EXISTS idx_pltracks_pl ON playlist_tracks (playlist_id);
+    -- Find "where does this song/artist live" looks up playlist_tracks BY track_id; without
+    -- this it full-scans the table (slow, and worse against remote Turso — was ~4.5s).
+    CREATE INDEX IF NOT EXISTS idx_pltracks_track ON playlist_tracks (track_id);
     CREATE TABLE IF NOT EXISTS saved_tracks (
       track_id TEXT PRIMARY KEY,
       added_at TEXT,
@@ -197,6 +201,9 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
   const results = await client.batch(stmts, "write");
   let added = 0;
   for (const i of insertResultIdx) added += Number(results[i].rowsAffected);
+  // New plays landed → refresh the cached all-time totals so Home reads them instantly
+  // (instead of running the expensive gap scan on render). Only on a real change.
+  if (added > 0) await recomputeAllTimeStats();
   return added;
 }
 
@@ -254,20 +261,44 @@ const SELECT_TRACK = `
        WHERE p2.track_id = t.id ORDER BY p2.played_at DESC LIMIT 1) AS source
   FROM tracks t JOIN plays p ON p.track_id = t.id`;
 
-// Estimated time *actually* listened for each play (for `plays p JOIN tracks t`): the gap
-// until the next play, capped at the song's length. So a skipped/partial play counts only
-// the few seconds it ran; a fully-played one counts ~its length; and stopping then resuming
-// hours later is capped at the song length (not the idle gap). This corrects the old
-// "every play = full song length" over-count, using only the recently-played timestamps we
-// already store — no extra Spotify calls. 10-min fallback when a track's duration is unknown.
-const LISTENED_MS = `MIN(
-  COALESCE(t.duration_ms, 600000),
-  COALESCE(
-    (CAST(strftime('%s', LEAD(p.played_at) OVER (ORDER BY p.played_at)) AS INTEGER)
-      - CAST(strftime('%s', p.played_at) AS INTEGER)) * 1000,
-    COALESCE(t.duration_ms, 600000)
-  )
-)`;
+// Estimated time *actually* listened per play: the gap until the next play, capped at the
+// song's length. A skipped/partial play counts only the seconds it ran; a fully-played one
+// counts ~its length; stopping then resuming hours later is capped at the song length (not
+// the idle gap). 10-min fallback when a track's duration is unknown.
+//
+// Computed in JS, not SQL: the equivalent `LEAD() OVER (ORDER BY played_at)` window function
+// runs pathologically slowly on Turso (~3s for ~1.5k rows — it was the whole reason the
+// history view was slow to load). A plain ordered fetch + linear pass is ~50ms and scales
+// fine (the plays table grows slowly).
+const LISTEN_FALLBACK_MS = 600000;
+type ListenRow = { playedAt: string; trackId: string; listenedMs: number };
+
+// Wrapped in React cache(): getDailyStats and getAllTimeStats both need this, and they run
+// together (Home's history boundary, the history refresh action) — cache() dedupes the
+// fetch to once per request instead of paying the plays scan twice.
+const playsWithListened = cache(async (): Promise<ListenRow[]> => {
+  const client = await getClient();
+  const res = await client.execute(
+    `SELECT p.played_at AS playedAt, p.track_id AS trackId, t.duration_ms AS durationMs
+     FROM plays p JOIN tracks t ON t.id = p.track_id
+     ORDER BY p.played_at ASC`,
+  );
+  const rows = plainRows(res.rows) as unknown as {
+    playedAt: string;
+    trackId: string;
+    durationMs: number | null;
+  }[];
+  return rows.map((r, i) => {
+    const dur = r.durationMs ?? LISTEN_FALLBACK_MS;
+    const next = rows[i + 1];
+    const gap = next ? Date.parse(next.playedAt) - Date.parse(r.playedAt) : null;
+    return {
+      playedAt: r.playedAt,
+      trackId: r.trackId,
+      listenedMs: Math.min(dur, gap != null && gap >= 0 ? gap : dur),
+    };
+  });
+});
 
 // One row per individual play (no GROUP BY): each listen keeps its own timestamp and the
 // context it was played from. `lastPlayed` carries that single play's time; `plays` is 1.
@@ -320,22 +351,41 @@ export async function getAllTimeStats(): Promise<{
   durationMs: number;
   since: string | null; // earliest recorded play (ISO), null if none
 }> {
-  const client = await getClient();
-  const res = await client.execute(
-    `WITH listened AS (
-       SELECT p.track_id AS tid, p.played_at AS played_at, ${LISTENED_MS} AS ms
-       FROM plays p JOIN tracks t ON t.id = p.track_id
-     )
-     SELECT COUNT(*) AS plays, COUNT(DISTINCT tid) AS uniqueTracks,
-       COALESCE(SUM(ms), 0) AS durationMs, MIN(played_at) AS since
-     FROM listened`,
-  );
-  return ({ ...res.rows[0] }) as unknown as {
-    plays: number;
-    uniqueTracks: number;
-    durationMs: number;
-    since: string | null;
-  };
+  // Read the cached value: the all-time listened total needs a gap scan over EVERY play,
+  // which is multi-second on Turso and shouldn't run on render. It's refreshed on write
+  // (recordPlays, when new plays land). Cold (never cached) → compute once and cache.
+  const v = await getMeta("alltime_stats");
+  if (v) {
+    try {
+      return JSON.parse(v) as AllTimeStats;
+    } catch {
+      /* fall through and recompute */
+    }
+  }
+  return recomputeAllTimeStats();
+}
+
+type AllTimeStats = { plays: number; uniqueTracks: number; durationMs: number; since: string | null };
+
+/** Recompute and cache the all-time totals (the expensive gap scan over every play). Called
+ *  on write when new plays are recorded, not on render. */
+export async function recomputeAllTimeStats(): Promise<AllTimeStats> {
+  const plays = await playsWithListened();
+  let stats: AllTimeStats;
+  if (plays.length === 0) {
+    stats = { plays: 0, uniqueTracks: 0, durationMs: 0, since: null };
+  } else {
+    const tracks = new Set<string>();
+    let durationMs = 0;
+    for (const p of plays) {
+      tracks.add(p.trackId);
+      durationMs += p.listenedMs;
+    }
+    // plays come back ascending, so the first is the earliest recorded play.
+    stats = { plays: plays.length, uniqueTracks: tracks.size, durationMs, since: plays[0].playedAt };
+  }
+  await setMeta("alltime_stats", JSON.stringify(stats));
+  return stats;
 }
 
 /** Per-day plays / unique songs / listening time, most recent first. */
@@ -352,18 +402,60 @@ function localDay(col: string, offsetMin: number): string {
 
 export async function getDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
   const client = await getClient();
+  // Only fetch the recent window we actually display (a couple extra days of buffer for the
+  // tz day-edge), so this stays cheap as total history grows — not a full-table scan. Uses
+  // idx_plays_played_at. Listened ms = gap to the next play, capped at song length, computed
+  // in JS (the SQL LEAD() window is pathologically slow on Turso).
+  const cutoff = new Date(Date.now() - (days + 2) * 86_400_000).toISOString();
   const res = await client.execute({
-    sql: `WITH listened AS (
-            SELECT ${localDay("p.played_at", offsetMin)} AS day, p.track_id AS tid,
-              ${LISTENED_MS} AS ms
-            FROM plays p JOIN tracks t ON t.id = p.track_id
-          )
-          SELECT day, COUNT(*) AS plays, COUNT(DISTINCT tid) AS uniqueTracks,
-            COALESCE(SUM(ms), 0) AS durationMs
-          FROM listened GROUP BY day ORDER BY day DESC LIMIT ?`,
-    args: [days],
+    sql: `SELECT p.played_at AS playedAt, p.track_id AS trackId, t.duration_ms AS durationMs
+          FROM plays p JOIN tracks t ON t.id = p.track_id
+          WHERE p.played_at >= :cutoff
+          ORDER BY p.played_at ASC`,
+    args: { cutoff },
   });
-  return plainRows(res.rows) as unknown as DayStats[];
+  const rows = plainRows(res.rows) as unknown as {
+    playedAt: string;
+    trackId: string;
+    durationMs: number | null;
+  }[];
+  // Minutes to add to UTC for the user's local day (clamped, integer), same convention as
+  // localDay() — toISOString() formats in UTC, so shifting first gives the local calendar day.
+  const offMs = Math.max(-720, Math.min(840, Math.round(offsetMin) || 0)) * 60000;
+  const byDay = new Map<string, { plays: number; tracks: Set<string>; ms: number }>();
+  for (let i = 0; i < rows.length; i++) {
+    const dur = rows[i].durationMs ?? LISTEN_FALLBACK_MS;
+    const next = rows[i + 1];
+    const gap = next ? Date.parse(next.playedAt) - Date.parse(rows[i].playedAt) : null;
+    const listenedMs = Math.min(dur, gap != null && gap >= 0 ? gap : dur);
+    const day = new Date(Date.parse(rows[i].playedAt) + offMs).toISOString().slice(0, 10);
+    let acc = byDay.get(day);
+    if (!acc) {
+      acc = { plays: 0, tracks: new Set(), ms: 0 };
+      byDay.set(day, acc);
+    }
+    acc.plays++;
+    acc.tracks.add(rows[i].trackId);
+    acc.ms += listenedMs;
+  }
+  return [...byDay.entries()]
+    .map(([day, a]) => ({ day, plays: a.plays, uniqueTracks: a.tracks.size, durationMs: a.ms }))
+    .sort((x, y) => (x.day < y.day ? 1 : -1))
+    .slice(0, days);
+}
+
+/** Whether any play exists strictly before the start of the given local day — lets the day
+ *  strip decide if it can expand to show older days. Cheap existence check (idx_plays_played_at). */
+export async function hasPlaysBeforeDay(day: string, offsetMin = 0): Promise<boolean> {
+  const client = await getClient();
+  const offMs = Math.max(-720, Math.min(840, Math.round(offsetMin) || 0)) * 60000;
+  // Start of `day` in the user's local zone, as a UTC instant.
+  const cutoff = new Date(Date.parse(day + "T00:00:00.000Z") - offMs).toISOString();
+  const res = await client.execute({
+    sql: `SELECT EXISTS(SELECT 1 FROM plays WHERE played_at < :cutoff) AS e`,
+    args: { cutoff },
+  });
+  return !!(res.rows[0] && Number(res.rows[0].e));
 }
 
 /** Tracks played on a specific local day (YYYY-MM-DD), most-played first.
@@ -451,6 +543,34 @@ export async function getStoredPlaylists(): Promise<StoredPlaylist[]> {
      FROM playlists ORDER BY position`,
   );
   return plainRows(res.rows) as unknown as StoredPlaylist[];
+}
+
+/** Count of DISTINCT songs (by case-insensitive artist+title) across all cached playlist
+ *  tracks — the "real" library size, collapsing the same song appearing in many playlists
+ *  (or a playlist accidentally duplicated).
+ *
+ *  Read from a cached meta value: computing it live is a multi-second DISTINCT scan over
+ *  playlist_tracks on remote Turso, and it was blocking every Home render. It's refreshed
+ *  by recomputeUniqueSongCount() at the end of each library sync (when the underlying data
+ *  actually changes). 0 until first cached — Home falls back to the raw track-count sum. */
+export async function getUniqueSongCount(): Promise<number> {
+  const v = await getMeta("unique_song_count");
+  return v ? Number(v) || 0 : 0;
+}
+
+/** Run the expensive distinct-song scan once and cache it in meta. Called at the end of a
+ *  library sync, not on render. Returns the fresh count. */
+export async function recomputeUniqueSongCount(): Promise<number> {
+  const client = await getClient();
+  const res = await client.execute(
+    `SELECT COUNT(*) AS n FROM (
+       SELECT DISTINCT lower(t.artist) AS a, lower(t.name) AS m
+       FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id
+     )`,
+  );
+  const n = res.rows[0] ? Number(res.rows[0].n) : 0;
+  await setMeta("unique_song_count", String(n));
+  return n;
 }
 
 /** One playlist's cached header row (name/owner/image/count) — used by the detail page so
@@ -737,17 +857,21 @@ export async function searchPlaylistSongs(query: string, limit = 12): Promise<Fo
 /** Listen history for the song matching `trackId`'s (artist, title): total plays + most
  *  recent timestamps. Keyed on artist+title so any release of the same song counts
  *  (matches the app's song identity). */
+// Each recent listen carries the played track id too, so the UI can deep-link a play
+// back to that exact song on the right day in History.
+export type Listen = { playedAt: string; trackId: string };
+
 export async function getSongListens(
   trackId: string,
   limit = 100,
-): Promise<{ total: number; recent: string[] }> {
+): Promise<{ total: number; recent: Listen[] }> {
   const client = await getClient();
   // One round-trip: resolve the song's (artist, title) key in a CTE, then count and list
   // its plays in the same statement. COUNT(*) OVER () is the full match count (computed
   // before LIMIT), so the capped `recent` rows and the true `total` come back together.
   const res = await client.execute({
     sql: `WITH k AS (SELECT lower(artist) AS a, lower(name) AS n FROM tracks WHERE id = :id)
-          SELECT COUNT(*) OVER () AS total, p.played_at AS playedAt
+          SELECT COUNT(*) OVER () AS total, p.played_at AS playedAt, p.track_id AS trackId
           FROM plays p JOIN tracks t ON t.id = p.track_id, k
           WHERE lower(t.artist) = k.a AND lower(t.name) = k.n
           ORDER BY p.played_at DESC LIMIT :limit`,
@@ -755,7 +879,7 @@ export async function getSongListens(
   });
   return {
     total: res.rows[0] ? Number(res.rows[0].total) : 0,
-    recent: res.rows.map((r) => String(r.playedAt)),
+    recent: res.rows.map((r) => ({ playedAt: String(r.playedAt), trackId: String(r.trackId) })),
   };
 }
 
@@ -794,12 +918,12 @@ export async function searchPlaylistArtists(query: string, limit = 12): Promise<
 export async function getArtistListens(
   artist: string,
   limit = 100,
-): Promise<{ total: number; recent: string[] }> {
+): Promise<{ total: number; recent: Listen[] }> {
   const client = await getClient();
   const a = artist.toLowerCase();
   // One round-trip: window count gives the true total alongside the LIMIT-capped rows.
   const res = await client.execute({
-    sql: `SELECT COUNT(*) OVER () AS total, p.played_at AS playedAt
+    sql: `SELECT COUNT(*) OVER () AS total, p.played_at AS playedAt, p.track_id AS trackId
           FROM plays p JOIN tracks t ON t.id = p.track_id
           WHERE lower(t.artist) = :a
           ORDER BY p.played_at DESC LIMIT :limit`,
@@ -807,7 +931,7 @@ export async function getArtistListens(
   });
   return {
     total: res.rows[0] ? Number(res.rows[0].total) : 0,
-    recent: res.rows.map((r) => String(r.playedAt)),
+    recent: res.rows.map((r) => ({ playedAt: String(r.playedAt), trackId: String(r.trackId) })),
   };
 }
 
@@ -824,13 +948,21 @@ export type SongLocation = {
 export async function getSongPlaylists(trackId: string, limit = 25): Promise<SongLocation[]> {
   const client = await getClient();
   const meId = await getMeId();
+  // Resolve every track id sharing this song's (artist, title) first (indexed by
+  // lower(artist), lower(name)), then look those up in playlist_tracks by track_id
+  // (indexed). The old shape joined the whole playlist_tracks table and computed lower()
+  // per row — a full scan that ran ~4.5s against remote Turso.
   const res = await client.execute({
-    sql: `SELECT p.id AS playlistId, p.name AS playlistName, pt.track_id AS trackId, pt.position AS position
+    sql: `WITH ids AS (
+            SELECT id FROM tracks
+            WHERE lower(artist) = (SELECT lower(artist) FROM tracks WHERE id = :id)
+              AND lower(name)   = (SELECT lower(name)   FROM tracks WHERE id = :id)
+          )
+          SELECT p.id AS playlistId, p.name AS playlistName, pt.track_id AS trackId, pt.position AS position
           FROM playlist_tracks pt
-            JOIN tracks t ON t.id = pt.track_id
+            JOIN ids ON ids.id = pt.track_id
             JOIN playlists p ON p.id = pt.playlist_id
-            JOIN (SELECT lower(artist) AS a, lower(name) AS n FROM tracks WHERE id = :id) k
-          WHERE lower(t.artist) = k.a AND lower(t.name) = k.n AND p.owner_id = :meId
+          WHERE p.owner_id = :meId
           ORDER BY p.name, pt.position
           LIMIT :limit`,
     args: { id: trackId, meId, limit },
@@ -857,16 +989,20 @@ export async function getArtistSongLocations(artist: string, limit = 50): Promis
   return plainRows(res.rows) as unknown as SongLocation[];
 }
 
-/** The set of track ids ever played from a given playback context (e.g. a playlist
- *  URI). Resume uses this to find the *furthest* track reached in playlist order, so
- *  rewinding/skipping back doesn't move your resume point backward. */
-export async function playedTrackIdsInContext(contextUri: string): Promise<Set<string>> {
+/** Every play from a given playback context (e.g. a playlist URI), with its timestamp,
+ *  oldest→newest. Resume uses the timestamps to scope to the most recent listening
+ *  session, so an older/deeper run can't push the resume point past where you actually
+ *  stopped this time. */
+export async function playedTracksInContext(
+  contextUri: string,
+): Promise<{ trackId: string; playedAt: string }[]> {
   const client = await getClient();
   const res = await client.execute({
-    sql: `SELECT DISTINCT track_id FROM plays WHERE context_uri = :uri`,
+    sql: `SELECT track_id AS trackId, played_at AS playedAt FROM plays
+          WHERE context_uri = :uri ORDER BY played_at ASC`,
     args: { uri: contextUri },
   });
-  return new Set(res.rows.map((r) => String(r.track_id)));
+  return plainRows(res.rows) as unknown as { trackId: string; playedAt: string }[];
 }
 
 /** Resolved name for a playback context uri, if we've cached it before. */

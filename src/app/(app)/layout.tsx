@@ -5,6 +5,7 @@ import { CleanProgressWatcher } from "@/components/clean-progress";
 import { SyncOnLoad } from "@/components/sync-on-load";
 import { TimezoneCookie } from "@/components/timezone-cookie";
 import { NowPlayingProvider } from "@/components/now-playing-context";
+import { ScrollbarHover } from "@/components/scrollbar-hover";
 
 export default async function AppLayout({
   children,
@@ -26,6 +27,7 @@ export default async function AppLayout({
       <CleanProgressWatcher />
       <SyncOnLoad />
       <TimezoneCookie />
+      <ScrollbarHover />
     </NowPlayingProvider>
   );
 }

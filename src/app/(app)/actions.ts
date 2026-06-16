@@ -9,13 +9,20 @@ import { intersect, keyOf, subtract } from "@/lib/spotify/domain";
 import { runTask } from "@/lib/tasks/registry";
 import { cleanPhase1, reconcileClean } from "@/lib/clean/run";
 import { syncLibrary } from "@/lib/sync/library";
+import { syncRecentPlays } from "@/lib/sync/history";
+import { tzOffsetMinutes } from "@/lib/tz";
 import {
   clearSpotifyTokens,
   deletePlaylistFromDb,
+  getAllTimeStats,
   getCleanBackupPref,
+  getDailyStats,
+  getLastSync,
+  hasPlaysBeforeDay,
+  type DayStats,
   getMeId,
   getPlaylistTracks,
-  playedTrackIdsInContext,
+  playedTracksInContext,
   removeCachedPlaylistTrack,
   setCleanBackupPref,
   storePlaylistTracks,
@@ -25,6 +32,47 @@ import {
 export type ActionResult<T = object> =
   | ({ ok: true } & T)
   | { ok: false; error: string };
+
+// Used by the merged-in history view's auto-refresh (every minute while Home is open, no
+// button): pulls the latest plays for the signed-in user into the store and returns
+// refreshed day stats so the view updates in place. The same core also runs on app load +
+// every 2 min via /api/sync, and on a schedule via /api/cron/sync. `days` matches however
+// far the day strip is currently expanded, so a refresh doesn't collapse it back to 2 weeks.
+export async function syncHistoryAction(days = 14) {
+  try {
+    const sp = await getSpotify();
+    const { added } = await syncRecentPlays(sp);
+    const tz = await tzOffsetMinutes();
+    const [daily, lastSync, allTime] = await Promise.all([
+      getDailyStats(tz, days),
+      getLastSync(),
+      getAllTimeStats(),
+    ]);
+    return { ok: true as const, added, daily, lastSync, allTime };
+  } catch (e) {
+    // Don't map getSpotify()'s login redirect into an error result (see fail() below).
+    unstable_rethrow(e);
+    return { ok: false as const, error: e instanceof Error ? e.message : "Sync failed" };
+  }
+}
+
+// Expand the day-by-day strip on demand: 2 weeks → 4 weeks → all. Returns the day rows for
+// the requested span plus whether even older days exist (so the strip knows to keep offering
+// the next step). Each level bounds its own fetch, so this stays fast.
+export async function loadDaysAction(
+  days: number,
+): Promise<ActionResult<{ daily: DayStats[]; hasMore: boolean }>> {
+  try {
+    await getSpotify(); // gate on a live session
+    const tz = await tzOffsetMinutes();
+    const daily = await getDailyStats(tz, days);
+    const oldest = daily[daily.length - 1]?.day;
+    const hasMore = !!oldest && daily.length >= days && (await hasPlaysBeforeDay(oldest, tz));
+    return { ok: true, daily, hasMore };
+  } catch (e) {
+    return fail(e);
+  }
+}
 
 function fail(e: unknown): { ok: false; error: string } {
   // getSpotify() redirects to /login on a dead session by THROWING Next's control-flow
@@ -411,25 +459,32 @@ export async function playTrackAction(trackUri: string): Promise<ActionResult> {
 }
 
 // "Pick up where you left off": start the chosen playlist on the active device at the
-// song *after* where you left off. Assumes in-order (non-shuffled) listening. The
-// leave-off point is the end of the longest in-order run of songs you've played
-// (small skips allowed) — NOT just the farthest-down song, so rewinding doesn't drag it
-// backward AND a one-off accidental play deep in the list doesn't jump you ahead past
-// songs you never heard. No history for that playlist → start from the top. Needs an
-// active device + Premium, like the other transport controls.
+// song *after* where you left off. Assumes in-order (non-shuffled) listening.
+//
+// The leave-off point is scoped to your MOST RECENT listening session, then within that
+// session it's the end of the longest in-order run of songs you played (small skips
+// allowed). Two protections, two scales:
+//   - Recency (session scope): if you got deep into the playlist days ago, then today
+//     restarted and only played a few songs, today's short session wins — we don't shove
+//     you back to the old deep spot. (This was the bug: the all-time longest run let an
+//     older, deeper session push the resume point far past where you actually stopped.)
+//   - In-session robustness (longest run): a one-off accidental tap deep in the list
+//     during the session is its own length-1 run and won't win, so we never skip you past
+//     songs you haven't heard.
+// No history for that playlist → start from the top. Needs an active device + Premium.
 export async function resumePlaylistAction(
   playlistId: string,
 ): Promise<ActionResult<{ track: string; fromTop: boolean }>> {
   try {
     const uri = `spotify:playlist:${playlistId}`;
-    // Read the cached track list (instant) and the played-track set in parallel with
+    // Read the cached track list (instant) and the timestamped plays in parallel with
     // auth, instead of re-paginating the whole playlist from Spotify before playing —
     // that live scan was the lag. Only cold (never-cached) playlists fall back to a live
     // fetch, and we cache that result for next time.
-    const [sp, cached, playedIds] = await Promise.all([
+    const [sp, cached, plays] = await Promise.all([
       getSpotify(),
       getPlaylistTracks(playlistId),
-      playedTrackIdsInContext(uri),
+      playedTracksInContext(uri),
     ]);
     let tracks = cached;
     if (tracks.length === 0) {
@@ -438,25 +493,42 @@ export async function resumePlaylistAction(
     }
     if (tracks.length === 0) throw new Error("This playlist has no playable tracks.");
 
-    // Positions (in playlist order) of tracks you've played from this playlist.
-    const playedPos: number[] = [];
-    for (let i = 0; i < tracks.length; i++) if (playedIds.has(tracks[i].id)) playedPos.push(i);
+    // Each track id → its position in the playlist (first occurrence wins for the rare
+    // duplicate). Plays are returned oldest→newest; map each to {position, time}, dropping
+    // any whose track is no longer in the playlist.
+    const posOf = new Map<string, number>();
+    for (let i = 0; i < tracks.length; i++) if (!posOf.has(tracks[i].id)) posOf.set(tracks[i].id, i);
+    const events: { pos: number; t: number }[] = [];
+    for (const p of plays) {
+      const pos = posOf.get(p.trackId);
+      const t = Date.parse(p.playedAt);
+      if (pos !== undefined && !Number.isNaN(t)) events.push({ pos, t });
+    }
 
-    // Leave-off point = the end of the LONGEST in-order run, tolerating small skips (a
-    // gap of up to GAP positions between consecutive plays still counts as the same run).
-    // This is robust against accidents: a one-off play deep in the list is its own
-    // length-1 run and won't win, so we never skip you past songs you haven't heard.
+    // Scope to the most recent session: split the time-ordered plays wherever the gap
+    // between consecutive plays exceeds SESSION_GAP, and keep only the last group.
+    const SESSION_GAP_MS = 3 * 60 * 60 * 1000;
+    let sessionStart = 0;
+    for (let i = 1; i < events.length; i++) {
+      if (events[i].t - events[i - 1].t > SESSION_GAP_MS) sessionStart = i;
+    }
+    const positions = Array.from(new Set(events.slice(sessionStart).map((e) => e.pos))).sort(
+      (a, b) => a - b,
+    );
+
+    // Within the session: end of the LONGEST in-order run, tolerating small skips (a gap of
+    // up to GAP positions between consecutive plays still counts as the same run).
     const GAP = 10;
     let bestEnd = -1;
     let bestLen = 0;
     let runStart = 0;
-    for (let k = 1; k <= playedPos.length; k++) {
-      const broke = k === playedPos.length || playedPos[k] - playedPos[k - 1] > GAP;
+    for (let k = 1; k <= positions.length; k++) {
+      const broke = k === positions.length || positions[k] - positions[k - 1] > GAP;
       if (broke) {
         const len = k - runStart;
         if (len > bestLen) {
           bestLen = len;
-          bestEnd = playedPos[k - 1];
+          bestEnd = positions[k - 1];
         }
         runStart = k;
       }

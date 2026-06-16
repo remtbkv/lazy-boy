@@ -1,10 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight } from "lucide-react";
 import { toast } from "@/lib/toast";
 import { playTrackAction } from "@/app/(app)/actions";
-import { loadDaysAction, syncHistoryAction } from "@/app/(app)/actions";
+import { syncHistoryAction } from "@/app/(app)/history/actions";
 import { AlbumThumb } from "@/components/album-thumb";
 import { FloatingBar } from "@/components/floating-bar";
 import { HoverScroll } from "@/components/hover-scroll";
@@ -44,10 +43,6 @@ function sortTracks(list: TrackStats[], sort: Sort, dir: "asc" | "desc"): TrackS
   const f = dir === "asc" ? 1 : -1;
   return [...list].sort((a, b) => f * compareTracks(a, b, sort));
 }
-// Day-strip expansion spans: 2 weeks → 4 weeks → everything (a cap large enough to mean
-// "all"). Each step's chevron at the right end loads the next span.
-const DAY_SPANS = [14, 28, 100000];
-
 // The direction each sort opens in (most-recent / most-played first; A→Z for text).
 const DEFAULT_DIR: Record<Sort, "asc" | "desc"> = {
   recent: "desc",
@@ -80,8 +75,6 @@ export function HistoryClient({
   allTime: initialAllTime,
   initialResults,
   focusTrackId = null,
-  initialHasMoreDays = false,
-  songListMaxHeightClass = "max-h-[calc(100vh-29rem)]",
 }: {
   initialDaily: DayStats[];
   initialDay: string | null;
@@ -91,23 +84,12 @@ export function HistoryClient({
   // When arriving from Find's "last played" deep link, the play's track id — the day view
   // scrolls to and briefly highlights this song (the server already opened the right day).
   focusTrackId?: string | null;
-  // Whether older days exist past the initial 2-week strip (drives the expand control).
-  initialHasMoreDays?: boolean;
-  // Caps the song table's height. Home passes a viewport-relative value so the merged-in
-  // list fills down toward the search bar without overflowing the page.
-  songListMaxHeightClass?: string;
 }) {
   const { playing } = useNowPlaying();
   const nowPlayingId = playing?.track.id;
   const [daily, setDaily] = useState(initialDaily);
   const [allTime, setAllTime] = useState(initialAllTime);
   const [query, setQuery] = useState("");
-
-  // Day strip expands on demand: 2 weeks → 4 weeks → all. `dayLevel` indexes DAY_SPANS;
-  // `hasMoreDays` says whether older days still exist past what's shown.
-  const [dayLevel, setDayLevel] = useState(0);
-  const [hasMoreDays, setHasMoreDays] = useState(initialHasMoreDays);
-  const [expandingDays, setExpandingDays] = useState(false);
 
   // The main list is scoped to one day (default: most recent / today), so the Plays
   // column reads "times played that day" rather than an ever-growing all-time total.
@@ -199,25 +181,6 @@ export function HistoryClient({
     }
   }
 
-  // Expand the day strip one span (2wk → 4wk → all). The right-end chevron triggers this.
-  async function expandDays() {
-    if (expandingDays || dayLevel >= DAY_SPANS.length - 1) return;
-    const next = dayLevel + 1;
-    setExpandingDays(true);
-    try {
-      const r = await loadDaysAction(DAY_SPANS[next]);
-      if (!r.ok) {
-        toast.error(r.error);
-        return;
-      }
-      setDaily(r.daily);
-      setDayLevel(next);
-      setHasMoreDays(next >= DAY_SPANS.length - 1 ? false : r.hasMore);
-    } finally {
-      setExpandingDays(false);
-    }
-  }
-
   // Skip the mount run: it would re-fetch the unfiltered list the server already
   // rendered (`initialResults`) just to replace it with identical data. Clearing the
   // query later still re-runs, restoring the full list.
@@ -250,9 +213,7 @@ export function HistoryClient({
       if (Date.now() - lastRefresh.current < 15000) return;
       lastRefresh.current = Date.now();
       try {
-        // Fetch as many days as the strip is currently expanded to, so a refresh keeps the
-        // expanded view instead of snapping back to 2 weeks.
-        const r = await syncHistoryAction(DAY_SPANS[dayLevel]);
+        const r = await syncHistoryAction();
         if (!r.ok) return;
         setDaily(r.daily);
         setAllTime(r.allTime);
@@ -343,23 +304,6 @@ export function HistoryClient({
                   </button>
                 );
               })}
-              {/* At the right end, expand the strip: 2wk → 4wk (chevron) → all ("See all").
-                  Just the chevron (or "See all" text) — no card/box, so it stays minimal. */}
-              {hasMoreDays && dayLevel < DAY_SPANS.length - 1 ? (
-                <button
-                  type="button"
-                  onClick={expandDays}
-                  disabled={expandingDays}
-                  aria-label={dayLevel === 0 ? "Show two more weeks" : "Show all days"}
-                  title={dayLevel === 0 ? "Show two more weeks" : "Show all days"}
-                  className="flex shrink-0 items-center gap-1 self-stretch px-1.5 text-xs font-medium text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:text-foreground disabled:opacity-50"
-                >
-                  {dayLevel >= 1 ? <span>See all</span> : null}
-                  <ChevronRight
-                    className={(dayLevel >= 1 ? "size-4" : "size-5") + (expandingDays ? " animate-pulse" : "")}
-                  />
-                </button>
-              ) : null}
               </div>
             </div>
 
@@ -403,7 +347,6 @@ export function HistoryClient({
               tracks={visibleTracks}
               mode={searching ? "log" : "aggregate"}
               focusTrackId={searching ? null : focusTrackId}
-              maxHeightClass={songListMaxHeightClass}
               loading={!searching && dayLoading}
               empty={
                 searching
@@ -421,7 +364,7 @@ export function HistoryClient({
         <FloatingBar
           query={query}
           onQuery={setQuery}
-          placeholder="Search history for a song or artist…"
+          placeholder="Search a song or artist…"
         />
       ) : null}
     </div>
@@ -438,14 +381,12 @@ function TrackTable({
   mode = "aggregate",
   loading = false,
   focusTrackId = null,
-  maxHeightClass = "max-h-[calc(100vh-29rem)]",
 }: {
   tracks: TrackStats[];
   empty: string;
   mode?: "aggregate" | "log";
   loading?: boolean;
   focusTrackId?: string | null;
-  maxHeightClass?: string;
 }) {
   const isLog = mode === "log";
   const { playing, playOptimistic } = useNowPlaying();
@@ -504,7 +445,7 @@ function TrackTable({
   };
 
   return (
-    <div className={"thin-scroll overflow-y-auto rounded-lg border border-border " + maxHeightClass}>
+    <div className="thin-scroll max-h-[calc(100vh-29rem)] overflow-y-auto rounded-lg border border-border">
       {/* Fixed layout: column widths stay constant and long text clips (then scrolls
           on hover) instead of widening the table into a horizontal scroll. Song and
           Album get the generous, roughly-equal flexible columns; From is narrower;

@@ -23,7 +23,7 @@ type FoundSong = {
   playlistCount: number;
 };
 type FoundArtist = { artist: string; songCount: number; albumImage: string | null };
-type Listens = { total: number; recent: string[] };
+type Listens = { total: number; recent: { playedAt: string; trackId: string }[] };
 type SongLocation = {
   playlistId: string;
   playlistName: string;
@@ -36,6 +36,15 @@ type Selected =
   | { kind: "artist"; item: FoundArtist };
 
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+
+// Local calendar day (YYYY-MM-DD) for a play, matching how History groups days. Uses the
+// browser's local time — same zone the tz cookie is set from server-side — so a play links
+// to the day it shows under in History.
+function dayKey(iso: string): string {
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
 
 function dedupeBy<T>(arr: T[], key: (x: T) => string): T[] {
   const seen = new Set<string>();
@@ -214,15 +223,21 @@ export function FindPanel() {
                       ? ` · in ${plural(selected.item.playlistCount, "playlist")}`
                       : ""}
                   </p>
-                  {/* Each play is its own row; capped to exactly three full rows (no
-                      half-row peeking — the scrollbar already signals there's more) and
-                      scrolls for the rest. Both columns share the size: the relative and
-                      exact times are the same fact, so only color separates them. */}
-                  <ul className="thin-scroll max-h-[4.25rem] space-y-1 overflow-y-auto pr-1 text-sm">
-                    {listens.recent.map((iso) => (
-                      <li key={iso} className="flex items-baseline justify-between gap-3">
-                        <span>{timeAgo(iso)}</span>
-                        <span className="text-muted-foreground">{exactTime(iso)}</span>
+                  {/* Each play is its own row; ~three rows show, the rest scroll (the
+                      scrollbar signals there's more). Both columns share the size: the
+                      relative and exact times are the same fact, so only color separates
+                      them. Clicking a row jumps to that play's day in History and scrolls
+                      to the song. */}
+                  <ul className="thin-scroll max-h-[5.5rem] space-y-1 overflow-y-auto pr-1 text-sm">
+                    {listens.recent.map((l) => (
+                      <li key={`${l.playedAt}-${l.trackId}`}>
+                        <Link
+                          href={`/home?day=${dayKey(l.playedAt)}&track=${encodeURIComponent(l.trackId)}`}
+                          className="-mx-1 flex items-baseline justify-between gap-3 rounded-md px-2 py-0.5 transition-colors hover:bg-accent/40"
+                        >
+                          <span>{timeAgo(l.playedAt)}</span>
+                          <span className="text-muted-foreground">{exactTime(l.playedAt)}</span>
+                        </Link>
                       </li>
                     ))}
                   </ul>

@@ -13,7 +13,9 @@ export default function AppError({ error }: { error: Error & { digest?: string }
           ? "Your Spotify session expired. Please sign in again."
           : error.message}
       </p>
-      <Link href="/login" className={buttonVariants()}>
+      {/* Neutral outline, matching the in-app buttons (quick-action pills) — not the green
+          primary, which we reserve for the Spotify-brand login CTA. */}
+      <Link href="/login" className={buttonVariants({ variant: "outline" })}>
         Back to sign in
       </Link>
     </div>

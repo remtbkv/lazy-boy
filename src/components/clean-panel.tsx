@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import { RefreshCw } from "lucide-react";
 import { toast } from "@/lib/toast";
 import {
@@ -40,6 +41,7 @@ export function CleanPanel({
   playlists: Item[];
   initialBackup: boolean;
 }) {
+  const router = useRouter();
   const [query, setQuery] = useState("");
   const [backup, setBackup] = useState(initialBackup);
   const [pending, start] = useTransition();
@@ -119,7 +121,14 @@ export function CleanPanel({
         };
         if (stopped) return;
         setSyncProgress({ processed: task.processed ?? 0, total: task.total ?? 0 });
-        if (task.status === "done") finish(() => toast.success("Synced"));
+        if (task.status === "done")
+          finish(() => {
+            toast.success("Synced");
+            // A sync can surface newly-created/added playlists and changes the unique-song
+            // count — pull the fresh server data into the view (smooth RSC reconcile, no
+            // remount/flash; this panel and its open state stay put).
+            router.refresh();
+          });
         else if (task.status === "error") finish(() => toast.error(task.error ?? "Sync failed"));
       } finally {
         inFlight = false;
@@ -131,7 +140,7 @@ export function CleanPanel({
       stopped = true;
       clearInterval(iv);
     };
-  }, [syncTaskId]);
+  }, [syncTaskId, router]);
 
   // Guards a double-click during the action's round-trip — `syncing` only flips after
   // the response, so without this two clicks start two full library scans.

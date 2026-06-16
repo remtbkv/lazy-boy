@@ -28,8 +28,11 @@ Legend: `[x]` done · `[~]` partial / seam in place · `[ ]` not started
 - [x] Liked songs → mirror playlist
 - [x] Save queue (uses the real `GET /v1/me/player/queue` endpoint)
 - [x] Pick up where you left off — "Resume" pill picks a playlist and starts it on the
-      active device at the song after the last one you played from it (via listen-history
-      `lastPlayedInContext` + `playContext`). `resume-panel.tsx`, `resumePlaylistAction`.
+      active device at the song after where you left off. The leave-off point is scoped to
+      your most recent listening session (via `playedTracksInContext` timestamps), then the
+      end of the longest in-order run within it — so an older/deeper session can't push you
+      past where you actually stopped, while a stray tap is still ignored. `resume-panel.tsx`,
+      `resumePlaylistAction`.
 - [x] Right-click a track in a playlist → Remove from playlist / Save to Liked / Add to
       queue / Share (copy link). `track-context-menu.tsx`, wired in `track-list.tsx`.
 

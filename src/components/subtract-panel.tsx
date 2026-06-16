@@ -337,10 +337,13 @@ export function SubtractPanel({ playlists }: { playlists: Item[] }) {
               <p className="text-sm text-muted-foreground">Computing difference…</p>
             ) : preview ? (
               <>
-                {/* Same box as the playlist view: thin scrollbar, sticky column header,
-                    scrolls within the card. Album + length columns are dropped so it
-                    fits this card's width. */}
-                <div className="thin-scroll min-h-0 max-h-[26rem] flex-1 overflow-y-auto rounded-lg border border-border">
+                {/* Same box as the playlist view: thin scrollbar, sticky column header.
+                    The scroller is absolutely positioned inside a flex-filled frame, so the
+                    song count never changes the box's size — it fills the height the left
+                    card sets and scrolls past that, rather than growing the card (which
+                    pushed the buttons down and left a gap beside the left card's row 2). */}
+                <div className="relative h-[55vh] min-h-0 lg:h-auto lg:flex-1">
+                  <div className="thin-scroll absolute inset-0 overflow-y-auto rounded-lg border border-border">
                   <div className="sticky top-0 z-10 grid grid-cols-[1.5rem_1fr_auto] items-center gap-3 border-b border-border bg-background px-3 py-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
                     <span className="text-right">#</span>
                     <span>Title</span>
@@ -423,6 +426,7 @@ export function SubtractPanel({ playlists }: { playlists: Item[] }) {
                       })}
                     </ul>
                   )}
+                  </div>
                 </div>
               </>
             ) : null}

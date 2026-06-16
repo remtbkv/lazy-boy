@@ -1,10 +1,26 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { Suspense } from "react";
 import { auth } from "@/lib/auth";
-import { getStoredPlaylists, getMeId, getPlaylistsSyncedAt, getCleanBackupPref } from "@/lib/db";
-import { PlaylistsSync } from "@/components/playlists-sync";
+import {
+  getStoredPlaylists,
+  getMeId,
+  getPlaylistsSyncedAt,
+  getCleanBackupPref,
+  getDailyStats,
+  getAllTimeStats,
+  getPlaysByDay,
+  hasPlaysBeforeDay,
+  searchHistory,
+} from "@/lib/db";
+import { tzOffsetMinutes } from "@/lib/tz";
 import { QuickActions } from "@/components/quick-actions";
 import { GreetingHeading } from "@/components/greeting-heading";
+import { HistoryClient } from "@/components/history-client";
+import { Skeleton } from "@/components/ui/skeleton";
+
+// Reads the DB fresh per request (also so the tz cookie is honoured for the history view).
+export const dynamic = "force-dynamic";
 
 // Playful greetings live in src/content/greetings.md (one is picked at random per
 // load). Only "- " list lines count; "{name}" is swapped for the first name. Read
@@ -24,7 +40,13 @@ function loadGreetings(): string[] {
   }
 }
 
-export default async function HomePage() {
+export default async function HomePage({
+  searchParams,
+}: {
+  // Find's "last played" rows deep-link here: ?day=YYYY-MM-DD&track=<id> opens that day in
+  // the merged-in history list and scrolls to that song.
+  searchParams: Promise<{ day?: string; track?: string }>;
+}) {
   const session = await auth();
   const name = session?.user?.name ?? "You";
   const first = name.split(" ")[0] || name;
@@ -39,49 +61,110 @@ export default async function HomePage() {
     first,
   );
 
-  // Read the library from the store — no Spotify call on render.
-  // PlaylistsSync refreshes it in the background when it's empty or stale.
+  // Only the light queries the top panel needs block the page. The heavier history data
+  // streams in its own boundary (below), so the greeting + quick actions paint immediately
+  // on navigation instead of waiting on the listen-history aggregates. (Library stats moved
+  // to the Playlists page heading.)
   const [playlists, meId, syncedAt, backupPref] = await Promise.all([
     getStoredPlaylists(),
     getMeId(),
     getPlaylistsSyncedAt(),
     getCleanBackupPref(),
   ]);
-  const owned = meId ? playlists.filter((p) => p.ownerId === meId).length : 0;
-  const totalSongs = playlists.reduce((n, p) => n + p.trackCount, 0);
 
   return (
-    <div className="space-y-10">
-      <header className="space-y-3">
+    <div>
+      <header>
         <GreetingHeading initial={greeting} />
-        <p className="text-muted-foreground">
-          {playlists.length > 0 ? (
-            <>
-              {playlists.length} playlists · {owned} created by you ·{" "}
-              {totalSongs.toLocaleString()} total songs
-            </>
-          ) : (
-            <span className="text-muted-foreground/70">Loading your library…</span>
-          )}
-        </p>
-        <PlaylistsSync syncedAt={syncedAt} />
       </header>
 
-      <QuickActions
-        playlists={playlists.map((p) => ({
-          id: p.id,
-          name: p.name,
-          trackCount: p.trackCount,
-          image: p.image,
-          // Lets the Subtract panel offer in-place removal only on playlists you own.
-          mine: !!meId && p.ownerId === meId,
-        }))}
-        backupPref={backupPref}
-      />
+      {/* Roomy gap below the greeting, then a tight, balanced gap around the divider so the
+          history table below can claim the vertical space. */}
+      <div className="mt-7">
+        <QuickActions
+          playlists={playlists.map((p) => ({
+            id: p.id,
+            name: p.name,
+            trackCount: p.trackCount,
+            image: p.image,
+            // Lets the Subtract panel offer in-place removal only on playlists you own.
+            mine: !!meId && p.ownerId === meId,
+          }))}
+          backupPref={backupPref}
+          syncedAt={syncedAt}
+        />
+      </div>
 
-      <p className="border-t border-border/60 pt-6 text-sm text-muted-foreground">
-        Just do this yourself, man.
-      </p>
+      {/* History lives here now (the standalone /history route was removed) — no "See stuff"
+          heading, so it flows straight out of the actions. Streamed so it never blocks the
+          shell; the divider keeps a tight, balanced gap (mt = pt). */}
+      <section className="mt-5 border-t border-border/60 pt-5">
+        <Suspense fallback={<HistorySkeleton />}>
+          <HomeHistory searchParams={searchParams} />
+        </Suspense>
+      </section>
+    </div>
+  );
+}
+
+// The listen-history aggregates (day stats, all-time, today's plays, search seed) live in
+// their own async boundary so they stream after the shell rather than blocking navigation.
+async function HomeHistory({
+  searchParams,
+}: {
+  searchParams: Promise<{ day?: string; track?: string }>;
+}) {
+  const { day, track } = await searchParams;
+  const tz = await tzOffsetMinutes();
+  const [daily, allTime, initialResults] = await Promise.all([
+    getDailyStats(tz),
+    getAllTimeStats(),
+    // Small seed only — it's replaced the moment you type, and a 300-row payload bloats the
+    // streamed RSC for no visible benefit.
+    searchHistory("", 50),
+  ]);
+  // Open the deep-linked day if Find sent one (even older than the day strip's window),
+  // else the most recent day with plays.
+  const focusDay = day ?? null;
+  const focusTrackId = track ?? null;
+  const initialDay = focusDay ?? daily[0]?.day ?? null;
+  const initialDayTracks = initialDay ? await getPlaysByDay(initialDay, tz) : [];
+  // Can the day strip expand past the first 2 weeks? (Are there older days?)
+  const oldestShown = daily[daily.length - 1]?.day;
+  const initialHasMoreDays =
+    !!oldestShown && daily.length >= 14 && (await hasPlaysBeforeDay(oldestShown, tz));
+
+  return (
+    <HistoryClient
+      // Remount when a Find deep-link changes day/track: Find lives on this same page now,
+      // so the click is a soft navigation — without a fresh key the client keeps its
+      // mounted state and ignores the new focus day/song.
+      key={`${focusDay ?? ""}-${focusTrackId ?? ""}`}
+      initialDaily={daily}
+      initialDay={initialDay}
+      initialDayTracks={initialDayTracks}
+      allTime={allTime}
+      initialResults={initialResults}
+      focusTrackId={focusTrackId}
+      initialHasMoreDays={initialHasMoreDays}
+      songListMaxHeightClass="max-h-[calc(100vh-34rem)]"
+    />
+  );
+}
+
+// Placeholder shown while the history boundary streams — matches the day strip + table
+// footprint so the shell doesn't jump when the real content lands.
+function HistorySkeleton() {
+  return (
+    <div className="space-y-6">
+      {/* Equal-width cards filling the full row, so the rightmost is flush with the table
+          skeleton below (fixed-width boxes stopped short of the right edge). */}
+      <div className="flex w-full gap-3">
+        {Array.from({ length: 7 }).map((_, i) => (
+          <Skeleton key={i} className="h-[7.5rem] flex-1 rounded-xl" />
+        ))}
+      </div>
+      <Skeleton className="h-[calc(100vh-36.25rem)] min-h-40 w-full rounded-lg" />
     </div>
   );
 }

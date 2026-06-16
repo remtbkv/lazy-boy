@@ -10,16 +10,26 @@ import { HistoryClient } from "@/components/history-client";
 // Reads the DB fresh on each request (also so the tz cookie is honoured).
 export const dynamic = "force-dynamic";
 
-export default async function HistoryPage() {
+export default async function HistoryPage({
+  searchParams,
+}: {
+  // Find's "last played" rows deep-link here: ?day=YYYY-MM-DD&track=<id> opens that day and
+  // scrolls to that song.
+  searchParams: Promise<{ day?: string; track?: string }>;
+}) {
   const tz = await tzOffsetMinutes();
+  const { day, track } = await searchParams;
   const [daily, allTime, initialResults] = await Promise.all([
     getDailyStats(tz),
     getAllTimeStats(),
     // Pre-rendered first page of the search list (only shown while searching).
     searchHistory(""),
   ]);
-  // Default the main list to the most recent day with plays ("today" in practice).
-  const initialDay = daily[0]?.day ?? null;
+  // Open the deep-linked day if given (even one older than the day strip's window), else
+  // default to the most recent day with plays ("today" in practice).
+  const focusDay = day ?? null;
+  const focusTrackId = track ?? null;
+  const initialDay = focusDay ?? daily[0]?.day ?? null;
   const initialDayTracks = initialDay ? await getPlaysByDay(initialDay, tz) : [];
 
   return (
@@ -32,6 +42,7 @@ export default async function HistoryPage() {
         initialDayTracks={initialDayTracks}
         allTime={allTime}
         initialResults={initialResults}
+        focusTrackId={focusTrackId}
       />
     </div>
   );

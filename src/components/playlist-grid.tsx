@@ -28,14 +28,18 @@ const COLLAPSED = 12; // ~3 rows on desktop
 
 export function PlaylistGrid({
   playlists,
-  total,
   loadingMore = false,
+  stats,
 }: {
   playlists: Item[];
+  // Accepted for call-site compatibility; the count now lives in the page heading.
   total?: number;
   loadingMore?: boolean;
+  // Library stats, rendered as the heading on the left of the sort row so it shares a line
+  // with the sort control instead of sitting on its own (which left an awkward gap above the
+  // grid). Passed as data, not JSX, so it renders client-side without serialized-children warnings.
+  stats?: { playlists: number; owned: number; songs: number; unique: boolean };
 }) {
-  const count = Math.max(total ?? playlists.length, playlists.length);
   const [expanded, setExpanded] = useState(false);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<Sort>("recents");
@@ -77,7 +81,7 @@ export function PlaylistGrid({
   const searching = query.trim().length > 0;
   const showingAll = searching || expanded;
   const visible = showingAll ? sorted : sorted.slice(0, COLLAPSED);
-  const moreCount = searching ? 0 : Math.max(count, sorted.length) - visible.length;
+  const moreCount = searching ? 0 : sorted.length - visible.length;
 
   // Searching while scrolled deep brings the (now shorter) list up into view.
   useEffect(() => {
@@ -111,13 +115,26 @@ export function PlaylistGrid({
       ref={sectionRef}
       className="scroll-mt-24 space-y-4"
     >
+      {/* Stats heading shares this row with the sort control, so it flows straight into the
+          grid below instead of leaving a gap. */}
       <div className="flex items-center justify-between gap-3">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-          {count} playlists
-          {loadingMore ? (
-            <span className="ml-2 normal-case text-muted-foreground/70">loading…</span>
+        <div className="flex min-w-0 items-baseline gap-2">
+          {/* Stats styled to match the app's section-header convention (cf. history "TODAY",
+              column headers): small, uppercase, muted — numbers kept in foreground to pop. */}
+          {stats ? (
+            <h1 className="truncate text-xs font-semibold uppercase tracking-wide text-muted-foreground sm:text-sm">
+              <span className="text-foreground">{stats.playlists.toLocaleString()}</span> playlists
+              {" · "}
+              <span className="text-foreground">{stats.owned.toLocaleString()}</span> created by you
+              {" · "}
+              <span className="text-foreground">{stats.songs.toLocaleString()}</span>{" "}
+              {stats.unique ? "unique songs" : "total songs"}
+            </h1>
           ) : null}
-        </h2>
+          {loadingMore ? (
+            <span className="text-sm text-muted-foreground/70">loading…</span>
+          ) : null}
+        </div>
         <SortMenu value={sort} direction={dir} options={SORTS} onSelect={selectSort} />
       </div>
 

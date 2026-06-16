@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 const STALE_MS = 15 * 60 * 1000; // re-sync the library at most every 15 min
@@ -21,6 +21,27 @@ export function PlaylistsSync({ syncedAt }: { syncedAt: string | null }) {
   const router = useRouter();
   const [syncing, setSyncing] = useState(false);
   const [percent, setPercent] = useState<number | null>(null);
+  // `shown` is the displayed number; it eases toward `percent` (the real progress, which
+  // arrives in chunky 1.5s polls) so it counts up smoothly instead of jumping 14 → 30 → 100.
+  const [shown, setShown] = useState(0);
+  const percentRef = useRef<number | null>(null);
+  useEffect(() => {
+    percentRef.current = percent;
+  }, [percent]);
+
+  // Tween the displayed percent toward the latest target while a sync is running. Step is
+  // proportional, so it catches up fast when far behind and settles gently near the target.
+  useEffect(() => {
+    if (!syncing) return;
+    const id = setInterval(() => {
+      setShown((s) => {
+        const target = percentRef.current ?? s;
+        if (s >= target) return s;
+        return Math.min(target, s + Math.max(1, Math.ceil((target - s) / 6)));
+      });
+    }, 60);
+    return () => clearInterval(id);
+  }, [syncing]);
 
   useEffect(() => {
     const stale = !syncedAt || Date.now() - new Date(syncedAt).getTime() > STALE_MS;
@@ -38,6 +59,7 @@ export function PlaylistsSync({ syncedAt }: { syncedAt: string | null }) {
     // external op runs" case — one extra render on mount).
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSyncing(true);
+    setShown(0); // restart the counter for this run
 
     const stop = (refresh: boolean) => {
       if (pollId) clearInterval(pollId);
@@ -104,7 +126,7 @@ export function PlaylistsSync({ syncedAt }: { syncedAt: string | null }) {
   if (!syncing) return null;
   return (
     <span className="text-xs text-muted-foreground/70" aria-live="polite">
-      syncing{percent != null ? ` ${percent}%` : "…"}
+      syncing{shown > 0 ? ` ${shown}%` : "…"}
     </span>
   );
 }

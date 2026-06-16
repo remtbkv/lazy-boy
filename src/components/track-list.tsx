@@ -142,7 +142,7 @@ export function TrackList({
   // the marker so the same row can flash again later.
   useEffect(() => {
     if (!flashId) return;
-    const timeout = setTimeout(() => setFlashId(null), 1700);
+    const timeout = setTimeout(() => setFlashId(null), 1900);
     return () => clearTimeout(timeout);
   }, [flashId]);
 

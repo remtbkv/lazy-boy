@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { LogOut } from "lucide-react";
 import { logout } from "@/app/(app)/actions";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -11,7 +12,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -20,7 +20,6 @@ import { cn } from "@/lib/utils";
 const TABS = [
   { href: "/home", label: "Home" },
   { href: "/playlists", label: "Playlists" },
-  { href: "/history", label: "History" },
   { href: "/friends", label: "Friends" },
 ];
 
@@ -37,6 +36,13 @@ export function Header({ name, image }: { name: string; image: string | null }) 
   // mouse/direct navigation).
   const targetIndex = useRef(-1);
   const lastKeyAt = useRef(0);
+
+  // Warm the RSC payload for every tab on mount so arrow-key navigation (which uses
+  // router.push, not the Links' hover-prefetch) lands instantly instead of fetching the
+  // target page fresh on each press.
+  useEffect(() => {
+    for (const t of TABS) router.prefetch(t.href);
+  }, [router]);
 
   useEffect(() => {
     if (Date.now() - lastKeyAt.current < 500) return; // don't clobber a burst in flight
@@ -217,19 +223,22 @@ export function Header({ name, image }: { name: string; image: string | null }) 
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="end"
-              sideOffset={6}
-              className="w-44"
+              sideOffset={8}
+              className="w-60 rounded-xl p-1.5"
               onMouseEnter={openMenu}
               onMouseLeave={scheduleClose}
             >
-              <DropdownMenuLabel className="truncate">{name}</DropdownMenuLabel>
-              <DropdownMenuSeparator />
+              <div className="px-1.5 py-1.5">
+                <p className="truncate text-sm font-medium text-foreground">{name}</p>
+              </div>
+              <DropdownMenuSeparator className="bg-border/60" />
               <form action={logout}>
                 <DropdownMenuItem
                   nativeButton
                   render={<button type="submit" />}
-                  className="w-full cursor-pointer"
+                  className="w-full cursor-pointer gap-2 px-1.5 py-1.5 text-muted-foreground focus:text-foreground"
                 >
+                  <LogOut className="size-4" />
                   Log out
                 </DropdownMenuItem>
               </form>

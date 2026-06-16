@@ -105,7 +105,7 @@ that outlives the ~1 h token refreshes mid-flight instead of dying on a 401. See
 
 ## Why these choices
 
-- **Auth.js over hand-rolled OAuth:** secure cookie/CSRF/refresh handling out of the box; the
+- **Auth.js over hand-rolled OAuth:** secure cookie/CSRF/refresh handling built in; the
   prototype's bugs were largely token/session plumbing.
 - **Pure domain layer:** the dedupe/clean/compare logic is the actual product value; isolating
   it makes it correct and testable independent of Spotify.

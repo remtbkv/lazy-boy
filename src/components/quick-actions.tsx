@@ -10,6 +10,7 @@ import { HoverTip } from "@/components/hover-tip";
 import { MergePanel } from "@/components/merge-panel";
 import { ResumePanel } from "@/components/resume-panel";
 import { SubtractPanel } from "@/components/subtract-panel";
+import { PlaylistsSync } from "@/components/playlists-sync";
 import { Button } from "@/components/ui/button";
 
 type Playlist = {
@@ -49,9 +50,11 @@ const SUBTRACT_HINT =
 export function QuickActions({
   playlists,
   backupPref,
+  syncedAt,
 }: {
   playlists: Playlist[];
   backupPref: boolean;
+  syncedAt: string | null;
 }) {
   const [openPanel, setOpenPanel] = useState<
     null | "resume" | "clean" | "find" | "merge" | "subtract"
@@ -129,6 +132,12 @@ export function QuickActions({
             Subtract
           </Button>
         </HoverTip>
+
+        {/* Library-sync status sits at the far right of the action row — fixed spot, so it
+            doesn't shift the page when it appears/disappears. */}
+        <div className="ml-auto">
+          <PlaylistsSync syncedAt={syncedAt} />
+        </div>
       </div>
 
       {openPanel === "resume" ? (
