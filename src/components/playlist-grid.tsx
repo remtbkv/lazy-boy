@@ -119,15 +119,15 @@ export function PlaylistGrid({
           grid below instead of leaving a gap. */}
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-baseline gap-2">
-          {/* Stats styled to match the app's section-header convention (cf. history "TODAY",
-              column headers): small, uppercase, muted — numbers kept in foreground to pop. */}
+          {/* Quiet caption — normal case, muted labels, numbers in foreground so they pop.
+              Matches the app's secondary text (no all-caps, which read out of place). */}
           {stats ? (
-            <h1 className="truncate text-xs font-semibold uppercase tracking-wide text-muted-foreground sm:text-sm">
-              <span className="text-foreground">{stats.playlists.toLocaleString()}</span> playlists
+            <h1 className="truncate text-sm text-muted-foreground">
+              <span className="font-medium text-foreground">{stats.playlists.toLocaleString()}</span> playlists
               {" · "}
-              <span className="text-foreground">{stats.owned.toLocaleString()}</span> created by you
+              <span className="font-medium text-foreground">{stats.owned.toLocaleString()}</span> created by you
               {" · "}
-              <span className="text-foreground">{stats.songs.toLocaleString()}</span>{" "}
+              <span className="font-medium text-foreground">{stats.songs.toLocaleString()}</span>{" "}
               {stats.unique ? "unique songs" : "total songs"}
             </h1>
           ) : null}

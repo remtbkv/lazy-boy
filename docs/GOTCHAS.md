@@ -112,8 +112,8 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   local file at `data/listens.db` (gitignored). **All `db.ts` functions are async**
   (network DB) — `await` them. Synced from `/me/player/recently-played` in
   `sync/history.ts`. Tables: `tracks`, `plays` (deduped on `played_at`), `contexts`
-  (resolved playlist/album names for the "From" column). The `/history` page shows
-  per-day cards + a searchable log.
+  (resolved playlist/album names for the "From" column). The listen history lives on the
+  home page (`/home`, streamed below the quick actions) — per-day cards + a searchable log.
 - **`recently-played` only returns the last 50 plays — this drives the whole sync
   design.** Spotify caps that endpoint at 50 and won't page back further, so any play
   that scrolls off before you poll is **gone forever**. Completeness therefore depends
@@ -124,8 +124,8 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   and there is **no manual sync button** — it's fully automatic. One shared core
   (`syncRecentPlays`), triggered by: **in-app polling** while the site is open
   (`SyncOnLoad` → `POST /api/sync` on load, every 2 min, and on tab-focus; server skips
-  if synced <60 s ago — so an open tab is effectively live, and `/history` also refreshes
-  its view each minute); and the **app-closed coverage** path — a **GitHub Actions cron**
+  if synced <60 s ago — so an open tab is effectively live, and the home history view also
+  refreshes each minute); and the **app-closed coverage** path — a **GitHub Actions cron**
   (`.github/workflows/sync.yml`) every 5 min (GitHub's hard floor; can't go to 2 min, and
   runs best-effort) hitting `/api/cron/sync` with the stored token (free; Vercel Hobby
   caps its own crons at ~once/day, kept as a secondary backstop). The GitHub workflow
@@ -135,9 +135,10 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
 - **Day buckets use the user's timezone, sent from the browser — never `'localtime'`.**
   Turso runs in UTC, so `date(played_at, 'localtime')` would bucket by UTC and plays after
   UTC-midnight show up on "tomorrow." Spotify's API has no user timezone, so `TimezoneCookie`
-  writes the browser's UTC offset to a `tzoffset` cookie; `tzOffsetMinutes()` reads it and
-  `getDailyStats`/`getPlaysByDay` apply it via `date(played_at, '±N minutes')` (`localDay()`
-  in `db.ts`). Caveat: one current offset is applied to all rows, so plays within ~1h of a
+  writes the browser's UTC offset to a `tzoffset` cookie; `tzOffsetMinutes()` reads it.
+  `getDailyStats` shifts each play by that offset in JS to bucket by local day; `getPlaysByDay`
+  applies it in SQL via `date(played_at, '±N minutes')` (`localDay()` in `db.ts`). Caveat: one
+  current offset is applied to all rows, so plays within ~1h of a
   *past* DST change can land a day off — fine for personal history. Cron-context callers
   (no request) get offset 0, but they don't compute day buckets, so it doesn't matter.
 

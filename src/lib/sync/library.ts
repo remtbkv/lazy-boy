@@ -4,6 +4,7 @@ import {
   getLikedSignals,
   getPlaylistSnapshot,
   getSavedSyncedAt,
+  rebuildTracksFts,
   recomputeUniqueSongCount,
   setLibrarySyncedAt,
   storePlaylists,
@@ -80,9 +81,10 @@ export async function syncLibrary(
   processed += head.total;
   onProgress?.(processed, total);
 
-  // Refresh the cached unique-song count now that playlist tracks are up to date — Home
-  // reads the cached value instead of running this multi-second scan on every render.
+  // Refresh the cached unique-song count and the Find search index now that playlist tracks
+  // are up to date — both read instantly on the render/search path instead of scanning live.
   await recomputeUniqueSongCount();
+  await rebuildTracksFts();
 
   await setLibrarySyncedAt();
 }

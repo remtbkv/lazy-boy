@@ -45,9 +45,9 @@ Legend: `[x]` done · `[~]` partial / seam in place · `[ ]` not started
       item, so the hover→click path stays connected. Uses Auth.js `signOut`.
 - [~] **Persistent song store** — libSQL/Turso (file: fallback in dev) via
       `src/lib/db.ts`. DONE: listen history synced from `/me/player/recently-played`
-      (`tracks`/`plays`/`contexts` tables), the `/history` page (per-day cards + searchable
-      log with play counts, last-played, album art, duration, resolved "From" playlist
-      names). Background sync runs in-app every 2 min while open (`/api/sync`) + a GitHub
+      (`tracks`/`plays`/`contexts` tables), the listen-history view on the home page (per-day
+      cards + searchable log with play counts, last-played, album art, duration, resolved
+      "From" playlist names). Background sync runs in-app every 2 min while open (`/api/sync`) + a GitHub
       Actions cron every 5 min + a daily Vercel Cron (both → `/api/cron/sync`), replacing
       the dev-only `setInterval` scheduler; no manual sync button. The cadence is deliberate:
       `recently-played` only returns the last 50 plays, so polling must outrun a heavy

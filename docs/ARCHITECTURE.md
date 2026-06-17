@@ -129,14 +129,14 @@ SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped 
   **no manual sync button** — it's all automatic. Triggered (no `setInterval` — serverless
   can't run one): in-app while the site is open (`SyncOnLoad` syncs on load, every 2 min,
   and on tab-focus → `POST /api/sync`, debounced server-side to ~60 s, so an open tab is
-  effectively live; the `/history` page also refreshes its own view each minute via
+  effectively live; the home history view also refreshes each minute via
   `syncHistoryAction`); and — the coverage path for when the app is closed — a **GitHub
   Actions cron** (`.github/workflows/sync.yml`) every 5 min (GitHub's hard floor for
   scheduled workflows, run best-effort) hitting `/api/cron/sync` with the stored token.
   A daily Vercel Cron (`vercel.json`) is a secondary backstop. All scheduled hits share
   `/api/cron/sync` (`CRON_SECRET`-guarded).
-- Reads: `searchHistory`, `getDailyStats`, `getLastSync`. The `/history` page renders day
-  cards + a searchable, scrollable log.
+- Reads: `searchHistory`, `getDailyStats`, `getLastSync`. The home page renders the listen
+  history — day cards + a searchable, scrollable log — streamed below the quick actions.
 - **Token refresh coordination:** the `meta` table doubles as a cross-instance mutex
   (`acquireLock`/`releaseLock`, a TTL compare-and-set) so concurrent serverless instances
   don't race Spotify's rotating refresh token into `invalid_grant`. See `src/lib/auth.ts`.

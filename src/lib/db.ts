@@ -10,6 +10,24 @@ import { createClient, type Client, type InStatement } from "@libsql/client";
 import type { Track } from "@/lib/spotify/types";
 import { CLEANED_PREFIX, BACKUP_PREFIX } from "@/lib/clean/names";
 
+// ── Query conventions (this is a remote DB — round trips and plan choice both matter) ──
+// Follow these when adding queries so they stay fast and stable:
+//  • Drive joins from the hot, indexed table and LEFT JOIN to `tracks`. Queries over `plays`
+//    or `playlist_tracks` use `FROM plays p LEFT JOIN tracks t` / `FROM playlist_tracks pt
+//    LEFT JOIN tracks t`. Every play / playlist-track has a matching track, so a LEFT JOIN
+//    returns identical rows while keeping Turso on the indexed plays/playlist_tracks plan;
+//    an INNER join lets it choose a slow, variable plan that scans the large `tracks` table.
+//  • For song-identity equality lookups — `WHERE lower(t.artist) = ?` (optionally `AND
+//    lower(t.name) = ?`) — keep an INNER JOIN so the planner uses idx_tracks_artist_name.
+//  • Cache expensive whole-table aggregates in `meta` and recompute on write, not on read:
+//    `unique_song_count` and `alltime_stats` are refreshed in recordPlays / syncLibrary and
+//    read instantly on render. Per-day stats fetch only the recent window they display.
+//  • Do gap/sequence math (e.g. listened time) in JS over an ordered fetch — SQL window
+//    functions (LEAD/LAG) are very slow on Turso. See playsWithListened / getDailyStats.
+//  • Substring/token search over song or artist names goes through the trigram FTS index
+//    (`tracks_fts`, rebuilt on library sync), not a `LIKE '%term%'` scan of the tracks
+//    table. See ftsTokenFilter / searchPlaylistSongs. Reuse it for any new text search.
+
 export type PlayRecord = {
   trackId: string;
   name: string;
@@ -134,6 +152,13 @@ async function init(): Promise<Client> {
       retry_after INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_api_log_ts ON api_log (ts);
+    -- Full-text index over playlist-song names/artists for the Find search. The trigram
+    -- tokenizer makes substring matching index-backed (same results as the old LIKE scan,
+    -- much faster). Rebuilt from playlist tracks at the end of each library sync
+    -- (rebuildTracksFts) — a background job, never on a render. Populated lazily if a
+    -- search runs before the first sync has filled it.
+    CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts
+      USING fts5(track_id UNINDEXED, name, artist, tokenize='trigram');
   `);
   // Migrate older DBs that predate the album/duration columns.
   const info = await client.execute("PRAGMA table_info(tracks)");
@@ -259,7 +284,7 @@ const SELECT_TRACK = `
     (SELECT COALESCE(c2.name, p2.context_type)
        FROM plays p2 LEFT JOIN contexts c2 ON c2.uri = p2.context_uri
        WHERE p2.track_id = t.id ORDER BY p2.played_at DESC LIMIT 1) AS source
-  FROM tracks t JOIN plays p ON p.track_id = t.id`;
+  FROM plays p LEFT JOIN tracks t ON t.id = p.track_id`;
 
 // Estimated time *actually* listened per play: the gap until the next play, capped at the
 // song's length. A skipped/partial play counts only the seconds it ran; a fully-played one
@@ -280,7 +305,7 @@ const playsWithListened = cache(async (): Promise<ListenRow[]> => {
   const client = await getClient();
   const res = await client.execute(
     `SELECT p.played_at AS playedAt, p.track_id AS trackId, t.duration_ms AS durationMs
-     FROM plays p JOIN tracks t ON t.id = p.track_id
+     FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
      ORDER BY p.played_at ASC`,
   );
   const rows = plainRows(res.rows) as unknown as {
@@ -307,7 +332,7 @@ const SELECT_PLAY = `
     t.duration_ms AS durationMs, 1 AS plays,
     p.played_at AS lastPlayed, p.played_at AS firstPlayed,
     COALESCE(c.name, p.context_type) AS source
-  FROM plays p JOIN tracks t ON t.id = p.track_id
+  FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
     LEFT JOIN contexts c ON c.uri = p.context_uri`;
 
 /** Search history by track name or artist; "" returns most recently played. Returns each
@@ -408,8 +433,11 @@ export async function getDailyStats(offsetMin = 0, days = 14): Promise<DayStats[
   // in JS (the SQL LEAD() window is pathologically slow on Turso).
   const cutoff = new Date(Date.now() - (days + 2) * 86_400_000).toISOString();
   const res = await client.execute({
+    // LEFT JOIN, not INNER: every play has a track so the rows are identical, but it makes
+    // Turso drive from plays (idx_plays_played_at) instead of picking a slow, variable plan
+    // against the large tracks table — INNER was 150ms–1.5s+ here, LEFT is a steady ~50ms.
     sql: `SELECT p.played_at AS playedAt, p.track_id AS trackId, t.duration_ms AS durationMs
-          FROM plays p JOIN tracks t ON t.id = p.track_id
+          FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
           WHERE p.played_at >= :cutoff
           ORDER BY p.played_at ASC`,
     args: { cutoff },
@@ -670,7 +698,7 @@ export async function getPlaylistTracks(playlistId: string): Promise<Track[]> {
   const res = await client.execute({
     sql: `SELECT t.id, t.name AS title, t.artist, t.uri, t.album,
             t.album_image AS albumImage, t.duration_ms AS durationMs, pt.added_at AS addedAt
-          FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id
+          FROM playlist_tracks pt LEFT JOIN tracks t ON t.id = pt.track_id
           WHERE pt.playlist_id = :pid ORDER BY pt.position`,
     args: { pid: playlistId },
   });
@@ -830,26 +858,73 @@ function tokenLike(column: string, query: string) {
   return { where, args, firstPrefix: `${tokens[0] ?? ""}%`, phrase: `%${query}%` };
 }
 
+/** Rebuild the Find search index from the songs currently in playlists. Runs at the end of
+ *  a library sync (a background job) so search stays fast without touching the render path. */
+export async function rebuildTracksFts(): Promise<void> {
+  const client = await getClient();
+  await client.batch(
+    [
+      "DELETE FROM tracks_fts",
+      `INSERT INTO tracks_fts (track_id, name, artist)
+         SELECT id, name, artist FROM tracks
+         WHERE id IN (SELECT DISTINCT track_id FROM playlist_tracks)`,
+    ],
+    "write",
+  );
+}
+
+// Build the index once per process if a search runs before any sync has filled it (e.g. a
+// fresh deploy). On a populated DB the flag short-circuits after the first cheap check.
+let ftsPopulated = false;
+async function ensureFts(client: Client): Promise<void> {
+  if (ftsPopulated) return;
+  const r = await client.execute("SELECT 1 FROM tracks_fts LIMIT 1");
+  if (r.rows.length === 0) await rebuildTracksFts();
+  ftsPopulated = true;
+}
+
+// Fast token search: anchor on the longest ≥3-char token via the trigram FTS index
+// (`f.<ftsCol> MATCH`), then narrow the small matched set with LIKE on the remaining tokens.
+// Same any-order-substring results as tokenLike, but index-backed. Returns null when no
+// token reaches trigram's 3-char minimum — callers fall back to tokenLike.
+function ftsTokenFilter(ftsCol: "name" | "artist", trackCol: string, query: string) {
+  const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const anchor = [...tokens].filter((t) => t.length >= 3).sort((a, b) => b.length - a.length)[0];
+  if (!anchor) return null;
+  const rest = [...tokens];
+  rest.splice(rest.indexOf(anchor), 1); // drop one occurrence of the anchor; the rest stay as LIKE
+  const conds = [`f.${ftsCol} MATCH :anchor`, ...rest.map((_, i) => `${trackCol} LIKE :r${i}`)];
+  const args: Record<string, string> = { anchor };
+  rest.forEach((t, i) => (args[`r${i}`] = `%${t}%`));
+  return { where: conds.join(" AND "), args, firstPrefix: `${tokens[0]}%`, phrase: `%${query}%` };
+}
+
 /** Songs in any playlist whose title matches `query` — forgiving, token-by-token: every
  *  word in the query must appear, in any order (so "old chinese" finds "older chinese
  *  parse"). One row per distinct (artist, title); contiguous/prefix matches rank first. */
 export async function searchPlaylistSongs(query: string, limit = 12): Promise<FoundSong[]> {
   const q = query.trim();
   if (!q) return [];
-  const { where, args, firstPrefix, phrase } = tokenLike("t.name", q);
-  if (!where) return [];
   const client = await getClient();
+  await ensureFts(client);
+  // Trigram FTS for the common case (any token ≥3 chars); plain LIKE for short queries.
+  const fts = ftsTokenFilter("name", "t.name", q);
+  const filt = fts ?? tokenLike("t.name", q);
+  if (!filt.where) return [];
+  const from = fts
+    ? "tracks_fts f JOIN tracks t ON t.id = f.track_id JOIN playlist_tracks pt ON pt.track_id = t.id"
+    : "tracks t JOIN playlist_tracks pt ON pt.track_id = t.id";
   const res = await client.execute({
     sql: `SELECT t.id, t.name AS title, t.artist, t.album, t.album_image AS albumImage,
             COUNT(DISTINCT pt.playlist_id) AS playlistCount
-          FROM tracks t JOIN playlist_tracks pt ON pt.track_id = t.id
-          WHERE ${where}
+          FROM ${from}
+          WHERE ${filt.where}
           GROUP BY lower(t.artist), lower(t.name)
           ORDER BY (CASE WHEN t.name LIKE :phrase THEN 0 ELSE 1 END),
                    (CASE WHEN t.name LIKE :firstPrefix THEN 0 ELSE 1 END),
                    playlistCount DESC, t.name
           LIMIT :limit`,
-    args: { ...args, phrase, firstPrefix, limit },
+    args: { ...filt.args, phrase: filt.phrase, firstPrefix: filt.firstPrefix, limit },
   });
   return plainRows(res.rows) as unknown as FoundSong[];
 }
@@ -895,21 +970,26 @@ export type FoundArtist = {
 export async function searchPlaylistArtists(query: string, limit = 12): Promise<FoundArtist[]> {
   const q = query.trim();
   if (!q) return [];
-  const { where, args, firstPrefix, phrase } = tokenLike("t.artist", q);
-  if (!where) return [];
   const client = await getClient();
+  await ensureFts(client);
+  const fts = ftsTokenFilter("artist", "t.artist", q);
+  const filt = fts ?? tokenLike("t.artist", q);
+  if (!filt.where) return [];
+  const from = fts
+    ? "tracks_fts f JOIN tracks t ON t.id = f.track_id JOIN playlist_tracks pt ON pt.track_id = t.id"
+    : "tracks t JOIN playlist_tracks pt ON pt.track_id = t.id";
   const res = await client.execute({
     sql: `SELECT t.artist,
             COUNT(DISTINCT lower(t.name)) AS songCount,
             MAX(t.album_image) AS albumImage
-          FROM tracks t JOIN playlist_tracks pt ON pt.track_id = t.id
-          WHERE ${where}
+          FROM ${from}
+          WHERE ${filt.where}
           GROUP BY lower(t.artist)
           ORDER BY (CASE WHEN t.artist LIKE :phrase THEN 0 ELSE 1 END),
                    (CASE WHEN t.artist LIKE :firstPrefix THEN 0 ELSE 1 END),
                    songCount DESC, t.artist
           LIMIT :limit`,
-    args: { ...args, phrase, firstPrefix, limit },
+    args: { ...filt.args, phrase: filt.phrase, firstPrefix: filt.firstPrefix, limit },
   });
   return plainRows(res.rows) as unknown as FoundArtist[];
 }
