@@ -40,13 +40,7 @@ function loadGreetings(): string[] {
   }
 }
 
-export default async function HomePage({
-  searchParams,
-}: {
-  // Find's "last played" rows deep-link here: ?day=YYYY-MM-DD&track=<id> opens that day in
-  // the merged-in history list and scrolls to that song.
-  searchParams: Promise<{ day?: string; track?: string }>;
-}) {
+export default async function HomePage() {
   const session = await auth();
   const name = session?.user?.name ?? "You";
   const first = name.split(" ")[0] || name;
@@ -100,7 +94,7 @@ export default async function HomePage({
           shell; the divider keeps a tight, balanced gap (mt = pt). */}
       <section className="mt-5 border-t border-border/60 pt-5">
         <Suspense fallback={<HistorySkeleton />}>
-          <HomeHistory searchParams={searchParams} />
+          <HomeHistory />
         </Suspense>
       </section>
     </div>
@@ -109,12 +103,7 @@ export default async function HomePage({
 
 // The listen-history aggregates (day stats, all-time, today's plays, search seed) live in
 // their own async boundary so they stream after the shell rather than blocking navigation.
-async function HomeHistory({
-  searchParams,
-}: {
-  searchParams: Promise<{ day?: string; track?: string }>;
-}) {
-  const { day, track } = await searchParams;
+async function HomeHistory() {
   const tz = await tzOffsetMinutes();
   const [daily, allTime, initialResults] = await Promise.all([
     getDailyStats(tz),
@@ -123,11 +112,9 @@ async function HomeHistory({
     // streamed RSC for no visible benefit.
     searchHistory("", 50),
   ]);
-  // Open the deep-linked day if Find sent one (even older than the day strip's window),
-  // else the most recent day with plays.
-  const focusDay = day ?? null;
-  const focusTrackId = track ?? null;
-  const initialDay = focusDay ?? daily[0]?.day ?? null;
+  // Default to the most recent day with plays. Find's "last played" rows focus a specific
+  // day/song via a client event (no URL params) — handled in HistoryClient, not here.
+  const initialDay = daily[0]?.day ?? null;
   const initialDayTracks = initialDay ? await getPlaysByDay(initialDay, tz) : [];
   // Can the day strip expand past the first 2 weeks? (Are there older days?)
   const oldestShown = daily[daily.length - 1]?.day;
@@ -136,16 +123,11 @@ async function HomeHistory({
 
   return (
     <HistoryClient
-      // Remount when a Find deep-link changes day/track: Find lives on this same page now,
-      // so the click is a soft navigation — without a fresh key the client keeps its
-      // mounted state and ignores the new focus day/song.
-      key={`${focusDay ?? ""}-${focusTrackId ?? ""}`}
       initialDaily={daily}
       initialDay={initialDay}
       initialDayTracks={initialDayTracks}
       allTime={allTime}
       initialResults={initialResults}
-      focusTrackId={focusTrackId}
       initialHasMoreDays={initialHasMoreDays}
       songListMaxHeightClass="max-h-[calc(100vh-34rem)]"
     />

@@ -31,8 +31,9 @@ Legend: `[x]` done · `[~]` partial / seam in place · `[ ]` not started
       active device at the song after where you left off. The leave-off point is scoped to
       your most recent listening session (via `playedTracksInContext` timestamps), then the
       end of the longest in-order run within it — so an older/deeper session can't push you
-      past where you actually stopped, while a stray tap is still ignored. `resume-panel.tsx`,
-      `resumePlaylistAction`.
+      past where you actually stopped, while a stray tap is still ignored. Plays map to
+      playlist positions by id, then by `(name, artist)`, so Spotify's relinked/duplicate ids
+      still count (see GOTCHAS § Spotify Web API). `resume-panel.tsx`, `resumePlaylistAction`.
 - [x] Right-click a track in a playlist → Remove from playlist / Save to Liked / Add to
       queue / Share (copy link). `track-context-menu.tsx`, wired in `track-list.tsx`.
 
@@ -47,11 +48,12 @@ Legend: `[x]` done · `[~]` partial / seam in place · `[ ]` not started
       `src/lib/db.ts`. DONE: listen history synced from `/me/player/recently-played`
       (`tracks`/`plays`/`contexts` tables), the listen-history view on the home page (per-day
       cards + searchable log with play counts, last-played, album art, duration, resolved
-      "From" playlist names). Background sync runs in-app every 2 min while open (`/api/sync`) + a GitHub
-      Actions cron every 5 min + a daily Vercel Cron (both → `/api/cron/sync`), replacing
-      the dev-only `setInterval` scheduler; no manual sync button. The cadence is deliberate:
-      `recently-played` only returns the last 50 plays, so polling must outrun a heavy
-      listener. TODO: "where saved" (which playlists contain a song) is not implemented yet.
+      "From" playlist names). Background sync runs in-app every 2 min while open (`/api/sync`),
+      plus an external every-5-min pinger as the app-closed trigger with a GitHub Actions
+      workflow + daily Vercel Cron as backstops (all → `/api/cron/sync`); no manual sync
+      button. The cadence is deliberate: `recently-played` only returns the last 50 plays, so
+      polling must outrun a heavy listener. The **Find** quick action covers "where saved"
+      (which playlists contain a song/artist) + last-played, via an FTS5 trigram index.
 
 ## Phase 3 — user behavior (`future.txt`)
 

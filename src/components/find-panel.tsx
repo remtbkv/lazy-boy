@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { AlbumThumb } from "@/components/album-thumb";
 import {
   Card,
@@ -62,6 +62,7 @@ function dedupeBy<T>(arr: T[], key: (x: T) => string): T[] {
 // Quick lookup of a song OR an artist in your playlists (toggle between the two so the
 // results stay clean), then see when you last listened to it. All from the local store.
 export function FindPanel() {
+  const router = useRouter();
   const [mode, setMode] = useState<Mode>("song");
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<(FoundSong | FoundArtist)[]>([]);
@@ -231,13 +232,23 @@ export function FindPanel() {
                   <ul className="thin-scroll max-h-[5.5rem] space-y-1 overflow-y-auto pr-1 text-sm">
                     {listens.recent.map((l) => (
                       <li key={`${l.playedAt}-${l.trackId}`}>
-                        <Link
-                          href={`/home?day=${dayKey(l.playedAt)}&track=${encodeURIComponent(l.trackId)}`}
-                          className="-mx-1 flex items-baseline justify-between gap-3 rounded-md px-2 py-0.5 transition-colors hover:bg-accent/40"
+                        {/* Jump to that play's day in the history below — a same-page event,
+                            not a URL change, so the address bar stays clean and a refresh
+                            doesn't replay the scroll/highlight. */}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            window.dispatchEvent(
+                              new CustomEvent("lazyboy:focus-history", {
+                                detail: { day: dayKey(l.playedAt), trackId: l.trackId },
+                              }),
+                            )
+                          }
+                          className="-mx-1 flex w-full items-baseline justify-between gap-3 rounded-md px-2 py-0.5 text-left transition-colors hover:bg-accent/40"
                         >
                           <span>{timeAgo(l.playedAt)}</span>
                           <span className="text-muted-foreground">{exactTime(l.playedAt)}</span>
-                        </Link>
+                        </button>
                       </li>
                     ))}
                   </ul>
@@ -256,9 +267,21 @@ export function FindPanel() {
                     selected.kind === "song" ? l.playlistId : `${l.title}|${l.playlistId}`,
                   ).map((loc) => (
                     <li key={`${loc.playlistId}-${loc.trackId}-${loc.position}`}>
-                      <Link
-                        href={`/playlists/${loc.playlistId}?t=${loc.trackId}`}
-                        className="block truncate rounded-md px-2 py-1 text-sm transition-colors hover:bg-accent/40"
+                      {/* Open the playlist and flag the track to scroll to via sessionStorage
+                          (consumed once on arrival) rather than a `?t=` query param — keeps
+                          the URL clean and a refresh won't re-trigger the scroll/flash. */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          try {
+                            sessionStorage.setItem(
+                              "lazyboy:focusTrack",
+                              JSON.stringify({ playlistId: loc.playlistId, trackId: loc.trackId }),
+                            );
+                          } catch {}
+                          router.push(`/playlists/${loc.playlistId}`);
+                        }}
+                        className="block w-full truncate rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-accent/40"
                       >
                         {selected.kind === "artist" ? (
                           <>
@@ -268,7 +291,7 @@ export function FindPanel() {
                         ) : (
                           loc.playlistName
                         )}
-                      </Link>
+                      </button>
                     </li>
                   ))}
                 </ul>

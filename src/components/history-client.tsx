@@ -6,6 +6,7 @@ import { toast } from "@/lib/toast";
 import { playTrackAction } from "@/app/(app)/actions";
 import { loadDaysAction, syncHistoryAction } from "@/app/(app)/actions";
 import { AlbumThumb } from "@/components/album-thumb";
+import { AnimatedNumber } from "@/components/animated-number";
 import { FloatingBar } from "@/components/floating-bar";
 import { HoverScroll } from "@/components/hover-scroll";
 import { HoverTip } from "@/components/hover-tip";
@@ -79,7 +80,6 @@ export function HistoryClient({
   initialDayTracks,
   allTime: initialAllTime,
   initialResults,
-  focusTrackId = null,
   initialHasMoreDays = false,
   songListMaxHeightClass = "max-h-[calc(100vh-29rem)]",
 }: {
@@ -88,9 +88,6 @@ export function HistoryClient({
   initialDayTracks: TrackStats[];
   allTime: AllTimeStats;
   initialResults: TrackStats[];
-  // When arriving from Find's "last played" deep link, the play's track id — the day view
-  // scrolls to and briefly highlights this song (the server already opened the right day).
-  focusTrackId?: string | null;
   // Whether older days exist past the initial 2-week strip (drives the expand control).
   initialHasMoreDays?: boolean;
   // Caps the song table's height. Home passes a viewport-relative value so the merged-in
@@ -119,10 +116,16 @@ export function HistoryClient({
 
   const ALL_TIME_LIMIT = 300;
 
+  // Find's "last played" rows focus a song here via a window event (no URL params): select
+  // its day, then scroll to + highlight the row. `nonce` lets the same song re-focus on a
+  // repeat click; a refresh fires no event, so it never replays.
+  const [focus, setFocus] = useState<{ trackId: string; nonce: number } | null>(null);
+
   // Search results (all-time) — only shown while there's a query.
   const [results, setResults] = useState(initialResults);
   const logRef = useRef<HTMLDivElement | null>(null);
   const dayScrollRef = useRef<HTMLDivElement | null>(null);
+  const activeDayRef = useRef<HTMLButtonElement | null>(null);
   const searching = query.trim().length > 0;
 
   // Day/search lists read newest-first; the all-time list reads most-played. The
@@ -180,6 +183,24 @@ export function HistoryClient({
       if (seq === dayReq.current) setDayLoading(false);
     }
   }
+
+  // Kept in a ref (refreshed each render) so the mount-only listener always calls the
+  // latest selectDay without re-subscribing — same pattern as doRefresh below.
+  const focusFromFind = useRef<(day: string | null, trackId: string) => void>(() => {});
+  useEffect(() => {
+    focusFromFind.current = (day, trackId) => {
+      if (day) void selectDay(day);
+      setFocus((p) => ({ trackId, nonce: (p?.nonce ?? 0) + 1 }));
+    };
+  });
+  useEffect(() => {
+    const onFocus = (e: Event) => {
+      const d = (e as CustomEvent<{ day?: string; trackId?: string }>).detail;
+      if (d?.trackId) focusFromFind.current(d.day ?? null, d.trackId);
+    };
+    window.addEventListener("lazyboy:focus-history", onFocus);
+    return () => window.removeEventListener("lazyboy:focus-history", onFocus);
+  }, []);
 
   async function selectAllTime() {
     if (allSelected) return;
@@ -304,6 +325,21 @@ export function HistoryClient({
     return () => el.removeEventListener("wheel", onWheel);
   }, [empty]);
 
+  // Keep the selected day card in view in the horizontal strip — needed when arriving from
+  // a Find deep link to an older day, whose card sits off-screen to the right. Only nudges
+  // when the card isn't already fully visible, so clicking a visible day doesn't jump the
+  // strip. Scrolls the strip's own scrollLeft (not scrollIntoView) so the page never moves
+  // vertically — that's the focused row's job.
+  useEffect(() => {
+    const el = dayScrollRef.current;
+    const btn = activeDayRef.current;
+    if (!el || !btn || allSelected) return;
+    const left = btn.offsetLeft;
+    const right = left + btn.offsetWidth;
+    if (left >= el.scrollLeft && right <= el.scrollLeft + el.clientWidth) return;
+    el.scrollTo({ left: left - (el.clientWidth - btn.offsetWidth) / 2, behavior: "smooth" });
+  }, [selectedDay, allSelected, daily]);
+
   return (
     <div className="space-y-6">
       {empty ? (
@@ -326,19 +362,22 @@ export function HistoryClient({
                 return (
                   <button
                     key={d.day}
+                    ref={active ? activeDayRef : undefined}
                     type="button"
                     onClick={() => selectDay(d.day)}
                     aria-pressed={active}
                     className={
-                      "min-w-[140px] shrink-0 rounded-xl border p-3 text-left transition-colors hover:border-white/20 hover:bg-white/[0.04] " +
+                      "min-w-[140px] shrink-0 rounded-xl border p-3 text-left transition-colors hover:border-white/20 " +
                       (active ? "border-white/25 bg-white/[0.06]" : "border-border bg-card")
                     }
                   >
                     <div className="text-sm font-semibold">{dayLabel(d.day)}</div>
-                    <div className="mt-2 text-2xl font-bold tabular-nums">{d.plays}</div>
+                    <div className="mt-2 text-2xl font-bold tabular-nums">
+                      <AnimatedNumber value={d.plays} />
+                    </div>
                     <div className="text-xs text-muted-foreground">plays</div>
-                    <div className="mt-2 text-xs text-muted-foreground">
-                      {formatListenTime(d.durationMs)} listened
+                    <div className="mt-2 text-xs tabular-nums text-muted-foreground">
+                      <AnimatedNumber value={d.durationMs} format={formatListenTime} /> listened
                     </div>
                   </button>
                 );
@@ -368,17 +407,17 @@ export function HistoryClient({
               onClick={selectAllTime}
               aria-pressed={allSelected}
               className={
-                "min-w-[150px] shrink-0 rounded-xl border p-3 text-left transition-colors hover:border-white/20 hover:bg-white/[0.04] " +
+                "min-w-[150px] shrink-0 rounded-xl border p-3 text-left transition-colors hover:border-white/20 " +
                 (allSelected ? "border-white/25 bg-white/[0.06]" : "border-white/15 bg-secondary/40")
               }
             >
               <div className="text-sm font-semibold">All time</div>
               <div className="mt-2 text-2xl font-bold tabular-nums">
-                {allTime.plays.toLocaleString()}
+                <AnimatedNumber value={allTime.plays} />
               </div>
               <div className="text-xs text-muted-foreground">plays</div>
-              <div className="mt-2 text-xs text-muted-foreground">
-                {formatListenTime(allTime.durationMs)} listened
+              <div className="mt-2 text-xs tabular-nums text-muted-foreground">
+                <AnimatedNumber value={allTime.durationMs} format={formatListenTime} /> listened
               </div>
               {allTime.since ? (
                 <div className="text-xs text-muted-foreground">since {shortDate(allTime.since)}</div>
@@ -402,7 +441,8 @@ export function HistoryClient({
             <TrackTable
               tracks={visibleTracks}
               mode={searching ? "log" : "aggregate"}
-              focusTrackId={searching ? null : focusTrackId}
+              focusTrackId={searching ? null : (focus?.trackId ?? null)}
+              focusNonce={focus?.nonce ?? 0}
               maxHeightClass={songListMaxHeightClass}
               loading={!searching && dayLoading}
               empty={
@@ -438,6 +478,7 @@ function TrackTable({
   mode = "aggregate",
   loading = false,
   focusTrackId = null,
+  focusNonce = 0,
   maxHeightClass = "max-h-[calc(100vh-29rem)]",
 }: {
   tracks: TrackStats[];
@@ -445,6 +486,9 @@ function TrackTable({
   mode?: "aggregate" | "log";
   loading?: boolean;
   focusTrackId?: string | null;
+  // Bumps on each Find click so the same song can be re-focused; `handledNonce` below makes
+  // the scroll/highlight fire once per request, not again on background `tracks` refreshes.
+  focusNonce?: number;
   maxHeightClass?: string;
 }) {
   const isLog = mode === "log";
@@ -453,27 +497,34 @@ function TrackTable({
   const [menu, setMenu] = useState<{ x: number; y: number; track: Track } | null>(null);
 
   // Deep-link focus: once the row for `focusTrackId` is present, scroll it into view and
-  // flash it briefly. `didFocus` makes this fire only on arrival — not again when a
-  // background refresh swaps in a new `tracks` array.
+  // flash it briefly. Each focus request carries a `focusNonce`; we act once per nonce, so
+  // a background refresh swapping in a new `tracks` array doesn't re-fire it.
   const focusRow = useRef<HTMLTableRowElement | null>(null);
-  const didFocus = useRef(false);
+  const handledNonce = useRef(-1);
   const [highlightId, setHighlightId] = useState<string | null>(null);
   useEffect(() => {
-    if (didFocus.current || !focusTrackId) return;
-    if (!tracks.some((t) => t.id === focusTrackId)) return;
-    didFocus.current = true;
+    if (!focusTrackId || handledNonce.current === focusNonce) return;
+    if (!tracks.some((t) => t.id === focusTrackId)) return; // wait for the day's rows to load
     // Deferred (next frame) so it isn't a synchronous setState in the effect body, and so
-    // the row ref is laid out before we scroll to it.
+    // the row ref is laid out before we scroll to it. Mark the nonce handled only once the
+    // frame runs: setting it up front let Strict Mode's mount→cleanup→mount cancel the rAF
+    // and then bail on the re-mount, so the highlight never fired.
     const raf = requestAnimationFrame(() => {
+      handledNonce.current = focusNonce;
       setHighlightId(focusTrackId);
       focusRow.current?.scrollIntoView({ behavior: "smooth", block: "center" });
     });
-    const id = setTimeout(() => setHighlightId(null), 2400);
-    return () => {
-      cancelAnimationFrame(raf);
-      clearTimeout(id);
-    };
-  }, [tracks, focusTrackId]);
+    return () => cancelAnimationFrame(raf);
+  }, [tracks, focusTrackId, focusNonce]);
+
+  // Clear the highlight on its own timer keyed to `highlightId`. Kept separate from the
+  // focus effect so a background refresh (which changes `tracks` and re-runs that effect)
+  // can't cancel the pending clear — otherwise the row stayed grey forever.
+  useEffect(() => {
+    if (!highlightId) return;
+    const id = setTimeout(() => setHighlightId(null), 1400);
+    return () => clearTimeout(id);
+  }, [highlightId]);
 
   // Double-click → play just that song; right-click → the same action menu as in a
   // playlist (Add to queue / Save to Liked / Share — no "remove", since it's not a
@@ -535,6 +586,10 @@ function TrackTable({
               ref={t.id === focusTrackId ? focusRow : undefined}
               className={
                 "cursor-default border-b border-border last:border-0 transition-colors hover:bg-accent/30" +
+                // The deep-linked row fades its grey wash out slowly/smoothly (vs the
+                // default 150ms snap) — applied to the focus row itself so the longer
+                // duration is in effect when the highlight clears, not just while it's on.
+                (t.id === focusTrackId ? " duration-700 ease-out" : "") +
                 (highlightId === t.id ? " bg-white/15" : isCurrent ? " bg-white/5" : "")
               }
               onDoubleClick={() => play(t)}

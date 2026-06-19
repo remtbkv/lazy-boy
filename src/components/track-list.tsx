@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
 import { Clock3, Pause, Play } from "lucide-react";
 import { toast } from "@/lib/toast";
 import { playPlaylistTrackAction } from "@/app/(app)/actions";
@@ -64,12 +63,28 @@ export function TrackList({
     if (removed.size) setRemoved(new Set());
   }
 
-  // Deep-link from Find: `?t=<trackId>` scrolls that row into view and flashes it. The
-  // flash is a soft wash that fades out on its own, so it's a brief "here it is" cue
-  // rather than a persistent selection.
-  const targetTrackId = useSearchParams().get("t");
+  // Deep-link from Find: the target track is handed over in sessionStorage (not a `?t=`
+  // URL param, so the address bar stays clean) and consumed once on arrival — read it,
+  // clear it, so a refresh won't re-scroll/flash. Only applies when it was meant for this
+  // playlist. Scrolls that row into view and flashes a soft wash that fades on its own.
   const scrolledFor = useRef<string | null>(null);
   const [flashId, setFlashId] = useState<string | null>(null);
+  const [targetTrackId, setTargetTrackId] = useState<string | null>(null);
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem("lazyboy:focusTrack");
+      if (!raw) return;
+      const { playlistId: pid, trackId } = JSON.parse(raw) as { playlistId?: string; trackId?: string };
+      if (!trackId || (pid && pid !== playlistId)) return;
+      sessionStorage.removeItem("lazyboy:focusTrack");
+      // One-shot read of a handoff value that can't exist during SSR render, so it has to
+      // land in state here; it fires once on mount, not in a render loop.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setTargetTrackId(trackId);
+    } catch {
+      /* malformed/unavailable storage — no deep-link focus, nothing to do */
+    }
+  }, [playlistId]);
 
   // Double-click a row → play that track within the playlist context, so playback
   // continues through the rest of the playlist (like Spotify). Clears the accidental

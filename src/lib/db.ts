@@ -289,13 +289,18 @@ const SELECT_TRACK = `
 // Estimated time *actually* listened per play: the gap until the next play, capped at the
 // song's length. A skipped/partial play counts only the seconds it ran; a fully-played one
 // counts ~its length; stopping then resuming hours later is capped at the song length (not
-// the idle gap). 10-min fallback when a track's duration is unknown.
+// the idle gap). A play that ran under LISTEN_MIN_MS is a skip, not a listen, and counts
+// zero (so flicking through tracks never inflates listened time). 10-min fallback when a
+// track's duration is unknown.
 //
 // Computed in JS, not SQL: the equivalent `LEAD() OVER (ORDER BY played_at)` window function
 // runs pathologically slowly on Turso (~3s for ~1.5k rows — it was the whole reason the
 // history view was slow to load). A plain ordered fetch + linear pass is ~50ms and scales
 // fine (the plays table grows slowly).
 const LISTEN_FALLBACK_MS = 600000;
+// A play whose actual run time (gap to the next play) is under this counts as a skip, not a
+// listen, and adds 0 to listened-time totals. Plays are still counted as plays.
+const LISTEN_MIN_MS = 5000;
 type ListenRow = { playedAt: string; trackId: string; listenedMs: number };
 
 // Wrapped in React cache(): getDailyStats and getAllTimeStats both need this, and they run
@@ -317,10 +322,11 @@ const playsWithListened = cache(async (): Promise<ListenRow[]> => {
     const dur = r.durationMs ?? LISTEN_FALLBACK_MS;
     const next = rows[i + 1];
     const gap = next ? Date.parse(next.playedAt) - Date.parse(r.playedAt) : null;
+    const ran = gap != null && gap >= 0 ? Math.min(dur, gap) : dur;
     return {
       playedAt: r.playedAt,
       trackId: r.trackId,
-      listenedMs: Math.min(dur, gap != null && gap >= 0 ? gap : dur),
+      listenedMs: ran < LISTEN_MIN_MS ? 0 : ran,
     };
   });
 });
@@ -455,7 +461,8 @@ export async function getDailyStats(offsetMin = 0, days = 14): Promise<DayStats[
     const dur = rows[i].durationMs ?? LISTEN_FALLBACK_MS;
     const next = rows[i + 1];
     const gap = next ? Date.parse(next.playedAt) - Date.parse(rows[i].playedAt) : null;
-    const listenedMs = Math.min(dur, gap != null && gap >= 0 ? gap : dur);
+    const ran = gap != null && gap >= 0 ? Math.min(dur, gap) : dur;
+    const listenedMs = ran < LISTEN_MIN_MS ? 0 : ran;
     const day = new Date(Date.parse(rows[i].playedAt) + offMs).toISOString().slice(0, 10);
     let acc = byDay.get(day);
     if (!acc) {
@@ -811,7 +818,7 @@ export async function getLibraryTracks(
       except: exceptPlaylistId ?? "",
       // The target's own cleaned output, excluded by exact name. With no target name there's
       // nothing to exclude → a sentinel no real playlist matches.
-      ownCleaned: exceptName ? CLEANED_PREFIX + exceptName : " ",
+      ownCleaned: exceptName ? CLEANED_PREFIX + exceptName : "",
       backupLike: BACKUP_PREFIX + "%",
     },
   });
@@ -1075,14 +1082,24 @@ export async function getArtistSongLocations(artist: string, limit = 50): Promis
  *  stopped this time. */
 export async function playedTracksInContext(
   contextUri: string,
-): Promise<{ trackId: string; playedAt: string }[]> {
+): Promise<{ trackId: string; name: string | null; artist: string | null; playedAt: string }[]> {
   const client = await getClient();
+  // Also return name/artist so callers can fall back to a name+artist match when the play's
+  // track id doesn't line up with the playlist's stored id — Spotify hands the same song
+  // different ids across a playlist vs. recently-played (track relinking / duplicate
+  // releases), and an id-only match silently drops those plays.
   const res = await client.execute({
-    sql: `SELECT track_id AS trackId, played_at AS playedAt FROM plays
-          WHERE context_uri = :uri ORDER BY played_at ASC`,
+    sql: `SELECT p.track_id AS trackId, t.name AS name, t.artist AS artist, p.played_at AS playedAt
+          FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
+          WHERE p.context_uri = :uri ORDER BY p.played_at ASC`,
     args: { uri: contextUri },
   });
-  return plainRows(res.rows) as unknown as { trackId: string; playedAt: string }[];
+  return plainRows(res.rows) as unknown as {
+    trackId: string;
+    name: string | null;
+    artist: string | null;
+    playedAt: string;
+  }[];
 }
 
 /** Resolved name for a playback context uri, if we've cached it before. */

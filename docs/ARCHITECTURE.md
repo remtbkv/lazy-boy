@@ -130,13 +130,24 @@ SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped 
   can't run one): in-app while the site is open (`SyncOnLoad` syncs on load, every 2 min,
   and on tab-focus → `POST /api/sync`, debounced server-side to ~60 s, so an open tab is
   effectively live; the home history view also refreshes each minute via
-  `syncHistoryAction`); and — the coverage path for when the app is closed — a **GitHub
-  Actions cron** (`.github/workflows/sync.yml`) every 5 min (GitHub's hard floor for
-  scheduled workflows, run best-effort) hitting `/api/cron/sync` with the stored token.
-  A daily Vercel Cron (`vercel.json`) is a secondary backstop. All scheduled hits share
-  `/api/cron/sync` (`CRON_SECRET`-guarded).
+  `syncHistoryAction`); and — the coverage path for when the app is closed — an **external
+  every-5-min pinger** hitting `/api/cron/sync` with the stored token (a systemd timer on an
+  always-on machine, or a service like cron-job.org). A **GitHub Actions** workflow
+  (`.github/workflows/sync.yml`, scheduled best-effort) and a daily **Vercel Cron**
+  (`vercel.json`) are backstops. All scheduled hits share `/api/cron/sync`
+  (`CRON_SECRET`-guarded).
 - Reads: `searchHistory`, `getDailyStats`, `getLastSync`. The home page renders the listen
   history — day cards + a searchable, scrollable log — streamed below the quick actions.
+- **Derived stats, search & resume:** "listened" time is computed per play (the gap to the
+  next play, capped at the song length; under 5 s counts as zero; an isolated play is assumed
+  to have finished) — Spotify reports *when* a track played, never *how long*. Whole-table
+  totals (`alltime_stats`) are cached in `meta` and recomputed on write; per-day totals compute
+  live. The **Find** quick action searches playlist songs/artists via an FTS5 trigram index
+  (`tracks_fts`, rebuilt on library sync). **Resume** (`resumePlaylistAction`) picks up where
+  you left off, matching plays to playlist positions by id then by `(name, artist)`. New
+  `db.ts` queries follow the conventions in that file's header (drive joins from the indexed
+  hot table; cache aggregates on write; do gap math in JS, not SQL window functions). Details
+  in `docs/GOTCHAS.md`.
 - **Token refresh coordination:** the `meta` table doubles as a cross-instance mutex
   (`acquireLock`/`releaseLock`, a TTL compare-and-set) so concurrent serverless instances
   don't race Spotify's rotating refresh token into `invalid_grant`. See `src/lib/auth.ts`.
@@ -151,17 +162,18 @@ SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped 
 - `history/search?q=` — local history search (no Spotify call → instant).
 - `now-playing` — live "what's playing"; returns `{ playing: null }` when idle (never stale).
 - `sync` (POST) — on-load history sync; server debounces, skipping if synced <~60 s ago.
-- `cron/sync` (GET) — scheduled history sync (GitHub Actions every 5 min + Vercel daily);
-  `CRON_SECRET`-guarded (fail-closed: an unset secret rejects all callers), session-less
-  (uses the stored token).
+- `cron/sync` (GET) — scheduled history sync. On-time trigger is an external every-5-min
+  pinger; GitHub Actions + a daily Vercel Cron are backstops. `CRON_SECRET`-guarded
+  (fail-closed: an unset secret rejects all callers), session-less (uses the stored token).
 
 All check `auth()` and 401 on no session, except `cron/sync` (cron secret, no session).
 
 ## Player simulation
 
-- **Now-playing bar** (`components/now-playing.tsx`, mounted in the `(app)` layout): polls
-  `/api/now-playing` every ~12s while visible; renders only when there's genuine active
-  playback. No active device → nothing shown.
+- **Now-playing bar** (`components/now-playing.tsx`, mounted in the `(app)` layout): the
+  shared `NowPlayingProvider` (`now-playing-context.tsx`) polls `/api/now-playing` every 6s
+  **while the tab is visible**; the bar interpolates the progress locally each second between
+  polls. Renders only when there's genuine active playback. No active device → nothing shown.
 - **Track right-click menu** (`components/track-context-menu.tsx`): Add to queue / Save to
   Liked / Open in Spotify, via `addToQueueAction` / `saveToLikedAction`.
 
@@ -172,6 +184,9 @@ All check `auth()` and 401 on no session, except `cron/sync` (cron secret, no se
 - `components/album-thumb.tsx` — album art + music-note fallback.
 - `components/sort-menu.tsx` — the "Sort by ▾" dropdown.
 - `components/floating-bar.tsx` — the bottom-centered search/see-more pill.
+- `components/animated-number.tsx` — `AnimatedNumber`: tweens a count from its old value to a
+  new one (ease-out, reduced-motion aware, no first-paint count-up). Use for any number that
+  updates live.
 
 ---
 

@@ -24,6 +24,14 @@ Palette (CSS variables in `src/app/globals.css`, mapped to Tailwind/shadcn token
 - Green is for **primary CTAs and active state only** — don't flood the UI with it.
 - Prefer neutral surfaces + one green accent per view.
 - Use shadcn components; don't hand-roll buttons/inputs/dialogs.
+- **Selection vs hover:** show selection with a subtle **fill** (`bg-white/[0.06]`) and hover
+  with a **border change only** (`hover:border-white/20`, no fill). Keeping the fill exclusive
+  to the selected item is what keeps selected vs. merely-hovered legible (day strip, all-time
+  card).
+- **Counts animate, they don't jolt.** Numbers that update live (plays, listened time on the
+  day + all-time cards) roll from the old value to the new via `AnimatedNumber` (ease-out,
+  reduced-motion aware, no count-up on first paint). Use it for any number that changes under
+  the user.
 
 ## Code style
 
@@ -45,6 +53,20 @@ Palette (CSS variables in `src/app/globals.css`, mapped to Tailwind/shadcn token
 - Normalize tracks to `Track` (`{ id, artist, title, uri }`) at the resource boundary; UI and
   domain never touch raw Spotify JSON.
 - Dedupe key is `(primary artist, title)`, lowercased — see `domain.keyOf`.
+
+## URL & transient UI state
+
+- **Keep the address bar clean.** Don't encode momentary UI focus (which day to open, which
+  song to scroll to and highlight) in query params — it clutters the URL and replays the
+  animation on refresh. Reserve real routes/params for shareable state. For transient focus:
+  - **Same page → a `window` CustomEvent.** Find's "last played" rows dispatch
+    `lazyboy:focus-history`; `history-client.tsx` listens, opens that day, scrolls to + flashes
+    the song.
+  - **Across routes → `sessionStorage`, consumed once.** Find's "found in" rows stash the
+    target track id and navigate to the bare `/playlists/[id]`; `track-list.tsx` reads it on
+    mount, scrolls + flashes, then clears it.
+  Both leave the URL untouched and skip replay on refresh by nature. These are plain web APIs,
+  so they behave the same on mobile and desktop.
 
 ## Errors
 

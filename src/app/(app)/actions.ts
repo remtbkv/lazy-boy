@@ -494,13 +494,23 @@ export async function resumePlaylistAction(
     if (tracks.length === 0) throw new Error("This playlist has no playable tracks.");
 
     // Each track id → its position in the playlist (first occurrence wins for the rare
-    // duplicate). Plays are returned oldest→newest; map each to {position, time}, dropping
-    // any whose track is no longer in the playlist.
+    // duplicate). Also index by name+artist as a fallback: Spotify gives the same song
+    // different ids in a playlist vs. in recently-played (track relinking / duplicate
+    // releases), so an id-only match silently drops those plays — which sent Resume back to
+    // an earlier song than where you actually stopped. Plays are oldest→newest; map each to
+    // {position, time}, dropping any whose song isn't in the playlist at all.
     const posOf = new Map<string, number>();
-    for (let i = 0; i < tracks.length; i++) if (!posOf.has(tracks[i].id)) posOf.set(tracks[i].id, i);
+    const posByKey = new Map<string, number>();
+    const songKey = (name: string | null | undefined, artist: string | null | undefined) =>
+      `${(name ?? "").toLowerCase().trim()} ${(artist ?? "").toLowerCase().trim()}`;
+    for (let i = 0; i < tracks.length; i++) {
+      if (!posOf.has(tracks[i].id)) posOf.set(tracks[i].id, i);
+      const key = songKey(tracks[i].title, tracks[i].artist);
+      if (!posByKey.has(key)) posByKey.set(key, i);
+    }
     const events: { pos: number; t: number }[] = [];
     for (const p of plays) {
-      const pos = posOf.get(p.trackId);
+      const pos = posOf.get(p.trackId) ?? posByKey.get(songKey(p.name, p.artist));
       const t = Date.parse(p.playedAt);
       if (pos !== undefined && !Number.isNaN(t)) events.push({ pos, t });
     }

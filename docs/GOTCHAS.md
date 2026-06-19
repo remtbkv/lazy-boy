@@ -77,6 +77,14 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   app's allowlist in the Spotify dashboard → User Management. **Not fixable in
   code.** Don't keep retrying or assume the user ID is wrong — it's a dashboard
   setting the user controls.
+- **The same song carries different track ids in different places (relinking /
+  duplicate releases).** A track stored in a playlist and the *same* track as it
+  comes back from `/me/player/recently-played` can have **different ids** (market
+  relinking, re-uploads, alternate releases). So anything correlating plays to a
+  playlist must match on **`(artist, title)`**, not the id — this is the same
+  identity the dedupe/clean features use (FEATURES § Track identity). Resume does
+  exactly this: it matches a play to a playlist position by id first, then falls
+  back to `(name, artist)`, so relinked plays still count.
 
 ## Architecture added recently
 
@@ -126,12 +134,13 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   (`SyncOnLoad` → `POST /api/sync` on load, every 2 min, and on tab-focus; server skips
   if synced <60 s ago — so an open tab is effectively live, and the home history view also
   refreshes each minute); and the **app-closed coverage** path — a **GitHub Actions cron**
-  (`.github/workflows/sync.yml`) every 5 min (GitHub's hard floor; can't go to 2 min, and
-  runs best-effort) hitting `/api/cron/sync` with the stored token (free; Vercel Hobby
-  caps its own crons at ~once/day, kept as a secondary backstop). The GitHub workflow
-  needs two repo secrets: `APP_URL` and `CRON_SECRET`. Want a tighter app-closed cadence
-  than 5 min? GitHub can't do it — use an external pinger (e.g. cron-job.org, 1-min free)
-  hitting `/api/cron/sync` with the same bearer secret.
+  (`.github/workflows/sync.yml`) hitting `/api/cron/sync` with the stored token. GitHub
+  schedules best-effort (real spacing can stretch to hours), so the **on-time app-closed
+  capture is an external every-5-min pinger** hitting the same `/api/cron/sync` — a systemd
+  timer on an always-on machine, or a service like cron-job.org — with the GitHub workflow
+  and a daily **Vercel Cron** (`vercel.json`) as backstops. Every scheduled hit carries
+  `Authorization: Bearer $CRON_SECRET` (fail-closed: an unset secret rejects all callers).
+  The GitHub workflow needs two repo secrets: `APP_URL` and `CRON_SECRET`.
 - **Day buckets use the user's timezone, sent from the browser — never `'localtime'`.**
   Turso runs in UTC, so `date(played_at, 'localtime')` would bucket by UTC and plays after
   UTC-midnight show up on "tomorrow." Spotify's API has no user timezone, so `TimezoneCookie`
@@ -141,6 +150,32 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   current offset is applied to all rows, so plays within ~1h of a
   *past* DST change can land a day off — fine for personal history. Cron-context callers
   (no request) get offset 0, but they don't compute day buckets, so it doesn't matter.
+- **Listened time ≠ play count — it's measured per play, capped at the song.** Each play
+  counts the gap until your *next* play, capped at the track length, so a song you skip part-way
+  counts only the seconds it actually ran (`playsWithListened` / `getDailyStats` in `db.ts`).
+  A play that ran under 5 s counts **zero** (a skip, not a listen; `LISTEN_MIN_MS`). An
+  isolated play (next play more than a song-length later) is assumed to have finished — the best
+  estimate available, since Spotify reports *when* a track played, never *how long*. Plays are
+  always the real count; this only shapes the "listened" totals. Whole-table totals
+  (`alltime_stats`) are cached in `meta` and recomputed on write; per-day totals compute live.
+- **Find search is index-backed (FTS5 trigram), not a `LIKE` scan.** Substring search over
+  playlist song/artist names goes through the `tracks_fts` virtual table (trigram tokenizer,
+  rebuilt during library sync), giving the same results as `LIKE '%term%'` but fast. Queries
+  under 3 chars fall back to `LIKE` (trigram needs ≥3 chars). See `ftsTokenFilter` /
+  `searchPlaylistSongs` in `db.ts`.
+- **Resume picks up where you left off in a playlist** (`resumePlaylistAction`): it scopes
+  plays in that playlist to the most recent session (>3 h gap splits sessions), takes the end
+  of the longest in-order run within it (tolerating small skips), and resumes at the next
+  track. It matches plays to playlist positions by id **then by `(name, artist)`** so relinked
+  ids still count (see the relinking note under Spotify Web API). Reads are cached
+  (`getPlaylistTracks`) + run in parallel with auth; the only network write is the Spotify
+  play call.
+- **`db.ts` query conventions (follow them for new queries — they're in the file header).**
+  Drive joins from the hot indexed table (`plays` / `playlist_tracks`) and `LEFT JOIN tracks`,
+  not the reverse (keeps the planner on the indexed path); keep an `INNER JOIN` only for
+  `lower(artist) = ?` identity lookups; cache whole-table aggregates in `meta` and recompute on
+  write; do gap/sequence math in JS, not SQL window functions (`LEAD`/`LAG` are very slow on
+  Turso).
 
 ## Verifying UI with Playwright
 
