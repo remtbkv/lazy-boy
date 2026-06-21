@@ -144,7 +144,7 @@ export function PlaylistGrid({
         </p>
       ) : (
         <ul className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-          {visible.map((p) => (
+          {visible.map((p, i) => (
             <li key={p.id}>
               <Link
                 href={`/playlists/${p.id}`}
@@ -155,7 +155,10 @@ export function PlaylistGrid({
                 }}
                 className="group block rounded-lg border border-border bg-card p-3 transition-colors hover:border-white/25 hover:bg-accent/40"
               >
-                <PlaylistThumb src={p.image} name={p.name} />
+                {/* Eager-load the first ~viewport of covers (≈ mobile's first rows + a bit) so
+                    what you see fills in immediately; the rest lazy-load on scroll, which keeps
+                    cellular from fetching all of them up front. */}
+                <PlaylistThumb src={p.image} name={p.name} priority={i < 8} />
                 <p className="mt-3 truncate text-sm font-medium select-text">{p.name}</p>
                 <p className="text-xs text-muted-foreground">{p.trackCount} tracks</p>
               </Link>

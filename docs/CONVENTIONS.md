@@ -32,6 +32,12 @@ Palette (CSS variables in `src/app/globals.css`, mapped to Tailwind/shadcn token
   day + all-time cards) roll from the old value to the new via `AnimatedNumber` (ease-out,
   reduced-motion aware, no count-up on first paint). Use it for any number that changes under
   the user.
+- **Images load over a steady skeleton, then fade in** (`PlaylistThumb`): a reserved
+  aspect-square box with a subtle pulse, the image fading in on decode — so covers arriving at
+  different times read as a smooth fill, never a broken grid, and the layout never shifts.
+  **Eager-load + high-priority the first view** (e.g. the grid's first ~8 covers); lazy-load
+  the rest so mobile/cellular doesn't fetch everything up front. Cover URLs are stored in the
+  DB and refreshed on library sync.
 
 ## Code style
 

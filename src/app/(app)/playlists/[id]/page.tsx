@@ -96,7 +96,7 @@ export default async function PlaylistDetailPage({
 
       <div className="flex flex-col gap-6 sm:flex-row sm:items-end">
         <div className="w-40 shrink-0">
-          <PlaylistThumb src={image} name={name} />
+          <PlaylistThumb src={image} name={name} priority />
         </div>
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-3xl font-bold tracking-tight select-text">{name}</h1>
