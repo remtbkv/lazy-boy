@@ -264,11 +264,13 @@ export function HistoryClient({
   // below always run the latest version without re-subscribing. Debounced so the
   // track-change trigger and the fallback timer can't double-fire.
   const lastRefresh = useRef(0);
-  const doRefresh = useRef(async () => {});
+  const doRefresh = useRef<(force?: boolean) => Promise<void>>(async () => {});
   useEffect(() => {
-    doRefresh.current = async () => {
+    doRefresh.current = async (force = false) => {
       if (document.visibilityState !== "visible") return;
-      if (Date.now() - lastRefresh.current < 15000) return;
+      // `force` skips the debounce — used by the song-change trigger so the just-finished play
+      // lands in sync with the now-playing chip rather than waiting out the interval.
+      if (!force && Date.now() - lastRefresh.current < 15000) return;
       lastRefresh.current = Date.now();
       try {
         // Fetch as many days as the strip is currently expanded to, so a refresh keeps the
@@ -295,11 +297,15 @@ export function HistoryClient({
     };
   });
 
-  // Refresh the moment the playing track changes (a finished song lands in
-  // recently-played → it shows up here right away), plus a slow fallback for when
-  // playback is idle/stopped.
+  // The now-playing chip just swapped to a new song → pull the just-finished play in *now* so
+  // its row slides into Today at the same moment, not on the next interval. Force past the
+  // debounce, and retry once a few seconds later to catch Spotify's recently-played lag (the
+  // finished song sometimes isn't logged at the exact tick the chip changes). Plus a slow
+  // fallback below for when playback is idle/stopped.
   useEffect(() => {
-    void doRefresh.current();
+    void doRefresh.current(true);
+    const t = setTimeout(() => void doRefresh.current(true), 4000);
+    return () => clearTimeout(t);
   }, [nowPlayingId]);
   useEffect(() => {
     const id = setInterval(() => void doRefresh.current(), 120000);
@@ -554,6 +560,29 @@ function TrackTable({
     });
   };
 
+  // Slide newly-synced rows in: compare this render's row keys to the previous set and animate
+  // only the few that just appeared on a background sync — not the first load or a day-switch
+  // (which replaces the whole list). State updated during render (React's "info from previous
+  // renders" pattern, same as track-list's prevTracks) so the class is present on the row's
+  // first paint (no flicker) without reading a ref in render. Aggregate view only.
+  const rowKeys = tracks.map((t) => `${t.id}-${t.lastPlayed}`);
+  const keySig = rowKeys.join("");
+  const [prevSig, setPrevSig] = useState(keySig);
+  const [prevKeys, setPrevKeys] = useState<Set<string>>(() => new Set(rowKeys));
+  const [animKeys, setAnimKeys] = useState<Set<string>>(() => new Set());
+  if (prevSig !== keySig) {
+    const fresh = rowKeys.filter((k) => !prevKeys.has(k));
+    const bulk = fresh.length > Math.max(3, Math.floor(rowKeys.length * 0.3));
+    setPrevSig(keySig);
+    setPrevKeys(new Set(rowKeys));
+    setAnimKeys(!isLog && !bulk && fresh.length > 0 ? new Set(fresh) : new Set());
+  }
+  useEffect(() => {
+    if (animKeys.size === 0) return;
+    const id = setTimeout(() => setAnimKeys(new Set()), 600);
+    return () => clearTimeout(id);
+  }, [animKeys]);
+
   return (
     <div className={"thin-scroll overflow-y-auto rounded-lg border border-border " + maxHeightClass}>
       {/* Fixed layout: column widths stay constant and long text clips (then scrolls
@@ -580,9 +609,11 @@ function TrackTable({
         <tbody>
           {tracks.map((t) => {
             const isCurrent = !!currentId && currentId === t.id;
+            const rowKey = `${t.id}-${t.lastPlayed}`;
+            const isNewRow = animKeys.has(rowKey);
             return (
             <tr
-              key={`${t.id}-${t.lastPlayed}`}
+              key={rowKey}
               ref={t.id === focusTrackId ? focusRow : undefined}
               className={
                 "cursor-default border-b border-border last:border-0 transition-colors hover:bg-accent/30" +
@@ -590,6 +621,8 @@ function TrackTable({
                 // default 150ms snap) — applied to the focus row itself so the longer
                 // duration is in effect when the highlight clears, not just while it's on.
                 (t.id === focusTrackId ? " duration-700 ease-out" : "") +
+                // A freshly-synced play eases down from under the header instead of popping.
+                (isNewRow ? " history-row-in" : "") +
                 (highlightId === t.id ? " bg-white/15" : isCurrent ? " bg-white/5" : "")
               }
               onDoubleClick={() => play(t)}

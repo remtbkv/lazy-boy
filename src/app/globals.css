@@ -136,6 +136,28 @@
   animation: np-swap 0.28s ease-out;
 }
 
+/* A freshly-synced play sliding into the top of the history list: it eases down from just
+   under the sticky header (which has a solid background, so the row appears to emerge from
+   behind it) and fades in, rather than popping. Only applied to genuinely new rows. */
+@keyframes history-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(-1.25rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.history-row-in {
+  animation: history-row-in 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .history-row-in {
+    animation: none;
+  }
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

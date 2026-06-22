@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Brush, Diff, GitMerge, ListPlus, Play, Search } from "lucide-react";
+import { Diff, Eraser, GitMerge, ListPlus, Play, Search } from "lucide-react";
 import { saveQueueAction } from "@/app/(app)/actions";
 import { ActionButton } from "@/components/action-button";
 import { CleanPanel } from "@/components/clean-panel";
@@ -83,7 +83,7 @@ export function QuickActions({
             aria-expanded={openPanel === "clean"}
             onClick={() => toggle("clean")}
           >
-            <Brush className="size-4 text-foreground" />
+            <Eraser className="size-4 text-foreground" />
             Clean playlist
           </Button>
         </HoverTip>
