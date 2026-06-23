@@ -283,11 +283,19 @@ export function HistoryClient({
         // if the user has since switched day/all or changed the search.
         const daySeq = dayReq.current;
         const searchSeq = searchReq.current;
+        // If you were following the latest day (not pinned to a past day or All-time) and the
+        // day has rolled over since the page loaded — e.g. the tab sat open overnight — advance
+        // to the new latest day ("Today") instead of staying on what used to be the latest.
+        const newLatest = r.daily[0]?.day ?? null;
+        const followingLatest = !allSelected && !searching && selectedDay === (daily[0]?.day ?? null);
+        const targetDay =
+          followingLatest && newLatest && newLatest !== selectedDay ? newLatest : selectedDay;
+        if (targetDay !== selectedDay) setSelectedDay(targetDay);
         if (allSelected) {
           const a = await fetch(`/api/history/all?limit=${ALL_TIME_LIMIT}`);
           if (a.ok && daySeq === dayReq.current) setDayTracks((await a.json()).results as TrackStats[]);
-        } else if (selectedDay) {
-          const d = await fetch(`/api/history/day?day=${selectedDay}`);
+        } else if (targetDay) {
+          const d = await fetch(`/api/history/day?day=${targetDay}`);
           if (d.ok && daySeq === dayReq.current) setDayTracks((await d.json()).results as TrackStats[]);
         }
         if (searching && searchSeq === searchReq.current) await runSearch(query);
@@ -310,6 +318,15 @@ export function HistoryClient({
   useEffect(() => {
     const id = setInterval(() => void doRefresh.current(), 120000);
     return () => clearInterval(id);
+  }, []);
+  // Returning to a tab that sat open (e.g. overnight): refresh right away so the counts update
+  // and the view rolls to Today — rather than waiting out the interval on a stale "Yesterday".
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void doRefresh.current(true);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
   }, []);
 
   const empty = daily.length === 0;
