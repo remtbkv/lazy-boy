@@ -712,6 +712,22 @@ export async function getPlaylistTracks(playlistId: string): Promise<Track[]> {
   return plainRows(res.rows) as unknown as Track[];
 }
 
+// Just the ordered id/uri/name/artist — all Resume needs to map plays → positions and pick
+// the offset track. Skips the album/image/duration/added-at columns `getPlaylistTracks`
+// carries, which roughly halves the payload on large playlists (the read sits on Resume's
+// critical path, right before the play command).
+export type PlaylistTrackRef = { id: string; uri: string; title: string; artist: string };
+export async function getPlaylistTrackOrder(playlistId: string): Promise<PlaylistTrackRef[]> {
+  const client = await getClient();
+  const res = await client.execute({
+    sql: `SELECT t.id, t.uri, t.name AS title, t.artist
+          FROM playlist_tracks pt LEFT JOIN tracks t ON t.id = pt.track_id
+          WHERE pt.playlist_id = :pid ORDER BY pt.position`,
+    args: { pid: playlistId },
+  });
+  return plainRows(res.rows) as unknown as PlaylistTrackRef[];
+}
+
 /** Drop one track from a playlist's cache (after a remove) so it doesn't reappear on
  *  the next render before the background refresh. */
 export async function removeCachedPlaylistTrack(playlistId: string, uri: string): Promise<void> {

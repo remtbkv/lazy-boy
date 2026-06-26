@@ -22,6 +22,7 @@ import {
   type DayStats,
   getMeId,
   getPlaylistTracks,
+  getPlaylistTrackOrder,
   playedTracksInContext,
   removeCachedPlaylistTrack,
   setCleanBackupPref,
@@ -483,7 +484,7 @@ export async function resumePlaylistAction(
     // fetch, and we cache that result for next time.
     const [sp, cached, plays] = await Promise.all([
       getSpotify(),
-      getPlaylistTracks(playlistId),
+      getPlaylistTrackOrder(playlistId),
       playedTracksInContext(uri),
     ]);
     let tracks = cached;
@@ -502,7 +503,7 @@ export async function resumePlaylistAction(
     const posOf = new Map<string, number>();
     const posByKey = new Map<string, number>();
     const songKey = (name: string | null | undefined, artist: string | null | undefined) =>
-      `${(name ?? "").toLowerCase().trim()} ${(artist ?? "").toLowerCase().trim()}`;
+      `${(name ?? "").toLowerCase().trim()} ${(artist ?? "").toLowerCase().trim()}`;
     for (let i = 0; i < tracks.length; i++) {
       if (!posOf.has(tracks[i].id)) posOf.set(tracks[i].id, i);
       const key = songKey(tracks[i].title, tracks[i].artist);
