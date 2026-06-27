@@ -59,11 +59,15 @@ export async function syncLibrary(
   // Only owned playlists feed the library union; re-fetch tracks just for the ones
   // whose snapshot_id changed since we last cached them. Either way every playlist's
   // songs count toward "looked through".
+  // Track whether anything in the library actually changed this run, so the expensive
+  // derived-index rebuilds below only fire when needed (not every hourly steady-state sync).
+  let changed = false;
   for (const p of owned) {
     const cachedSnapshot = await getPlaylistSnapshot(p.id);
     if (!p.snapshot || cachedSnapshot !== p.snapshot) {
       const tracks = await sp.playlistTracks(p.id);
       await storePlaylistTracks(p.id, tracks, p.snapshot);
+      changed = true;
       if (paceMs) await sleep(paceMs);
     }
     processed += p.trackCount;
@@ -77,14 +81,19 @@ export async function syncLibrary(
   const stale = !savedAt || Date.now() - Date.parse(savedAt) > LIKED_FULL_MAX_AGE_MS;
   if (stale || sig.total !== head.total || sig.topAddedAt !== head.topAddedAt) {
     await storeSavedTracks(await sp.savedTracks());
+    changed = true;
   }
   processed += head.total;
   onProgress?.(processed, total);
 
-  // Refresh the cached unique-song count and the Find search index now that playlist tracks
-  // are up to date — both read instantly on the render/search path instead of scanning live.
-  await recomputeUniqueSongCount();
-  await rebuildTracksFts();
+  // Refresh the cached unique-song count and the Find search index ONLY when the library
+  // actually changed. The FTS refresh is a full delete-all + insert-all over every playlist
+  // track (~tens of thousands of rows), so running it on every steady-state hourly sync — when
+  // nothing moved — burned the bulk of the Turso row-write quota for no benefit.
+  if (changed) {
+    await recomputeUniqueSongCount();
+    await rebuildTracksFts();
+  }
 
   await setLibrarySyncedAt();
 }

@@ -522,6 +522,40 @@ export type StoredPlaylist = {
 /** Replace the stored library with a fresh full scan (kept in native order). */
 export async function storePlaylists(rows: StoredPlaylist[], meId: string | null): Promise<void> {
   const client = await getClient();
+  const now = new Date().toISOString();
+
+  // Cheap change-probe (a read, never on a render path — this only runs in the background
+  // library sync): if the playlist list already matches the cache — same id/name/owner/image/
+  // count in the same order — skip the full delete-all + reinsert and just bump the synced-at
+  // marker. A steady-state hourly sync then writes ~1 row instead of ~2× the playlist count.
+  // (Per-playlist track changes are handled separately by the snapshot-gated loop in
+  // syncLibrary; a song swap that leaves the count unchanged correctly doesn't rewrite the
+  // list here.)
+  const cached = plainRows(
+    (
+      await client.execute(
+        "SELECT id, name, owner_id AS ownerId, image, track_count AS trackCount FROM playlists ORDER BY position",
+      )
+    ).rows,
+  ) as unknown as { id: string; name: string; ownerId: string | null; image: string | null; trackCount: number }[];
+  const unchanged =
+    cached.length === rows.length &&
+    rows.every((r, i) => {
+      const c = cached[i];
+      return (
+        c.id === r.id &&
+        c.name === r.name &&
+        (c.ownerId ?? null) === (r.ownerId ?? null) &&
+        (c.image ?? null) === (r.image ?? null) &&
+        Number(c.trackCount) === r.trackCount
+      );
+    });
+  if (unchanged) {
+    await setMeta("playlists_synced_at", now);
+    if (meId) await setMeta("me_id", meId);
+    return;
+  }
+
   const stmts: InStatement[] = [{ sql: "DELETE FROM playlists", args: [] }];
   rows.forEach((r, i) =>
     stmts.push({
