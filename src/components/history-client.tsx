@@ -49,6 +49,18 @@ function sortTracks(list: TrackStats[], sort: Sort, dir: "asc" | "desc"): TrackS
 // "all"). Each step's chevron at the right end loads the next span.
 const DAY_SPANS = [14, 28, 100000];
 
+// Row cascade: when rows enter — a fresh list, or new plays landing on a background sync — the
+// top ones float down one after another. The beat between rows is `STEP_MAX`, but it's squeezed
+// so the whole run always finishes inside `WINDOW_MS` no matter how many enter: a couple of new
+// songs get a clear one-by-one beat; a dozen fall quicker. Only the top `MAX` animate (the rest
+// sit below the fold). `cascadeStep` returns the actual per-row delay for a run of `n` rows.
+const CASCADE_MAX = 12;
+const CASCADE_STEP_MAX = 85; // ms between consecutive rows when only a few enter
+const CASCADE_WINDOW_MS = 600; // ms cap on the spread from the first row's start to the last's
+const CASCADE_FALL_MS = 600; // one row's fall — keep in sync with .history-row-in in globals.css
+const cascadeStep = (n: number) =>
+  n > 1 ? Math.min(CASCADE_STEP_MAX, CASCADE_WINDOW_MS / (n - 1)) : 0;
+
 // The direction each sort opens in (most-recent / most-played first; A→Z for text).
 const DEFAULT_DIR: Record<Sort, "asc" | "desc"> = {
   recent: "desc",
@@ -519,6 +531,15 @@ function TrackTable({
   const currentId = playing?.track.id;
   const [menu, setMenu] = useState<{ x: number; y: number; track: Track } | null>(null);
 
+  // The scrollable list box. When new plays land at the top we ride the view up to them
+  // (below). `lastUserScroll` lets us bow out if you're actively scrolling; `programmaticScroll`
+  // marks our own scroll so it isn't mistaken for yours. `scrollCue` bumps on each batch of new
+  // plays to trigger the ride-up.
+  const scrollBox = useRef<HTMLDivElement | null>(null);
+  const lastUserScroll = useRef(0);
+  const programmaticScroll = useRef(false);
+  const [scrollCue, setScrollCue] = useState(0);
+
   // Deep-link focus: once the row for `focusTrackId` is present, scroll it into view and
   // flash it briefly. Each focus request carries a `focusNonce`; we act once per nonce, so
   // a background refresh swapping in a new `tracks` array doesn't re-fire it.
@@ -586,22 +607,79 @@ function TrackTable({
   const keySig = rowKeys.join("");
   const [prevSig, setPrevSig] = useState(keySig);
   const [prevKeys, setPrevKeys] = useState<Set<string>>(() => new Set(rowKeys));
-  const [animKeys, setAnimKeys] = useState<Set<string>>(() => new Set());
+  // `anim` maps a row key to its stagger slot (0 = first to fall). A handful of genuinely-new
+  // keys (a background sync) fall in together where they land; a wholesale change (you picked
+  // another day / All time) cascades the top rows in, each a beat after the one above, so the
+  // list pours into the box top-first. The rest sit below the fold and need no entrance.
+  const [anim, setAnim] = useState<Map<string, number>>(() => new Map());
   if (prevSig !== keySig) {
     const fresh = rowKeys.filter((k) => !prevKeys.has(k));
     const bulk = fresh.length > Math.max(3, Math.floor(rowKeys.length * 0.3));
     setPrevSig(keySig);
     setPrevKeys(new Set(rowKeys));
-    setAnimKeys(!isLog && !bulk && fresh.length > 0 ? new Set(fresh) : new Set());
+    if (isLog || fresh.length === 0) {
+      setAnim(new Map());
+    } else if (bulk) {
+      // New list → cascade the top rows, top-first.
+      setAnim(new Map(rowKeys.slice(0, CASCADE_MAX).map((k, i) => [k, i])));
+    } else {
+      // A few new plays → each falls a beat after the one above (top-first), never all at once.
+      setAnim(new Map(fresh.slice(0, CASCADE_MAX).map((k, i) => [k, i])));
+      // …and ride the view up to them (handled by the effect below).
+      setScrollCue((n) => n + 1);
+    }
   }
   useEffect(() => {
-    if (animKeys.size === 0) return;
-    const id = setTimeout(() => setAnimKeys(new Set()), 600);
+    if (anim.size === 0) return;
+    // Hold the class until the last (most-delayed) row finishes its fall, then reset so the next
+    // diff starts clean.
+    const maxSlot = Math.max(...anim.values());
+    const id = setTimeout(
+      () => setAnim(new Map()),
+      maxSlot * cascadeStep(anim.size) + CASCADE_FALL_MS + 80,
+    );
     return () => clearTimeout(id);
-  }, [animKeys]);
+  }, [anim]);
+
+  // New plays just landed at the top → ride the view up to reveal them, as if you already knew
+  // the song was there. A smooth, lightly-hijacked scroll: eased in-and-out, with travel time
+  // scaling to the distance so a long way up moves with more pace. Skips it when you're already
+  // at the top (the row's float-in alone shows the song) or actively scrolling (don't fight you),
+  // and honors prefers-reduced-motion (jumps instead of gliding).
+  useEffect(() => {
+    if (scrollCue === 0) return;
+    const el = scrollBox.current;
+    if (!el || el.scrollTop <= 4) return;
+    if (Date.now() - lastUserScroll.current < 1200) return;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      el.scrollTop = 0;
+      return;
+    }
+    const start = el.scrollTop;
+    const duration = Math.min(900, 300 + start * 0.5);
+    const t0 = performance.now();
+    const ease = (p: number) => (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2);
+    programmaticScroll.current = true;
+    let raf = requestAnimationFrame(function step(now: number) {
+      const p = Math.min(1, (now - t0) / duration);
+      el.scrollTop = start * (1 - ease(p));
+      if (p < 1) raf = requestAnimationFrame(step);
+      else programmaticScroll.current = false;
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      programmaticScroll.current = false;
+    };
+  }, [scrollCue]);
 
   return (
-    <div className={"thin-scroll overflow-y-auto rounded-lg border border-border " + maxHeightClass}>
+    <div
+      ref={scrollBox}
+      onScroll={() => {
+        if (!programmaticScroll.current) lastUserScroll.current = Date.now();
+      }}
+      className={"thin-scroll overflow-y-auto rounded-lg border border-border " + maxHeightClass}
+    >
       {/* Fixed layout: column widths stay constant and long text clips (then scrolls
           on hover) instead of widening the table into a horizontal scroll. Song and
           Album get the generous, roughly-equal flexible columns; From is narrower;
@@ -627,19 +705,24 @@ function TrackTable({
           {tracks.map((t) => {
             const isCurrent = !!currentId && currentId === t.id;
             const rowKey = `${t.id}-${t.lastPlayed}`;
-            const isNewRow = animKeys.has(rowKey);
+            const slot = anim.get(rowKey);
+            const animating = slot !== undefined;
             return (
             <tr
               key={rowKey}
               ref={t.id === focusTrackId ? focusRow : undefined}
+              // Stagger the fall: each cascading row waits its slot before easing in. `backwards`
+              // fill (in the CSS) keeps it hidden during that wait so there's no pre-flash.
+              style={animating && slot ? { animationDelay: `${Math.round(slot * cascadeStep(anim.size))}ms` } : undefined}
               className={
                 "cursor-default border-b border-border last:border-0 transition-colors hover:bg-accent/30" +
                 // The deep-linked row fades its grey wash out slowly/smoothly (vs the
                 // default 150ms snap) — applied to the focus row itself so the longer
                 // duration is in effect when the highlight clears, not just while it's on.
                 (t.id === focusTrackId ? " duration-700 ease-out" : "") +
-                // A freshly-synced play eases down from under the header instead of popping.
-                (isNewRow ? " history-row-in" : "") +
+                // A freshly-synced play (or each row of a freshly-loaded list) eases down from
+                // under the header instead of popping.
+                (animating ? " history-row-in" : "") +
                 (highlightId === t.id ? " bg-white/15" : isCurrent ? " bg-white/5" : "")
               }
               onDoubleClick={() => play(t)}

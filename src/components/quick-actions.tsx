@@ -133,11 +133,8 @@ export function QuickActions({
           </Button>
         </HoverTip>
 
-        {/* Library-sync status sits at the far right of the action row — fixed spot, so it
-            doesn't shift the page when it appears/disappears. */}
-        <div className="ml-auto">
-          <PlaylistsSync syncedAt={syncedAt} />
-        </div>
+        {/* Headless: kicks the background library scan when stale, renders nothing. */}
+        <PlaylistsSync syncedAt={syncedAt} />
       </div>
 
       {openPanel === "resume" ? (
