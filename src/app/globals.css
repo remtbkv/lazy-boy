@@ -188,6 +188,17 @@
   }
 }
 
+/* iOS Safari zooms the whole page when you focus an input whose font-size is < 16px — and
+   stays zoomed after you leave the field. Force ≥16px on phone-width screens so focusing any
+   search/text field never triggers that zoom. Desktop keeps the components' smaller text. */
+@media (max-width: 639px) {
+  input:not([type="checkbox"]):not([type="radio"]),
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+}
+
 /* Thin, unobtrusive scrollbar shared by every scroll area (history day tray + tables,
    playlist track list, compare list, menus). Defining the webkit pseudo-elements forces
    a slim scrollbar that takes its own track space, so it never floats over content the

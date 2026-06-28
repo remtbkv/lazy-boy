@@ -117,12 +117,14 @@ export function PlaylistGrid({
     >
       {/* Stats heading shares this row with the sort control, so it flows straight into the
           grid below instead of leaving a gap. */}
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex min-w-0 items-baseline gap-2">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
           {/* Quiet caption — normal case, muted labels, numbers in foreground so they pop.
-              Matches the app's secondary text (no all-caps, which read out of place). */}
+              Matches the app's secondary text (no all-caps, which read out of place). Wraps in
+              full on mobile (no truncation) so all three stats are readable; single line on
+              desktop where the sort control shares the row. */}
           {stats ? (
-            <h1 className="truncate text-sm text-muted-foreground">
+            <h1 className="text-sm text-muted-foreground sm:truncate">
               <span className="font-medium text-foreground">{stats.playlists.toLocaleString()}</span> playlists
               {" · "}
               <span className="font-medium text-foreground">{stats.owned.toLocaleString()}</span> created by you
@@ -135,7 +137,11 @@ export function PlaylistGrid({
             <span className="text-sm text-muted-foreground/70">loading…</span>
           ) : null}
         </div>
-        <SortMenu value={sort} direction={dir} options={SORTS} onSelect={selectSort} />
+        {/* Desktop: sort sits on the stats row. Mobile: it's pulled out (below) into the bottom
+            bar next to the search, so the stats line gets the full width. */}
+        <div className="hidden shrink-0 sm:block">
+          <SortMenu value={sort} direction={dir} options={SORTS} onSelect={selectSort} />
+        </div>
       </div>
 
       {searching && filtered.length === 0 ? (
@@ -167,11 +173,24 @@ export function PlaylistGrid({
         </ul>
       )}
 
+      {/* Mobile: the see-more/less control is a full-width button under the grid, so the bottom
+          bar stays just search + sort (the pill hides this action on small screens). */}
+      {action ? (
+        <button
+          type="button"
+          onClick={action.onClick}
+          className="w-full rounded-lg border border-border bg-card py-3 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground sm:hidden"
+        >
+          {action.label}
+        </button>
+      ) : null}
+
       <FloatingBar
         query={query}
         onQuery={setQuery}
         placeholder="Search playlists…"
         action={action}
+        trailing={<SortMenu value={sort} direction={dir} options={SORTS} onSelect={selectSort} />}
       />
 
       {/* After FloatingBar on purpose: the pill measures its PREVIOUS sibling as "the

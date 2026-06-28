@@ -180,7 +180,9 @@ export function Header({ name, image }: { name: string; image: string | null }) 
             it reports playback and isn't part of the account control. */}
         <div className="ml-auto flex items-center gap-3 sm:gap-8">
           <NowPlaying />
-          <div onMouseEnter={openMenu} onMouseLeave={scheduleClose}>
+          {/* Avatar/account menu is desktop-only — on a phone it's wasted real estate next to
+              the now-playing chip (and the only thing in it, log out, isn't a phone action). */}
+          <div className="hidden sm:block" onMouseEnter={openMenu} onMouseLeave={scheduleClose}>
           <DropdownMenu
             open={menuOpen}
             onOpenChange={(o) => {

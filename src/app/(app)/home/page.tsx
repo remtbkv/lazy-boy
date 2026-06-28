@@ -129,7 +129,7 @@ async function HomeHistory() {
       allTime={allTime}
       initialResults={initialResults}
       initialHasMoreDays={initialHasMoreDays}
-      songListMaxHeightClass="max-h-[calc(100vh-34rem)]"
+      songListMaxHeightClass="sm:max-h-[calc(100vh-34rem)]"
     />
   );
 }

@@ -93,7 +93,7 @@ export function HistoryClient({
   allTime: initialAllTime,
   initialResults,
   initialHasMoreDays = false,
-  songListMaxHeightClass = "max-h-[calc(100vh-29rem)]",
+  songListMaxHeightClass = "sm:max-h-[calc(100vh-29rem)]",
 }: {
   initialDaily: DayStats[];
   initialDay: string | null;
@@ -389,9 +389,9 @@ export function HistoryClient({
               scrollable days read as one group, clearly separate from the fixed all-time
               reference. flex-1 + min-w-0 makes the tray take the leftover width and clip
               its own overflow, so it can never run under the all-time card. */}
-          <div className="flex items-stretch gap-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-stretch">
             <div className="min-w-0 flex-1 rounded-xl border border-border bg-white/[0.02] p-2">
-              <div ref={dayScrollRef} className="thin-scroll flex gap-3 overflow-x-auto pb-1">
+              <div ref={dayScrollRef} className="thin-scroll flex gap-3 overflow-x-auto overscroll-x-contain pb-1 [touch-action:pan-x]">
               {daily.map((d) => {
                 const active = !allSelected && d.day === selectedDay;
                 return (
@@ -402,7 +402,7 @@ export function HistoryClient({
                     onClick={() => selectDay(d.day)}
                     aria-pressed={active}
                     className={
-                      "min-w-[140px] shrink-0 rounded-xl border p-3 text-left transition-colors hover:border-white/20 " +
+                      "min-w-[120px] shrink-0 rounded-xl border p-3 text-left transition-colors hover:border-white/20 sm:min-w-[140px] " +
                       (active ? "border-white/25 bg-white/[0.06]" : "border-border bg-card")
                     }
                   >
@@ -514,7 +514,7 @@ function TrackTable({
   loading = false,
   focusTrackId = null,
   focusNonce = 0,
-  maxHeightClass = "max-h-[calc(100vh-29rem)]",
+  maxHeightClass = "sm:max-h-[calc(100vh-29rem)]",
 }: {
   tracks: TrackStats[];
   empty: string;
@@ -582,8 +582,12 @@ function TrackTable({
     albumImage: t.albumImage,
     durationMs: t.durationMs ?? undefined,
   });
-  const play = (t: TrackStats) => {
+  // The specific row the user played from this table — so the search log highlights just that
+  // one, not every row of the same song.
+  const [playedKey, setPlayedKey] = useState<string | null>(null);
+  const play = (t: TrackStats, rowKey: string) => {
     window.getSelection?.()?.removeAllRanges();
+    setPlayedKey(rowKey);
     playTrackAction(t.uri).then((r) => {
       if (!r.ok) {
         toast.error(r.error);
@@ -678,14 +682,14 @@ function TrackTable({
       onScroll={() => {
         if (!programmaticScroll.current) lastUserScroll.current = Date.now();
       }}
-      className={"thin-scroll overflow-y-auto rounded-lg border border-border " + maxHeightClass}
+      className={"thin-scroll rounded-lg border border-border sm:overflow-y-auto " + maxHeightClass}
     >
       {/* Fixed layout: column widths stay constant and long text clips (then scrolls
           on hover) instead of widening the table into a horizontal scroll. Song and
           Album get the generous, roughly-equal flexible columns; From is narrower;
           the numeric/time columns are fixed and small. */}
       <table className="w-full table-fixed text-sm">
-        <thead className="sticky top-0 z-10 bg-background">
+        <thead className="static z-10 bg-background sm:sticky sm:top-0">
           <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
             <th className="px-4 py-2 font-medium">Song</th>
             <th className="hidden px-4 py-2 font-medium md:table-cell">Album</th>
@@ -703,8 +707,12 @@ function TrackTable({
         </thead>
         <tbody>
           {tracks.map((t) => {
-            const isCurrent = !!currentId && currentId === t.id;
             const rowKey = `${t.id}-${t.lastPlayed}`;
+            // In the day/all-time view there's one row per song, so matching by track id is
+            // right. In the search log the same song repeats (one row per play) — matching by id
+            // would turn ALL of them green, so there we light only the row you actually played.
+            const isCurrent =
+              !!currentId && currentId === t.id && (!isLog || rowKey === playedKey);
             const slot = anim.get(rowKey);
             const animating = slot !== undefined;
             return (
@@ -725,7 +733,7 @@ function TrackTable({
                 (animating ? " history-row-in" : "") +
                 (highlightId === t.id ? " bg-white/15" : isCurrent ? " bg-white/5" : "")
               }
-              onDoubleClick={() => play(t)}
+              onDoubleClick={() => play(t, rowKey)}
               onContextMenu={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
@@ -744,6 +752,15 @@ function TrackTable({
                     <HoverScroll className="text-xs text-muted-foreground">
                       {t.artist}
                     </HoverScroll>
+                    {/* Mobile only: the Album/Length/Last-played/From columns are hidden on
+                        small screens, so fold the two most useful bits — when it was played and
+                        which playlist it's from — into a compact line under the artist. */}
+                    <div className="mt-0.5 flex items-center gap-1.5 truncate text-[11px] text-muted-foreground/70 sm:hidden">
+                      <span className="shrink-0">
+                        {isLog ? exactTimeShort(t.lastPlayed) : timeAgo(t.lastPlayed)}
+                      </span>
+                      {t.source ? <span className="truncate">· {t.source}</span> : null}
+                    </div>
                   </div>
                 </div>
               </td>

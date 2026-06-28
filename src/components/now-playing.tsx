@@ -161,12 +161,23 @@ export function NowPlaying() {
         // Pointer devices reveal on hover (handled on the wrapper); touch devices
         // toggle on tap, since there's no hover.
         onClick={() => {
-          if (!canHover) setOpen((o) => !o);
+          // Touch: a tap toggles play/pause directly. The desktop hover-popover (transport
+          // controls) isn't used on touch — it overflowed off-screen and duplicated controls
+          // you'd reach in Spotify anyway. The green ring on the art shows the play state.
+          if (!canHover) toggle();
         }}
         className="flex items-center gap-2.5 rounded-xl px-1 py-1 text-left transition-colors hover:bg-secondary/60 sm:gap-3 sm:px-2.5 sm:py-2"
       >
+        {/* On phones the chip is just the art (no progress bar / text), so the art itself carries
+            the play state: a green ring when playing, dimmed when paused. Reset on desktop
+            (sm:), where the progress bar already shows it. */}
         <span key={`art-${track.id}`} className="np-swap flex shrink-0">
-          {art("size-8 rounded-md object-cover sm:size-9")}
+          {art(
+            "size-8 rounded-md object-cover sm:size-9" +
+              (isPlaying
+                ? " shadow-[0_0_0_2px_#1db954] sm:shadow-none"
+                : " opacity-60 sm:opacity-100"),
+          )}
         </span>
         <span
           className="hidden min-w-0 transition-[width] duration-300 ease-out sm:block"
@@ -204,8 +215,8 @@ export function NowPlaying() {
       {/* Controls popover (on hover): where it's playing from + skip/pause. Same width
           as the chip (inset-x-0) so it reads as one element; only widens on phones to
           fit the controls. Progress already lives in the chip, so it's not repeated. */}
-      {open ? (
-        <div className="absolute inset-x-0 top-full z-50 mt-2 min-w-[12rem] max-w-[calc(100vw-2rem)] rounded-xl border border-border bg-popover/95 p-3 shadow-2xl shadow-black/50 ring-1 ring-white/5 backdrop-blur sm:min-w-0">
+      {open && canHover ? (
+        <div className="absolute right-0 top-full z-50 mt-2 min-w-[12rem] max-w-[calc(100vw-2rem)] rounded-xl border border-border bg-popover/95 p-3 shadow-2xl shadow-black/50 ring-1 ring-white/5 backdrop-blur">
           {context ? (
             <HoverScroll className="text-center text-[11px] text-muted-foreground/80">
               from {context.name}
