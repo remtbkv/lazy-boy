@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { after } from "next/server";
 import { unstable_rethrow } from "next/navigation";
 import { auth, signIn, signOut, getValidAccessToken } from "@/lib/auth";
 import { getSpotify } from "@/lib/session";
@@ -105,7 +106,10 @@ export async function login() {
   await signIn("spotify", { redirectTo: "/home" });
 }
 export async function logout() {
-  await clearSpotifyTokens();
+  // Defer the token wipe off the redirect path so logout returns immediately. It still runs
+  // (after the response is sent) so the background cron can't keep syncing post-logout — it
+  // just no longer blocks the user on a remote DB write.
+  after(() => clearSpotifyTokens().catch(() => {}));
   await signOut({ redirectTo: "/login" });
 }
 

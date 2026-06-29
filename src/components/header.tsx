@@ -238,7 +238,7 @@ export function Header({ name, image }: { name: string; image: string | null }) 
                 <DropdownMenuItem
                   nativeButton
                   render={<button type="submit" />}
-                  className="w-full cursor-pointer gap-2 px-1.5 py-1.5 text-muted-foreground focus:text-foreground"
+                  className="w-full cursor-pointer gap-2 px-1.5 py-1.5 text-foreground"
                 >
                   <LogOut className="size-4" />
                   Log out
