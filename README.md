@@ -36,12 +36,11 @@ closed. A hosted instance adds a persistent DB + a scheduler.
    (`openssl rand -base64 32`), and `AUTH_URL` = your deployed origin (e.g.
    `https://<project-name>.vercel.app`).
 3. **Spotify** — add `https://<your-domain>/api/auth/callback/spotify` as a Redirect URI.
-4. **Keep history current while closed** — a GitHub Actions cron
-   (`.github/workflows/sync.yml`) pings `/api/cron/sync` every 5 min. Add two repo secrets:
-   `APP_URL` (your deployed origin) and `CRON_SECRET` (same value as in Vercel). Without
-   `CRON_SECRET` the endpoint fail-closes. For a tighter cadence than GitHub's best-effort
-   schedule, point any external pinger (cron-job.org, a systemd timer, …) at the same
-   `/api/cron/sync` with the bearer secret. Claude can do this for you :)
+4. **Keep history current while closed** — point a pinger at `/api/cron/sync` so your
+   history keeps syncing when the app isn't open. Easiest: a free [cron-job.org](https://cron-job.org)
+   job that runs every 2 minutes — method GET, one header `Authorization: Bearer <CRON_SECRET>`
+   (same value as in Vercel). The URL is your deployed origin + `/api/cron/sync`. Without
+   `CRON_SECRET` the endpoint stays closed. Claude can set this up for you :)
 
 For full `AUTH_URL` / redirect-URI / token-coordination details, see `docs/ARCHITECTURE.md` and `docs/GOTCHAS.md`.
 

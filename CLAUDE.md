@@ -36,7 +36,7 @@ src/app/api/playlists/sync  one full library scan → DB (client fires when stal
 src/app/api/history/     listen-history search (reads the DB)
 src/app/api/now-playing/ live "what's playing"; null when idle (never stale)
 src/app/api/sync/        on-load listen-history sync (POST; debounced server-side)
-src/app/api/cron/sync/   scheduled history sync (external 5-min pinger; GitHub Actions + Vercel cron as backstops)
+src/app/api/cron/sync/   scheduled history sync (external pinger e.g. cron-job.org; daily Vercel cron backstop)
 src/lib/auth.ts          Auth.js config + Spotify token refresh (centralized)
 src/lib/session.ts       getSpotify(): server-only authed Spotify client
 src/lib/spotify/         client.ts (fetch+pagination+429/403), resources.ts, domain.ts, types.ts

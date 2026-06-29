@@ -133,14 +133,13 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   (`syncRecentPlays`), triggered by: **in-app polling** while the site is open
   (`SyncOnLoad` → `POST /api/sync` on load, every 2 min, and on tab-focus; server skips
   if synced <60 s ago — so an open tab is effectively live, and the home history view also
-  refreshes each minute); and the **app-closed coverage** path — a **GitHub Actions cron**
-  (`.github/workflows/sync.yml`) hitting `/api/cron/sync` with the stored token. GitHub
-  schedules best-effort (real spacing can stretch to hours), so the **on-time app-closed
-  capture is an external every-5-min pinger** hitting the same `/api/cron/sync` — a systemd
-  timer on an always-on machine, or a service like cron-job.org — with the GitHub workflow
-  and a daily **Vercel Cron** (`vercel.json`) as backstops. Every scheduled hit carries
-  `Authorization: Bearer $CRON_SECRET` (fail-closed: an unset secret rejects all callers).
-  The GitHub workflow needs two repo secrets: `APP_URL` and `CRON_SECRET`.
+  refreshes each minute); and the **app-closed coverage** path — an **external pinger**
+  hitting `/api/cron/sync` with the stored token every ~2 min (a service like cron-job.org,
+  or a systemd timer on an always-on machine), with a daily **Vercel Cron** (`vercel.json`)
+  as the backstop. Every scheduled hit carries `Authorization: Bearer $CRON_SECRET`
+  (fail-closed: an unset secret rejects all callers). A GitHub Actions cron drove this at
+  first but was removed — GitHub schedules best-effort and real spacing stretched to hours,
+  which loses plays against the 50-play window; a dedicated pinger holds a tight cadence.
 - **Day buckets use the user's timezone, sent from the browser — never `'localtime'`.**
   Turso runs in UTC, so `date(played_at, 'localtime')` would bucket by UTC and plays after
   UTC-midnight show up on "tomorrow." Spotify's API has no user timezone, so `TimezoneCookie`

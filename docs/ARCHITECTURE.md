@@ -131,11 +131,11 @@ SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped 
   and on tab-focus → `POST /api/sync`, debounced server-side to ~60 s, so an open tab is
   effectively live; the home history view also refreshes each minute via
   `syncHistoryAction`); and — the coverage path for when the app is closed — an **external
-  every-5-min pinger** hitting `/api/cron/sync` with the stored token (a systemd timer on an
-  always-on machine, or a service like cron-job.org). A **GitHub Actions** workflow
-  (`.github/workflows/sync.yml`, scheduled best-effort) and a daily **Vercel Cron**
-  (`vercel.json`) are backstops. All scheduled hits share `/api/cron/sync`
-  (`CRON_SECRET`-guarded).
+  pinger** hitting `/api/cron/sync` with the stored token every ~2 min (a [cron-job.org](https://cron-job.org)
+  job, or a systemd timer on an always-on machine). A daily **Vercel Cron** (`vercel.json`)
+  is the backstop. All scheduled hits share `/api/cron/sync` (`CRON_SECRET`-guarded).
+  (A GitHub Actions cron drove this initially but was removed: GitHub schedules best-effort
+  and stretched to multi-hour gaps, losing plays against the 50-play window.)
 - Reads: `searchHistory`, `getDailyStats`, `getLastSync`. The home page renders the listen
   history — day cards + a searchable, scrollable log — streamed below the quick actions.
 - **Derived stats, search & resume:** "listened" time is computed per play (the gap to the
@@ -162,8 +162,8 @@ SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped 
 - `history/search?q=` — local history search (no Spotify call → instant).
 - `now-playing` — live "what's playing"; returns `{ playing: null }` when idle (never stale).
 - `sync` (POST) — on-load history sync; server debounces, skipping if synced <~60 s ago.
-- `cron/sync` (GET) — scheduled history sync. On-time trigger is an external every-5-min
-  pinger; GitHub Actions + a daily Vercel Cron are backstops. `CRON_SECRET`-guarded
+- `cron/sync` (GET) — scheduled history sync. On-time trigger is an external pinger
+  (cron-job.org, ~2 min); a daily Vercel Cron is the backstop. `CRON_SECRET`-guarded
   (fail-closed: an unset secret rejects all callers), session-less (uses the stored token).
 
 All check `auth()` and 401 on no session, except `cron/sync` (cron secret, no session).
