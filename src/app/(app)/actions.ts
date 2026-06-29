@@ -410,8 +410,33 @@ export async function removeFromPlaylistAction(
   }
 }
 
-// Transport controls used by the now-playing card. All share the same "no active
-// device" handling, since that's the one expected failure on a personal player.
+// Turn a Spotify player error into an honest message. The old code labeled every 403
+// "needs Premium and an active device", which misleads when you HAVE both and something
+// else failed (the common one: an active-but-restricted device — a Connect speaker, TV,
+// console, or another app's web player — that shows in now-playing because reads work but
+// refuses remote control). Spotify carries the real cause in the response body's
+// `error.reason` / `error.message` (e.g. "PREMIUM_REQUIRED", "Restriction violated"),
+// which SpotifyError.message holds raw — so surface it instead of guessing.
+function playbackError(e: SpotifyError): string {
+  let reason = "";
+  try {
+    const body = JSON.parse(e.message)?.error;
+    reason = body?.reason || body?.message || "";
+  } catch {
+    /* non-JSON body — leave reason empty */
+  }
+  if (/premium/i.test(reason)) return "Spotify Premium is required for playback.";
+  if (e.status === 404 || /no_active_device|not found/i.test(reason)) {
+    return "No active device — open Spotify and start playing on the device you want to control.";
+  }
+  // 403/other: device is reachable but won't accept the command (usually restricted).
+  return reason
+    ? `Spotify wouldn't start playback (${reason}). Try playing from the Spotify app on your phone or desktop.`
+    : "Spotify wouldn't start playback — open the Spotify app on the device you want and try again.";
+}
+
+// Transport controls used by the now-playing card. All share the same player-error
+// handling, since that's the one expected failure on a personal player.
 async function playerControl(
   fn: (sp: Awaited<ReturnType<typeof getSpotify>>) => Promise<void>,
 ): Promise<ActionResult> {
@@ -421,15 +446,8 @@ async function playerControl(
     return { ok: true };
   } catch (e) {
     unstable_rethrow(e);
-    if (e instanceof SpotifyError) {
-      // 404 = no active device; 403 on a player command is usually "Premium required"
-      // (or a transient restriction) — don't mislabel it as a device problem.
-      if (e.status === 404) {
-        return { ok: false, error: "No active device — start playing on Spotify first." };
-      }
-      if (e.status === 403) {
-        return { ok: false, error: "Playback needs Spotify Premium and an active device." };
-      }
+    if (e instanceof SpotifyError && (e.status === 404 || e.status === 403)) {
+      return { ok: false, error: playbackError(e) };
     }
     return fail(e);
   }
@@ -554,13 +572,8 @@ export async function resumePlaylistAction(
     return { ok: true, track: start.title, fromTop };
   } catch (e) {
     unstable_rethrow(e);
-    if (e instanceof SpotifyError) {
-      if (e.status === 404) {
-        return { ok: false, error: "No active device — start playing on Spotify first." };
-      }
-      if (e.status === 403) {
-        return { ok: false, error: "Playback needs Spotify Premium and an active device." };
-      }
+    if (e instanceof SpotifyError && (e.status === 404 || e.status === 403)) {
+      return { ok: false, error: playbackError(e) };
     }
     return fail(e);
   }
