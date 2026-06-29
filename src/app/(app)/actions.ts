@@ -429,12 +429,12 @@ function playbackError(e: SpotifyError): string {
   if (e.status === 404 || /no_active_device|not found/i.test(reason)) {
     return "No active device — open Spotify and start playing on the device you want to control.";
   }
-  // A bare 403 "Forbidden" (no player-specific reason) is an authorization failure, not a
-  // device/Premium one: the session predates the playback-control scope
-  // (`user-modify-playback-state`), so reads work but control commands are rejected.
-  // Re-auth re-grants it. Same pattern as saveToLikedAction's library-modify case.
+  // A bare 403 "Forbidden" (no player-specific reason) on a control command, while reads
+  // work, is the Premium-only signature: Spotify's playback-control endpoints require
+  // Premium, and a free account gets exactly this. (The rarer cause is a stale token
+  // missing the modify-playback grant, which a re-login refreshes — hence the fallback.)
   if (e.status === 403 && (reason === "" || /^forbidden$/i.test(reason))) {
-    return "Log out and back in to allow playback control.";
+    return "Playback control needs Spotify Premium. If this account is Premium, log out and back in to refresh access.";
   }
   // Other 403s: device is reachable but won't accept the command (usually restricted).
   return reason
