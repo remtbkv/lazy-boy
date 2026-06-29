@@ -239,7 +239,13 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       // redirect_uri forces the loopback IP in the authorize step.
       authorization: {
         url: "https://accounts.spotify.com/authorize",
-        params: { scope: SCOPES, redirect_uri: CALLBACK_URL },
+        // show_dialog forces Spotify's consent screen on every login. Without it, Spotify
+        // silently reuses a user's PRIOR consent — so any scope added after they first
+        // authorized (or granted by an earlier app sharing this client id) is never issued,
+        // and the token keeps the old, smaller scope set. That's what made playback control
+        // (`user-modify-playback-state`) 403 "Forbidden" while reads kept working. Forcing
+        // the dialog makes a fresh login grant the current full SCOPES.
+        params: { scope: SCOPES, redirect_uri: CALLBACK_URL, show_dialog: "true" },
       },
       // Force the same loopback redirect_uri in the token exchange (Auth.js would
       // otherwise send the normalized `localhost` one, which Spotify rejects).
