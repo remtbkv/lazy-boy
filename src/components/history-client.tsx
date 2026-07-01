@@ -164,6 +164,32 @@ export function HistoryClient({
   const searchReq = useRef(0);
   const dayReq = useRef(0);
 
+  // Client cache of already-fetched days (day → its rows). The day list is a per-click fetch
+  // to /api/history/day (a Turso round-trip), so without this every tap pays the full network
+  // hop. Seeded with the server-rendered initial day; neighbours prefetch on selection so
+  // browsing adjacent days is instant. Past days never change; today/yesterday can gain plays,
+  // so a cache hit still revalidates quietly in the background.
+  const dayCache = useRef<Map<string, TrackStats[]> | null>(null);
+  if (dayCache.current === null) {
+    dayCache.current = new Map(initialDay ? [[initialDay, initialDayTracks]] : []);
+  }
+  async function fetchDayTracks(day: string): Promise<TrackStats[]> {
+    const res = await fetch(`/api/history/day?day=${day}`);
+    if (!res.ok) throw new Error("day fetch failed");
+    const rows = (await res.json()).results as TrackStats[];
+    dayCache.current!.set(day, rows);
+    return rows;
+  }
+  // Warm the cache for the days either side of `day` so an adjacent tap is instant.
+  function prefetchNeighbors(day: string) {
+    const i = daily.findIndex((d) => d.day === day);
+    if (i < 0) return;
+    for (const j of [i - 1, i + 1, i - 2, i + 2]) {
+      const nd = daily[j]?.day;
+      if (nd && !dayCache.current!.has(nd)) void fetchDayTracks(nd).catch(() => {});
+    }
+  }
+
   async function runSearch(q: string) {
     const seq = ++searchReq.current;
     try {
@@ -183,17 +209,28 @@ export function HistoryClient({
     setSelectedDay(day);
     setSort("recent");
     setDir("desc");
-    setDayLoading(true);
-    try {
-      const res = await fetch(`/api/history/day?day=${day}`);
-      if (seq !== dayReq.current) return;
-      // On failure show empty, not the PREVIOUS day's rows under this day's heading.
-      setDayTracks(res.ok ? ((await res.json()).results as TrackStats[]) : []);
-    } catch {
-      if (seq === dayReq.current) setDayTracks([]);
-    } finally {
-      if (seq === dayReq.current) setDayLoading(false);
+    const cached = dayCache.current!.get(day);
+    if (cached) {
+      // Instant from cache; revalidate quietly (today/yesterday may have gained plays).
+      setDayTracks(cached);
+      setDayLoading(false);
+      void fetchDayTracks(day)
+        .then((rows) => { if (seq === dayReq.current) setDayTracks(rows); })
+        .catch(() => {});
+    } else {
+      setDayLoading(true);
+      try {
+        const rows = await fetchDayTracks(day);
+        if (seq !== dayReq.current) return;
+        setDayTracks(rows);
+      } catch {
+        // On failure show empty, not the PREVIOUS day's rows under this day's heading.
+        if (seq === dayReq.current) setDayTracks([]);
+      } finally {
+        if (seq === dayReq.current) setDayLoading(false);
+      }
     }
+    prefetchNeighbors(day);
   }
 
   // Kept in a ref (refreshed each render) so the mount-only listener always calls the
@@ -212,6 +249,12 @@ export function HistoryClient({
     };
     window.addEventListener("lazyboy:focus-history", onFocus);
     return () => window.removeEventListener("lazyboy:focus-history", onFocus);
+  }, []);
+
+  // Prefetch the initial day's neighbours once on mount, so the first adjacent tap is instant.
+  useEffect(() => {
+    if (initialDay) prefetchNeighbors(initialDay);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function selectAllTime() {
