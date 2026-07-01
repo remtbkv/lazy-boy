@@ -408,6 +408,10 @@ export function HistoryClient({
   // when the card isn't already fully visible, so clicking a visible day doesn't jump the
   // strip. Scrolls the strip's own scrollLeft (not scrollIntoView) so the page never moves
   // vertically — that's the focused row's job.
+  //
+  // Fires only when the SELECTION changes — NOT when `daily` changes. Expanding the strip
+  // ("See all") or a background sync adding a day would otherwise re-run this and, if you'd
+  // scrolled away from the still-selected day (e.g. today), yank the strip back to it.
   useEffect(() => {
     const el = dayScrollRef.current;
     const btn = activeDayRef.current;
@@ -416,7 +420,8 @@ export function HistoryClient({
     const right = left + btn.offsetWidth;
     if (left >= el.scrollLeft && right <= el.scrollLeft + el.clientWidth) return;
     el.scrollTo({ left: left - (el.clientWidth - btn.offsetWidth) / 2, behavior: "smooth" });
-  }, [selectedDay, allSelected, daily]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDay, allSelected]);
 
   return (
     <div className="space-y-6">
