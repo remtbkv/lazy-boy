@@ -4,6 +4,7 @@ import { spotifyClient, SpotifyError } from "@/lib/spotify";
 import { syncRecentPlays } from "@/lib/sync/history";
 import { syncLibrary } from "@/lib/sync/library";
 import { getLibrarySyncedAt } from "@/lib/db";
+import { ensureCronJobEnabled } from "@/lib/cronjob";
 
 // Rebuild the library index at most hourly (snapshot-diffing makes a run cheap, but no
 // need to do it every 5-minute tick). Takes a token getter — a cold full scan can
@@ -32,6 +33,12 @@ export async function GET(req: Request) {
   // unset CRON_SECRET in a deploy would otherwise leave this endpoint open to anyone.)
   if (!secret || !safeEqual(req.headers.get("authorization") ?? "", `Bearer ${secret}`)) {
     return Response.json({ ok: false, error: "forbidden" }, { status: 401 });
+  }
+  // The daily Vercel cron doubles as a watchdog: re-enable the every-2-min cron-job.org
+  // pinger if it auto-disabled after a failure storm, so closed-app sync self-heals. Only
+  // Vercel's cron carries this header, so the 2-min pings themselves skip the check.
+  if (req.headers.get("x-vercel-cron")) {
+    await ensureCronJobEnabled();
   }
   const token = await getValidAccessToken();
   if (!token) {
