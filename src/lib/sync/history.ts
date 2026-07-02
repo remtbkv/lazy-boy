@@ -4,6 +4,7 @@ import {
   recordPlays,
   recordContexts,
   unresolvedContextUris,
+  getSpotifyCooldownUntil,
   type PlayRecord,
   type ContextRecord,
 } from "@/lib/db";
@@ -14,7 +15,15 @@ type Spotify = ReturnType<typeof spotifyClient>;
 // and the /api/cron/sync backstop (stored-token client).
 // Pulls the last ~50 plays into the local store and resolves any new playback
 // contexts (playlist/album names). recordPlays() stamps `last_sync`.
-export async function syncRecentPlays(sp: Spotify): Promise<{ added: number }> {
+export async function syncRecentPlays(
+  sp: Spotify,
+): Promise<{ added: number; skipped?: string }> {
+  // Spotify handed out a rate-limit ban recently — don't poke it again until the window
+  // passes (persisted, so serverless ticks honor it across invocations). Re-poking a
+  // banned endpoint is what risks turning a brief throttle into a long block.
+  if (Date.now() < (await getSpotifyCooldownUntil())) {
+    return { added: 0, skipped: "cooldown" };
+  }
   const recent = await sp.recentlyPlayed(50);
   const rows: PlayRecord[] = recent.map((r) => ({
     trackId: r.track.id,

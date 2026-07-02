@@ -2,7 +2,7 @@
 // Owns: auth header, JSON, pagination, 429/Retry-After backoff. No domain logic here.
 
 import type { Paging } from "./types";
-import { getApiLogSummary, logSpotifyRequest } from "@/lib/db";
+import { getApiLogSummary, logSpotifyRequest, setSpotifyCooldownUntil } from "@/lib/db";
 
 const BASE = "https://api.spotify.com/v1";
 const MAX_RETRIES = 3;
@@ -21,6 +21,10 @@ const FORBIDDEN_RETRIES = 1;
 // When Spotify's Retry-After is larger than this (seconds), it's a long ban, not a brief
 // burst throttle — stop retrying immediately instead of hammering a banned endpoint.
 const HARD_BAN_S = 120;
+// A long ban is persisted so other serverless invocations back off too, but capped so we
+// re-probe within a bounded window rather than staying dark for the full multi-hour wait
+// Spotify sometimes demands. One probe per this interval can't sustain a ban.
+const PERSIST_COOLDOWN_CAP_MS = 30 * 60 * 1000;
 
 export class SpotifyError extends Error {
   status: number;
@@ -135,6 +139,12 @@ export class HttpClient {
         // hands out multi-hour bans when an endpoint is hammered), stop now: more calls
         // can't succeed in any reasonable window and only risk deepening the ban.
         if ((rawRetryAfter ?? 0) > HARD_BAN_S) {
+          // Persist the backoff so other serverless invocations (cron ticks, on-load
+          // polls) honor it — module-scoped `cooldownUntil` is wiped between invocations,
+          // so without this every tick re-pokes the banned endpoint.
+          const untilMs = Date.now() + Math.min((rawRetryAfter ?? 0) * 1000, PERSIST_COOLDOWN_CAP_MS);
+          cooldownUntil = Math.max(cooldownUntil, untilMs);
+          void setSpotifyCooldownUntil(untilMs).catch(() => {});
           return res;
         }
         if (rateLimited < rlMax) {

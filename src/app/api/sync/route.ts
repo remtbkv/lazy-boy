@@ -1,5 +1,5 @@
 import { auth } from "@/lib/auth";
-import { spotifyClient } from "@/lib/spotify";
+import { spotifyClient, SpotifyError } from "@/lib/spotify";
 import { getLastSync } from "@/lib/db";
 import { syncRecentPlays } from "@/lib/sync/history";
 
@@ -20,9 +20,13 @@ export async function POST() {
     return Response.json({ ok: true, skipped: true });
   }
   try {
-    const { added } = await syncRecentPlays(spotifyClient(session.accessToken));
-    return Response.json({ ok: true, added });
+    const { added, skipped } = await syncRecentPlays(spotifyClient(session.accessToken));
+    return Response.json({ ok: true, added, skipped });
   } catch (e) {
+    // A rate-limit self-heals; don't 500 the open app's background poll over it.
+    if (e instanceof SpotifyError && e.status === 429) {
+      return Response.json({ ok: true, skipped: "rate-limited" });
+    }
     return Response.json(
       { ok: false, error: e instanceof Error ? e.message : "sync failed" },
       { status: 500 },

@@ -882,6 +882,17 @@ export async function setLibrarySyncedAt(): Promise<void> {
   await setMeta("library_synced_at", new Date().toISOString());
 }
 
+// Spotify rate-limit backoff, persisted so it survives across serverless invocations
+// (the HTTP client's in-memory cooldown is wiped between each cron/API invocation, so
+// without this every scheduled tick would re-poke a banned endpoint). Stored as epoch ms.
+export async function getSpotifyCooldownUntil(): Promise<number> {
+  const v = await getMeta("spotify_cooldown_until");
+  return v ? Number(v) || 0 : 0;
+}
+export async function setSpotifyCooldownUntil(untilMs: number): Promise<void> {
+  await setMeta("spotify_cooldown_until", String(Math.floor(untilMs)));
+}
+
 // ---- preferences / background-job bookkeeping (meta-backed) ----
 /** Whether "Clean" backs removed songs up to a separate playlist. Persisted globally
  *  (DB, so it follows the user across devices), defaulting to on. */

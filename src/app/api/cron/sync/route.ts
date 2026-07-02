@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { getValidAccessToken } from "@/lib/auth";
-import { spotifyClient } from "@/lib/spotify";
+import { spotifyClient, SpotifyError } from "@/lib/spotify";
 import { syncRecentPlays } from "@/lib/sync/history";
 import { syncLibrary } from "@/lib/sync/library";
 import { getLibrarySyncedAt } from "@/lib/db";
@@ -46,11 +46,19 @@ export async function GET(req: Request) {
     return t;
   };
   try {
-    const { added } = await syncRecentPlays(spotifyClient(token));
+    const { added, skipped } = await syncRecentPlays(spotifyClient(token));
+    // Rate-limited/cooling down: don't pile the heavier library scan onto a throttle.
+    if (skipped) return Response.json({ ok: true, added, skipped });
     // Heavier, lower-frequency upkeep — each self-gates so this stays cheap on most ticks.
     const library = await maybeSyncLibrary(freshToken);
     return Response.json({ ok: true, added, library });
   } catch (e) {
+    // A rate-limit is transient and self-heals — never surface it as a 5xx. An external
+    // scheduler (cron-job.org) auto-disables a job after N consecutive failures, so a
+    // 500 here on a passing Spotify throttle would take the whole closed-app sync offline.
+    if (e instanceof SpotifyError && e.status === 429) {
+      return Response.json({ ok: true, skipped: "rate-limited" });
+    }
     return Response.json(
       { ok: false, error: e instanceof Error ? e.message : "sync failed" },
       { status: 500 },
