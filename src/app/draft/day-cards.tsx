@@ -63,9 +63,11 @@ export function DayCards({
               className={card(selected === d.day)}
             >
               <div className="text-sm font-semibold">{dayLabel(d.day)}</div>
-              <div className="mt-2 text-xl font-semibold tabular-nums">{d.plays}</div>
-              <div className="text-xs text-muted-foreground">plays</div>
-              <div className="mt-1.5 text-xs tabular-nums text-muted-foreground">
+              <div className="mt-2 text-xl font-semibold tabular-nums">
+                {d.plays}{" "}
+                <span className="text-xs font-normal text-muted-foreground">plays</span>
+              </div>
+              <div className="mt-1 text-xs tabular-nums text-muted-foreground">
                 {formatListenTime(d.durationMs)}
               </div>
             </button>
@@ -94,12 +96,18 @@ export function DayCards({
         className={cn(card(selected === "all"), "sm:min-w-[140px]")}
       >
         <div className="text-sm font-semibold">All time</div>
-        <div className="mt-2 text-xl font-semibold tabular-nums">{allTime.plays}</div>
-        <div className="text-xs text-muted-foreground">plays</div>
-        <div className="mt-1.5 text-xs tabular-nums text-muted-foreground">
-          {formatListenTime(allTime.durationMs)}
-          {allTime.since ? ` · since ${shortDate(allTime.since)}` : ""}
+        <div className="mt-2 text-xl font-semibold tabular-nums">
+          {allTime.plays}{" "}
+          <span className="text-xs font-normal text-muted-foreground">plays</span>
         </div>
+        <div className="mt-1 text-xs tabular-nums text-muted-foreground">
+          {formatListenTime(allTime.durationMs)}
+        </div>
+        {allTime.since ? (
+          <div className="text-xs tabular-nums text-muted-foreground/70">
+            since {shortDate(allTime.since)}
+          </div>
+        ) : null}
       </button>
     </div>
   );

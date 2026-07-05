@@ -8,7 +8,6 @@ import {
   getStoredPlaylists,
   searchHistory,
 } from "@/lib/db";
-import { formatListenTime } from "@/lib/format";
 import { tzOffsetMinutes } from "@/lib/tz";
 import { DenBottomNav, DenChrome } from "./chrome";
 import { DenHome } from "./den-home";
@@ -61,18 +60,12 @@ export default async function DraftPage() {
   const last = latest[0]?.lastPlayed ? Date.parse(latest[0].lastPlayed) : 0;
   const awake = now - last < 10 * 60_000;
 
-  const todayStats = daily.find((d) => d.day === today);
-  const subline = todayStats
-    ? `${todayStats.plays} plays · ${formatListenTime(todayStats.durationMs)} today`
-    : "Quiet so far today.";
-
   return (
     <>
       <DenChrome awake={awake} name={name} image={image} />
       <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-28 pt-7 sm:px-6 sm:pb-12 sm:pt-9">
         <DenHome
           greeting={greeting}
-          subline={subline}
           daily={daily}
           allTime={{ plays: allTime.plays, durationMs: allTime.durationMs, since: allTime.since }}
           initialDay={initialDay}

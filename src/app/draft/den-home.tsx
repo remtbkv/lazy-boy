@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, SearchIcon, X } from "lucide-react";
 import type { DayStats, StoredPlaylist, TrackStats } from "@/lib/db";
-import { exactTimeShort, timeAgo } from "@/lib/format";
+import { exactTimeShort, formatDuration, timeAgo } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { SortMenu } from "@/components/sort-menu";
 import {
@@ -72,7 +72,6 @@ type ArtistGroup = {
 // artist — repeated plays collapse into one row you can expand for the exact times.
 export function DenHome({
   greeting,
-  subline,
   daily: initialDaily,
   allTime,
   initialDay,
@@ -80,7 +79,6 @@ export function DenHome({
   playlists,
 }: {
   greeting: string;
-  subline: string;
   daily: DayStats[];
   allTime: { plays: number; durationMs: number; since: string | null };
   initialDay: string;
@@ -213,9 +211,10 @@ export function DenHome({
 
   return (
     <div className="space-y-8">
+      {/* Just the greeting — today's numbers already live on the Today card below;
+          repeating them here said the same thing twice within an inch. */}
       <header>
         <h1 className="den-display text-[27px] leading-tight sm:text-4xl">{greeting}</h1>
-        <p className="mt-1.5 text-sm text-muted-foreground">{subline}</p>
       </header>
 
       <ActionDock playlists={playlists} />
@@ -253,38 +252,35 @@ export function DenHome({
               </button>
             ) : null}
           </div>
-          <div className="flex h-11 shrink-0 items-center gap-0.5 rounded-xl border border-border bg-card p-1">
-            {(["songs", "artists"] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => {
-                  setMode(m);
-                  setExpanded(null);
-                }}
-                aria-pressed={mode === m}
-                className={cn(
-                  "h-full rounded-lg px-2.5 text-[13px] font-medium capitalize transition-colors sm:px-3",
-                  mode === m ? "bg-secondary text-foreground" : "text-muted-foreground",
-                )}
-              >
-                {m}
-              </button>
-            ))}
-          </div>
-          {/* Sort — applies to the day / all-time list; hidden while searching
-              (search results carry their own order). */}
-          {!searching ? (
-            <div className="hidden shrink-0 sm:block">
+          {/* One contextual control beside the field: while typing, the songs/artists
+              switch (it only affects search); otherwise the sort menu for the list
+              below. Never both — two idle controls was clutter. */}
+          {searching ? (
+            <div className="flex h-11 shrink-0 items-center gap-0.5 rounded-xl border border-border bg-card p-1">
+              {(["songs", "artists"] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => {
+                    setMode(m);
+                    setExpanded(null);
+                  }}
+                  aria-pressed={mode === m}
+                  className={cn(
+                    "h-full rounded-lg px-2.5 text-[13px] font-medium capitalize transition-colors sm:px-3",
+                    mode === m ? "bg-secondary text-foreground" : "text-muted-foreground",
+                  )}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="shrink-0">
               <SortMenu value={sort} direction={dir} options={SORTS} onSelect={selectSort} />
             </div>
-          ) : null}
+          )}
         </div>
-        {!searching ? (
-          <div className="-mt-3 flex justify-end sm:hidden">
-            <SortMenu value={sort} direction={dir} options={SORTS} onSelect={selectSort} />
-          </div>
-        ) : null}
 
         {searching ? (
           <div className={cn(searchPending && "opacity-60 transition-opacity")}>
@@ -331,34 +327,60 @@ export function DenHome({
                 No plays recorded here.
               </p>
             ) : (
-              <ul className="divide-y divide-border/50">
-                {dayRows.map((t) => (
-                  <li key={`${t.id}-${t.lastPlayed}`}>
-                    <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 py-2 sm:gap-4 md:grid-cols-[auto_minmax(0,5fr)_minmax(0,4fr)_auto]">
-                      <Art image={t.albumImage} />
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-medium select-text">{t.name}</p>
-                        <p className="truncate text-[13px] text-muted-foreground select-text">
-                          {t.artist}
-                        </p>
-                      </div>
-                      {/* Album column — desktop only, left-aligned on its own track so
-                          every row lines up. Always shown, like the live table. */}
-                      <p className="hidden truncate text-[13px] text-muted-foreground md:block">
-                        {t.album}
-                      </p>
-                      <div className="text-right">
-                        {t.plays > 1 ? (
-                          <p className="text-sm font-medium tabular-nums">×{t.plays}</p>
-                        ) : null}
-                        <p className="text-xs tabular-nums text-muted-foreground">
-                          {selected === "all" ? timeAgo(t.lastPlayed) : clockTime(t.lastPlayed)}
-                        </p>
-                      </div>
-                    </div>
-                  </li>
-                ))}
-              </ul>
+              // Fixed-layout table (like the live history table): column widths stay put
+              // and long text clips instead of pushing the columns apart. Song + Album take
+              // the flexible share; the numeric/time/source columns are narrow and fixed.
+              <table className="w-full table-fixed text-sm">
+                <thead>
+                  <tr className="border-b border-border/60 text-left text-[11px] uppercase tracking-wide text-muted-foreground/70">
+                    <th className="py-2 pr-3 font-medium">Song</th>
+                    <th className="hidden py-2 pr-3 font-medium md:table-cell">Album</th>
+                    <th className="hidden w-16 py-2 pr-3 text-right font-medium sm:table-cell">
+                      Length
+                    </th>
+                    <th className="w-14 py-2 pr-3 text-right font-medium">Plays</th>
+                    <th className="hidden w-24 py-2 pr-3 font-medium sm:table-cell">
+                      {selected === "all" ? "Last played" : "Played"}
+                    </th>
+                    <th className="hidden w-32 py-2 font-medium lg:table-cell">From</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border/50">
+                  {dayRows.map((t) => (
+                    <tr key={`${t.id}-${t.lastPlayed}`}>
+                      <td className="py-2 pr-3">
+                        <div className="flex min-w-0 items-center gap-3">
+                          <Art image={t.albumImage} size={9} />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate font-medium select-text">{t.name}</p>
+                            <p className="truncate text-xs text-muted-foreground select-text">
+                              {t.artist}
+                            </p>
+                            {/* Phones hide the side columns — fold time + source here. */}
+                            <p className="mt-0.5 truncate text-[11px] text-muted-foreground/70 sm:hidden">
+                              {selected === "all" ? timeAgo(t.lastPlayed) : clockTime(t.lastPlayed)}
+                              {t.source ? ` · ${t.source}` : ""}
+                            </p>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="hidden truncate py-2 pr-3 text-muted-foreground md:table-cell">
+                        {t.album ?? "—"}
+                      </td>
+                      <td className="hidden py-2 pr-3 text-right tabular-nums text-muted-foreground sm:table-cell">
+                        {formatDuration(t.durationMs)}
+                      </td>
+                      <td className="py-2 pr-3 text-right tabular-nums">{t.plays}</td>
+                      <td className="hidden truncate py-2 pr-3 text-muted-foreground sm:table-cell">
+                        {selected === "all" ? timeAgo(t.lastPlayed) : clockTime(t.lastPlayed)}
+                      </td>
+                      <td className="hidden truncate py-2 text-muted-foreground lg:table-cell">
+                        {t.source ?? "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             )}
             {tracks.length > PAGE && !showAll ? (
               <button
@@ -376,11 +398,12 @@ export function DenHome({
   );
 }
 
-function Art({ image }: { image: string | null }) {
+function Art({ image, size = 11 }: { image: string | null; size?: 9 | 11 }) {
+  const cls = size === 9 ? "size-9" : "size-11";
   return image ? (
-    <img src={image} alt="" loading="lazy" className="size-11 shrink-0 rounded-md object-cover" />
+    <img src={image} alt="" loading="lazy" className={`${cls} shrink-0 rounded-md object-cover`} />
   ) : (
-    <span className="size-11 shrink-0 rounded-md bg-secondary" />
+    <span className={`${cls} shrink-0 rounded-md bg-secondary`} />
   );
 }
 

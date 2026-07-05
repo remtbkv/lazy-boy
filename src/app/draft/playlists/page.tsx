@@ -1,5 +1,5 @@
 import { auth } from "@/lib/auth";
-import { getStoredPlaylists, searchHistory } from "@/lib/db";
+import { getStoredPlaylists, getUniqueSongCount, searchHistory } from "@/lib/db";
 import { DenBottomNav, DenChrome } from "../chrome";
 import { PlaylistsGrid } from "./playlists-grid";
 
@@ -8,9 +8,10 @@ import { PlaylistsGrid } from "./playlists-grid";
 export const dynamic = "force-dynamic";
 
 export default async function DraftPlaylistsPage() {
-  const [session, playlists, latest] = await Promise.all([
+  const [session, playlists, uniqueSongs, latest] = await Promise.all([
     auth(),
     getStoredPlaylists(),
+    getUniqueSongCount(),
     searchHistory("", 1),
   ]);
   const name = session?.user?.name ?? "You";
@@ -25,7 +26,7 @@ export default async function DraftPlaylistsPage() {
     <>
       <DenChrome awake={awake} name={name} image={image} active="playlists" />
       <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-28 pt-7 sm:px-6 sm:pb-12 sm:pt-9">
-        <PlaylistsGrid playlists={playlists} />
+        <PlaylistsGrid playlists={playlists} uniqueSongs={uniqueSongs} />
       </main>
       <DenBottomNav name={name} image={image} active="playlists" />
     </>

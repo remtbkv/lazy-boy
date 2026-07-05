@@ -9,17 +9,27 @@ import { fuzzyFilter } from "@/lib/filter";
 // The library under the new skin: heading with the real counts, an in-flow search
 // (no floating pill), and a responsive art-first grid — 2-up on phones, up to 5-up
 // on desktop. Art is never overlaid; the name sits below it.
-export function PlaylistsGrid({ playlists }: { playlists: StoredPlaylist[] }) {
+export function PlaylistsGrid({
+  playlists,
+  uniqueSongs,
+}: {
+  playlists: StoredPlaylist[];
+  uniqueSongs: number;
+}) {
   const [query, setQuery] = useState("");
   const shown = query.trim() ? fuzzyFilter(playlists, query, (p) => p.name) : playlists;
   const songs = playlists.reduce((n, p) => n + p.trackCount, 0);
 
   return (
     <div className="space-y-6">
+      {/* No "Playlists" title — the active nav tab already names the page. The stats
+          line is the header: playlists · total songs · unique songs (dedup'd across
+          playlists), matching the live app. */}
       <header>
-        <h1 className="den-display text-[27px] leading-tight sm:text-4xl">Playlists</h1>
-        <p className="mt-1.5 text-sm tabular-nums text-muted-foreground">
-          {playlists.length} playlists · {songs.toLocaleString()} songs
+        <h1 className="sr-only">Playlists</h1>
+        <p className="text-sm tabular-nums text-muted-foreground">
+          {playlists.length.toLocaleString()} playlists · {songs.toLocaleString()} total songs
+          {uniqueSongs > 0 ? ` · ${uniqueSongs.toLocaleString()} unique songs` : ""}
         </p>
       </header>
 
