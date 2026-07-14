@@ -1,5 +1,5 @@
 import { Skeleton } from "@/components/ui/skeleton";
-import { HeaderSkeleton } from "../header-skeleton";
+import { HeaderSkeleton } from "./header-skeleton";
 
 // Route-level loading UI: Next shows this instantly on navigation into the draft (and as the
 // first streamed chunk on a cold load) while the server component awaits auth + the DB reads.

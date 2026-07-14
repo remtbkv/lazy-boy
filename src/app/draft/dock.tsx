@@ -1,21 +1,9 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useState } from "react";
 import { Diff, Eraser, GitMerge, ListPlus, Play, X } from "lucide-react";
-import {
-  mergeAction,
-  resumePlaylistAction,
-  saveCompareDiffAction,
-  saveQueueAction,
-  startCleanAction,
-  subtractPreviewAction,
-  type SubtractTrack,
-} from "@/app/(app)/actions";
-import { PlaylistsSync } from "@/components/playlists-sync";
-import { writeCleanActive } from "@/lib/clean-progress";
 import { toast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
-import type { DockData } from "../history-actions";
 
 type Playlist = { id: string; name: string; trackCount: number; image: string | null };
 
@@ -44,10 +32,12 @@ const ACTIONS: {
     blurb: "Pick base playlists, then the playlists to subtract from them — see which songs are unique vs. shared." },
 ];
 
+const DRAFT_NOTE = "Draft preview — this action gets wired up when the design ships.";
+
 // The action dock. Desktop: a quiet row of text buttons — hover reveals the surface
 // (no standing chips). Mobile: a 3-wide grid of tiles sized for thumbs; tapping opens
 // a bottom sheet with the action's description readable on touch.
-export function ActionDock({ playlists, backupPref, syncedAt }: DockData) {
+export function ActionDock({ playlists }: { playlists: Playlist[] }) {
   const [open, setOpen] = useState<ActionKey | null>(null);
   const action = ACTIONS.find((a) => a.key === open) ?? null;
 
@@ -86,17 +76,7 @@ export function ActionDock({ playlists, backupPref, syncedAt }: DockData) {
         ))}
       </div>
 
-      {/* Headless: kicks the background library scan when the cache is stale, renders nothing. */}
-      <PlaylistsSync syncedAt={syncedAt} />
-
-      {action ? (
-        <ActionSheet
-          action={action}
-          playlists={playlists}
-          backupPref={backupPref}
-          onClose={() => setOpen(null)}
-        />
-      ) : null}
+      {action ? <ActionSheet action={action} playlists={playlists} onClose={() => setOpen(null)} /> : null}
     </>
   );
 }
@@ -104,12 +84,10 @@ export function ActionDock({ playlists, backupPref, syncedAt }: DockData) {
 function ActionSheet({
   action,
   playlists,
-  backupPref,
   onClose,
 }: {
   action: (typeof ACTIONS)[number];
   playlists: Playlist[];
-  backupPref: boolean;
   onClose: () => void;
 }) {
   // Ordered selections. For "subtract" both lists are live and the toggle decides
@@ -117,13 +95,6 @@ function ActionSheet({
   const [picked, setPicked] = useState<string[]>([]);
   const [others, setOthers] = useState<string[]>([]);
   const [group, setGroup] = useState<"base" | "subtract">("base");
-  const [pending, start] = useTransition();
-  // Subtract answers a question before it does anything, so it gets a second step in the
-  // same sheet: the picker becomes the result (unique vs. shared), with the save as the
-  // follow-up. Every other action commits straight from the picker.
-  const [preview, setPreview] = useState<{ kept: SubtractTrack[]; overlap: SubtractTrack[] } | null>(
-    null,
-  );
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -170,73 +141,9 @@ function ActionSheet({
           ? picked.length >= 1 && others.length >= 1
           : true;
 
-  const nameOf = (id: string) => playlists.find((p) => p.id === id)?.name ?? "playlist";
-
-  // The real Spotify flows. Merge names itself, and Clean reports progress through the
-  // app-wide CleanProgressWatcher (see the layout) — so neither needs a step of its own.
   const confirm = () => {
-    start(async () => {
-      switch (action.key) {
-        case "resume": {
-          const r = await resumePlaylistAction(picked[0]);
-          if (r.ok) toast.success(`Resuming "${nameOf(picked[0])}"`);
-          else toast.error(r.error);
-          break;
-        }
-        case "clean": {
-          const r = await startCleanAction(picked[0], backupPref);
-          if (!r.ok) {
-            toast.error(r.error);
-            break;
-          }
-          // Hand the task to the global watcher so progress keeps showing after this closes.
-          if (r.taskId) writeCleanActive({ taskId: r.taskId, playlistId: picked[0] });
-          toast.success(
-            r.unique
-              ? `"${r.name}" — nothing to strip, every song is new`
-              : `Cleaning "${r.name}" — ${r.removed} already-saved removed, ${r.kept} kept`,
-          );
-          break;
-        }
-        case "queue": {
-          const r = await saveQueueAction();
-          if (r.ok) toast.success(`Saved to "${r.name}"`);
-          else toast.error(r.error);
-          break;
-        }
-        case "merge": {
-          const r = await mergeAction(picked); // click order is the merge order
-          if (r.ok) toast.success(`Merged ${r.count} songs into "${r.name}"`);
-          else toast.error(r.error);
-          break;
-        }
-        case "subtract": {
-          // Step one: answer the question. Nothing is written until you save below.
-          const r = await subtractPreviewAction(
-            picked[0],
-            others.map((id) => ({ id, name: nameOf(id) })),
-          );
-          if (r.ok) {
-            setPreview({ kept: r.kept, overlap: r.overlap });
-            return; // stay open — the result IS the point
-          }
-          toast.error(r.error);
-          break;
-        }
-      }
-      onClose();
-    });
-  };
-
-  const saveDiff = () => {
-    if (!preview) return;
-    const name = `${nameOf(picked[0])} minus ${others.map(nameOf).join(" + ")}`.slice(0, 100);
-    start(async () => {
-      const r = await saveCompareDiffAction(name, preview.kept.map((t) => t.uri));
-      if (r.ok) toast.success(`Saved ${r.count} songs to "${name}"`);
-      else toast.error(r.error);
-      onClose();
-    });
+    toast.success(DRAFT_NOTE);
+    onClose();
   };
 
   return (
@@ -258,11 +165,7 @@ function ActionSheet({
         <div className="flex items-start justify-between gap-4 px-5 pt-4">
           <div>
             <h2 className="den-display text-lg">{action.label}</h2>
-            <p className="mt-1 text-[13px] leading-snug text-muted-foreground">
-              {preview
-                ? `${preview.kept.length} only in "${nameOf(picked[0])}" · ${preview.overlap.length} shared`
-                : action.blurb}
-            </p>
+            <p className="mt-1 text-[13px] leading-snug text-muted-foreground">{action.blurb}</p>
           </div>
           <button
             type="button"
@@ -275,7 +178,7 @@ function ActionSheet({
         </div>
 
         {/* Subtract: which group the next tap goes to. */}
-        {action.select === "subtract" && !preview ? (
+        {action.select === "subtract" ? (
           <div className="mx-5 mt-3 flex items-center gap-0.5 self-start rounded-xl border border-border bg-card p-1">
             {(
               [
@@ -299,29 +202,7 @@ function ActionSheet({
           </div>
         ) : null}
 
-        {preview ? (
-          // The result. Same row rhythm as the picker, so the sheet doesn't lurch.
-          <div className="thin-scroll mt-4 min-h-0 flex-1 overflow-y-auto border-t border-border/60">
-            {preview.kept.length === 0 ? (
-              <p className="px-5 py-6 text-sm text-muted-foreground">
-                Every song is already in the playlists you subtracted.
-              </p>
-            ) : null}
-            {preview.kept.map((t) => (
-              <div key={t.id} className="flex w-full items-center gap-3 px-5 py-2.5 text-left">
-                {t.albumImage ? (
-                  <img src={t.albumImage} alt="" className="size-10 shrink-0 rounded-md object-cover" />
-                ) : (
-                  <span className="size-10 shrink-0 rounded-md bg-secondary" />
-                )}
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-medium">{t.title}</span>
-                  <span className="block truncate text-xs text-muted-foreground">{t.artist}</span>
-                </span>
-              </div>
-            ))}
-          </div>
-        ) : action.select ? (
+        {action.select ? (
           <div className="thin-scroll mt-4 min-h-0 flex-1 overflow-y-auto border-t border-border/60">
             {/* The library streams in just after mount (see DockLoader), so on a very fast
                 click it may not have landed yet. */}
@@ -367,7 +248,7 @@ function ActionSheet({
         <div className="flex items-center justify-between gap-2 px-5 py-4">
           {/* "Never mind, redo" — wipes the picks without closing. Only rendered once
               there's something to wipe. */}
-          {(picked.length || others.length) && !preview ? (
+          {picked.length || others.length ? (
             <button
               type="button"
               onClick={() => {
@@ -384,15 +265,11 @@ function ActionSheet({
           )}
           <button
             type="button"
-            onClick={preview ? saveDiff : confirm}
-            disabled={pending || (!preview && !ready) || (!!preview && preview.kept.length === 0)}
+            onClick={confirm}
+            disabled={!ready}
             className="h-10 rounded-lg bg-foreground px-5 text-sm font-semibold text-background transition-opacity disabled:opacity-40"
           >
-            {pending
-              ? "Working…"
-              : preview
-                ? `Save ${preview.kept.length} songs`
-                : action.label}
+            {action.label}
           </button>
         </div>
       </div>
