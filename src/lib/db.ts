@@ -274,6 +274,31 @@ export async function unresolvedContextUris(): Promise<{ uri: string; type: stri
   );
 }
 
+// The "From" (source) of a play. Normally the context's resolved name, falling back to its
+// type. BUT: Spotify keeps reporting a playlist as the context even after the playlist ends
+// and it auto-plays recommended "next" songs that were never in the playlist — so those
+// reads are misleading. When a play's context is a playlist WE HAVE CACHED and the played
+// song isn't a member, blank the source to NULL (the UI renders "—"). Two guards keep it
+// honest: (1) only blank when the playlist's tracks are cached, so an unsynced or foreign
+// playlist we can't verify still shows its name instead of being wrongly blanked; (2) match
+// membership by (artist, title) identity, not track id — Spotify hands the same song
+// different ids in a playlist vs. recently-played, so an id match would drop real plays.
+// The song lookup uses idx_tracks_artist_name; the playlist lookup uses idx_pltracks_pl.
+// `p` = the play row, `c` = its joined contexts row; both reference the outer track `t`.
+function sourceExpr(p: string, c: string): string {
+  const pid = `replace(${p}.context_uri, 'spotify:playlist:', '')`;
+  return `CASE
+      WHEN ${p}.context_type = 'playlist' AND ${p}.context_uri IS NOT NULL
+           AND EXISTS (SELECT 1 FROM playlist_tracks pl WHERE pl.playlist_id = ${pid})
+           AND NOT EXISTS (
+             SELECT 1 FROM playlist_tracks plm JOIN tracks tm ON tm.id = plm.track_id
+             WHERE plm.playlist_id = ${pid}
+               AND lower(tm.artist) = lower(t.artist) AND lower(tm.name) = lower(t.name))
+      THEN NULL
+      ELSE COALESCE(${c}.name, ${p}.context_type)
+    END`;
+}
+
 // `source` is the context (playlist/album name, or type) of the MOST RECENT play
 // only — not every context the track ever appeared in, which would be misleading
 // (a one-off queue shouldn't read as "in this playlist").
@@ -281,7 +306,7 @@ const SELECT_TRACK = `
   SELECT t.id, t.name, t.artist, t.uri, t.album, t.album_image AS albumImage,
     t.duration_ms AS durationMs,
     COUNT(p.id) AS plays, MAX(p.played_at) AS lastPlayed, MIN(p.played_at) AS firstPlayed,
-    (SELECT COALESCE(c2.name, p2.context_type)
+    (SELECT ${sourceExpr("p2", "c2")}
        FROM plays p2 LEFT JOIN contexts c2 ON c2.uri = p2.context_uri
        WHERE p2.track_id = t.id ORDER BY p2.played_at DESC LIMIT 1) AS source
   FROM plays p LEFT JOIN tracks t ON t.id = p.track_id`;
@@ -337,7 +362,7 @@ const SELECT_PLAY = `
   SELECT t.id, t.name, t.artist, t.uri, t.album, t.album_image AS albumImage,
     t.duration_ms AS durationMs, 1 AS plays,
     p.played_at AS lastPlayed, p.played_at AS firstPlayed,
-    COALESCE(c.name, p.context_type) AS source
+    ${sourceExpr("p", "c")} AS source
   FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
     LEFT JOIN contexts c ON c.uri = p.context_uri`;
 
@@ -1181,12 +1206,22 @@ export async function getContextName(uri: string): Promise<string | null> {
 // invalid_grant → forced re-login" race.
 export type SpotifyTokens = { accessToken: string; refreshToken: string; expiresAt: number };
 
+// The Spotify OAuth token is a SINGLE global row, but local dev and the deployed prod app
+// (plus the every-2-min cron) share ONE Turso database. Spotify rotates the refresh token
+// on every refresh, so if dev and prod use the same row they keep rotating each other's
+// token out from under one another → `invalid_grant` → forced re-login (and the occasional
+// Configuration error when it happens mid-callback). Namespacing the key by environment
+// gives dev its own independent Spotify session while keeping the shared data DB, so a
+// dev-server restart no longer logs you out. Prod keeps the canonical `spotify_tokens` key.
+const SPOTIFY_TOKENS_KEY =
+  process.env.NODE_ENV === "production" ? "spotify_tokens" : "spotify_tokens_dev";
+
 export async function setSpotifyTokens(t: SpotifyTokens): Promise<void> {
-  await setMeta("spotify_tokens", JSON.stringify(t));
+  await setMeta(SPOTIFY_TOKENS_KEY, JSON.stringify(t));
 }
 
 export async function getSpotifyTokens(): Promise<SpotifyTokens | null> {
-  const raw = await getMeta("spotify_tokens");
+  const raw = await getMeta(SPOTIFY_TOKENS_KEY);
   if (!raw) return null;
   try {
     return JSON.parse(raw) as SpotifyTokens;
@@ -1197,7 +1232,7 @@ export async function getSpotifyTokens(): Promise<SpotifyTokens | null> {
 
 export async function clearSpotifyTokens(): Promise<void> {
   const client = await getClient();
-  await client.execute({ sql: "DELETE FROM meta WHERE key = ?", args: ["spotify_tokens"] });
+  await client.execute({ sql: "DELETE FROM meta WHERE key = ?", args: [SPOTIFY_TOKENS_KEY] });
 }
 
 // ---- cross-instance lock (meta-table mutex with TTL) ----

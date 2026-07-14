@@ -1,18 +1,35 @@
+import type { Viewport } from "next";
 import { redirect } from "next/navigation";
 import { headers } from "next/headers";
 import { auth } from "@/lib/auth";
-import { Header } from "@/components/header";
 import { CleanProgressWatcher } from "@/components/clean-progress";
 import { SyncOnLoad } from "@/components/sync-on-load";
 import { TimezoneCookie } from "@/components/timezone-cookie";
 import { NowPlayingProvider } from "@/components/now-playing-context";
 import { ScrollbarHover } from "@/components/scrollbar-hover";
+import { DenBottomNav, DenChrome } from "./chrome";
+import "./den.css";
 
-export default async function AppLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+// viewport-fit=cover so the mobile bottom nav can pad itself with
+// env(safe-area-inset-bottom) instead of sitting under the iOS home indicator.
+export const viewport: Viewport = {
+  themeColor: "#0b0b0e",
+  viewportFit: "cover",
+};
+
+// The chrome lives HERE, not in the pages. A layout persists across navigation between its
+// child routes — it is not re-rendered — so the header and its state survive a page change.
+//
+// It used to be rendered per-page, which meant every navigation unmounted and remounted the
+// whole header: the avatar's ring recomputed from scratch (the flash), and the
+// NowPlayingProvider remounted and re-ran its poll, so the current song popped back in. None
+// of that data can change in the time it takes to switch pages, so none of it should be
+// re-fetched or re-derived. Hoisting the provider up here also means one poller for the whole
+// app, not one per page view.
+//
+// Pages bring their own <main> (each route wants different padding and, on Home, a viewport
+// lock) — so there's deliberately no shared <main> wrapper here.
+export default async function AppLayout({ children }: { children: React.ReactNode }) {
   // The session cookie is pinned to 127.0.0.1, so on `localhost` auth() sees no session and
   // would detour through /login (a full server render) before the root-layout canonicalizer
   // bounces to 127.0.0.1. Skip that: render nothing here and let the canonicalizer jump
@@ -24,19 +41,20 @@ export default async function AppLayout({
   const session = await auth();
   if (!session || session.error) redirect("/login");
 
+  const name = session.user?.name ?? "You";
+  const image = session.user?.image ?? null;
+
   return (
-    <NowPlayingProvider>
-      <Header
-        name={session.user?.name ?? "You"}
-        image={session.user?.image ?? null}
-      />
-      <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-8 sm:px-6">
+    <div id="den-root" className="flex min-h-dvh flex-col">
+      <NowPlayingProvider>
+        <DenChrome name={name} image={image} />
         {children}
-      </main>
-      <CleanProgressWatcher />
-      <SyncOnLoad />
-      <TimezoneCookie />
-      <ScrollbarHover />
-    </NowPlayingProvider>
+        <DenBottomNav name={name} image={image} />
+        <CleanProgressWatcher />
+        <SyncOnLoad />
+        <TimezoneCookie />
+        <ScrollbarHover />
+      </NowPlayingProvider>
+    </div>
   );
 }

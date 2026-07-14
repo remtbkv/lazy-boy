@@ -1,6 +1,18 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Client-side Router Cache. Every page here is `force-dynamic`, and Next's default for
+  // dynamic routes is staleTimes 0 — i.e. re-fetch the whole RSC payload on EVERY navigation,
+  // including going Back to a page you were just on. That's why revisits felt as slow as first
+  // loads.
+  //
+  // 30s. Memory isn't the constraint (the whole draft is ~460KB of text — home ~170KB,
+  // playlists ~245KB, friends ~43KB); staleness is. A shorter hold means new plays surface on
+  // a normal revisit rather than being masked by a cached payload. A hard reload always
+  // bypasses this either way.
+  experimental: {
+    staleTimes: { dynamic: 30, static: 180 },
+  },
   // The app's Spotify redirect URI is on 127.0.0.1, but `next dev` serves from
   // localhost — Next 16 treats that as cross-origin and blocks /_next dev
   // resources (HMR + client runtime), which silently breaks hydration so no

@@ -13,7 +13,7 @@ freely. Add/remove/reword at will.
 - Look who's back.
 - Couldn't stay away?
 - Knew you'd be back.
-- Can't get enough, can you.
+- Can't get enough, can you...
 - Couldn't resist, huh.
 - Miss me?
 - Back in stock.

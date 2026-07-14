@@ -58,10 +58,13 @@
 
   <!-- green music note (chilling to music) -->
   <g fill="#1DB954">
-    <circle cx="132" cy="48" r="3.4"/>
-    <rect x="134.6" y="33" width="2" height="16" rx="1"/>
-    <circle cx="152" cy="55" r="2.8"/>
-    <rect x="154" y="42" width="1.7" height="14" rx="0.9"/>
-    <path d="M134.6 33 Q144 30.5 154 35.5 L154 42 Q144 37.5 136.6 39.5 Z"/>
+    <!-- Beamed eighth-note pair: note heads at the base of two stems, joined by a
+         solid angled beam. Topmost point y=34, well inside the 0–200 viewBox so
+         nothing clips. -->
+    <ellipse cx="131.6" cy="50.5" rx="4.2" ry="3.1" transform="rotate(-18 131.6 50.5)"/>
+    <ellipse cx="151.4" cy="55.5" rx="3.6" ry="2.7" transform="rotate(-18 151.4 55.5)"/>
+    <rect x="134.7" y="34" width="2" height="17" rx="1"/>
+    <rect x="153.7" y="39.4" width="1.8" height="16.6" rx="0.9"/>
+    <path d="M134.7 34 L155.5 39.4 L155.5 44 L134.7 38.6 Z"/>
   </g>
 </svg>

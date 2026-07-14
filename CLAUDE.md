@@ -28,8 +28,11 @@ the dedupe/clean/queue-save algorithms — they are re-specified in `docs/FEATUR
 
 ```
 src/app/(auth)/          login page (unauthenticated shell)
-src/app/(app)/           authed shell: layout calls auth(), header tabs, feature pages
-                         home/, playlists/, playlists/[id]/, compare/, friends/, history/
+src/app/(app)/           authed shell: layout calls auth() + owns the chrome (chrome.tsx,
+                         den.css skin, now-playing provider); pages bring their own <main>
+                         home/ (greeting, action dock, day strip, song table), playlists/,
+                         playlists/[id]/, friends/
+                         history-actions.ts  Home's listen-history reads + the Spotify sync
 src/app/api/auth/        Auth.js route handler (NextAuth catch-all)
 src/app/api/tasks/       background-task progress polling endpoint
 src/app/api/playlists/sync  one full library scan → DB (client fires when stale)
@@ -47,7 +50,7 @@ src/lib/filter.ts        fuzzyFilter — substring+prefix name search (shared)
 src/components/ui/       UI primitives — Base UI under the hood, NOT Radix (see GOTCHAS.md)
 src/components/          app components + shared: album-thumb, sort-menu, floating-bar,
                          now-playing, track-context-menu, playlists-client, playlist-grid,
-                         merge-panel, track-list, clean-panel, history-client, header
+                         merge-panel, track-list, clean-panel
 docs/                    ARCHITECTURE, FEATURES, ROADMAP, CONVENTIONS, GOTCHAS, SECURITY
 ```
 

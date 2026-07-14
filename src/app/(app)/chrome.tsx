@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 import { Disc3, Home, LibraryBig, LogOut } from "lucide-react";
-import { logout } from "@/app/(app)/actions";
+import { logout } from "./actions";
 import { NowPlaying } from "@/components/now-playing";
-import { NowPlayingProvider } from "@/components/now-playing-context";
+import { useNowPlaying } from "@/components/now-playing-context";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -17,42 +18,69 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-// Draft chrome. Desktop: one slim top bar — mark, wordmark, quiet nav, skin toggle,
+// App chrome. Desktop: one slim top bar — mark, wordmark, quiet nav, skin toggle,
 // account avatar. Mobile: the top bar shrinks to mark + wordmark, and navigation moves
 // to a bottom tab bar (thumb reach), padded past the iOS home indicator. Solid
 // backgrounds throughout — no translucency, no blur.
 //
-// Playlists/Friends point at the real pages (the draft covers Home only for now).
 
 const TABS = [
-  { key: "home", href: "/draft", label: "Home", icon: Home },
-  { key: "playlists", href: "/draft/playlists", label: "Playlists", icon: LibraryBig },
+  { key: "home", href: "/home", label: "Home", icon: Home },
+  { key: "playlists", href: "/playlists", label: "Playlists", icon: LibraryBig },
   { key: "friends", href: "/friends", label: "Friends", icon: Disc3 },
 ] as const;
 
 type TabKey = (typeof TABS)[number]["key"];
 
-export function DenChrome({
-  awake,
-  name,
-  image,
-  active = "home",
-}: {
-  awake: boolean;
-  name: string;
-  image: string | null;
-  active?: TabKey;
-}) {
+// `active` and `awake` are derived here rather than passed in, because the chrome now lives in
+// the layout and must not depend on which page rendered it. `awake` comes straight from the
+// now-playing state (something is playing ⇒ awake), which also removed a DB query from the
+// page load — it used to be answered by fetching the most recent play.
+function useActiveTab(): TabKey {
+  const pathname = usePathname();
+  if (pathname.startsWith("/playlists")) return "playlists";
+  if (pathname.startsWith("/friends")) return "friends";
+  return "home";
+}
+
+export function DenChrome({ name, image }: { name: string; image: string | null }) {
+  const active = useActiveTab();
+  const { playing } = useNowPlaying();
+  const awake = !!playing?.isPlaying;
+  const router = useRouter();
+  // ←/→ move between the top tabs. Neighboring routes are prefetched so the switch is
+  // instant. Ignored while typing (search field) or with a dialog/sheet open, and when a
+  // modifier is held (browser shortcuts), so it only fires on a bare arrow press.
+  useEffect(() => {
+    TABS.forEach((t) => router.prefetch(t.href));
+    const idx = TABS.findIndex((t) => t.key === active);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
+      if (document.querySelector('[role="dialog"]')) return;
+      const next = e.key === "ArrowRight" ? idx + 1 : idx - 1;
+      if (next < 0 || next >= TABS.length) return;
+      e.preventDefault();
+      router.push(TABS[next].href);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [active, router]);
+
   return (
-    <header className="sticky top-0 z-40 border-b border-border/70 bg-background">
-      <div className="mx-auto flex h-14 w-full max-w-5xl items-center gap-5 px-4 sm:px-6">
+    // Translucent + blurred: on a scrolling page (Playlists) the artwork passes UNDER the header
+    // rather than hitting an opaque wall, so it reads as one continuous surface.
+    <header className="sticky top-0 z-40 border-b border-border/70 bg-background/70 backdrop-blur-xl">
+      <div className="mx-auto flex h-16 w-full max-w-5xl items-center gap-6 px-4 sm:px-6">
         {/* Just the mark — the tab title already says the name. Gentle idle motion:
             a slow breathe while nothing plays, the slight sway while something does. */}
-        <Link href="/draft" className="flex items-center" aria-label="Lazy Boy">
+        <Link href="/home" className="flex items-center" aria-label="Lazy Boy">
           <img
             src="/icon.svg"
             alt=""
-            className={"size-8 " + (awake ? "den-panda-awake" : "den-panda-asleep")}
+            className={"size-9 " + (awake ? "den-panda-awake" : "den-panda-asleep")}
           />
         </Link>
 
@@ -63,7 +91,7 @@ export function DenChrome({
               key={t.key}
               href={t.href}
               className={cn(
-                "rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors",
+                "rounded-md px-3 py-1.5 text-[15px] font-medium transition-colors",
                 t.key === active
                   ? "text-foreground"
                   : "text-muted-foreground/70 hover:text-foreground",
@@ -75,11 +103,13 @@ export function DenChrome({
         </nav>
 
         <div className="ml-auto flex items-center gap-4">
-          {/* Current song, same chip as the live header — reports playback here too. */}
-          <NowPlayingProvider>
+          {/* Current song, same chip as the live header. Wrapped in `den-np` so the
+              title/artist box is pinned to a fixed width (den.css) — otherwise it
+              measures each song and animates its width, shifting everything right of it.
+              The provider is in the layout, so this does NOT remount on navigation. */}
+          <div className="den-np">
             <NowPlaying />
-          </NowPlayingProvider>
-          <SkinToggle />
+          </div>
           <div className="hidden sm:block">
             <AccountMenu name={name} image={image} />
           </div>
@@ -89,11 +119,34 @@ export function DenChrome({
   );
 }
 
+const RING_FALLBACK = "rgb(150, 150, 158)";
+const RING_CACHE = "lb-ring:";
+
 // The account control from the live header, carried over: pfp with a ring tinted to
 // its average colour, enlarging on hover, opening a menu with log out.
+//
+// The tint is derived from the image through a canvas, which takes a beat. The header is
+// rendered per-page, so it REMOUNTS on every navigation — meaning the ring used to reset to
+// the grey fallback and then animate back to the tint each time you changed pages. That was
+// the flash. The colour is memoised per image URL and re-applied in a layout effect (before
+// paint), so a remount starts already-correct and there is nothing left to animate.
 function AccountMenu({ name, image }: { name: string; image: string | null }) {
-  const [ringColor, setRingColor] = useState("rgb(150, 150, 158)");
+  const [ringColor, setRingColor] = useState(RING_FALLBACK);
   const [hover, setHover] = useState(false);
+
+  // Before paint: if we've already computed this image's tint, use it immediately. Runs on the
+  // client only (useLayoutEffect is a no-op on the server, hence the guard).
+  const useIsoLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+  useIsoLayoutEffect(() => {
+    if (!image) return;
+    try {
+      const cached = sessionStorage.getItem(RING_CACHE + image);
+      if (cached) setRingColor(cached);
+    } catch {
+      /* storage unavailable — fall through and compute */
+    }
+  }, [image]);
+
   useEffect(() => {
     if (!image) return;
     let cancelled = false;
@@ -117,7 +170,13 @@ function AccountMenu({ name, image }: { name: string; image: string | null }) {
           n++;
         }
         if (n && !cancelled) {
-          setRingColor(`rgb(${Math.round(r / n)}, ${Math.round(g / n)}, ${Math.round(b / n)})`);
+          const c = `rgb(${Math.round(r / n)}, ${Math.round(g / n)}, ${Math.round(b / n)})`;
+          setRingColor(c);
+          try {
+            sessionStorage.setItem(RING_CACHE + image, c);
+          } catch {
+            /* quota / unavailable — recomputing next time is harmless */
+          }
         }
       } catch {
         /* tainted canvas (no CORS) → keep the gray fallback */
@@ -173,8 +232,8 @@ function AccountMenu({ name, image }: { name: string; image: string | null }) {
             style={{
               transform: hover ? "scale(1.1)" : "scale(1)",
               boxShadow: hover
-                ? `0 0 0 4px ${ringColor}, 0 0 6px 1px ${ringColor.replace("rgb(", "rgba(").replace(")", ", 0.45)")}`
-                : `0 0 0 4px ${ringColor}`,
+                ? `0 0 0 3px ${ringColor}, 0 0 6px 1px ${ringColor.replace("rgb(", "rgba(").replace(")", ", 0.45)")}`
+                : `0 0 0 2px ${ringColor}`,
             }}
           >
             <Avatar className="size-8">
@@ -210,15 +269,8 @@ function AccountMenu({ name, image }: { name: string; image: string | null }) {
   );
 }
 
-export function DenBottomNav({
-  name,
-  image,
-  active = "home",
-}: {
-  name: string;
-  image: string | null;
-  active?: TabKey;
-}) {
+export function DenBottomNav({ name, image }: { name: string; image: string | null }) {
+  const active = useActiveTab();
   // Account tab: first tap reveals a small Log out panel above the bar (never a
   // one-tap sign-out — too easy to hit by accident); tapping elsewhere dismisses it.
   const [accountOpen, setAccountOpen] = useState(false);
@@ -285,30 +337,3 @@ export function DenBottomNav({
   );
 }
 
-// A/B skin switch — the one comparison knob. "den" = warm charcoal + bamboo,
-// "ink" = the live app's cool neutrals under the same new layout/type. Label is
-// driven purely by CSS off #den-root[data-skin] (see den.css) so hydration can't
-// mismatch the pre-paint localStorage skin.
-function SkinToggle() {
-  const toggle = () => {
-    const root = document.getElementById("den-root");
-    if (!root) return;
-    const next = root.dataset.skin === "ink" ? "den" : "ink";
-    root.dataset.skin = next;
-    try {
-      localStorage.setItem("lb-skin", next);
-    } catch {}
-  };
-  return (
-    <button
-      type="button"
-      onClick={toggle}
-      className="flex h-7 items-center gap-1.5 rounded-md border border-border/80 px-2 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
-      title="Switch draft palette"
-    >
-      <span className="den-skin-dot size-2 rounded-full" />
-      <span className="den-when-den">den</span>
-      <span className="den-when-ink">ink</span>
-    </button>
-  );
-}

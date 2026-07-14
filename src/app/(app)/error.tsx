@@ -4,7 +4,11 @@ import { useEffect } from "react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button";
 
-export default function AppError({ error }: { error: Error & { digest?: string } }) {
+export default function AppError({
+  error,
+}: {
+  error: Error & { digest?: string };
+}) {
   const isAuthError = /not authenticated/i.test(error.message);
   // A deploy gives server actions fresh ids, so a tab left open across a deploy posts an id
   // the new build doesn't have ("Failed to find Server Action …"). That's purely a stale-build
@@ -23,26 +27,32 @@ export default function AppError({ error }: { error: Error & { digest?: string }
 
   if (isStaleAction) {
     return (
-      <div className="mx-auto max-w-md space-y-2 py-16 text-center">
-        <h2 className="text-xl font-semibold">Updating…</h2>
-        <p className="text-sm text-muted-foreground">Loading the latest version.</p>
-      </div>
+      <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-28 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
+        <div className="mx-auto max-w-md space-y-2 py-16 text-center">
+          <h2 className="text-xl font-semibold">Updating…</h2>
+          <p className="text-sm text-muted-foreground">
+            Loading the latest version.
+          </p>
+        </div>
+      </main>
     );
   }
 
   return (
-    <div className="mx-auto max-w-md space-y-4 py-16 text-center">
-      <h2 className="text-xl font-semibold">Something went wrong</h2>
-      <p className="text-sm text-muted-foreground">
-        {isAuthError
-          ? "Your Spotify session expired. Please sign in again."
-          : error.message}
-      </p>
-      {/* Neutral outline, matching the in-app buttons (quick-action pills) — not the green
+    <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-28 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
+      <div className="mx-auto max-w-md space-y-4 py-16 text-center">
+        <h2 className="text-xl font-semibold">Something went wrong</h2>
+        <p className="text-sm text-muted-foreground">
+          {isAuthError
+            ? "Your Spotify session expired. Please sign in again."
+            : error.message}
+        </p>
+        {/* Neutral outline, matching the in-app buttons (quick-action pills) — not the green
           primary, which we reserve for the Spotify-brand login CTA. */}
-      <Link href="/login" className={buttonVariants({ variant: "outline" })}>
-        Back to sign in
-      </Link>
-    </div>
+        <Link href="/login" className={buttonVariants({ variant: "outline" })}>
+          Back to sign in
+        </Link>
+      </div>
+    </main>
   );
 }

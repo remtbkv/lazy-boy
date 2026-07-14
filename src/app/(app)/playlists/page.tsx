@@ -1,33 +1,32 @@
-import { getStoredPlaylists, getPlaylistsSyncedAt, getMeId, getUniqueSongCount } from "@/lib/db";
-import { PlaylistsClient } from "@/components/playlists-client";
+import { getStoredPlaylists, getMeId, getPlaylistsSyncedAt, getUniqueSongCount } from "@/lib/db";
+import { PlaylistsSync } from "@/components/playlists-sync";
+import { PlaylistsGrid } from "./playlists-grid";
 
-export default async function PlaylistsPage() {
-  // Served from the local store — instant. The client triggers a background sync
-  // when it's empty or stale (see PlaylistsClient → PlaylistsSync).
-  const [stored, syncedAt, meId, uniqueSongs] = await Promise.all([
+// Playlists — the library grid. Reads the local store
+// only; each tile links into the real playlist detail page (not redesigned yet).
+// Auth and the chrome are the layout's job now, so this page fetches only its own data.
+export const dynamic = "force-dynamic";
+
+export default async function DraftPlaylistsPage() {
+  const [playlists, meId, uniqueSongs, syncedAt] = await Promise.all([
     getStoredPlaylists(),
-    getPlaylistsSyncedAt(),
     getMeId(),
     getUniqueSongCount(),
+    getPlaylistsSyncedAt(),
   ]);
-  const items = stored.map((p) => ({
-    id: p.id,
-    name: p.name,
-    image: p.image,
-    trackCount: p.trackCount,
-  }));
-  const owned = meId ? stored.filter((p) => p.ownerId === meId).length : 0;
-  // Cached unique count; fall back to the raw track-count sum until it's first computed.
-  const totalSongs = stored.reduce((n, p) => n + p.trackCount, 0);
-  const songCount = uniqueSongs || totalSongs;
+  const owned = meId ? playlists.filter((p) => p.ownerId === meId).length : 0;
 
-  // Library stats (moved here from Home) — rendered inline with the grid's sort control so
-  // it flows straight into the listing.
   return (
-    <PlaylistsClient
-      initialItems={items}
-      syncedAt={syncedAt}
-      stats={{ playlists: stored.length, owned, songs: songCount, unique: !!uniqueSongs }}
-    />
+    <>
+      {/* The grid renders the cached library, and nothing here was refreshing that cache — so a
+          playlist you created or renamed elsewhere never showed up. Same headless kick the live
+          app uses: if the store is >15min stale, start ONE background scan and get out of the
+          way. Playlists change on the order of days, not minutes, so it's deliberately not a
+          live poll — no on-page churn, and the new tiles are there next time you land here. */}
+      <PlaylistsSync syncedAt={syncedAt} />
+      <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-28 pt-7 sm:px-6 sm:pb-24 sm:pt-9">
+        <PlaylistsGrid playlists={playlists} owned={owned} uniqueSongs={uniqueSongs} />
+      </main>
+    </>
   );
 }

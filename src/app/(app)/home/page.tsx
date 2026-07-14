@@ -1,30 +1,24 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { Suspense } from "react";
 import { auth } from "@/lib/auth";
-import {
-  getStoredPlaylists,
-  getMeId,
-  getPlaylistsSyncedAt,
-  getCleanBackupPref,
-  getDailyStats,
-  getAllTimeStats,
-  getPlaysByDay,
-  hasPlaysBeforeDay,
-  searchHistory,
-} from "@/lib/db";
+import { getAllTimeStats, getDailyStats, getPlaysByDay } from "@/lib/db";
 import { tzOffsetMinutes } from "@/lib/tz";
-import { QuickActions } from "@/components/quick-actions";
-import { GreetingHeading } from "@/components/greeting-heading";
-import { HistoryClient } from "@/components/history-client";
-import { Skeleton } from "@/components/ui/skeleton";
+import { DenHome } from "./den-home";
+import { DockLoader } from "./dock-loader";
+import { LockViewport } from "./lock-viewport";
 
-// Reads the DB fresh per request (also so the tz cookie is honoured for the history view).
+// Home. Reads the local store only
+// (zero Spotify API calls), so iterating on it can never touch a rate limit.
+//
+// Load shape: `loading.tsx` gives the route an instant skeleton (that's what makes the page
+// feel immediate — the first byte doesn't wait on any query), and then the WHOLE page lands
+// in one piece. There is deliberately NO inner Suspense boundary: streaming the shell first
+// and the history after made the page assemble itself on screen — title, then day cards,
+// then the song list — which reads as choppy. One skeleton → one complete page is smoother
+// than a fast-but-staggered reveal. Only the dock's playlist library loads in the background
+// (nothing on screen shows it, so it can't cause a visible pop).
 export const dynamic = "force-dynamic";
 
-// Playful greetings live in src/content/greetings.md (one is picked at random per
-// load). Only "- " list lines count; "{name}" is swapped for the first name. Read
-// fresh each request so edits to the file show up without a restart.
 function loadGreetings(): string[] {
   try {
     const raw = readFileSync(path.join(process.cwd(), "src/content/greetings.md"), "utf8");
@@ -41,112 +35,53 @@ function loadGreetings(): string[] {
 }
 
 export default async function HomePage() {
-  const session = await auth();
+  const [session, tz] = await Promise.all([auth(), tzOffsetMinutes()]);
   const name = session?.user?.name ?? "You";
+  const [daily, allTime] = await Promise.all([getDailyStats(tz, 14), getAllTimeStats()]);
+  // eslint-disable-next-line react-hooks/purity -- Server Component: per-request time is intended
+  const todayLocal = new Date(Date.now() + tz * 60_000).toISOString().slice(0, 10);
+  // Serial by necessity: which day to open depends on which days have plays.
+  const initialDay = daily[0]?.day ?? todayLocal;
+  const initialTracks = await getPlaysByDay(initialDay, tz);
   const first = name.split(" ")[0] || name;
+
   const greetings = loadGreetings();
-  // Server Component: a per-request random greeting is intentional. It's picked
-  // here (not client-side) so it's deterministic for hydration, then frozen in
-  // GreetingHeading's state. The purity rule targets client render; it doesn't
-  // apply to a Server Component that renders fresh per request.
+  // Server Component: per-request randomness/time is intentional (matches /home).
   // eslint-disable-next-line react-hooks/purity
-  const greeting = greetings[Math.floor(Math.random() * greetings.length)].replace(
-    "{name}",
-    first,
-  );
-
-  // Only the light queries the top panel needs block the page. The heavier history data
-  // streams in its own boundary (below), so the greeting + quick actions paint immediately
-  // on navigation instead of waiting on the listen-history aggregates. (Library stats moved
-  // to the Playlists page heading.)
-  const [playlists, meId, syncedAt, backupPref] = await Promise.all([
-    getStoredPlaylists(),
-    getMeId(),
-    getPlaylistsSyncedAt(),
-    getCleanBackupPref(),
-  ]);
+  const greeting = greetings[Math.floor(Math.random() * greetings.length)].replace("{name}", first);
 
   return (
-    <div>
-      <header>
-        <GreetingHeading initial={greeting} />
-      </header>
+    <>
+      {/* Desktop: this page never scrolls — the song list inside absorbs the leftover height
+          and scrolls on its own. The viewport lock lives on #den-root (see den.css) and is
+          applied by <LockViewport /> only while Home is mounted, so the shared (app) layout
+          stays scrollable for the Playlists grid. */}
+      <LockViewport />
+      <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-28 pt-7 sm:overflow-hidden sm:px-6 sm:pb-[4.75rem] sm:pt-6">
+        {/* Flex column that fills the available height on desktop so the whole page fits the
+            viewport (no body scroll) and only the song list scrolls inside; on mobile it's a
+            normal stacked column and the page scrolls. */}
+        <div className="flex flex-col gap-6 sm:h-full sm:min-h-0">
+          {/* Just the greeting — today's numbers already live on the Today card below,
+              repeating them here said the same thing twice within an inch. */}
+          <header className="shrink-0">
+            <h1 className="den-display text-4xl leading-tight tracking-tight sm:text-5xl">
+              {greeting}
+            </h1>
+          </header>
 
-      {/* Roomy gap below the greeting, then a tight, balanced gap around the divider so the
-          history table below can claim the vertical space. */}
-      <div className="mt-7">
-        <QuickActions
-          playlists={playlists.map((p) => ({
-            id: p.id,
-            name: p.name,
-            trackCount: p.trackCount,
-            image: p.image,
-            // Lets the Subtract panel offer in-place removal only on playlists you own.
-            mine: !!meId && p.ownerId === meId,
-          }))}
-          backupPref={backupPref}
-          syncedAt={syncedAt}
-        />
-      </div>
+          <div className="shrink-0">
+            <DockLoader />
+          </div>
 
-      {/* History lives here now (the standalone /history route was removed) — no "See stuff"
-          heading, so it flows straight out of the actions. Streamed so it never blocks the
-          shell; the divider keeps a tight, balanced gap (mt = pt). */}
-      <section className="mt-5 border-t border-border/60 pt-5">
-        <Suspense fallback={<HistorySkeleton />}>
-          <HomeHistory />
-        </Suspense>
-      </section>
-    </div>
-  );
-}
-
-// The listen-history aggregates (day stats, all-time, today's plays, search seed) live in
-// their own async boundary so they stream after the shell rather than blocking navigation.
-async function HomeHistory() {
-  const tz = await tzOffsetMinutes();
-  const [daily, allTime, initialResults] = await Promise.all([
-    getDailyStats(tz),
-    getAllTimeStats(),
-    // Small seed only — it's replaced the moment you type, and a 300-row payload bloats the
-    // streamed RSC for no visible benefit.
-    searchHistory("", 50),
-  ]);
-  // Default to the most recent day with plays. Find's "last played" rows focus a specific
-  // day/song via a client event (no URL params) — handled in HistoryClient, not here.
-  const initialDay = daily[0]?.day ?? null;
-  const initialDayTracks = initialDay ? await getPlaysByDay(initialDay, tz) : [];
-  // Can the day strip expand past the first 2 weeks? (Are there older days?)
-  const oldestShown = daily[daily.length - 1]?.day;
-  const initialHasMoreDays =
-    !!oldestShown && daily.length >= 14 && (await hasPlaysBeforeDay(oldestShown, tz));
-
-  return (
-    <HistoryClient
-      initialDaily={daily}
-      initialDay={initialDay}
-      initialDayTracks={initialDayTracks}
-      allTime={allTime}
-      initialResults={initialResults}
-      initialHasMoreDays={initialHasMoreDays}
-      songListMaxHeightClass="sm:max-h-[calc(100vh-34rem)]"
-    />
-  );
-}
-
-// Placeholder shown while the history boundary streams — matches the day strip + table
-// footprint so the shell doesn't jump when the real content lands.
-function HistorySkeleton() {
-  return (
-    <div className="space-y-6">
-      {/* Equal-width cards filling the full row, so the rightmost is flush with the table
-          skeleton below (fixed-width boxes stopped short of the right edge). */}
-      <div className="flex w-full gap-3">
-        {Array.from({ length: 7 }).map((_, i) => (
-          <Skeleton key={i} className="h-[7.5rem] flex-1 rounded-xl" />
-        ))}
-      </div>
-      <Skeleton className="h-[calc(100vh-36.25rem)] min-h-40 w-full rounded-lg" />
-    </div>
+          <DenHome
+            daily={daily}
+            allTime={{ plays: allTime.plays, durationMs: allTime.durationMs, since: allTime.since }}
+            initialDay={initialDay}
+            initialTracks={initialTracks}
+          />
+        </div>
+      </main>
+    </>
   );
 }

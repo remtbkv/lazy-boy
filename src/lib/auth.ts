@@ -290,7 +290,15 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         return t;
       }
 
-      let stored = await getSpotifyTokens();
+      let stored: SpotifyTokens | null;
+      try {
+        stored = await getSpotifyTokens();
+      } catch {
+        // Transient DB read error — a Turso hiccup must NOT crash the request into a
+        // Configuration error / forced logout. Keep the session exactly as-is and let a
+        // later request resolve the token.
+        return t;
+      }
       // Migrate older sessions that kept tokens in the cookie into the DB once.
       if (!stored && t.refreshToken && t.accessToken && t.expiresAt) {
         stored = {
@@ -298,10 +306,15 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           refreshToken: t.refreshToken,
           expiresAt: t.expiresAt,
         };
-        await setSpotifyTokens(stored);
-        delete t.accessToken;
-        delete t.refreshToken;
-        delete t.expiresAt;
+        // Best-effort: if the write fails, keep the cookie tokens and retry next time.
+        try {
+          await setSpotifyTokens(stored);
+          delete t.accessToken;
+          delete t.refreshToken;
+          delete t.expiresAt;
+        } catch {
+          /* keep cookie tokens; a later request migrates them */
+        }
       }
       if (!stored) {
         t.error = "RefreshAccessTokenError";
@@ -320,9 +333,14 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         if (e instanceof RefreshError && e.terminal) {
           // Refresh token is genuinely dead → real re-login required, unless another
           // process already rotated to a fresh one (then this failure is a stale race).
-          await clearTokensIfStale(stored.refreshToken);
-          if (await getSpotifyTokens()) delete t.error;
-          else t.error = "RefreshAccessTokenError";
+          // Guarded so a DB error while checking doesn't itself crash the callback.
+          try {
+            await clearTokensIfStale(stored.refreshToken);
+            if (await getSpotifyTokens()) delete t.error;
+            else t.error = "RefreshAccessTokenError";
+          } catch {
+            /* DB unreachable — keep the session and retry next request */
+          }
         }
         // Transient failure: keep the session; the next request retries.
       }
@@ -330,7 +348,11 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     },
     async session({ session, token }) {
       const t = token as SpotifyToken;
-      session.accessToken = (await getSpotifyTokens())?.accessToken;
+      // Guarded: this read runs on EVERY authed request (and right after the sign-in
+      // write). A transient Turso error here must degrade to "no access token this tick",
+      // never throw — an unguarded throw surfaces as the Auth.js `Configuration` error
+      // and breaks login entirely.
+      session.accessToken = (await getSpotifyTokens().catch(() => null))?.accessToken;
       session.error = t.error;
       return session;
     },

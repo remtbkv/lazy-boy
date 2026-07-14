@@ -1,31 +1,46 @@
 import { Skeleton } from "@/components/ui/skeleton";
 
-// Route-level loading UI: Next shows this instantly on navigation to /home (and as the
-// first streamed chunk on a cold load) while the server component awaits auth + the DB
-// reads. It mirrors the real shell — greeting, quick-action pills, then the history strip
-// + table — so the page doesn't jump when the content lands, and the user sees immediate
-// feedback instead of a blank screen on a slow/cold start.
-export default function HomeLoading() {
+// Route-level loading UI: Next shows this instantly on navigation into the draft (and as the
+// first streamed chunk on a cold load) while the server component awaits auth + the DB reads.
+// It mirrors the real shell — header, greeting, action pills, day strip, list — so the page
+// doesn't jump when content lands and you never stare at a blank screen.
+export default function DraftLoading() {
   return (
-    <div>
-      <header>
-        <Skeleton className="h-12 w-80 max-w-full rounded-lg" />
-      </header>
+    <>
 
-      <div className="mt-7 flex flex-wrap gap-2">
-        {Array.from({ length: 6 }).map((_, i) => (
-          <Skeleton key={i} className="h-9 w-28 rounded-full" />
-        ))}
-      </div>
+      <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-28 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
+        <div className="flex flex-col gap-6">
+          <Skeleton className="h-11 w-96 max-w-full rounded-lg" />
 
-      <section className="mt-5 space-y-6 border-t border-border/60 pt-5">
-        <div className="flex w-full gap-3">
-          {Array.from({ length: 7 }).map((_, i) => (
-            <Skeleton key={i} className="h-[7.5rem] flex-1 rounded-xl" />
-          ))}
+          <div className="flex flex-wrap gap-2">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <Skeleton key={i} className="h-10 w-28 rounded-full" />
+            ))}
+          </div>
+
+          {/* Day strip: just a merged row of blocks. A skeleton is an estimate of the layout,
+              not a replica — reproducing the tray border and the separate All-time card made it
+              read as real chrome. */}
+          <div className="flex gap-2">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <Skeleton key={i} className="h-[6.5rem] flex-1 rounded-xl" />
+            ))}
+          </div>
+
+          <div className="space-y-3">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="flex items-center gap-3">
+                <Skeleton className="size-10 shrink-0 rounded-md" />
+                <div className="flex-1 space-y-1.5">
+                  <Skeleton className="h-3.5 w-1/3 rounded" />
+                  <Skeleton className="h-3 w-1/5 rounded opacity-60" />
+                </div>
+                <Skeleton className="h-3.5 w-40 rounded opacity-40" />
+              </div>
+            ))}
+          </div>
         </div>
-        <Skeleton className="h-[calc(100vh-36.25rem)] min-h-40 w-full rounded-lg" />
-      </section>
-    </div>
+      </main>
+    </>
   );
 }

@@ -69,8 +69,8 @@ export default async function PlaylistDetailPage({
             All playlists
           </Link>
           <div className="rounded-lg border border-border bg-card p-6 text-center text-sm text-muted-foreground">
-            Couldn&apos;t load this playlist right now — Spotify rate-limited the request.
-            Refresh to try again.
+            Couldn&apos;t load this playlist right now — Spotify rate-limited
+            the request. Refresh to try again.
           </div>
         </div>
       );
@@ -84,49 +84,58 @@ export default async function PlaylistDetailPage({
   const isMine = !!meId && ownerId === meId;
   const totalMs = cachedTracks.reduce((sum, t) => sum + (t.durationMs ?? 0), 0);
 
+  // The (app) layout no longer wraps children in a <main> — each page owns its own, because
+  // Home needs a viewport lock and the others don't. This is the standard page container.
   return (
-    <div className="space-y-6">
-      <Link
-        href="/playlists"
-        className="inline-flex w-fit items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:border-white/25 hover:bg-accent hover:text-foreground"
-      >
-        <ArrowLeft className="size-4" />
-        All playlists
-      </Link>
+    <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-28 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
+      <div className="space-y-6">
+        <Link
+          href="/playlists"
+          className="inline-flex w-fit items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:border-white/25 hover:bg-accent hover:text-foreground"
+        >
+          <ArrowLeft className="size-4" />
+          All playlists
+        </Link>
 
-      <div className="flex flex-col gap-6 sm:flex-row sm:items-end">
-        <div className="w-40 shrink-0">
-          <PlaylistThumb src={image} name={name} priority />
+        <div className="flex flex-col gap-6 sm:flex-row sm:items-end">
+          <div className="w-40 shrink-0">
+            <PlaylistThumb src={image} name={name} priority />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h1 className="truncate text-3xl font-bold tracking-tight select-text">
+              {name}
+            </h1>
+            <p className="mt-1.5 text-sm text-muted-foreground">
+              {isMine || !ownerId ? null : <>{ownerId} · </>}
+              {trackCount} tracks
+              {totalMs > 0 ? ` · ${formatListenTime(totalMs)}` : null}
+            </p>
+          </div>
         </div>
-        <div className="min-w-0 flex-1">
-          <h1 className="truncate text-3xl font-bold tracking-tight select-text">{name}</h1>
-          <p className="mt-1.5 text-sm text-muted-foreground">
-            {isMine || !ownerId ? null : <>{ownerId} · </>}
-            {trackCount} tracks
-            {totalMs > 0 ? ` · ${formatListenTime(totalMs)}` : null}
-          </p>
-        </div>
-      </div>
 
-      {/* Serve the cached track list instantly (no Spotify pagination on render); a
+        {/* Serve the cached track list instantly (no Spotify pagination on render); a
           background check refreshes it only when the playlist's snapshot_id changed.
           First ever visit (cold cache) streams a live fetch that also fills the cache. */}
-      {cachedTracks.length > 0 ? (
-        <>
-          <TrackList
-            tracks={cachedTracks}
-            duplicateIds={findDuplicates(cachedTracks).map((t) => t.id)}
-            playlistId={id}
-            canRemove={isMine}
-          />
-          <PlaylistTracksSync playlistId={id} snapshot={cachedSnapshot ?? undefined} />
-        </>
-      ) : (
-        <Suspense fallback={<TracksSkeleton />}>
-          <Tracks id={id} canRemove={isMine} live={coldLive} />
-        </Suspense>
-      )}
-    </div>
+        {cachedTracks.length > 0 ? (
+          <>
+            <TrackList
+              tracks={cachedTracks}
+              duplicateIds={findDuplicates(cachedTracks).map((t) => t.id)}
+              playlistId={id}
+              canRemove={isMine}
+            />
+            <PlaylistTracksSync
+              playlistId={id}
+              snapshot={cachedSnapshot ?? undefined}
+            />
+          </>
+        ) : (
+          <Suspense fallback={<TracksSkeleton />}>
+            <Tracks id={id} canRemove={isMine} live={coldLive} />
+          </Suspense>
+        )}
+      </div>
+    </main>
   );
 }
 
@@ -152,7 +161,10 @@ async function Tracks({
       snapshot = live.snapshot;
       tracks = await sp.playlistTracks(id);
     } else {
-      const [pl, tr] = await Promise.all([sp.playlist(id), sp.playlistTracks(id)]);
+      const [pl, tr] = await Promise.all([
+        sp.playlist(id),
+        sp.playlistTracks(id),
+      ]);
       snapshot = pl.snapshot;
       tracks = tr;
     }

@@ -1,0 +1,111 @@
+/* /draft skin — scoped entirely under #den-root so the main app's tokens/styles are
+   untouched. Cool-neutral "ink" palette (Rem's pick). Green stays semantic: green =
+   alive/now (played today, syncing, live). */
+
+#den-root {
+  --background: #0b0b0e;
+  --foreground: #ececf1;
+  --card: #15151a;
+  --card-foreground: #ececf1;
+  --popover: #1b1b21;
+  --popover-foreground: #ececf1;
+  --secondary: #232329;
+  --secondary-foreground: #ececf1;
+  --muted: #232329;
+  --muted-foreground: #a0a0aa;
+  --accent: #27272e;
+  --accent-foreground: #ffffff;
+  --border: #232329;
+  --input: #27272e;
+  --bamboo: #9aa3b2; /* cool steel micro-accent (selection marks) */
+  --live: #1db954;
+
+  background-color: var(--background);
+  color: var(--foreground);
+}
+
+/* ---- Type ----------------------------------------------------------------------
+   Headings use the app's own face (Figtree) — weight and tracking do the work.
+   No imported display font. */
+.den-display {
+  font-family: var(--font-sans), sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+/* ---- Now-playing: fixed-width text box ------------------------------------------
+   The shared NowPlaying chip measures each song's title and animates its own width to
+   fit — which shifts everything to its right as songs change. In the draft we pin the
+   title/artist box to a constant width (long titles clip / scroll on hover, short ones
+   don't shrink the slot) and kill the width transition. The chip's inner markup is
+   [art span][text span] inside a button; the text span is the second/last one. */
+.den-np button > span:last-child {
+  width: 158px !important; /* 10% off the previous 176px (11rem), rounded to a whole pixel */
+  transition: none !important;
+}
+
+/* ---- Day strip ↔ song table alignment -------------------------------------------
+   The song list's first column is indented to line up with the day cards' TEXT, not with the
+   tray's outer edge. Without this the SONG header and the album art start 22px to the LEFT of
+   the "Today" / "67" characters directly above them, which reads as a broken left margin.
+
+   The inset is the sum of everything between the tray's outer edge and a card's text:
+       tray border (1px) + tray padding (p-1.5 = 6px)  = 7px
+     + card border (1px) + card padding (p-3.5 = 14px) = 15px
+     ------------------------------------------------------
+                                                        22px
+
+   It lives here as ONE variable so the table and the cards can't drift apart: if the tray or
+   card padding ever changes, this is the single place to re-derive. The table's RIGHT edge is
+   untouched, so "From" stays flush with the All-time card. */
+#den-root {
+  --day-text-inset: 22px;
+}
+
+/* ---- Home: single-viewport lock ------------------------------------------------
+   Home never scrolls as a page — the song list scrolls inside it. The lock must sit on
+   the flex shell (#den-root), which lives in the SHARED draft layout, so it's toggled
+   per-page by <LockViewport /> instead: Playlists is a long grid and must scroll normally.
+   (Putting `height/overflow` on Home's <main> doesn't work — it's `flex-1`, and
+   flex-basis:0% wins over `height` on the flex main axis.) Desktop only. */
+@media (min-width: 640px) {
+  #den-root.den-locked {
+    height: 100dvh;
+    overflow: hidden;
+  }
+}
+
+/* ---- Panda mark ----------------------------------------------------------------
+   Sleeping: slow breathing scale + a drifting z. Awake: a gentle head sway.
+   Both idle animations are long-period so the mark reads as calm, not busy. */
+@keyframes den-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.035); }
+}
+@keyframes den-sway {
+  0%, 100% { transform: rotate(-2.5deg); }
+  50% { transform: rotate(2.5deg); }
+}
+.den-panda-asleep { animation: den-breathe 4.5s ease-in-out infinite; transform-origin: 50% 80%; }
+.den-panda-awake  { animation: den-sway 3.2s ease-in-out infinite; transform-origin: 50% 85%; }
+
+/* ---- Bottom sheet (mobile action panels) ---------------------------------------- */
+@keyframes den-sheet-up {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+@keyframes den-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.den-sheet { animation: den-sheet-up 0.3s cubic-bezier(0.32, 0.72, 0, 1); }
+.den-scrim { animation: den-fade-in 0.25s ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .den-panda-asleep,
+  .den-panda-awake,
+  .den-sheet,
+  .den-scrim {
+    animation: none;
+  }
+}
