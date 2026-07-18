@@ -2,8 +2,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 // Route-level loading UI: Next shows this instantly on navigation into the draft (and as the
 // first streamed chunk on a cold load) while the server component awaits auth + the DB reads.
-// It mirrors the real shell — header, greeting, action pills, day strip, list — so the page
-// doesn't jump when content lands and you never stare at a blank screen.
+// Mirrors only the PAGE BODY — greeting, action pills, day strip, list — NOT the header, which
+// the layout already renders, so the page doesn't jump when content lands.
 export default function DraftLoading() {
   return (
     <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-28 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
