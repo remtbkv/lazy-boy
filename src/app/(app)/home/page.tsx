@@ -57,7 +57,7 @@ export default async function HomePage() {
           applied by <LockViewport /> only while Home is mounted, so the shared (app) layout
           stays scrollable for the Playlists grid. */}
       <LockViewport />
-      <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-28 pt-7 sm:overflow-hidden sm:px-6 sm:pb-[4.75rem] sm:pt-6">
+      <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-36 pt-7 sm:overflow-hidden sm:px-6 sm:pb-[4.75rem] sm:pt-6">
         {/* Flex column that fills the available height on desktop so the whole page fits the
             viewport (no body scroll) and only the song list scrolls inside; on mobile it's a
             normal stacked column and the page scrolls. */}

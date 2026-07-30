@@ -24,7 +24,7 @@ export default async function DraftPlaylistsPage() {
           way. Playlists change on the order of days, not minutes, so it's deliberately not a
           live poll — no on-page churn, and the new tiles are there next time you land here. */}
       <PlaylistsSync syncedAt={syncedAt} />
-      <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-28 pt-7 sm:px-6 sm:pb-24 sm:pt-9">
+      <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-36 pt-7 sm:px-6 sm:pb-24 sm:pt-9">
         <PlaylistsGrid playlists={playlists} owned={owned} uniqueSongs={uniqueSongs} />
       </main>
     </>
