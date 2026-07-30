@@ -56,7 +56,7 @@ export function DayCards({
     <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
       {/* Scrollable days tray */}
       <div className="min-w-0 flex-1 rounded-xl border border-border/60 bg-white/[0.015] p-1.5">
-        <div className="thin-scroll flex snap-x gap-2 overflow-x-auto overscroll-x-contain [touch-action:pan-x] [-webkit-mask-image:linear-gradient(to_right,#000_calc(100%-2rem),transparent)] [mask-image:linear-gradient(to_right,#000_calc(100%-2rem),transparent)]">
+        <div className="thin-scroll thin-scroll-quiet flex snap-x gap-2 overflow-x-auto overscroll-x-contain [touch-action:pan-x] [-webkit-mask-image:linear-gradient(to_right,#000_calc(100%-2rem),transparent)] [mask-image:linear-gradient(to_right,#000_calc(100%-2rem),transparent)]">
           {daily.map((d) => (
             <button
               key={d.day}
