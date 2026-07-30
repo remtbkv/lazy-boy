@@ -4,7 +4,6 @@ import {
   getLikedSignals,
   getPlaylistSnapshot,
   getSavedSyncedAt,
-  rebuildTracksFts,
   recomputeUniqueSongCount,
   setLibrarySyncedAt,
   storePlaylists,
@@ -86,13 +85,11 @@ export async function syncLibrary(
   processed += head.total;
   onProgress?.(processed, total);
 
-  // Refresh the cached unique-song count and the Find search index ONLY when the library
-  // actually changed. The FTS refresh is a full delete-all + insert-all over every playlist
-  // track (~tens of thousands of rows), so running it on every steady-state hourly sync — when
-  // nothing moved — burned the bulk of the Turso row-write quota for no benefit.
+  // Refresh the cached unique-song count ONLY when the library actually changed — running
+  // derived-index rebuilds on every steady-state hourly sync burned Turso row writes for
+  // no benefit.
   if (changed) {
     await recomputeUniqueSongCount();
-    await rebuildTracksFts();
   }
 
   await setLibrarySyncedAt();

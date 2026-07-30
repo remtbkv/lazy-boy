@@ -9,7 +9,7 @@ import { useNowPlaying } from "@/components/now-playing-context";
 // playing — album art, title/artist, and a thin in-track progress bar. On touch a tap
 // toggles play/pause (the art's green ring shows the state); long titles clip and slide on
 // hover to reveal the rest. The box width is fixed so changing songs doesn't shift the
-// header (in the draft, den.css pins it further).
+// header (den.css pins it further).
 export function NowPlaying() {
   const { playing, toggle: ctxToggle } = useNowPlaying();
   const [pos, setPos] = useState(0); // interpolated position, ms

@@ -6,7 +6,7 @@ const nextConfig: NextConfig = {
   // including going Back to a page you were just on. That's why revisits felt as slow as first
   // loads.
   //
-  // 30s. Memory isn't the constraint (the whole draft is ~460KB of text — home ~170KB,
+  // 30s. Memory is not the constraint (the whole app is ~460KB of RSC text — home ~170KB,
   // playlists ~245KB, friends ~43KB); staleness is. A shorter hold means new plays surface on
   // a normal revisit rather than being masked by a cached payload. A hard reload always
   // bypasses this either way.

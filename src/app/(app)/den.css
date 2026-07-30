@@ -1,4 +1,4 @@
-/* /draft skin — scoped entirely under #den-root so the main app's tokens/styles are
+/* App skin — scoped entirely under #den-root so the main app's tokens/styles are
    untouched. Cool-neutral "ink" palette (Rem's pick). Green stays semantic: green =
    alive/now (played today, syncing, live). */
 
@@ -34,7 +34,7 @@
 
 /* ---- Now-playing: fixed-width text box ------------------------------------------
    The shared NowPlaying chip measures each song's title and animates its own width to
-   fit — which shifts everything to its right as songs change. In the draft we pin the
+   fit — which shifts everything to its right as songs change. We pin the
    title/artist box to a constant width (long titles clip / scroll on hover, short ones
    don't shrink the slot) and kill the width transition. The chip's inner markup is
    [art span][text span] inside a button; the text span is the second/last one. */
@@ -63,7 +63,7 @@
 
 /* ---- Home: single-viewport lock ------------------------------------------------
    Home never scrolls as a page — the song list scrolls inside it. The lock must sit on
-   the flex shell (#den-root), which lives in the SHARED draft layout, so it's toggled
+   the flex shell (#den-root), which lives in the SHARED (app) layout, so it is toggled
    per-page by <LockViewport /> instead: Playlists is a long grid and must scroll normally.
    (Putting `height/overflow` on Home's <main> doesn't work — it's `flex-1`, and
    flex-basis:0% wins over `height` on the flex main axis.) Desktop only. */
