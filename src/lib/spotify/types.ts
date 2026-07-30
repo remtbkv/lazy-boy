@@ -36,8 +36,6 @@ export type SpotifyUser = {
   product?: string; // "premium" | "free" | ...
 };
 
-export type QueueItem = Track;
-
 // ---- Raw Spotify API shapes (only what we read) ----
 
 export type Paging<T> = {

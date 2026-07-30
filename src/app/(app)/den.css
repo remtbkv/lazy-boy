@@ -18,7 +18,6 @@
   --border: #232329;
   --input: #27272e;
   --bamboo: #9aa3b2; /* cool steel micro-accent (selection marks) */
-  --live: #1db954;
 
   background-color: var(--background);
   color: var(--foreground);

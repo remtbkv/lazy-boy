@@ -10,23 +10,15 @@ import { intersect, keyOf, subtract } from "@/lib/spotify/domain";
 import { runTask } from "@/lib/tasks/registry";
 import { cleanPhase1, reconcileClean } from "@/lib/clean/run";
 import { syncLibrary } from "@/lib/sync/library";
-import { syncRecentPlays } from "@/lib/sync/history";
-import { tzOffsetMinutes } from "@/lib/tz";
 import {
   clearSpotifyTokens,
   deletePlaylistFromDb,
-  getAllTimeStats,
   getCleanBackupPref,
-  getDailyStats,
-  getLastSync,
-  hasPlaysBeforeDay,
-  type DayStats,
   getMeId,
   getPlaylistTracks,
   getPlaylistTrackOrder,
   playedTracksInContext,
   removeCachedPlaylistTrack,
-  setCleanBackupPref,
   storePlaylistTracks,
   upsertStoredPlaylist,
 } from "@/lib/db";
@@ -34,47 +26,6 @@ import {
 export type ActionResult<T = object> =
   | ({ ok: true } & T)
   | { ok: false; error: string };
-
-// Used by the merged-in history view's auto-refresh (every minute while Home is open, no
-// button): pulls the latest plays for the signed-in user into the store and returns
-// refreshed day stats so the view updates in place. The same core also runs on app load +
-// every 2 min via /api/sync, and on a schedule via /api/cron/sync. `days` matches however
-// far the day strip is currently expanded, so a refresh doesn't collapse it back to 2 weeks.
-export async function syncHistoryAction(days = 14) {
-  try {
-    const sp = await getSpotify();
-    const { added } = await syncRecentPlays(sp);
-    const tz = await tzOffsetMinutes();
-    const [daily, lastSync, allTime] = await Promise.all([
-      getDailyStats(tz, days),
-      getLastSync(),
-      getAllTimeStats(),
-    ]);
-    return { ok: true as const, added, daily, lastSync, allTime };
-  } catch (e) {
-    // Don't map getSpotify()'s login redirect into an error result (see fail() below).
-    unstable_rethrow(e);
-    return { ok: false as const, error: e instanceof Error ? e.message : "Sync failed" };
-  }
-}
-
-// Expand the day-by-day strip on demand: 2 weeks → 4 weeks → all. Returns the day rows for
-// the requested span plus whether even older days exist (so the strip knows to keep offering
-// the next step). Each level bounds its own fetch, so this stays fast.
-export async function loadDaysAction(
-  days: number,
-): Promise<ActionResult<{ daily: DayStats[]; hasMore: boolean }>> {
-  try {
-    await getSpotify(); // gate on a live session
-    const tz = await tzOffsetMinutes();
-    const daily = await getDailyStats(tz, days);
-    const oldest = daily[daily.length - 1]?.day;
-    const hasMore = !!oldest && daily.length >= days && (await hasPlaysBeforeDay(oldest, tz));
-    return { ok: true, daily, hasMore };
-  } catch (e) {
-    return fail(e);
-  }
-}
 
 function fail(e: unknown): { ok: false; error: string } {
   // getSpotify() redirects to /login on a dead session by THROWING Next's control-flow
@@ -174,33 +125,6 @@ export async function startCleanAction(
     );
     revalidatePath("/playlists");
     return { ok: true, name: result.name, kept: result.kept, removed: result.removed, taskId: task.id };
-  } catch (e) {
-    return fail(e);
-  }
-}
-
-/** Persist the global "back up removed songs" preference for Clean. */
-export async function setCleanBackupAction(on: boolean): Promise<ActionResult> {
-  try {
-    await setCleanBackupPref(on);
-    return { ok: true };
-  } catch (e) {
-    return fail(e);
-  }
-}
-
-/** Resync the backend index (playlists + tracks + Liked) with Spotify as a background
- *  task; returns a task id whose progress (songs looked through / total) the client
- *  polls — so it keeps running and stays visible across a refresh. */
-export async function startSyncAction(): Promise<ActionResult<{ taskId: string }>> {
-  try {
-    const session = await auth();
-    if (!session?.accessToken || session.error) throw new Error("Not authenticated");
-    const token = refreshingToken();
-    const task = runTask("sync-backend", (onProgress) =>
-      syncLibrary(spotifyClient(token, true), onProgress),
-    );
-    return { ok: true, taskId: task.id };
   } catch (e) {
     return fail(e);
   }
@@ -331,26 +255,6 @@ export async function subtractPreviewAction(
   }
 }
 
-/** Remove a batch of tracks from a playlist in place (the Subtract panel's "remove
- *  overlap from base"). Refreshes the cached track list + snapshot afterwards so the
- *  index stays in step — the bulk version of removeFromPlaylistAction's upkeep. */
-export async function removeTracksAction(
-  playlistId: string,
-  uris: string[],
-): Promise<ActionResult<{ removed: number }>> {
-  try {
-    if (uris.length === 0) throw new Error("Nothing to remove.");
-    const sp = await getSpotify();
-    await sp.removeItems(playlistId, uris);
-    const [pl, fresh] = await Promise.all([sp.playlist(playlistId), sp.playlistTracks(playlistId)]);
-    await storePlaylistTracks(playlistId, fresh, pl.snapshot);
-    revalidatePath(`/playlists/${playlistId}`);
-    return { ok: true, removed: uris.length };
-  } catch (e) {
-    return fail(e);
-  }
-}
-
 export async function saveCompareDiffAction(
   name: string,
   uris: string[],
@@ -464,12 +368,6 @@ async function playerControl(
   }
 }
 
-export async function playerNextAction(): Promise<ActionResult> {
-  return playerControl((sp) => sp.nextTrack());
-}
-export async function playerPreviousAction(): Promise<ActionResult> {
-  return playerControl((sp) => sp.previousTrack());
-}
 export async function playerSetPlayingAction(play: boolean): Promise<ActionResult> {
   return playerControl((sp) => (play ? sp.resumePlayback() : sp.pausePlayback()));
 }
@@ -481,11 +379,6 @@ export async function playPlaylistTrackAction(
   trackUri: string,
 ): Promise<ActionResult> {
   return playerControl((sp) => sp.playContext(`spotify:playlist:${playlistId}`, trackUri));
-}
-
-// Double-click a track outside a playlist (e.g. in history) → just play that track.
-export async function playTrackAction(trackUri: string): Promise<ActionResult> {
-  return playerControl((sp) => sp.playTracks([trackUri]));
 }
 
 // "Pick up where you left off": start the chosen playlist on the active device at the
