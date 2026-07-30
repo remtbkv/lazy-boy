@@ -32,6 +32,38 @@ export function NowPlaying() {
   // advance it locally from this anchor between polls.
   const base = useRef({ progressMs: 0, at: 0, isPlaying: false });
 
+  // What the chip DISPLAYS. On a song change the swap waits until the incoming album art
+  // is decoded, so the np-swap fade shows a ready bitmap — swapping immediately faded in
+  // an empty box and the art popped in whenever the network got around to it, which is
+  // the choppiness. Same-song updates (every poll) pass straight through.
+  const [shown, setShown] = useState(playing?.track ?? null);
+  const shownId = useRef(shown?.id);
+  useEffect(() => {
+    const t = playing?.track ?? null;
+    // Nothing playing, no art to wait for, or the same song (a poll refresh): show as-is.
+    // Same-id updates don't re-animate — the np-swap spans are keyed by track id.
+    if (!t || !t.albumImage || t.id === shownId.current) {
+      shownId.current = t?.id;
+      setShown(t);
+      return;
+    }
+    let stale = false;
+    const commit = () => {
+      if (stale) return;
+      shownId.current = t.id;
+      setShown(t);
+    };
+    const img = new window.Image();
+    img.src = t.albumImage;
+    // decode() resolves once the bitmap is paint-ready; on failure just swap anyway.
+    img.decode().then(commit, commit);
+    const to = setTimeout(commit, 800); // slow network: don't hold the old song hostage
+    return () => {
+      stale = true;
+      clearTimeout(to);
+    };
+  }, [playing?.track]);
+
   // Measure the widest line and clamp it. Deferred to a frame so it isn't a synchronous
   // setState in the effect body.
   useEffect(() => {
@@ -44,7 +76,7 @@ export function NowPlaying() {
       setBoxW(max ? Math.min(MAX, Math.max(MIN, max)) : null);
     });
     return () => cancelAnimationFrame(id);
-  }, [playing?.track.title, playing?.track.artist]);
+  }, [shown?.title, shown?.artist]);
 
   // Re-anchor the local progress ticker whenever fresh data arrives from the shared poller.
   useEffect(() => {
@@ -70,8 +102,9 @@ export function NowPlaying() {
     return () => clearInterval(id);
   }, [playing?.durationMs]);
 
-  if (!playing) return null;
-  const { track, isPlaying, durationMs } = playing;
+  if (!playing || !shown) return null;
+  const { isPlaying, durationMs } = playing;
+  const track = shown; // what the chip displays — lags `playing` until the new art is ready
   const pct = durationMs > 0 ? Math.min(100, (pos / durationMs) * 100) : 0;
 
   function toggle() {

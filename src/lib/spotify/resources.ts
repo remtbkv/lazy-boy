@@ -25,7 +25,9 @@ function normTrack(raw: RawTrack | null): Track | null {
     title: raw.name,
     uri: raw.uri,
     album: raw.album?.name,
-    albumImage: images.at(-1)?.url ?? images[0]?.url ?? null, // smallest for thumbs
+    // Middle size (300px): the 64px "smallest" reads blurry in 40–44px thumbs on retina
+    // (88 device px from a 64px source). [640, 300, 64] is Spotify's usual ladder.
+    albumImage: images[1]?.url ?? images[0]?.url ?? null,
     durationMs: raw.duration_ms,
   };
 }

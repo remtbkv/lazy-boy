@@ -180,9 +180,12 @@
    `.thin-scroll-active` class is toggled by ScrollbarHover (more reliable than a CSS
    `:hover`, which Chrome only repaints near the bar). The reserved track keeps layout
    from shifting when it appears. */
+/* One bar everywhere, both axes: 5px, 22% white (38% under a direct grab) — sized and
+   inked between the old 6px/30% vertical (fine) and the strip's brief 4px/14% variant,
+   so every scroll area matches. */
 .thin-scroll::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 .thin-scroll::-webkit-scrollbar-track {
   background: transparent;
@@ -195,22 +198,10 @@
   transition: background-color 260ms ease;
 }
 .thin-scroll-active::-webkit-scrollbar-thumb {
-  background-color: rgb(255 255 255 / 0.3);
+  background-color: rgb(255 255 255 / 0.22);
 }
 .thin-scroll-active::-webkit-scrollbar-thumb:hover {
-  background-color: rgb(255 255 255 / 0.45);
-}
-/* Quiet variant for horizontal strips (day cards): the bar sits directly under the
-   content inside a framed tray, so at 6px/30% it read as a bright rule pinned to the
-   cards. Half the height, well under half the ink; still brightens under a direct grab. */
-.thin-scroll-quiet::-webkit-scrollbar {
-  height: 4px;
-}
-.thin-scroll-quiet.thin-scroll-active::-webkit-scrollbar-thumb {
-  background-color: rgb(255 255 255 / 0.14);
-}
-.thin-scroll-quiet.thin-scroll-active::-webkit-scrollbar-thumb:hover {
-  background-color: rgb(255 255 255 / 0.3);
+  background-color: rgb(255 255 255 / 0.38);
 }
 
 /* Toasts: a compact, soft-white pill (Spotify-style) — light bg + dark text come from

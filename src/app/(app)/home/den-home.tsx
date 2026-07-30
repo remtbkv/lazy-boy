@@ -404,7 +404,8 @@ export function DenHome({
                   // Indented to the day cards' text, not the tray's outer edge (see
                   // --day-text-inset in den.css). Right edge is unchanged, so From stays
                   // flush with the All-time card.
-                  className="thin-scroll h-full overflow-y-auto pl-[var(--day-text-inset)]"
+                  // pr keeps the right-aligned FROM/PLAYED text off the scrollbar.
+                  className="thin-scroll h-full overflow-y-auto pl-[var(--day-text-inset)] pr-2"
                 >
                 <table className="w-full table-fixed text-[15px]">
                   <thead className="sticky top-0 z-10 bg-background">
