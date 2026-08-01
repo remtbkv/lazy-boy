@@ -158,14 +158,16 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   always the real count; this only shapes the "listened" totals. Whole-table totals
   (`alltime_stats`) are cached in `meta` and recomputed on write; per-day totals compute live.
 - **Row-scanning reads go through a local replica, not the remote DB — and Turso's slowness
-  is not latency.** The round trip to the primary is ~20 ms, but a bare
-  `SELECT COUNT(*) FROM tracks` (15k rows, nothing returned) takes ~1.1 s there and ~0.2 ms
-  against the same data in local SQLite. So the cost is per row scanned, and no amount of
-  index tuning hides it once a query touches thousands of rows: history search measured
-  1.2–4 s, the all-time list 7.6 s, one day's plays ~1 s, a Home render ~1.5 s of query time.
-  `getReader()` in `db.ts` therefore serves scanning reads from a **libSQL embedded replica**
-  (a local SQLite copy synced from the primary) — same SQL, identical rows, 35 ms / 63 ms /
-  2 ms for those three. Writes and everything touching `meta` stay on `getClient()` (the
+  is not latency.** Medians over n=8, because single-shot timings against this primary are
+  worthless (`SELECT 1` alone ranged 37–440 ms in one run): round trip ~47 ms, but
+  `SELECT COUNT(*) FROM tracks` (15k rows, nothing returned) is ~312 ms against ~0.02 ms for
+  the same data in local SQLite. The cost is per row scanned, and no index tuning hides it
+  once a query touches thousands of rows. `getReader()` in `db.ts` therefore serves scanning
+  reads from a **libSQL embedded replica** (a local SQLite copy synced from the primary) —
+  same SQL, identical rows: history search 344 ms → 5.7 ms, the all-time list 705 ms →
+  8.9 ms, one day's plays 41 ms → 0.9 ms, the day-strip mount scan 105 ms → 13 ms.
+  **Treat any primary-side number here as an order of magnitude, not a constant** — the
+  same query measured 2.9 s earlier in the day and 344 ms later, unchanged. Writes and everything touching `meta` stay on `getClient()` (the
   primary): a write through a replica forwards-then-pulls (~5× slower), and the token/lock
   rows must never be read from a copy another instance's refresh hasn't reached, which is the
   `invalid_grant` race `acquireLock` exists to prevent. Every write ends with `syncReader()`
@@ -185,9 +187,12 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   `recomputeOrphanFlags()` refreshes the flag exactly when membership can have moved —
   `{newOnly}` for plays just recorded, `{playlistId}` when one playlist's tracks change,
   unscoped for the backfill and for a library-list rewrite — and writes only rows whose
-  verdict actually flips, so a steady-state sync writes zero rows. Measured on the live DB:
-  all-time list 2952 ms → 719 ms on the primary and 79 ms → 7 ms on the replica, rows
-  identical, and 0 mismatches against the old expression across all 6,644 plays.
+  verdict actually flips, so a steady-state sync writes zero rows. Measured on the live DB
+  (medians, n=5): all-time list 63 ms → 8.9 ms and history search 36 ms → 5.7 ms on the
+  replica, rows identical, 0 mismatches against the old expression across all 6,644 plays.
+  On the **primary** the same change is only 903 ms → 705 ms and 546 ms → 344 ms, and one
+  day's plays does not improve at all (41 ms either way) — the win is real on the replica and
+  marginal-to-absent against remote Turso, whose variance swamps it.
   **If you add a way for playlist membership to change, call `recomputeOrphanFlags` from it**
   — that is the one thing that can now go stale. A `NULL` flag reads as non-orphan, which is
   the same answer the old expression gave for a playlist it couldn't verify, so a missed

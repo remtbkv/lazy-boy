@@ -191,14 +191,20 @@ async function init(): Promise<Client> {
 
 // ── Read replica ────────────────────────────────────────────────────────────────────────
 // Turso's remote instance is slow at anything that SCANS rows, and it is not the network:
-// the round trip to the primary is ~20ms, but `SELECT COUNT(*) FROM tracks` (15k rows,
-// nothing returned) takes ~1.1s there and ~0.2ms against the same data in local SQLite.
-// Every scanning read therefore cost seconds — history search 1.2–4s, the all-time list
-// 7.6s, one day's plays ~1s, the Home render ~1.5s of pure query time.
+// the round trip to the primary is ~47ms (median, n=8), but `SELECT COUNT(*) FROM tracks`
+// (15k rows, nothing returned) is ~312ms there and ~0.02ms against the same data in local
+// SQLite. The cost is per row scanned, so every scanning read paid for the whole table.
+//
+// NUMBERS HERE ARE MEDIANS OVER REPEATED RUNS, and they have to be: this primary's timings
+// swing wildly (`SELECT 1` alone measured 37–440ms within one run, and the same history
+// search measured 2.9s early in a session and 344ms later, unchanged). A single-shot timing
+// against it is not a measurement. Re-measure with repetition before trusting any figure in
+// this file, including these.
 //
 // So scanning reads run against a libSQL EMBEDDED REPLICA: a local SQLite copy of the same
 // database that the client keeps current by pulling frames from the primary. Same SQL, same
-// rows, ~100–500× faster (measured: search 4032ms → 35ms, all-time 7602ms → 63ms).
+// rows (medians, n=5): history search 344ms → 5.7ms, all-time list 705ms → 8.9ms, one day's
+// plays 41ms → 0.9ms, the day-strip mount scan 105ms → 13ms.
 //
 // Writes deliberately do NOT go through it. A write via a replica forwards to the primary
 // and then pulls back, which is ~5× slower than writing to the primary directly, and the
@@ -438,8 +444,10 @@ export async function unresolvedContextUris(): Promise<{ uri: string; type: stri
 // different ids in a playlist vs. recently-played, so an id match would drop real plays.
 //
 // That verdict is STORED, in `plays.ctx_orphan`, not recomputed per row. As a live expression
-// it was two correlated `playlist_tracks` subqueries per OUTPUT row — measured at ~90% of the
-// all-time list's cost (62ms vs 5.7ms without it, on local SQLite; seconds on remote Turso).
+// it was two correlated `playlist_tracks` subqueries per OUTPUT row — the dominant cost of the
+// all-time list on the replica (medians, n=5: 63ms → 8.9ms; history search 36ms → 5.7ms).
+// Against the remote primary the same change is marginal (903ms → 705ms) and for one day's
+// plays it is nothing (41ms either way) — that backend's variance swamps it.
 // It is also a poor fit for live evaluation: the answer depends on playlist membership, which
 // changes only when a playlist is synced, while the expression re-derived it on every render.
 // recomputeOrphanFlags() refreshes it exactly when membership can have changed.
