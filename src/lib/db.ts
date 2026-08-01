@@ -18,23 +18,38 @@ import {
   type TrackFields,
 } from "@/lib/store-diff";
 
-// ── Query conventions (this is a remote DB — round trips and plan choice both matter) ──
-// Follow these when adding queries so they stay fast and stable:
-//  • Drive joins from the hot, indexed table and LEFT JOIN to `tracks`. Queries over `plays`
-//    or `playlist_tracks` use `FROM plays p LEFT JOIN tracks t` / `FROM playlist_tracks pt
-//    LEFT JOIN tracks t`. Every play / playlist-track has a matching track, so a LEFT JOIN
-//    returns identical rows while keeping Turso on the indexed plays/playlist_tracks plan;
-//    an INNER join lets it choose a slow, variable plan that scans the large `tracks` table.
-//  • For song-identity equality lookups — `WHERE lower(t.artist) = ?` (optionally `AND
-//    lower(t.name) = ?`) — keep an INNER JOIN so the planner uses idx_tracks_artist_name.
-//  • Cache expensive whole-table aggregates in `meta` and recompute on write, not on read:
-//    `unique_song_count` and `alltime_stats` are refreshed in recordPlays / syncLibrary and
-//    read instantly on render. Per-day stats fetch only the recent window they display.
-//  • Do gap/sequence math (e.g. listened time) in JS over an ordered fetch — SQL window
-//    functions (LEAD/LAG) are very slow on Turso. See playsWithListened / getDailyStats.
-//  • Pick the right client. A read that SCANS rows uses getReader() (the local replica); a
-//    write, and anything reading `meta`, uses getClient() (the primary). See the Read replica
-//    section below for why. A new write must end with `await syncReader()`.
+// ── Query conventions (a remote primary + a local replica — round trips and plan choice
+// both matter) ──
+// All figures below: medians (min–max), n=15×2 interleaved runs primary / n=9 local,
+// 2026-08-01, scripts/bench-reads.mjs. Follow these when adding queries:
+//  • Anything that SCANS rows reads from getReader() (the replica). Primary-side scans are
+//    seconds-scale AND unstable session to session: the full plays scan (~6,660 rows)
+//    measured ~105ms one morning and 1,369-2,243ms (216-7,854ms) that afternoon, same query,
+//    same data. The replica does it in ~10ms, stably.
+//  • Song-identity equality lookups — `WHERE lower(t.artist) = ?` (optionally `AND
+//    lower(t.name) = ?`) — keep an INNER JOIN so the planner uses idx_tracks_artist_name:
+//    INNER 22-24ms vs LEFT 82-510ms (max 3,475ms) on the primary, 0.045ms vs 5.6ms local.
+//    Reproduced in both replicates; this one is a real rule.
+//  • LEFT vs INNER on the plays-driven joins is measured INDISTINGUISHABLE, rows identical:
+//    dailyStats window 66/104ms LEFT vs 68/47ms INNER; history search 71/57 vs 70/56.
+//    LEFT stays the default style here — but it is no longer a performance rule.
+//  • Window functions are fine on the replica (LEAD over the full plays scan is ~1.5× a plain
+//    fetch: 15.0 vs 10.4ms). The rule that actually holds: NO full-table scan against the
+//    PRIMARY on any render path.
+//  • Cache whole-table aggregates in `meta` and recompute on write, not on read
+//    (`unique_song_count`, `alltime_stats`; per-day stats fetch only their window). The
+//    justification is the replica-less path — on a cold instance a live recompute costs
+//    0.2-3.4s against the primary vs a ~20ms meta read. Every cached derived value must be
+//    covered by scripts/verify-derived.mjs.
+//  • Writes, and ALL meta coordination keys (tokens, locks), use getClient() (the primary);
+//    a new write must end with `await syncReader()`, and — if it changed a table getReader()
+//    serves — must BUMP THE WRITE MARKER in the same batch (writeSeqStmt(); see the marker
+//    note below, which owns the bump-or-not rule). Serial primary reads stack linearly —
+//    ~20ms each (a single-key meta read costs the same as `SELECT 1`), 3 serial meta reads
+//    65-72ms vs 23-26ms for the same 3 via Promise.all — so dedupe or parallelize them.
+//  • NEVER encode a single-session primary timing as a rule. State median (min–max), n and
+//    date, and re-measure before trusting it. This file's own history is the cautionary
+//    tale: three of the rules it used to state did not reproduce.
 
 export type PlayRecord = {
   trackId: string;
@@ -144,7 +159,9 @@ async function init(): Promise<Client> {
     );
     CREATE INDEX IF NOT EXISTS idx_pltracks_pl ON playlist_tracks (playlist_id);
     -- Find "where does this song/artist live" looks up playlist_tracks BY track_id; without
-    -- this it full-scans the table (slow, and worse against remote Turso — was ~4.5s).
+    -- this the plan degrades from SEARCH-by-index to a full SCAN (local copy, same rows:
+    -- 0.032ms indexed vs 0.683ms with the index dropped, n=9, 2026-08-01) — and a scan is
+    -- far worse against the remote primary, where scans are seconds-scale.
     CREATE INDEX IF NOT EXISTS idx_pltracks_track ON playlist_tracks (track_id);
     CREATE TABLE IF NOT EXISTS saved_tracks (
       track_id TEXT PRIMARY KEY,
@@ -191,7 +208,8 @@ async function init(): Promise<Client> {
 
 // ── Read replica ────────────────────────────────────────────────────────────────────────
 // Turso's remote instance is slow at anything that SCANS rows, and it is not the network:
-// the round trip to the primary is ~47ms (median, n=8), but `SELECT COUNT(*) FROM tracks`
+// the round trip to the primary is ~47ms (median, n=8; 20-29ms in later sessions — the bare
+// round trip itself drifts 20-47ms across sessions), but `SELECT COUNT(*) FROM tracks`
 // (15k rows, nothing returned) is ~312ms there and ~0.02ms against the same data in local
 // SQLite. The cost is per row scanned, so every scanning read paid for the whole table.
 //
@@ -224,14 +242,76 @@ const REPLICA_ENABLED =
 const REPLICA_PATH = process.env.VERCEL
   ? "/tmp/lazyboy-replica.db"
   : path.join(process.cwd(), "data", "replica.db");
-// How long a write made by ANOTHER process (the cron, the other of dev/prod) can go unseen.
-// Our own writes don't wait for this — they call syncReader() directly.
-const REPLICA_SYNC_INTERVAL_S = 30;
+// There is deliberately NO syncInterval. A background poll every 30s was 2,880 pulls/day per
+// instance whether or not anything had been written, and it still left a 30s window where
+// another process's write was invisible. The freshness gate in getReader() replaces both
+// halves: it pulls only when the marker says there is something to pull, and never serves a
+// copy that is behind. Our own writes stay synchronous via syncReader().
+
+// A BUILD-TIME SEED DOES NOT WORK — measured 2026-08-01, don't rebuild it. The idea: ship a
+// synced replica snapshot in the deployment and copy it to REPLICA_PATH so a cold instance
+// resumes incrementally instead of pulling ~18MB. Mechanically it works, and when the snapshot
+// is minutes old it is a big win (medians, interleaved n=4: 934ms seeded vs 5,944ms full).
+// It collapses because THIS PRIMARY ROTATES ITS REPLICATION GENERATION on a schedule we don't
+// control, at a VARIABLE cadence — 2026-08-01, one sample/min: 4470 → 4471 → 4472 → 4473 in 25
+// minutes (~7min apart) in the morning, then a single generation held for 32+ minutes later
+// the same day. So "every N minutes" is not a property to lean on; what holds is that a
+// rotation lands somewhere inside a normal deploy's lifetime. A snapshot from an older
+// generation doesn't resume — it costs MORE than starting empty:
+//   same generation, <1min old   934ms   (785-1,000, n=4)   vs full 5,944ms (5,469-7,465)
+//   1 generation behind        6,114ms   (6,077-6,115, n=3) vs full 2,150ms (1,978-6,578)
+//   2 generations behind      13,700ms   (13,383-15,644, n=3) vs full 4,845ms (4,317-5,008)
+// A deploy-time snapshot is stale-generation from the first rotation onward — unpredictable
+// when, certain to happen inside the deploy's lifetime — i.e. for every cold start except the
+// ones shortly after a deploy, so the bundled seed makes the normal case 2-3× SLOWER.
+// There is no cheap way to check the primary's current generation before opening the replica,
+// so it can't be gated either. (For the record, the minimal resumable file set is
+// `.db` + `-info` + `-wal`: `.db` alone makes createClient throw InvalidLocalState, and
+// `.db` + `-info` without the WAL silently drops the rows still in it — 6,667 of 6,670 plays.)
+const REPLICA_SIDECARS = ["-info", "-wal", "-shm"];
 
 const gr = globalThis as unknown as {
   __listenReader?: Client;
   __listenReplicaBoot?: Promise<void>;
+  __listenReplicaSyncing?: boolean;
 };
+
+function removeReplicaFiles(): void {
+  for (const suffix of ["", ...REPLICA_SIDECARS]) {
+    fs.rmSync(REPLICA_PATH + suffix, { force: true });
+  }
+}
+
+/** Open the replica at REPLICA_PATH, sync it, and prove it can answer a query. Throws (after
+ *  closing the client) if any of that fails, so the caller can wipe and retry. */
+async function openReplica(): Promise<Client> {
+  // createClient itself throws on an inconsistent local state, so it belongs inside the try.
+  let replica: Client | undefined;
+  try {
+    replica = createClient({
+      url: `file:${REPLICA_PATH}`,
+      syncUrl: process.env.TURSO_DATABASE_URL,
+      authToken,
+      intMode: "number",
+      // No syncInterval on purpose — see the note where it used to live. Every pull is
+      // deliberate: this boot sync, syncReader() after our own writes, and the gate's
+      // catch-up pull when the marker says another process wrote.
+    });
+    await replica.sync();
+    // sync() SUCCEEDS against a corrupt local file — measured: a truncated replica synced in
+    // 461ms and only failed on the FIRST QUERY (SQLITE_CORRUPT). Without a read here, an
+    // instance that inherited a damaged file (a sync killed mid-write, a half-written /tmp)
+    // would hand that client to every scanning read for the life of the instance. Two indexed
+    // counts, 0.3ms together, catch it. `PRAGMA quick_check` catches more but costs 57ms and
+    // scales with the DB, so it stays off the boot path.
+    await replica.execute("SELECT count(*) AS n FROM plays");
+    await replica.execute("SELECT count(*) AS n FROM tracks");
+    return replica;
+  } catch (err) {
+    replica?.close();
+    throw err;
+  }
+}
 
 function bootReplica(): void {
   if (gr.__listenReplicaBoot) return;
@@ -239,15 +319,17 @@ function bootReplica(): void {
     // The primary owns the schema; make sure init() has run before copying it down.
     await getClient();
     fs.mkdirSync(path.dirname(REPLICA_PATH), { recursive: true });
-    const replica = createClient({
-      url: `file:${REPLICA_PATH}`,
-      syncUrl: process.env.TURSO_DATABASE_URL,
-      authToken,
-      intMode: "number",
-      syncInterval: REPLICA_SYNC_INTERVAL_S,
-    });
-    await replica.sync();
-    gr.__listenReader = replica;
+    // A file already there is one this process didn't write: the dev copy from an earlier run,
+    // or a warm Vercel instance's /tmp. It's the only thing that can be damaged, so it's the
+    // only case worth retrying — throw it away and build from scratch, once.
+    const inherited = fs.existsSync(REPLICA_PATH);
+    try {
+      gr.__listenReader = await openReplica();
+    } catch (err) {
+      if (!inherited) throw err;
+      removeReplicaFiles();
+      gr.__listenReader = await openReplica();
+    }
   })().catch(() => {
     // A replica is an optimisation, never a requirement — drop the cached failure so a
     // later call retries, and keep serving from the primary in the meantime.
@@ -255,25 +337,153 @@ function bootReplica(): void {
   });
 }
 
-/** Client for reads that scan rows: the local replica once it has synced, the primary until
- *  then. Never blocks on the copy being ready. Not for `meta` — see the note above. */
+/** Start building the replica now, without waiting for a read to ask for it. Called from
+ *  src/instrumentation.ts at server start. The boot is seconds (full sync: 2.1s median
+ *  2.0-2.3s early in a session, 4.7s median 4.0-5.2s an hour later, n=5 each — this primary
+ *  drifts), and until it lands every scanning read pays the primary's seconds-scale tail.
+ *  Nothing used to kick it off until the first such read arrived, so a cold instance started
+ *  that clock at the first render instead of at process start. Fire-and-forget by design — it
+ *  resolves into the module-global, and getReader() keeps using the primary until it lands. */
+export function warmReplica(): void {
+  if (!REPLICA_ENABLED) return;
+  bootReplica();
+}
+
+// ── The write marker (`meta.write_seq`) ─────────────────────────────────────────────────
+// A counter the primary bumps on every write THE REPLICA SERVES. It exists so a read can
+// tell, cheaply, whether the local copy is complete: the gate below compares the primary's
+// value with the replica's own copy of the same row. Equal → the copy holds every committed
+// write and can be trusted. Different → it is behind, and this request reads the primary.
+// (libSQL gives nothing usable for this: sync() reports frames_synced: 1 whether or not it
+// pulled anything, and PRAGMAs on a replica handle forward to the primary and error.)
+//
+// WHICH WRITES BUMP IT — the rule, in one place:
+//   BUMP when the write changes a table getReader() hands out: plays (including ctx_orphan),
+//   tracks, contexts, playlists, playlist_tracks, saved_tracks.
+//   DO NOT BUMP for a write that only touches `meta` or `api_log`. Nothing reads either from
+//   the replica — every meta read goes through getMeta() → getClient(), which is the
+//   token/lock rule at the top of this section, and getApiLogSummary() reads the primary too.
+//   That covers tokens, locks, the cooldown, the *_synced_at stamps, and the derived caches
+//   (`alltime_stats`, `unique_song_count`). api_log matters most: it is written on essentially
+//   every outgoing Spotify call (~6s apart while the app is open), so bumping on it would put
+//   the gate permanently in the "behind" state and route everything to the primary — the exact
+//   thing this replaces.
+// An unnecessary bump is not a correctness bug, it just costs other instances a primary-routed
+// request plus a catch-up pull. A MISSING bump is a correctness bug: it serves stale rows.
+//
+// The bump must be ATOMIC WITH (same batch as) or AFTER the data it announces, never before.
+// Announcing late is safe — a reader that syncs in the gap simply gets the rows early and
+// re-checks next request. Announcing early is not: a reader could mark itself fresh against a
+// copy that doesn't have the write yet.
+const WRITE_SEQ_KEY = "write_seq";
+
+/** The bump, as a statement to append to a write batch. Starts the counter at 1 if absent. */
+function writeSeqStmt(): InStatement {
+  return {
+    sql: `INSERT INTO meta (key, value) VALUES ('${WRITE_SEQ_KEY}', '1')
+          ON CONFLICT(key) DO UPDATE SET value = CAST(meta.value AS INTEGER) + 1`,
+    args: [],
+  };
+}
+
+/** Bump the marker on its own, for a write that isn't already batched. */
+async function bumpWriteSeq(): Promise<void> {
+  const client = await getClient();
+  await client.execute(writeSeqStmt());
+}
+
+/** The marker as stored (a TEXT column, so compare as strings), or null before the first
+ *  bump. Cheap on both sides: an indexed single-key lookup — ~20-30ms on the primary (a
+ *  round trip; the same cost as `SELECT 1`), ~0.01ms on the replica's local file. */
+async function readWriteSeq(client: Client): Promise<string | null> {
+  const res = await client.execute({
+    sql: "SELECT value FROM meta WHERE key = ?",
+    args: [WRITE_SEQ_KEY],
+  });
+  return res.rows[0] ? String(res.rows[0].value) : null;
+}
+
+// One freshness verdict per REQUEST, not per query: a page runs several scanning reads and
+// they must not each pay a primary round trip. Same shape as playsWithListened below and the
+// token box in auth.ts — React cache() gives a per-request box; outside a request (the cron
+// path) cache() has no dispatcher and is a pass-through, so each call re-checks instead,
+// which is correct, just not deduped.
+const readerBox = cache(() => ({ p: null as Promise<Client> | null }));
+
+/** Decide, once per request, whether the replica may answer: it may exactly when it has
+ *  every write the primary has committed. When it doesn't, this request reads the PRIMARY —
+ *  slower for scans, but never stale — and the copy is pulled up in the background so the
+ *  next request is local again. */
+async function chooseReader(replica: Client): Promise<Client> {
+  const primary = await getClient();
+  let primarySeq: string | null;
+  try {
+    primarySeq = await readWriteSeq(primary);
+  } catch {
+    // The marker read is the ONE thing standing between a read and its data, so it must not
+    // be able to take reads down. If the primary is unreachable, serve the local copy and say
+    // nothing: during a primary outage the replica is the only thing that can answer at all,
+    // and the staleness is bounded by the outage. Availability wins here, freshness elsewhere.
+    return replica;
+  }
+  try {
+    if ((await readWriteSeq(replica)) === primarySeq) return replica;
+  } catch {
+    // A copy that can't answer a single-key lookup is not a copy worth reading from.
+    return primary;
+  }
+  backgroundSync(replica);
+  return primary;
+}
+
+/** Client for reads that scan rows: the local replica when the gate says it is current, the
+ *  primary otherwise (not yet built, behind, or broken). Never blocks on a sync. Not for
+ *  `meta` — see the note above. */
 function getReader(): Promise<Client> {
   if (!REPLICA_ENABLED) return getClient();
-  if (gr.__listenReader) return Promise.resolve(gr.__listenReader);
-  bootReplica();
-  return getClient();
+  const replica = gr.__listenReader;
+  if (!replica) {
+    bootReplica();
+    return getClient();
+  }
+  const box = readerBox();
+  box.p ??= chooseReader(replica);
+  return box.p;
+}
+
+/** Catch the copy up without making this request wait for it — the request it belongs to is
+ *  already being served from the primary. Fire-and-forget, one at a time: concurrent requests
+ *  all see the same stale marker, and N parallel pulls of the same frames is pure egress. */
+function backgroundSync(replica: Client): void {
+  if (gr.__listenReplicaSyncing) return;
+  gr.__listenReplicaSyncing = true;
+  void replica
+    .sync()
+    .catch(() => {
+      /* the next request's gate sees the marker still behind and retries the pull */
+    })
+    .finally(() => {
+      gr.__listenReplicaSyncing = false;
+    });
 }
 
 /** Pull the replica up to date. Called at the end of every write so the read that follows
- *  sees what was just written — syncInterval alone would leave a window where a play we just
- *  recorded isn't in the copy yet. */
+ *  sees what was just written — the gate would route that read to the primary otherwise, and
+ *  read-after-own-write shouldn't have to pay for a scan against it. */
 async function syncReader(): Promise<void> {
   const r = gr.__listenReader;
   if (!r) return;
   try {
     await r.sync();
+    // The copy is current as of this pull, so a "behind" verdict this request formed earlier
+    // — the cron writes every ~2 min, so a request can easily start behind — is now wrong in
+    // the slow direction: it would keep the rest of the request on the primary, including
+    // recomputeUniqueSongCount's multi-second DISTINCT scan. Drop it and let the next read
+    // re-gate (one marker round trip). Same shape as publishTokens() in auth.ts: a write
+    // republishes what it just made true instead of leaving the request's snapshot stale.
+    readerBox().p = null;
   } catch {
-    /* the syncInterval tick retries; a failed sync must not fail the write that triggered it */
+    /* the next read's gate catches the copy up; a failed sync must not fail its write */
   }
 }
 
@@ -370,6 +580,11 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
       },
     });
   }
+  // Only announce a change if there IS one. A tick that found nothing new writes just the
+  // last_sync stamp below — a meta key, never read from the replica — and the sync runs every
+  // couple of minutes, so bumping unconditionally would leave every other instance gate-failed
+  // around the clock.
+  if (stmts.length > 0) stmts.push(writeSeqStmt());
   // Stamp last_sync atomically with the plays.
   stmts.push({
     sql: `INSERT INTO meta (key, value) VALUES ('last_sync', :v)
@@ -395,12 +610,15 @@ export async function recordContexts(contexts: ContextRecord[]): Promise<void> {
   const client = await getClient();
   const now = new Date().toISOString();
   await client.batch(
-    contexts.map((c) => ({
-      sql: `INSERT INTO contexts (uri, name, type, checked_at)
-            VALUES (:uri, :name, :type, :at)
-            ON CONFLICT(uri) DO UPDATE SET name = excluded.name, checked_at = excluded.checked_at`,
-      args: { uri: c.uri, name: c.name, type: c.type, at: now },
-    })),
+    [
+      ...contexts.map((c) => ({
+        sql: `INSERT INTO contexts (uri, name, type, checked_at)
+              VALUES (:uri, :name, :type, :at)
+              ON CONFLICT(uri) DO UPDATE SET name = excluded.name, checked_at = excluded.checked_at`,
+        args: { uri: c.uri, name: c.name, type: c.type, at: now },
+      })),
+      writeSeqStmt(),
+    ],
     "write",
   );
   // Pull the replica up to the write we just made, so the read that follows is fresh.
@@ -505,7 +723,14 @@ async function recomputeOrphanFlags(
     sql: `UPDATE plays AS p SET ctx_orphan = (${ORPHAN_PREDICATE}) WHERE ${where}`,
     args: opts.playlistId && !opts.newOnly ? { uri: `spotify:playlist:${opts.playlistId}` } : {},
   });
-  return Number(res.rowsAffected);
+  const changed = Number(res.rowsAffected);
+  // `plays` is replica-served and this ran AFTER its caller's batch already bumped, so the
+  // flags need their own announcement or a copy synced in between serves rows whose verdict
+  // is stale. Only when rows actually flipped: the common case is 0, and a bump there would
+  // re-route every other instance on every sync tick for nothing. The extra round trip is
+  // paid only on a real change, and this is a background write path either way.
+  if (changed > 0) await bumpWriteSeq();
+  return changed;
 }
 
 // `source` is the context (playlist/album name, or type) of the MOST RECENT play
@@ -527,10 +752,12 @@ const SELECT_TRACK = `
 // zero (so flicking through tracks never inflates listened time). 10-min fallback when a
 // track's duration is unknown.
 //
-// Computed in JS, not SQL: the equivalent `LEAD() OVER (ORDER BY played_at)` window function
-// runs pathologically slowly on Turso (~3s for ~1.5k rows — it was the whole reason the
-// history view was slow to load). A plain ordered fetch + linear pass is ~50ms and scales
-// fine (the plays table grows slowly).
+// Computed in JS, not SQL, as a style choice plus one hard constraint. The equivalent
+// `LEAD() OVER (ORDER BY played_at)` is NOT pathological — on the replica it is ~1.5× a plain
+// ordered fetch (15.0 vs 10.4ms median, n=9, 2026-08-01); an earlier "~3s" figure here was a
+// single-shot primary timing and did not reproduce. What matters is that this read is a full
+// plays scan, so it must stay on the replica: the same scan against the PRIMARY is
+// seconds-scale and unpredictable (1.4-2.2s median, up to 7.9s, n=15×2).
 const LISTEN_FALLBACK_MS = 600000;
 // A play whose actual run time (gap to the next play) is under this counts as a skip, not a
 // listen, and adds 0 to listened-time totals. Plays are still counted as plays.
@@ -670,12 +897,12 @@ export async function getDailyStats(offsetMin = 0, days = 14): Promise<DayStats[
   // Only fetch the recent window we actually display (a couple extra days of buffer for the
   // tz day-edge), so this stays cheap as total history grows — not a full-table scan. Uses
   // idx_plays_played_at. Listened ms = gap to the next play, capped at song length, computed
-  // in JS (the SQL LEAD() window is pathologically slow on Turso).
+  // in JS (see playsWithListened for why the window function isn't used).
   const cutoff = new Date(Date.now() - (days + 2) * 86_400_000).toISOString();
   const res = await client.execute({
-    // LEFT JOIN, not INNER: every play has a track so the rows are identical, but it makes
-    // Turso drive from plays (idx_plays_played_at) instead of picking a slow, variable plan
-    // against the large tracks table — INNER was 150ms–1.5s+ here, LEFT is a steady ~50ms.
+    // LEFT and INNER measured indistinguishable here, rows identical (primary 66/104ms LEFT
+    // vs 68/47ms INNER, medians n=15×2, 2026-08-01) — the old "INNER was 150ms-1.5s+" figure
+    // did not reproduce. LEFT is kept as the default style, not for performance.
     sql: `SELECT p.played_at AS playedAt, p.track_id AS trackId, t.duration_ms AS durationMs
           FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
           WHERE p.played_at >= :cutoff
@@ -785,6 +1012,7 @@ export async function storePlaylists(rows: StoredPlaylist[], meId: string | null
       );
     });
   if (unchanged) {
+    // Meta only, so no marker bump (and, as before, no sync): nothing the replica serves moved.
     await setMeta("playlists_synced_at", now);
     if (meId) await setMeta("me_id", meId);
     return;
@@ -836,6 +1064,9 @@ export async function storePlaylists(rows: StoredPlaylist[], meId: string | null
       args: { v: meId },
     });
   }
+  // Reached only when the list really changed (the unchanged fast path above returns before
+  // this and writes meta only), so the bump is unconditional here.
+  stmts.push(writeSeqStmt());
   await client.batch(stmts, "write");
   // This branch purges playlist_tracks for playlists that no longer exist, so membership can
   // change for several at once — a full pass, not a scoped one. (The unchanged fast path
@@ -902,13 +1133,20 @@ export async function getStoredPlaylist(id: string): Promise<StoredPlaylist | nu
  *  with real data (mosaic image, true position). */
 export async function upsertStoredPlaylist(p: StoredPlaylist): Promise<void> {
   const client = await getClient();
-  await client.execute({
-    sql: `INSERT INTO playlists (id, name, owner_id, image, track_count, position)
-          VALUES (:id, :name, :ownerId, :image, :trackCount, -1)
-          ON CONFLICT(id) DO UPDATE SET name = excluded.name,
-            track_count = excluded.track_count`,
-    args: { id: p.id, name: p.name, ownerId: p.ownerId, image: p.image, trackCount: p.trackCount },
-  });
+  // Batched with the marker bump so the row and its announcement land together.
+  await client.batch(
+    [
+      {
+        sql: `INSERT INTO playlists (id, name, owner_id, image, track_count, position)
+              VALUES (:id, :name, :ownerId, :image, :trackCount, -1)
+              ON CONFLICT(id) DO UPDATE SET name = excluded.name,
+                track_count = excluded.track_count`,
+        args: { id: p.id, name: p.name, ownerId: p.ownerId, image: p.image, trackCount: p.trackCount },
+      },
+      writeSeqStmt(),
+    ],
+    "write",
+  );
   // Pull the replica up to the write we just made, so the read that follows is fresh.
   await syncReader();
 }
@@ -975,6 +1213,9 @@ export async function storePlaylistTracks(
       args: { pid: playlistId, from: deleteFrom },
     });
   }
+  // Everything queued so far is playlist_tracks/tracks; the two meta stamps below are not
+  // replica-served, so a call that diffed to no changes announces nothing.
+  if (stmts.length > 0) stmts.push(writeSeqStmt());
   stmts.push({
     sql: `INSERT INTO meta (key, value) VALUES (:k, :v)
           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
@@ -1032,11 +1273,17 @@ export async function getPlaylistTrackOrder(playlistId: string): Promise<Playlis
  *  the next render before the background refresh. */
 export async function removeCachedPlaylistTrack(playlistId: string, uri: string): Promise<void> {
   const client = await getClient();
-  await client.execute({
-    sql: `DELETE FROM playlist_tracks
-          WHERE playlist_id = :pid AND track_id IN (SELECT id FROM tracks WHERE uri = :uri)`,
-    args: { pid: playlistId, uri },
-  });
+  await client.batch(
+    [
+      {
+        sql: `DELETE FROM playlist_tracks
+              WHERE playlist_id = :pid AND track_id IN (SELECT id FROM tracks WHERE uri = :uri)`,
+        args: { pid: playlistId, uri },
+      },
+      writeSeqStmt(),
+    ],
+    "write",
+  );
   // Pull the replica up to the write we just made, so the read that follows is fresh.
   await syncReader();
 }
@@ -1050,6 +1297,7 @@ export async function deletePlaylistFromDb(playlistId: string): Promise<void> {
       { sql: "DELETE FROM playlists WHERE id = :id", args: { id: playlistId } },
       { sql: "DELETE FROM playlist_tracks WHERE playlist_id = :id", args: { id: playlistId } },
       { sql: "DELETE FROM meta WHERE key IN (:a, :b)", args: { a: `plsnap:${playlistId}`, b: `pltracks_at:${playlistId}` } },
+      writeSeqStmt(),
     ],
     "write",
   );
@@ -1106,6 +1354,9 @@ export async function storeSavedTracks(tracks: Track[]): Promise<void> {
       args: chunk,
     });
   }
+  // As in storePlaylistTracks: only the saved_tracks/tracks writes above are replica-served,
+  // so a diff that came back empty writes the three stamps below and announces nothing.
+  if (stmts.length > 0) stmts.push(writeSeqStmt());
   stmts.push(metaStmt("liked_total", String(tracks.length)));
   stmts.push(metaStmt("liked_top_added_at", tracks[0]?.addedAt ?? ""));
   stmts.push(metaStmt("saved_synced_at", new Date().toISOString()));
@@ -1304,6 +1555,7 @@ function metaStmt(key: string, value: string): InStatement {
   };
 }
 
+// No write marker here: `meta` is read from the primary, never the replica (write-marker note).
 async function setMeta(key: string, value: string): Promise<void> {
   const client = await getClient();
   await client.execute({
