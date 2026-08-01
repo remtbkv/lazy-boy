@@ -33,7 +33,7 @@ Legend: `[x]` done · `[~]` partial / seam in place · `[ ]` not started
       end of the longest in-order run within it — so an older/deeper session can't push you
       past where you actually stopped, while a stray tap is still ignored. Plays map to
       playlist positions by id, then by `(name, artist)`, so Spotify's relinked/duplicate ids
-      still count (see GOTCHAS § Spotify Web API). `resume-panel.tsx`, `resumePlaylistAction`.
+      still count (see GOTCHAS § Spotify Web API). `home/dock.tsx`, `resumePlaylistAction`.
 - [x] Right-click a track in a playlist → Remove from playlist / Save to Liked / Add to
       queue / Share (copy link). `track-context-menu.tsx`, wired in `track-list.tsx`.
 

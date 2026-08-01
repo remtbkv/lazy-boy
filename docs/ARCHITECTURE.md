@@ -130,7 +130,7 @@ SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped 
   can't run one): in-app while the site is open (`SyncOnLoad` syncs on load, every 2 min,
   and on tab-focus → `POST /api/sync`, debounced server-side to ~60 s, so an open tab is
   effectively live; the home history view also refreshes each minute via
-  `syncHistoryAction`); and — the coverage path for when the app is closed — an **external
+  `refreshHistoryAction`); and — the coverage path for when the app is closed — an **external
   pinger** hitting `/api/cron/sync` with the stored token every ~2 min (a [cron-job.org](https://cron-job.org)
   job, or a systemd timer on an always-on machine). A daily **Vercel Cron** (`vercel.json`)
   is the backstop. All scheduled hits share `/api/cron/sync` (`CRON_SECRET`-guarded).
@@ -146,6 +146,11 @@ SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped 
   playlist positions by id then by `(name, artist)`. New `db.ts` queries follow the
   conventions in that file's header (drive joins from the indexed hot table; cache aggregates
   on write; do gap math in JS, not SQL window functions). Details in `docs/GOTCHAS.md`.
+- **Verifying the derived values.** `alltime_stats`, `unique_song_count` and `plays.ctx_orphan`
+  are caches kept fresh by hand-maintained invalidation, so they can silently drift from the
+  source rows. `node --env-file=.env.local scripts/verify-derived.mjs` recomputes all three from
+  source against the primary and exits 1 with the named diff when a stored value disagrees
+  (read-only; `--demo` injects and restores a deliberate corruption to show it actually fails).
 - **Two clients, split by role.** Remote Turso costs ~1 s per few-thousand rows *scanned*
   (not a latency problem — the round trip is ~20 ms), so `getReader()` serves row-scanning
   reads from a libSQL **embedded replica**: a local SQLite copy of the same database, synced

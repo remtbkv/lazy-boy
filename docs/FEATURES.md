@@ -76,20 +76,16 @@ Reference: `check_playlist_for_duplicates`.
 Create a new playlist = the original minus a given set of track ids. Reference:
 `remove_songs_from_playlist`.
 
-### 10. Subtract playlists  →  `subtractPreviewAction(base, others)` / `removeTracksAction`
+### 10. Subtract playlists  →  `subtractPreviewAction(base, others)`
 Set difference between the user's own playlists, as a quick action. Pick a **base**
 playlist and one or more playlists to subtract; the base's tracks split into:
 - **Unique** — `(artist, title)` in no subtracted playlist (`subtract`).
 - **Shared** — also present in a subtracted playlist (`intersect`), each tagged with the
   first subtracted playlist that contains it.
 From the preview: save the unique set as a new playlist named `"A − B − C"`
-(`createFromUris`), or remove the shared set from the base **in place** (`removeItems`,
-then the cached track list + snapshot are refreshed; offered only when the base is the
-user's own playlist). Reads the synced index — instant, and as fresh as the last library
+(`createFromUris`). Reads the synced index — instant, and as fresh as the last library
 sync, like Clean's phase 1; the preview recomputes live (debounced) as the selection
-changes. UI: `subtract-panel.tsx` on Home — picker card + an equal result card to its
-right whose rows mirror the playlist detail view (album art, now-playing column,
-double-click play, right-click track menu) minus the album/length columns.
+changes.
 
 ## Listen-history quick actions (added after the port)
 

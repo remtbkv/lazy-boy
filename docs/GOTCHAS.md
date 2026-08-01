@@ -33,7 +33,13 @@ instead of re-investigating. (Pairs with `CLAUDE.md`, `AGENTS.md`, and the other
   several concurrent requests that each refresh with the same (soon-invalidated)
   token, and the losers get `invalid_grant` → forced re-login. Now an in-process
   lock (`refreshShared`) coordinates one refresh, writes the new tokens to the DB,
-  and everyone reads the latest from there. Refresh retries transient failures
+  and everyone reads the latest from there. Within one request that read is deduped
+  through a `cache()` promise box (`readTokensShared` in `auth.ts`) — layout + page
+  `auth()` calls and both callbacks share a single primary read (measured 4 → 1 per
+  `/home` render), and every refresh/write republishes the box so the same request
+  never serves a pre-refresh token. The refresh-coordination paths (`coordinatedRefresh`,
+  `waitForFreshToken`, cron's `getValidAccessToken`) stay on direct reads — they need
+  real-time DB state. Refresh retries transient failures
   (429/5xx/network) and only forces re-login on a genuinely dead refresh token
   (`invalid_grant`). Older cookie-stored tokens are migrated into the DB on first
   request. If you ever wipe `data/listens.db` you'll need to reconnect once.
@@ -50,12 +56,12 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
 - **A native `<input>` nested in a `<label>` double-fires `onChange`** here (one
   click → two toggles → net zero). For clickable rows, put a single `onClick` on
   a `<div role="checkbox">` and keep the checkbox **visual-only** (see
-  `merge-panel.tsx`, `track-list.tsx`, `ui/checkbox.tsx`).
+  `home/dock.tsx`, `track-list.tsx`, `ui/checkbox.tsx`).
 - **`DropdownMenuLabel` must sit inside a `Menu.Group`** or Base UI throws
   `MenuGroupContext is missing` (crashed the profile menu → "page couldn't
   load"). It's a plain `<div>` now.
 - **Base UI `Menu` has no `openOnHover` prop.** Hover-to-open is done with
-  controlled `open` state + a close-delay bridge in `header.tsx`.
+  controlled `open` state + a close-delay bridge in `chrome.tsx`.
 - Triggers use the **`render`** prop, not Radix's `asChild`.
 
 ## Spotify Web API — changed since model training data
@@ -96,8 +102,8 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   stale; the sync does the one full scan off the render path, then `router.refresh()`
   shows fresh data. `me_id` + `playlists_synced_at` live in the `meta` table. (The
   old per-page `/api/playlists?offset=` waterfall and its `myPlaylistsPage` chain
-  were deleted.) `playlist-grid.tsx` still collapses to 3 rows with see-more + fuzzy
-  search; thumbnails are lazy. **Creating a playlist must also write the store** — the
+  were deleted.) `playlists-grid.tsx` has fuzzy search; thumbnails are lazy.
+  **Creating a playlist must also write the store** — the
   grid renders only from the DB, so merge / save-queue / clean / save-diff call
   `recordNewPlaylist()` (→ `db.upsertStoredPlaylist`, position −1 = sorts first) right
   after the Spotify create; without that the new playlist is invisible until the next
@@ -167,14 +173,36 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   same SQL, identical rows: history search 344 ms → 5.7 ms, the all-time list 705 ms →
   8.9 ms, one day's plays 41 ms → 0.9 ms, the day-strip mount scan 105 ms → 13 ms.
   **Treat any primary-side number here as an order of magnitude, not a constant** — the
-  same query measured 2.9 s earlier in the day and 344 ms later, unchanged. Writes and everything touching `meta` stay on `getClient()` (the
+  same query measured 2.9 s earlier in the day and 344 ms later, unchanged. That is also a
+  correction of the record: the messages of commits `76e2c61` and `37af0ea` cite single-shot
+  figures (e.g. search 2933 ms, all-time list 2952 ms) that read 3–7× larger than the medians
+  here; the medians are the measurement, the commit messages are what one draw from a
+  high-variance backend looked like. Writes and everything touching `meta` stay on `getClient()` (the
   primary): a write through a replica forwards-then-pulls (~5× slower), and the token/lock
   rows must never be read from a copy another instance's refresh hasn't reached, which is the
   `invalid_grant` race `acquireLock` exists to prevent. Every write ends with `syncReader()`
-  so the read after it is fresh; other processes' writes land within `syncInterval` (30 s).
+  so the read after it is fresh. **Another process's write is never served stale**: there is no
+  background poll (a 30 s `syncInterval` was 2,880 pulls/day per instance whether or not
+  anything had been written, and still left a 30 s stale window). Instead every write that
+  touches a replica-served table bumps `meta.write_seq` in its own batch, and `getReader()`
+  gates on it once per request — replica when the primary's marker and the copy's match,
+  primary for that request plus one background catch-up pull when they don't. Idle instances
+  pull nothing; a cross-instance write is visible on the very next read.
   A cold instance is never blocked on the copy — `getReader()` returns the primary until the
   first sync lands — and if the replica can't be built at all, everything keeps working on
   the primary. Kill switch: `LAZYBOY_NO_REPLICA=1`.
+- **A bundled replica snapshot cannot speed up cold starts — the primary rotates its libSQL
+  replication generation periodically** (observed 2026-08-01: as often as every ~7–11 min —
+  gen 4470→4473 over ~25 min — but a later 19-min window sat on one generation; cadence is
+  variable and any rotation inside a deploy's lifetime kills a seed).
+  A same-generation seed boots in ~0.9s vs ~2–6s full sync, but one generation behind costs
+  ~6s and two behind ~14s — *worse than starting empty* — and a deploy-time seed is stale
+  within minutes. Measured and rejected; details above `REPLICA_SIDECARS` in `db.ts`. What
+  works instead: `src/instrumentation.ts` starts the replica boot at instance start (not first
+  read), and a damaged inherited replica file is wiped and re-synced once (sync() succeeds on
+  a corrupt file; the failure only surfaces on the first query). Minimal correct sidecar set
+  when copying a replica: `.db` + `-info` + `-wal` — omitting `-wal` silently loses every row
+  still in the WAL.
 - **If a query is slow, count the rows it SCANS, not the rows it returns.** Both bad ones
   returned little. `searchHistory` is `LIKE '%q%'`, unindexable by construction, so it scans
   `tracks` — left as-is, because on the replica it is ~6 ms and the table grows with distinct
@@ -205,11 +233,16 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   (`getPlaylistTracks`) + run in parallel with auth; the only network write is the Spotify
   play call.
 - **`db.ts` query conventions (follow them for new queries — they're in the file header).**
-  Drive joins from the hot indexed table (`plays` / `playlist_tracks`) and `LEFT JOIN tracks`,
-  not the reverse (keeps the planner on the indexed path); keep an `INNER JOIN` only for
-  `lower(artist) = ?` identity lookups; cache whole-table aggregates in `meta` and recompute on
-  write; do gap/sequence math in JS, not SQL window functions (`LEAD`/`LAG` are very slow on
-  Turso).
+  Every row-scanning read goes to `getReader()` (the replica): primary scans are seconds-scale
+  with unbounded session-to-session variance (the same plays scan measured ~105ms one morning
+  and 1.4-2.2s that afternoon), replica reads are single-digit ms. Keep `INNER JOIN` for
+  `lower(artist)`/`lower(name)` identity lookups so the planner uses `idx_tracks_artist_name`
+  (22-24ms vs 82-510ms on the primary) — but `LEFT` vs `INNER` on plays-driven joins is
+  measured indistinguishable, so it's a style default now, not a perf rule, and `LEAD`/`LAG`
+  are fine on the replica (~1.5× a plain fetch). Cache whole-table aggregates in `meta`
+  (covered by `scripts/verify-derived.mjs`); writes + all `meta` keys use `getClient()` and
+  serial primary reads stack ~20-30ms each, so dedupe or `Promise.all` them. Never turn a
+  single-session primary timing into a rule.
 
 ## Verifying UI with Playwright
 
