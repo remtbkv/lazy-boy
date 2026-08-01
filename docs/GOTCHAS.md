@@ -157,11 +157,28 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   estimate available, since Spotify reports *when* a track played, never *how long*. Plays are
   always the real count; this only shapes the "listened" totals. Whole-table totals
   (`alltime_stats`) are cached in `meta` and recomputed on write; per-day totals compute live.
-- **Find search is index-backed (FTS5 trigram), not a `LIKE` scan.** Substring search over
-  playlist song/artist names goes through the `tracks_fts` virtual table (trigram tokenizer,
-  rebuilt during library sync), giving the same results as `LIKE '%term%'` but fast. Queries
-  under 3 chars fall back to `LIKE` (trigram needs ≥3 chars). See `ftsTokenFilter` /
-  `searchPlaylistSongs` in `db.ts`.
+- **Row-scanning reads go through a local replica, not the remote DB — and Turso's slowness
+  is not latency.** The round trip to the primary is ~20 ms, but a bare
+  `SELECT COUNT(*) FROM tracks` (15k rows, nothing returned) takes ~1.1 s there and ~0.2 ms
+  against the same data in local SQLite. So the cost is per row scanned, and no amount of
+  index tuning hides it once a query touches thousands of rows: history search measured
+  1.2–4 s, the all-time list 7.6 s, one day's plays ~1 s, a Home render ~1.5 s of query time.
+  `getReader()` in `db.ts` therefore serves scanning reads from a **libSQL embedded replica**
+  (a local SQLite copy synced from the primary) — same SQL, identical rows, 35 ms / 63 ms /
+  2 ms for those three. Writes and everything touching `meta` stay on `getClient()` (the
+  primary): a write through a replica forwards-then-pulls (~5× slower), and the token/lock
+  rows must never be read from a copy another instance's refresh hasn't reached, which is the
+  `invalid_grant` race `acquireLock` exists to prevent. Every write ends with `syncReader()`
+  so the read after it is fresh; other processes' writes land within `syncInterval` (30 s).
+  A cold instance is never blocked on the copy — `getReader()` returns the primary until the
+  first sync lands — and if the replica can't be built at all, everything keeps working on
+  the primary. Kill switch: `LAZYBOY_NO_REPLICA=1`.
+- **If a query is slow, count the rows it SCANS, not the rows it returns.** The two worst
+  offenders both returned little: `searchHistory` is `LIKE '%q%'` (unindexable by
+  construction — it scans `tracks`), and `sourceExpr` runs two correlated `playlist_tracks`
+  subqueries **per output row** (it is ~90% of `getAllTimePlays`: 62 ms vs 5.7 ms without it,
+  locally). The replica makes both cheap enough to leave alone; on the primary they were the
+  whole problem.
 - **Resume picks up where you left off in a playlist** (`resumePlaylistAction`): it scopes
   plays in that playlist to the most recent session (>3 h gap splits sessions), takes the end
   of the longest in-order run within it (tolerating small skips), and resumes at the next

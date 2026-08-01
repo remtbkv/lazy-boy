@@ -9,6 +9,14 @@ import fs from "node:fs";
 import { createClient, type Client, type InStatement } from "@libsql/client";
 import type { Track } from "@/lib/spotify/types";
 import { CLEANED_PREFIX, BACKUP_PREFIX } from "@/lib/clean/names";
+import {
+  tracksNeedingWrite,
+  playKey,
+  newPlays,
+  diffPositions,
+  diffKeyed,
+  type TrackFields,
+} from "@/lib/store-diff";
 
 // ── Query conventions (this is a remote DB — round trips and plan choice both matter) ──
 // Follow these when adding queries so they stay fast and stable:
@@ -24,6 +32,9 @@ import { CLEANED_PREFIX, BACKUP_PREFIX } from "@/lib/clean/names";
 //    read instantly on render. Per-day stats fetch only the recent window they display.
 //  • Do gap/sequence math (e.g. listened time) in JS over an ordered fetch — SQL window
 //    functions (LEAD/LAG) are very slow on Turso. See playsWithListened / getDailyStats.
+//  • Pick the right client. A read that SCANS rows uses getReader() (the local replica); a
+//    write, and anything reading `meta`, uses getClient() (the primary). See the Read replica
+//    section below for why. A new write must end with `await syncReader()`.
 
 export type PlayRecord = {
   trackId: string;
@@ -165,6 +176,88 @@ async function init(): Promise<Client> {
   return client;
 }
 
+// ── Read replica ────────────────────────────────────────────────────────────────────────
+// Turso's remote instance is slow at anything that SCANS rows, and it is not the network:
+// the round trip to the primary is ~20ms, but `SELECT COUNT(*) FROM tracks` (15k rows,
+// nothing returned) takes ~1.1s there and ~0.2ms against the same data in local SQLite.
+// Every scanning read therefore cost seconds — history search 1.2–4s, the all-time list
+// 7.6s, one day's plays ~1s, the Home render ~1.5s of pure query time.
+//
+// So scanning reads run against a libSQL EMBEDDED REPLICA: a local SQLite copy of the same
+// database that the client keeps current by pulling frames from the primary. Same SQL, same
+// rows, ~100–500× faster (measured: search 4032ms → 35ms, all-time 7602ms → 63ms).
+//
+// Writes deliberately do NOT go through it. A write via a replica forwards to the primary
+// and then pulls back, which is ~5× slower than writing to the primary directly, and the
+// token/lock rows in `meta` must never be read from a copy that another instance's refresh
+// hasn't reached yet (that's the invalid_grant race the token code exists to avoid). So:
+// getClient() = the primary, for every write plus all of meta; getReader() = the replica,
+// for the row-scanning reads.
+//
+// The replica is never on the critical path: getReader() hands back the primary until the
+// first sync has landed, so a cold serverless instance is exactly as fast as it is today and
+// gets fast the moment the copy is there. If the replica can't be built at all, everything
+// silently keeps using the primary.
+const REPLICA_ENABLED =
+  !!process.env.TURSO_DATABASE_URL && process.env.LAZYBOY_NO_REPLICA !== "1";
+// Vercel's only writable directory is /tmp (per warm instance). Locally it sits beside the
+// dev DB so it survives dev-server restarts and re-syncs incrementally, not from scratch.
+const REPLICA_PATH = process.env.VERCEL
+  ? "/tmp/lazyboy-replica.db"
+  : path.join(process.cwd(), "data", "replica.db");
+// How long a write made by ANOTHER process (the cron, the other of dev/prod) can go unseen.
+// Our own writes don't wait for this — they call syncReader() directly.
+const REPLICA_SYNC_INTERVAL_S = 30;
+
+const gr = globalThis as unknown as {
+  __listenReader?: Client;
+  __listenReplicaBoot?: Promise<void>;
+};
+
+function bootReplica(): void {
+  if (gr.__listenReplicaBoot) return;
+  gr.__listenReplicaBoot = (async () => {
+    // The primary owns the schema; make sure init() has run before copying it down.
+    await getClient();
+    fs.mkdirSync(path.dirname(REPLICA_PATH), { recursive: true });
+    const replica = createClient({
+      url: `file:${REPLICA_PATH}`,
+      syncUrl: process.env.TURSO_DATABASE_URL,
+      authToken,
+      intMode: "number",
+      syncInterval: REPLICA_SYNC_INTERVAL_S,
+    });
+    await replica.sync();
+    gr.__listenReader = replica;
+  })().catch(() => {
+    // A replica is an optimisation, never a requirement — drop the cached failure so a
+    // later call retries, and keep serving from the primary in the meantime.
+    gr.__listenReplicaBoot = undefined;
+  });
+}
+
+/** Client for reads that scan rows: the local replica once it has synced, the primary until
+ *  then. Never blocks on the copy being ready. Not for `meta` — see the note above. */
+function getReader(): Promise<Client> {
+  if (!REPLICA_ENABLED) return getClient();
+  if (gr.__listenReader) return Promise.resolve(gr.__listenReader);
+  bootReplica();
+  return getClient();
+}
+
+/** Pull the replica up to date. Called at the end of every write so the read that follows
+ *  sees what was just written — syncInterval alone would leave a window where a play we just
+ *  recorded isn't in the copy yet. */
+async function syncReader(): Promise<void> {
+  const r = gr.__listenReader;
+  if (!r) return;
+  try {
+    await r.sync();
+  } catch {
+    /* the syncInterval tick retries; a failed sync must not fail the write that triggered it */
+  }
+}
+
 // libSQL Row objects aren't plain objects (they carry a prototype + indexed access), so
 // React warns when a Server Component passes them straight to a Client Component. Spread
 // each into a plain object so query results cross the RSC boundary cleanly.
@@ -172,30 +265,81 @@ function plainRows(rows: readonly unknown[]): unknown[] {
   return rows.map((r) => ({ ...(r as object) }));
 }
 
+// Cached track rows for a set of ids, chunked to stay under SQLite's bound-variable cap.
+async function readCachedTracks(client: Client, ids: string[]): Promise<Map<string, TrackFields>> {
+  const cached = new Map<string, TrackFields>();
+  for (let i = 0; i < ids.length; i += 500) {
+    const chunk = ids.slice(i, i + 500);
+    const res = await client.execute({
+      sql: `SELECT id, name, artist, uri, album, album_image AS albumImage,
+              duration_ms AS durationMs
+            FROM tracks WHERE id IN (${chunk.map(() => "?").join(",")})`,
+      args: chunk,
+    });
+    for (const r of plainRows(res.rows) as unknown as TrackFields[]) cached.set(r.id, r);
+  }
+  return cached;
+}
+
+// The unconditional-upsert statement for a track row (used only for rows the diff says
+// actually changed — Turso counts every ON CONFLICT UPDATE as a billed row write, even
+// when the values are identical).
+function trackUpsertStmt(t: TrackFields): InStatement {
+  return {
+    sql: `INSERT INTO tracks (id, name, artist, uri, album, album_image, duration_ms)
+          VALUES (:id, :name, :artist, :uri, :album, :albumImage, :durationMs)
+          ON CONFLICT(id) DO UPDATE SET name = excluded.name, artist = excluded.artist,
+            album = excluded.album, album_image = excluded.album_image,
+            duration_ms = excluded.duration_ms`,
+    args: {
+      id: t.id,
+      name: t.name,
+      artist: t.artist,
+      uri: t.uri,
+      album: t.album,
+      albumImage: t.albumImage,
+      durationMs: t.durationMs,
+    },
+  };
+}
+
 /** Insert plays, deduped on (track, played_at). Returns how many were new. */
 export async function recordPlays(plays: PlayRecord[]): Promise<number> {
   if (plays.length === 0) return 0;
   const client = await getClient();
-  const stmts: InStatement[] = [];
+  // Diff before writing: the sync hands us the same ~50 recently-played rows every couple
+  // of minutes, and blindly upserting them burned ~50 billed row writes per tick on
+  // identical data. Two small indexed reads find what actually changed; a no-change tick
+  // now writes only the last_sync stamp.
+  const tracks: TrackFields[] = plays.map((r) => ({
+    id: r.trackId,
+    name: r.name,
+    artist: r.artist,
+    uri: r.uri,
+    album: r.album,
+    albumImage: r.albumImage,
+    durationMs: r.durationMs,
+  }));
+  const cached = await readCachedTracks(client, [...new Set(tracks.map((t) => t.id))]);
+  // Every incoming play is at least as recent as the batch's oldest, so one indexed range
+  // read covers all the (track, played_at) pairs that could already exist.
+  const minAt = plays.reduce((m, p) => (p.playedAt < m ? p.playedAt : m), plays[0].playedAt);
+  const existingRes = await client.execute({
+    sql: `SELECT track_id AS trackId, played_at AS playedAt FROM plays WHERE played_at >= ?`,
+    args: [minAt],
+  });
+  const existing = new Set(
+    (plainRows(existingRes.rows) as unknown as { trackId: string; playedAt: string }[]).map(
+      playKey,
+    ),
+  );
+
+  const stmts: InStatement[] = tracksNeedingWrite(tracks, cached).map(trackUpsertStmt);
   const insertResultIdx: number[] = [];
-  for (const r of plays) {
-    stmts.push({
-      sql: `INSERT INTO tracks (id, name, artist, uri, album, album_image, duration_ms)
-            VALUES (:trackId, :name, :artist, :uri, :album, :albumImage, :durationMs)
-            ON CONFLICT(id) DO UPDATE SET name = excluded.name, artist = excluded.artist,
-              album = excluded.album, album_image = excluded.album_image,
-              duration_ms = excluded.duration_ms`,
-      args: {
-        trackId: r.trackId,
-        name: r.name,
-        artist: r.artist,
-        uri: r.uri,
-        album: r.album,
-        albumImage: r.albumImage,
-        durationMs: r.durationMs,
-      },
-    });
-    insertResultIdx.push(stmts.length); // index of the insertPlay result, below
+  for (const r of newPlays(plays, existing)) {
+    insertResultIdx.push(stmts.length);
+    // Keep OR IGNORE as a race guard — a concurrent sync may have inserted the same play
+    // between our read and this write.
     stmts.push({
       sql: `INSERT OR IGNORE INTO plays (track_id, played_at, context_type, context_uri)
             VALUES (:trackId, :playedAt, :contextType, :contextUri)`,
@@ -214,6 +358,8 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
     args: { v: new Date().toISOString() },
   });
   const results = await client.batch(stmts, "write");
+  // Pull the replica up to the write we just made, so the read that follows is fresh.
+  await syncReader();
   let added = 0;
   for (const i of insertResultIdx) added += Number(results[i].rowsAffected);
   // New plays landed → refresh the cached all-time totals so Home reads them instantly
@@ -236,6 +382,8 @@ export async function recordContexts(contexts: ContextRecord[]): Promise<void> {
     })),
     "write",
   );
+  // Pull the replica up to the write we just made, so the read that follows is fresh.
+  await syncReader();
 }
 
 // Negative-cached (name IS NULL) contexts get re-checked this often. Keeps the cache
@@ -247,7 +395,7 @@ const NEGATIVE_RECHECK_MS = 30 * 24 * 60 * 60 * 1000;
  *  re-check window has lapsed. Callers cap the batch, so the ordering keeps stale
  *  re-checks from starving genuinely new contexts. */
 export async function unresolvedContextUris(): Promise<{ uri: string; type: string }[]> {
-  const client = await getClient();
+  const client = await getReader();
   const cutoff = new Date(Date.now() - NEGATIVE_RECHECK_MS).toISOString();
   const res = await client.execute({
     sql: `SELECT DISTINCT p.context_uri AS uri, p.context_type AS type,
@@ -322,7 +470,7 @@ type ListenRow = { playedAt: string; trackId: string; listenedMs: number };
 // together (Home's history boundary, the history refresh action) — cache() dedupes the
 // fetch to once per request instead of paying the plays scan twice.
 const playsWithListened = cache(async (): Promise<ListenRow[]> => {
-  const client = await getClient();
+  const client = await getReader();
   const res = await client.execute(
     `SELECT p.played_at AS playedAt, p.track_id AS trackId, t.duration_ms AS durationMs
      FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
@@ -360,7 +508,7 @@ const SELECT_PLAY = `
  *  play as its own row (not collapsed into a per-song count), newest first, so you see the
  *  actual time of every listen. */
 export async function searchHistory(query: string, limit = 300): Promise<TrackStats[]> {
-  const client = await getClient();
+  const client = await getReader();
   const q = query.trim();
   if (!q) {
     const res = await client.execute({
@@ -381,7 +529,7 @@ export async function searchHistory(query: string, limit = 300): Promise<TrackSt
 /** Most-played tracks all-time, capped so the list never balloons to thousands.
  *  Feeds the history table when the "All time" card is selected. `plays` is all-time. */
 export async function getAllTimePlays(limit: number): Promise<TrackStats[]> {
-  const client = await getClient();
+  const client = await getReader();
   const res = await client.execute({
     sql: `${SELECT_TRACK} GROUP BY t.id
           ORDER BY plays DESC, lastPlayed DESC, t.name ASC LIMIT ?`,
@@ -447,7 +595,7 @@ function localDay(col: string, offsetMin: number): string {
 }
 
 export async function getDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
-  const client = await getClient();
+  const client = await getReader();
   // Only fetch the recent window we actually display (a couple extra days of buffer for the
   // tz day-edge), so this stays cheap as total history grows — not a full-table scan. Uses
   // idx_plays_played_at. Listened ms = gap to the next play, capped at song length, computed
@@ -497,7 +645,7 @@ export async function getDailyStats(offsetMin = 0, days = 14): Promise<DayStats[
 /** Whether any play exists strictly before the start of the given local day — lets the day
  *  strip decide if it can expand to show older days. Cheap existence check (idx_plays_played_at). */
 export async function hasPlaysBeforeDay(day: string, offsetMin = 0): Promise<boolean> {
-  const client = await getClient();
+  const client = await getReader();
   const offMs = Math.max(-720, Math.min(840, Math.round(offsetMin) || 0)) * 60000;
   // Start of `day` in the user's local zone, as a UTC instant.
   const cutoff = new Date(Date.parse(day + "T00:00:00.000Z") - offMs).toISOString();
@@ -511,7 +659,7 @@ export async function hasPlaysBeforeDay(day: string, offsetMin = 0): Promise<boo
 /** Tracks played on a specific local day (YYYY-MM-DD), most-played first.
  *  `plays`/`lastPlayed`/`source` are scoped to that day, not all-time. */
 export async function getPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]> {
-  const client = await getClient();
+  const client = await getReader();
   const res = await client.execute({
     sql: `${SELECT_TRACK}
           WHERE ${localDay("p.played_at", offsetMin)} = :day
@@ -618,10 +766,12 @@ export async function storePlaylists(rows: StoredPlaylist[], meId: string | null
     });
   }
   await client.batch(stmts, "write");
+  // Pull the replica up to the write we just made, so the read that follows is fresh.
+  await syncReader();
 }
 
 export async function getStoredPlaylists(): Promise<StoredPlaylist[]> {
-  const client = await getClient();
+  const client = await getReader();
   const res = await client.execute(
     `SELECT id, name, owner_id AS ownerId, image, track_count AS trackCount
      FROM playlists ORDER BY position`,
@@ -645,7 +795,8 @@ export async function getUniqueSongCount(): Promise<number> {
 /** Run the expensive distinct-song scan once and cache it in meta. Called at the end of a
  *  library sync, not on render. Returns the fresh count. */
 export async function recomputeUniqueSongCount(): Promise<number> {
-  const client = await getClient();
+  await syncReader();
+  const client = await getReader();
   const res = await client.execute(
     `SELECT COUNT(*) AS n FROM (
        SELECT DISTINCT lower(t.artist) AS a, lower(t.name) AS m
@@ -660,7 +811,7 @@ export async function recomputeUniqueSongCount(): Promise<number> {
 /** One playlist's cached header row (name/owner/image/count) — used by the detail page so
  *  it doesn't load the entire library just to read a single row. */
 export async function getStoredPlaylist(id: string): Promise<StoredPlaylist | null> {
-  const client = await getClient();
+  const client = await getReader();
   const res = await client.execute({
     sql: `SELECT id, name, owner_id AS ownerId, image, track_count AS trackCount
           FROM playlists WHERE id = :id`,
@@ -683,6 +834,8 @@ export async function upsertStoredPlaylist(p: StoredPlaylist): Promise<void> {
             track_count = excluded.track_count`,
     args: { id: p.id, name: p.name, ownerId: p.ownerId, image: p.image, trackCount: p.trackCount },
   });
+  // Pull the replica up to the write we just made, so the read that follows is fresh.
+  await syncReader();
 }
 
 export async function getPlaylistsSyncedAt(): Promise<string | null> {
@@ -702,32 +855,51 @@ export async function storePlaylistTracks(
   snapshot?: string,
 ): Promise<void> {
   const client = await getClient();
-  const stmts: InStatement[] = [
-    { sql: "DELETE FROM playlist_tracks WHERE playlist_id = :pid", args: { pid: playlistId } },
-  ];
-  tracks.forEach((t, i) => {
-    stmts.push({
-      sql: `INSERT INTO tracks (id, name, artist, uri, album, album_image, duration_ms)
-            VALUES (:id, :name, :artist, :uri, :album, :albumImage, :durationMs)
-            ON CONFLICT(id) DO UPDATE SET name = excluded.name, artist = excluded.artist,
-              album = excluded.album, album_image = excluded.album_image,
-              duration_ms = excluded.duration_ms`,
-      args: {
-        id: t.id,
-        name: t.title,
-        artist: t.artist,
-        uri: t.uri,
-        album: t.album ?? null,
-        albumImage: t.albumImage ?? null,
-        durationMs: t.durationMs ?? null,
-      },
-    });
+  // Diff against the cache instead of delete-all + reinsert: the old full rewrite billed
+  // ~3N row writes (N deletes + N track upserts + N inserts) every time a snapshot
+  // changed, even for a one-song edit to a large playlist. Now an append writes only the
+  // new tail, and only tracks whose fields actually changed get re-upserted.
+  const cachedPosRes = await client.execute({
+    sql: `SELECT track_id AS trackId, added_at AS addedAt
+          FROM playlist_tracks WHERE playlist_id = :pid ORDER BY position`,
+    args: { pid: playlistId },
+  });
+  const cachedPos = plainRows(cachedPosRes.rows) as unknown as {
+    trackId: string;
+    addedAt: string | null;
+  }[];
+  const incoming: TrackFields[] = tracks.map((t) => ({
+    id: t.id,
+    name: t.title,
+    artist: t.artist,
+    uri: t.uri,
+    album: t.album ?? null,
+    albumImage: t.albumImage ?? null,
+    durationMs: t.durationMs ?? null,
+  }));
+  const cachedTracks = await readCachedTracks(client, [...new Set(incoming.map((t) => t.id))]);
+
+  const stmts: InStatement[] = tracksNeedingWrite(incoming, cachedTracks).map(trackUpsertStmt);
+  const { changed, deleteFrom } = diffPositions(
+    tracks.map((t) => ({ trackId: t.id, addedAt: t.addedAt ?? null })),
+    cachedPos,
+  );
+  for (const pos of changed) {
+    const t = tracks[pos];
     stmts.push({
       sql: `INSERT INTO playlist_tracks (playlist_id, position, track_id, added_at)
-            VALUES (:pid, :pos, :tid, :added)`,
-      args: { pid: playlistId, pos: i, tid: t.id, added: t.addedAt ?? null },
+            VALUES (:pid, :pos, :tid, :added)
+            ON CONFLICT(playlist_id, position) DO UPDATE SET track_id = excluded.track_id,
+              added_at = excluded.added_at`,
+      args: { pid: playlistId, pos, tid: t.id, added: t.addedAt ?? null },
     });
-  });
+  }
+  if (deleteFrom !== null) {
+    stmts.push({
+      sql: "DELETE FROM playlist_tracks WHERE playlist_id = :pid AND position >= :from",
+      args: { pid: playlistId, from: deleteFrom },
+    });
+  }
   stmts.push({
     sql: `INSERT INTO meta (key, value) VALUES (:k, :v)
           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
@@ -741,6 +913,8 @@ export async function storePlaylistTracks(
     });
   }
   await client.batch(stmts, "write");
+  // Pull the replica up to the write we just made, so the read that follows is fresh.
+  await syncReader();
 }
 
 /** The Spotify snapshot_id of the cached tracks, if known. */
@@ -750,7 +924,7 @@ export async function getPlaylistSnapshot(playlistId: string): Promise<string | 
 
 /** A playlist's cached tracks in playlist order (empty if never cached). */
 export async function getPlaylistTracks(playlistId: string): Promise<Track[]> {
-  const client = await getClient();
+  const client = await getReader();
   const res = await client.execute({
     sql: `SELECT t.id, t.name AS title, t.artist, t.uri, t.album,
             t.album_image AS albumImage, t.duration_ms AS durationMs, pt.added_at AS addedAt
@@ -767,7 +941,7 @@ export async function getPlaylistTracks(playlistId: string): Promise<Track[]> {
 // critical path, right before the play command).
 export type PlaylistTrackRef = { id: string; uri: string; title: string; artist: string };
 export async function getPlaylistTrackOrder(playlistId: string): Promise<PlaylistTrackRef[]> {
-  const client = await getClient();
+  const client = await getReader();
   const res = await client.execute({
     sql: `SELECT t.id, t.uri, t.name AS title, t.artist
           FROM playlist_tracks pt LEFT JOIN tracks t ON t.id = pt.track_id
@@ -786,6 +960,8 @@ export async function removeCachedPlaylistTrack(playlistId: string, uri: string)
           WHERE playlist_id = :pid AND track_id IN (SELECT id FROM tracks WHERE uri = :uri)`,
     args: { pid: playlistId, uri },
   });
+  // Pull the replica up to the write we just made, so the read that follows is fresh.
+  await syncReader();
 }
 
 /** Remove a playlist and all its cached tracks/snapshot from the store (after the
@@ -800,6 +976,8 @@ export async function deletePlaylistFromDb(playlistId: string): Promise<void> {
     ],
     "write",
   );
+  // Pull the replica up to the write we just made, so the read that follows is fresh.
+  await syncReader();
 }
 
 // ---- saved tracks (Liked Songs index; the other half of "the library") ----
@@ -807,33 +985,53 @@ export async function deletePlaylistFromDb(playlistId: string): Promise<void> {
  *  the cheap change-signals (count + newest added_at) used to skip future re-fetches. */
 export async function storeSavedTracks(tracks: Track[]): Promise<void> {
   const client = await getClient();
-  const stmts: InStatement[] = [{ sql: "DELETE FROM saved_tracks", args: [] }];
-  tracks.forEach((t, i) => {
+  // Diff against the cache instead of delete-all + reinsert (same row-write-quota reasoning
+  // as storePlaylistTracks — this one re-ran in full at least daily via LIKED_FULL_MAX_AGE_MS).
+  const cachedRes = await client.execute(
+    "SELECT track_id AS trackId, added_at AS addedAt, position FROM saved_tracks",
+  );
+  const cachedSaved = plainRows(cachedRes.rows) as unknown as {
+    trackId: string;
+    addedAt: string | null;
+    position: number;
+  }[];
+  const incoming: TrackFields[] = tracks.map((t) => ({
+    id: t.id,
+    name: t.title,
+    artist: t.artist,
+    uri: t.uri,
+    album: t.album ?? null,
+    albumImage: t.albumImage ?? null,
+    durationMs: t.durationMs ?? null,
+  }));
+  const cachedTracks = await readCachedTracks(client, [...new Set(incoming.map((t) => t.id))]);
+
+  const stmts: InStatement[] = tracksNeedingWrite(incoming, cachedTracks).map(trackUpsertStmt);
+  const { upserts, deletes } = diffKeyed(
+    tracks.map((t, i) => ({ trackId: t.id, addedAt: t.addedAt ?? null, position: i })),
+    cachedSaved,
+  );
+  for (const r of upserts) {
     stmts.push({
-      sql: `INSERT INTO tracks (id, name, artist, uri, album, album_image, duration_ms)
-            VALUES (:id, :name, :artist, :uri, :album, :albumImage, :durationMs)
-            ON CONFLICT(id) DO UPDATE SET name = excluded.name, artist = excluded.artist,
-              album = excluded.album, album_image = excluded.album_image,
-              duration_ms = excluded.duration_ms`,
-      args: {
-        id: t.id,
-        name: t.title,
-        artist: t.artist,
-        uri: t.uri,
-        album: t.album ?? null,
-        albumImage: t.albumImage ?? null,
-        durationMs: t.durationMs ?? null,
-      },
+      sql: `INSERT INTO saved_tracks (track_id, added_at, position) VALUES (:tid, :added, :pos)
+            ON CONFLICT(track_id) DO UPDATE SET added_at = excluded.added_at,
+              position = excluded.position`,
+      args: { tid: r.trackId, added: r.addedAt, pos: r.position },
     });
+  }
+  for (let i = 0; i < deletes.length; i += 500) {
+    const chunk = deletes.slice(i, i + 500);
     stmts.push({
-      sql: `INSERT INTO saved_tracks (track_id, added_at, position) VALUES (:tid, :added, :pos)`,
-      args: { tid: t.id, added: t.addedAt ?? null, pos: i },
+      sql: `DELETE FROM saved_tracks WHERE track_id IN (${chunk.map(() => "?").join(",")})`,
+      args: chunk,
     });
-  });
+  }
   stmts.push(metaStmt("liked_total", String(tracks.length)));
   stmts.push(metaStmt("liked_top_added_at", tracks[0]?.addedAt ?? ""));
   stmts.push(metaStmt("saved_synced_at", new Date().toISOString()));
   await client.batch(stmts, "write");
+  // Pull the replica up to the write we just made, so the read that follows is fresh.
+  await syncReader();
 }
 
 /** The cheap Liked-Songs change-signals (count + newest added_at). */
@@ -862,7 +1060,7 @@ export async function getLibraryTracks(
   exceptPlaylistId?: string,
   exceptName?: string,
 ): Promise<Track[]> {
-  const client = await getClient();
+  const client = await getReader();
   const meId = await getMeId();
   const res = await client.execute({
     sql: `
@@ -922,7 +1120,7 @@ export async function getCleanBackupPref(): Promise<boolean> {
 export async function playedTracksInContext(
   contextUri: string,
 ): Promise<{ trackId: string; name: string | null; artist: string | null; playedAt: string }[]> {
-  const client = await getClient();
+  const client = await getReader();
   // Also return name/artist so callers can fall back to a name+artist match when the play's
   // track id doesn't line up with the playlist's stored id — Spotify hands the same song
   // different ids across a playlist vs. recently-played (track relinking / duplicate
@@ -943,7 +1141,7 @@ export async function playedTracksInContext(
 
 /** Resolved name for a playback context uri, if we've cached it before. */
 export async function getContextName(uri: string): Promise<string | null> {
-  const client = await getClient();
+  const client = await getReader();
   const res = await client.execute({
     sql: "SELECT name FROM contexts WHERE uri = ?",
     args: [uri],
@@ -1062,6 +1260,13 @@ export async function logSpotifyRequest(entry: {
     p = entry.path.startsWith("http") ? new URL(entry.path).pathname : entry.path.split("?")[0];
   } catch {
     /* keep the raw path */
+  }
+  // Don't log successful now-playing polls: they fire every few seconds while the app is
+  // open and each log row costs 2 billed Turso row writes (insert + prune delete) for no
+  // diagnostic value. Failures (429s, errors) on this endpoint still always log, and the
+  // getApiLogSummary windows correspondingly exclude successful now-playing traffic.
+  if (entry.status >= 200 && entry.status < 300 && p.endsWith("/me/player/currently-playing")) {
+    return;
   }
   await client.execute({
     sql: `INSERT INTO api_log (ts, method, path, status, retry_after) VALUES (?, ?, ?, ?, ?)`,

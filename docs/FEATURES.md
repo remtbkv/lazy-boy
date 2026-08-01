@@ -96,12 +96,15 @@ double-click play, right-click track menu) minus the album/length columns.
 These aren't from the prototype; they're built on the local listen-history store (`db.ts`).
 Stats/sync internals live in [ARCHITECTURE](ARCHITECTURE.md) and [GOTCHAS](GOTCHAS.md).
 
-### Find  →  `FindPanel` + `/api/find*`
-Look up a song or artist across your playlists and see when you last listened to it. Search is
-index-backed (FTS5 trigram over playlist song/artist names; `LIKE` fallback under 3 chars).
-Results deep-link without touching the URL: a "last played" row jumps to that day in the home
-history (a `window` CustomEvent), a "found in" row opens that playlist and scrolls to the track
-(`sessionStorage`, consumed once). See [CONVENTIONS → URL & transient UI state](CONVENTIONS.md).
+### History search  →  `searchPlaysAction` + `SearchIsland`
+The bottom search pill on Home searches the whole listen history by song title or artist and
+returns every matching play as its own row, newest first; the client groups them per song or
+per artist behind the songs/artists switch. DB-only — it never calls Spotify, and album art is
+the URL already stored on the track row, so typing can't cost API calls or hit a rate limit.
+Reads run against the local replica (see [GOTCHAS](GOTCHAS.md)), so the query is ~5–35 ms.
+
+(The older **Find** panel — "which playlists contain this song" — and its `/api/find*` routes
+and FTS5 trigram index were removed in `045d4a1`.)
 
 ### Resume  →  `resumePlaylistAction`  [PLAYBACK, PREMIUM]
 "Pick up where you left off" in a playlist, assuming in-order (non-shuffled) listening:

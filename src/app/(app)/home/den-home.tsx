@@ -198,7 +198,10 @@ export function DenHome({
       searchPlaysAction(q).then((rows) => {
         if (liveQuery.current === q) setResolved({ q, rows });
       });
-    }, 250);
+      // 120ms, not 250: the query itself now runs against the local read replica (~5–35ms
+      // instead of the 1–4s it cost against remote Turso), so the debounce had become the
+      // biggest part of the wait rather than a guard against an expensive call.
+    }, 120);
     return () => clearTimeout(id);
   }, [query]);
 
@@ -484,7 +487,7 @@ export function DenHome({
                     the bottom of the list is unmistakable. */}
                 <div
                   className={cn(
-                    "pointer-events-none absolute inset-x-0 bottom-0 h-28 bg-gradient-to-t from-background to-transparent transition-opacity duration-200",
+                    "pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-background to-transparent transition-opacity duration-200",
                     dayMoreBelow ? "opacity-100" : "opacity-0",
                   )}
                 />

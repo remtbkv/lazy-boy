@@ -142,12 +142,18 @@ SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped 
   next play, capped at the song length; under 5 s counts as zero; an isolated play is assumed
   to have finished) — Spotify reports *when* a track played, never *how long*. Whole-table
   totals (`alltime_stats`) are cached in `meta` and recomputed on write; per-day totals compute
-  live. The **Find** quick action searches playlist songs/artists via an FTS5 trigram index
-  (`tracks_fts`, rebuilt on library sync). **Resume** (`resumePlaylistAction`) picks up where
-  you left off, matching plays to playlist positions by id then by `(name, artist)`. New
-  `db.ts` queries follow the conventions in that file's header (drive joins from the indexed
-  hot table; cache aggregates on write; do gap math in JS, not SQL window functions). Details
-  in `docs/GOTCHAS.md`.
+  live. **Resume** (`resumePlaylistAction`) picks up where you left off, matching plays to
+  playlist positions by id then by `(name, artist)`. New `db.ts` queries follow the
+  conventions in that file's header (drive joins from the indexed hot table; cache aggregates
+  on write; do gap math in JS, not SQL window functions). Details in `docs/GOTCHAS.md`.
+- **Two clients, split by role.** Remote Turso costs ~1 s per few-thousand rows *scanned*
+  (not a latency problem — the round trip is ~20 ms), so `getReader()` serves row-scanning
+  reads from a libSQL **embedded replica**: a local SQLite copy of the same database, synced
+  in the background. `getClient()` — the primary — keeps every write plus all of `meta`, so
+  write latency and the cross-instance token/lock guarantees are unchanged. Writes call
+  `syncReader()` so the next read sees them. The replica is never on the critical path: reads
+  fall back to the primary until the first sync lands, and permanently if it fails. See
+  `docs/GOTCHAS.md`.
 - **Token refresh coordination:** the `meta` table doubles as a cross-instance mutex
   (`acquireLock`/`releaseLock`, a TTL compare-and-set) so concurrent serverless instances
   don't race Spotify's rotating refresh token into `invalid_grant`. See `src/lib/auth.ts`.

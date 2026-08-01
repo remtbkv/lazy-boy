@@ -52,8 +52,9 @@ Legend: `[x]` done · `[~]` partial / seam in place · `[ ]` not started
       plus an external pinger (cron-job.org, ~2 min) as the app-closed trigger with a daily
       Vercel Cron as backstop (all → `/api/cron/sync`); no manual sync
       button. The cadence is deliberate: `recently-played` only returns the last 50 plays, so
-      polling must outrun a heavy listener. The **Find** quick action covers "where saved"
-      (which playlists contain a song/artist) + last-played, via an FTS5 trigram index.
+      polling must outrun a heavy listener. Home's search island covers title/artist search
+      over the whole history. ("Where saved" — which playlists contain a song — was the Find
+      panel, removed in `045d4a1`; nothing replaces it yet.)
 
 ## Phase 3 — user behavior (`future.txt`)
 
