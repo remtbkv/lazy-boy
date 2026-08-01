@@ -173,12 +173,25 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   A cold instance is never blocked on the copy — `getReader()` returns the primary until the
   first sync lands — and if the replica can't be built at all, everything keeps working on
   the primary. Kill switch: `LAZYBOY_NO_REPLICA=1`.
-- **If a query is slow, count the rows it SCANS, not the rows it returns.** The two worst
-  offenders both returned little: `searchHistory` is `LIKE '%q%'` (unindexable by
-  construction — it scans `tracks`), and `sourceExpr` runs two correlated `playlist_tracks`
-  subqueries **per output row** (it is ~90% of `getAllTimePlays`: 62 ms vs 5.7 ms without it,
-  locally). The replica makes both cheap enough to leave alone; on the primary they were the
-  whole problem.
+- **If a query is slow, count the rows it SCANS, not the rows it returns.** Both bad ones
+  returned little. `searchHistory` is `LIKE '%q%'`, unindexable by construction, so it scans
+  `tracks` — left as-is, because on the replica it is ~6 ms and the table grows with distinct
+  songs, not plays. `sourceExpr` was worse and is fixed (next bullet).
+- **A play's "From" is stored (`plays.ctx_orphan`), not derived per read.** The rule — blank
+  the source when Spotify reports a playlist context but the song isn't in that cached
+  playlist — used to be two correlated `playlist_tracks` subqueries per *output row*, which
+  was ~90 % of `getAllTimePlays`. It was also the wrong shape: the answer only changes when a
+  playlist is synced, but the expression re-derived it on every render. Now
+  `recomputeOrphanFlags()` refreshes the flag exactly when membership can have moved —
+  `{newOnly}` for plays just recorded, `{playlistId}` when one playlist's tracks change,
+  unscoped for the backfill and for a library-list rewrite — and writes only rows whose
+  verdict actually flips, so a steady-state sync writes zero rows. Measured on the live DB:
+  all-time list 2952 ms → 719 ms on the primary and 79 ms → 7 ms on the replica, rows
+  identical, and 0 mismatches against the old expression across all 6,644 plays.
+  **If you add a way for playlist membership to change, call `recomputeOrphanFlags` from it**
+  — that is the one thing that can now go stale. A `NULL` flag reads as non-orphan, which is
+  the same answer the old expression gave for a playlist it couldn't verify, so a missed
+  recompute degrades to "shows the playlist name" and self-heals on the next sync.
 - **Resume picks up where you left off in a playlist** (`resumePlaylistAction`): it scopes
   plays in that playlist to the most recent session (>3 h gap splits sessions), takes the end
   of the longest in-order run within it (tolerating small skips), and resumes at the next

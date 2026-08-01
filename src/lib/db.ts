@@ -173,6 +173,19 @@ async function init(): Promise<Client> {
   if (!ctxCols.has("checked_at")) {
     await client.execute("ALTER TABLE contexts ADD COLUMN checked_at TEXT");
   }
+  // ctx_orphan caches the playlist-membership verdict per play (see sourceExpr). NULL means
+  // "not computed yet" — recomputeOrphanFlags() fills it, and until it does the read falls
+  // back to treating the play as non-orphan, which is the same answer for ~91% of plays.
+  const playsInfo = await client.execute("PRAGMA table_info(plays)");
+  const playsCols = new Set(playsInfo.rows.map((r) => String(r.name)));
+  if (!playsCols.has("ctx_orphan")) {
+    await client.execute("ALTER TABLE plays ADD COLUMN ctx_orphan INTEGER");
+  }
+  // Every orphan recompute, and playedTracksInContext (Resume), select plays BY context_uri;
+  // without this they scan the whole plays table.
+  await client.execute(
+    "CREATE INDEX IF NOT EXISTS idx_plays_context ON plays (context_uri)",
+  );
   return client;
 }
 
@@ -358,6 +371,8 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
     args: { v: new Date().toISOString() },
   });
   const results = await client.batch(stmts, "write");
+  // Give the plays we just inserted their membership verdict before anything reads them.
+  await recomputeOrphanFlags({ newOnly: true });
   // Pull the replica up to the write we just made, so the read that follows is fresh.
   await syncReader();
   let added = 0;
@@ -416,25 +431,73 @@ export async function unresolvedContextUris(): Promise<{ uri: string; type: stri
 // type. BUT: Spotify keeps reporting a playlist as the context even after the playlist ends
 // and it auto-plays recommended "next" songs that were never in the playlist — so those
 // reads are misleading. When a play's context is a playlist WE HAVE CACHED and the played
-// song isn't a member, blank the source to NULL (the UI renders "—"). Two guards keep it
+// song isn't a member, the source blanks to NULL (the UI renders "—"). Two guards keep that
 // honest: (1) only blank when the playlist's tracks are cached, so an unsynced or foreign
 // playlist we can't verify still shows its name instead of being wrongly blanked; (2) match
 // membership by (artist, title) identity, not track id — Spotify hands the same song
 // different ids in a playlist vs. recently-played, so an id match would drop real plays.
-// The song lookup uses idx_tracks_artist_name; the playlist lookup uses idx_pltracks_pl.
-// `p` = the play row, `c` = its joined contexts row; both reference the outer track `t`.
+//
+// That verdict is STORED, in `plays.ctx_orphan`, not recomputed per row. As a live expression
+// it was two correlated `playlist_tracks` subqueries per OUTPUT row — measured at ~90% of the
+// all-time list's cost (62ms vs 5.7ms without it, on local SQLite; seconds on remote Turso).
+// It is also a poor fit for live evaluation: the answer depends on playlist membership, which
+// changes only when a playlist is synced, while the expression re-derived it on every render.
+// recomputeOrphanFlags() refreshes it exactly when membership can have changed.
+//
+// `p` = the play row, `c` = its joined contexts row. NULL ctx_orphan (a play recorded before
+// the column existed, or before its playlist was cached) reads as non-orphan — the same
+// answer the guarded expression gave for an unverifiable playlist.
 function sourceExpr(p: string, c: string): string {
-  const pid = `replace(${p}.context_uri, 'spotify:playlist:', '')`;
-  return `CASE
-      WHEN ${p}.context_type = 'playlist' AND ${p}.context_uri IS NOT NULL
-           AND EXISTS (SELECT 1 FROM playlist_tracks pl WHERE pl.playlist_id = ${pid})
-           AND NOT EXISTS (
-             SELECT 1 FROM playlist_tracks plm JOIN tracks tm ON tm.id = plm.track_id
-             WHERE plm.playlist_id = ${pid}
-               AND lower(tm.artist) = lower(t.artist) AND lower(tm.name) = lower(t.name))
-      THEN NULL
-      ELSE COALESCE(${c}.name, ${p}.context_type)
-    END`;
+  return `CASE WHEN ${p}.ctx_orphan = 1 THEN NULL
+               ELSE COALESCE(${c}.name, ${p}.context_type) END`;
+}
+
+// The membership verdict, as SQL over the play row `p`. This is the ONLY place the rule
+// lives; sourceExpr reads what this writes. Kept identical to the expression it replaced so
+// the stored flag and a live evaluation can be diffed against each other.
+const ORPHAN_PREDICATE = `
+  CASE WHEN p.context_type = 'playlist' AND p.context_uri IS NOT NULL
+            AND EXISTS (SELECT 1 FROM playlist_tracks pl
+                        WHERE pl.playlist_id = replace(p.context_uri, 'spotify:playlist:', ''))
+            AND NOT EXISTS (
+              SELECT 1 FROM playlist_tracks plm JOIN tracks tm ON tm.id = plm.track_id
+              WHERE plm.playlist_id = replace(p.context_uri, 'spotify:playlist:', '')
+                AND lower(tm.artist) = (SELECT lower(artist) FROM tracks WHERE id = p.track_id)
+                AND lower(tm.name) = (SELECT lower(name) FROM tracks WHERE id = p.track_id))
+       THEN 1 ELSE 0 END`;
+
+/** Refresh the stored `ctx_orphan` verdict, and return how many rows changed.
+ *
+ *  Three scopes, matching the three ways the verdict can go stale — each does the least work
+ *  that is still correct:
+ *    `{ newOnly }`    plays we just recorded have no verdict yet; nobody else's changed.
+ *    `{ playlistId }` that playlist's membership changed (tracks added/removed, cache
+ *                     populated, playlist deleted), so only plays FROM it can flip.
+ *    `{}`             full pass — the one-time backfill, and after a change that can touch
+ *                     many playlists at once (the library list being rewritten).
+ *
+ *  Only rows whose verdict actually flips are written, so a steady-state sync that re-stores
+ *  an unchanged playlist writes zero rows — Turso bills every row write, including a
+ *  no-op UPDATE. Measured on the live DB: 0 rows and ~0.2-0.4s for the two scoped modes.
+ *
+ *  Writes to the primary only; the caller is responsible for the syncReader() that follows
+ *  (all four call sites already make one for their own write, so there is no second pull). */
+async function recomputeOrphanFlags(
+  opts: { playlistId?: string; newOnly?: boolean } = {},
+): Promise<number> {
+  const client = await getClient();
+  // newOnly deliberately does NOT evaluate the predicate in the WHERE clause: the point is to
+  // avoid running it over every historical play just to learn nothing changed.
+  const where = opts.newOnly
+    ? "p.ctx_orphan IS NULL"
+    : `(p.ctx_orphan IS NULL OR p.ctx_orphan <> (${ORPHAN_PREDICATE}))${
+        opts.playlistId ? " AND p.context_uri = :uri" : ""
+      }`;
+  const res = await client.execute({
+    sql: `UPDATE plays AS p SET ctx_orphan = (${ORPHAN_PREDICATE}) WHERE ${where}`,
+    args: opts.playlistId && !opts.newOnly ? { uri: `spotify:playlist:${opts.playlistId}` } : {},
+  });
+  return Number(res.rowsAffected);
 }
 
 // `source` is the context (playlist/album name, or type) of the MOST RECENT play
@@ -766,6 +829,10 @@ export async function storePlaylists(rows: StoredPlaylist[], meId: string | null
     });
   }
   await client.batch(stmts, "write");
+  // This branch purges playlist_tracks for playlists that no longer exist, so membership can
+  // change for several at once — a full pass, not a scoped one. (The unchanged fast path
+  // above returns before this and costs nothing.)
+  await recomputeOrphanFlags();
   // Pull the replica up to the write we just made, so the read that follows is fresh.
   await syncReader();
 }
@@ -913,6 +980,8 @@ export async function storePlaylistTracks(
     });
   }
   await client.batch(stmts, "write");
+  // Membership for THIS playlist changed, so plays from it may flip orphan either way.
+  await recomputeOrphanFlags({ playlistId });
   // Pull the replica up to the write we just made, so the read that follows is fresh.
   await syncReader();
 }
@@ -976,6 +1045,9 @@ export async function deletePlaylistFromDb(playlistId: string): Promise<void> {
     ],
     "write",
   );
+  // Its cached tracks are gone, so plays from it are no longer verifiable and stop being
+  // blanked — the same fallback an unsynced playlist gets.
+  await recomputeOrphanFlags({ playlistId });
   // Pull the replica up to the write we just made, so the read that follows is fresh.
   await syncReader();
 }
