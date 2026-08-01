@@ -3,6 +3,7 @@
 
 import NextAuth, { customFetch } from "next-auth";
 import Spotify from "next-auth/providers/spotify";
+import { cache } from "react";
 import {
   getSpotifyTokens,
   setSpotifyTokens,
@@ -54,6 +55,30 @@ type SpotifyToken = {
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// ── Request-scoped token read ──────────────────────────────────────────────────────────
+// One tokens read per request instead of one per callback. /home calls auth() twice (the
+// (app) layout and home/page), and each call read the tokens row in BOTH the jwt and the
+// session callback — 4 serial primary round trips (~20-30ms median each, tails to 700ms)
+// before any content. React cache() scopes this box to the request, so they share one read.
+// The box holds the PROMISE, and every write/refresh republishes it, so a later read in the
+// same request sees the fresh tokens instead of the pre-refresh snapshot.
+// Outside a request (the cron path) cache() has no dispatcher and is a pass-through: each
+// call gets a fresh box, i.e. a plain direct read. Anything that polls or double-checks the
+// DB across instances (coordinatedRefresh, waitForFreshToken, clearTokensIfStale,
+// getValidAccessToken) deliberately reads DIRECTLY — those need real-time state, not this
+// request's snapshot.
+const tokenBox = cache(() => ({ p: null as Promise<SpotifyTokens | null> | null }));
+function readTokensShared(): Promise<SpotifyTokens | null> {
+  const box = tokenBox();
+  box.p ??= getSpotifyTokens();
+  return box.p;
+}
+/** Publish what the DB now holds (null after a clear) so later reads in this request don't
+ *  serve a stale — or dead — token. */
+function publishTokens(t: SpotifyTokens | null): void {
+  tokenBox().p = Promise.resolve(t);
+}
 
 // `terminal` distinguishes a genuinely dead refresh token (revoked / re-consent
 // needed → force re-login) from a transient failure (token endpoint rate-limited,
@@ -274,6 +299,9 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         };
         try {
           await setSpotifyTokens(tokens);
+          // The session callback reads next, in this same request — hand it what we wrote
+          // instead of making it re-read the row we just stamped.
+          publishTokens(tokens);
           // Stored in the DB (the source of truth) — keep the cookie lean.
           delete t.accessToken;
           delete t.refreshToken;
@@ -292,7 +320,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
 
       let stored: SpotifyTokens | null;
       try {
-        stored = await getSpotifyTokens();
+        stored = await readTokensShared();
       } catch {
         // Transient DB read error — a Turso hiccup must NOT crash the request into a
         // Configuration error / forced logout. Keep the session exactly as-is and let a
@@ -309,6 +337,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         // Best-effort: if the write fails, keep the cookie tokens and retry next time.
         try {
           await setSpotifyTokens(stored);
+          publishTokens(stored);
           delete t.accessToken;
           delete t.refreshToken;
           delete t.expiresAt;
@@ -327,7 +356,10 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       }
       // Expired: refresh through the shared lock, always using the latest token.
       try {
-        await refreshShared(stored.refreshToken);
+        // refreshShared resolves to the tokens now in the DB (ours, or a winner's) — publish
+        // them so the session callback hands out the fresh access token rather than the
+        // expired one this request started with.
+        publishTokens(await refreshShared(stored.refreshToken));
         delete t.error;
       } catch (e) {
         if (e instanceof RefreshError && e.terminal) {
@@ -336,7 +368,12 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           // Guarded so a DB error while checking doesn't itself crash the callback.
           try {
             await clearTokensIfStale(stored.refreshToken);
-            if (await getSpotifyTokens()) delete t.error;
+            // DIRECT read: it has to see the post-clear state, which the request box can't
+            // (it still holds the token we just failed with). Publishing the result is what
+            // keeps the session callback from handing out that dead token.
+            const after = await getSpotifyTokens();
+            publishTokens(after);
+            if (after) delete t.error;
             else t.error = "RefreshAccessTokenError";
           } catch {
             /* DB unreachable — keep the session and retry next request */
@@ -348,11 +385,11 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     },
     async session({ session, token }) {
       const t = token as SpotifyToken;
-      // Guarded: this read runs on EVERY authed request (and right after the sign-in
-      // write). A transient Turso error here must degrade to "no access token this tick",
+      // Shares the request's one tokens read with the jwt callback above (see the token box).
+      // Still guarded: a transient Turso error must degrade to "no access token this tick",
       // never throw — an unguarded throw surfaces as the Auth.js `Configuration` error
       // and breaks login entirely.
-      session.accessToken = (await getSpotifyTokens().catch(() => null))?.accessToken;
+      session.accessToken = (await readTokensShared().catch(() => null))?.accessToken;
       session.error = t.error;
       return session;
     },
