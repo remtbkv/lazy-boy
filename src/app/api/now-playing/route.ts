@@ -8,6 +8,9 @@ import { getContextName, recordContexts } from "@/lib/db";
 // poll doesn't re-hit Spotify for a name it already knows.
 export async function GET() {
   const session = await auth();
+  // Deliberately 200 {playing:null}, not 401: the poll runs every 6s, and a just-expired
+  // session would otherwise error-spam the console until re-login. Nothing leaks — the
+  // signed-out answer is indistinguishable from "nothing playing".
   if (!session?.accessToken || session.error) {
     return Response.json({ playing: null }, { status: 200 });
   }
@@ -21,7 +24,10 @@ export async function GET() {
       const cached = await getContextName(playing.context.uri);
       if (cached) {
         context = { name: cached, type: playing.context.type };
-      } else {
+      } else if (cached === undefined) {
+        // Never cached — resolve once and cache. `null` (negative-cached, known 403/404)
+        // deliberately falls through with no name and no Spotify call: re-hitting it every
+        // 6s poll is what the negative cache exists to prevent.
         const resolved = await sp.contextName(playing.context.uri);
         if (resolved) {
           await recordContexts([{ uri: playing.context.uri, name: resolved.name, type: resolved.type }]);

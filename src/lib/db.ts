@@ -584,7 +584,8 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
   // last_sync stamp below — a meta key, never read from the replica — and the sync runs every
   // couple of minutes, so bumping unconditionally would leave every other instance gate-failed
   // around the clock.
-  if (stmts.length > 0) stmts.push(writeSeqStmt());
+  const changed = stmts.length > 0;
+  if (changed) stmts.push(writeSeqStmt());
   // Stamp last_sync atomically with the plays.
   stmts.push({
     sql: `INSERT INTO meta (key, value) VALUES ('last_sync', :v)
@@ -592,10 +593,15 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
     args: { v: new Date().toISOString() },
   });
   const results = await client.batch(stmts, "write");
-  // Give the plays we just inserted their membership verdict before anything reads them.
-  await recomputeOrphanFlags({ newOnly: true });
+  // A no-change tick (the steady-state cron every couple of minutes) wrote only last_sync —
+  // nothing the reader serves — so skip the orphan recompute (~0.2s primary UPDATE over zero
+  // rows) and the replica pull (~0.13s no-op sync) it would otherwise pay each tick.
+  if (insertResultIdx.length > 0) {
+    // Give the plays we just inserted their membership verdict before anything reads them.
+    await recomputeOrphanFlags({ newOnly: true });
+  }
   // Pull the replica up to the write we just made, so the read that follows is fresh.
-  await syncReader();
+  if (changed) await syncReader();
   let added = 0;
   for (const i of insertResultIdx) added += Number(results[i].rowsAffected);
   // New plays landed → refresh the cached all-time totals so Home reads them instantly
@@ -1470,14 +1476,18 @@ export async function playedTracksInContext(
   }[];
 }
 
-/** Resolved name for a playback context uri, if we've cached it before. */
-export async function getContextName(uri: string): Promise<string | null> {
+/** Cached name for a playback context uri, tri-state: `undefined` = never cached (worth
+ *  resolving), `null` = negative-cached (known-unresolvable — don't re-hit Spotify), string =
+ *  the name. The distinction matters: collapsing NULL rows into a string made this return the
+ *  literal "null" (String(null)), which the now-playing chip then displayed as a name. */
+export async function getContextName(uri: string): Promise<string | null | undefined> {
   const client = await getReader();
   const res = await client.execute({
     sql: "SELECT name FROM contexts WHERE uri = ?",
     args: [uri],
   });
-  return res.rows[0] ? String(res.rows[0].name) : null;
+  if (!res.rows[0]) return undefined;
+  return res.rows[0].name == null ? null : String(res.rows[0].name);
 }
 
 // ---- Spotify tokens (server-side source of truth) ----
