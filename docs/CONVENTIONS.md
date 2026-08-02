@@ -65,14 +65,9 @@ Palette (CSS variables in `src/app/globals.css`, mapped to Tailwind/shadcn token
 - **Keep the address bar clean.** Don't encode momentary UI focus (which day to open, which
   song to scroll to and highlight) in query params — it clutters the URL and replays the
   animation on refresh. Reserve real routes/params for shareable state. For transient focus:
-  - **Same page → a `window` CustomEvent.** Find's "last played" rows dispatch
-    `lazyboy:focus-history`; `history-client.tsx` listens, opens that day, scrolls to + flashes
-    the song.
-  - **Across routes → `sessionStorage`, consumed once.** Find's "found in" rows stash the
-    target track id and navigate to the bare `/playlists/[id]`; `track-list.tsx` reads it on
-    mount, scrolls + flashes, then clears it.
-  Both leave the URL untouched and skip replay on refresh by nature. These are plain web APIs,
-  so they behave the same on mobile and desktop.
+  same page → a `window` CustomEvent (e.g. `clean-progress.ts` dispatches `clean:active`);
+  across routes → `sessionStorage`, consumed once on arrival. Both leave the URL untouched
+  and skip replay on refresh by nature, and behave the same on mobile and desktop.
 
 ## Errors
 
