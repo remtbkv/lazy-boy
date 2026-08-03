@@ -198,8 +198,10 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   A same-generation seed boots in ~0.9s vs ~2–6s full sync, but one generation behind costs
   ~6s and two behind ~14s — *worse than starting empty* — and a deploy-time seed is stale
   within minutes. Measured and rejected; details above `REPLICA_SIDECARS` in `db.ts`. What
-  works instead: `src/instrumentation.ts` starts the replica boot at instance start (not first
-  read), and a damaged inherited replica file is wiped and re-synced once (sync() succeeds on
+  works instead: the replica boots lazily on the first scanning read (the eager instance-start
+  warm in `src/instrumentation.ts` was removed 2026-08-03 — every cold instance, including the
+  cron-only ones that never scan, pulled the full ~17MB and it burned 77% of the free plan's
+  3GB/mo syncs quota in 3 days), and a damaged inherited replica file is wiped and re-synced once (sync() succeeds on
   a corrupt file; the failure only surfaces on the first query). Minimal correct sidecar set
   when copying a replica: `.db` + `-info` + `-wal` — omitting `-wal` silently loses every row
   still in the WAL.

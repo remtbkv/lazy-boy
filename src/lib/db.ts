@@ -337,17 +337,13 @@ function bootReplica(): void {
   });
 }
 
-/** Start building the replica now, without waiting for a read to ask for it. Called from
- *  src/instrumentation.ts at server start. The boot is seconds (full sync: 2.1s median
- *  2.0-2.3s early in a session, 4.7s median 4.0-5.2s an hour later, n=5 each — this primary
- *  drifts), and until it lands every scanning read pays the primary's seconds-scale tail.
- *  Nothing used to kick it off until the first such read arrived, so a cold instance started
- *  that clock at the first render instead of at process start. Fire-and-forget by design — it
- *  resolves into the module-global, and getReader() keeps using the primary until it lands. */
-export function warmReplica(): void {
-  if (!REPLICA_ENABLED) return;
-  bootReplica();
-}
+// There is deliberately NO eager instance-start warm (src/instrumentation.ts used to call
+// one). Every cold instance pulled the full ~17MB replica whether or not it would ever scan —
+// and the cron tick every ~2 min means most instances exist only to write and exit. Against
+// Turso's free-plan 3GB/mo syncs quota that was ~12-17 bootstraps/day of pure waste (77% of
+// the August quota burned in 3 days, 2026-08-03). The replica now boots lazily from
+// getReader() on the first scanning read; until it lands those reads use the primary, which
+// was always the designed fallback.
 
 // ── The write marker (`meta.write_seq`) ─────────────────────────────────────────────────
 // A counter the primary bumps on every write THE REPLICA SERVES. It exists so a read can
