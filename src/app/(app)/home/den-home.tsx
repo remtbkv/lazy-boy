@@ -810,7 +810,8 @@ function Art({ image, size = 11 }: { image: string | null; size?: 9 | 10 | 11 })
 }
 
 // A matched song: one row no matter how many times it was played; the play count sits
-// on the right and the row expands to the exact listen times.
+// on the right and the row expands to the exact listen times, each with where it was played
+// from. Both come from the hydrated play rows, so the expansion needs no request of its own.
 //
 // Title, artist and art render immediately (they come from the client index); album, count and
 // time appear when the stats land. The row's height is set by the 44px thumbnail, so nothing
@@ -862,8 +863,19 @@ function SongResult({
       {expanded && plays.length > 0 ? (
         <ul className="mb-2 ml-[3.75rem] space-y-1 border-l border-border/60 pl-4">
           {listed.map((p, i) => (
-            <li key={i} className="text-[13px] tabular-nums text-muted-foreground">
-              {exactTimeShort(p.lastPlayed)}
+            <li key={i} className="flex items-baseline gap-3 text-[13px] text-muted-foreground">
+              {/* Fixed width from sm up so the sources line up into a column rather than
+                  ragging off each timestamp. */}
+              <span className="shrink-0 tabular-nums sm:min-w-[8.5rem]">
+                {exactTimeShort(p.lastPlayed)}
+              </span>
+              {/* Where THAT play was listened from — the same per-play value the day table
+                  shows in its From column, carried on the row by db.ts's sourceExpr: the
+                  resolved playlist/album name, the bare context type when the name never
+                  resolved, and NULL when the song is no longer in the playlist it was
+                  credited to (ctx_orphan). Nothing is rendered for a null, same as a play
+                  with no context at all. */}
+              {p.source ? <span className="truncate">{p.source}</span> : null}
             </li>
           ))}
           {plays.length > SHOW && !showAllPlays ? (

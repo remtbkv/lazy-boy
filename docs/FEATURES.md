@@ -102,8 +102,13 @@ cost API calls or hit a rate limit.
 `[id, name, artist]` (2,957 tracks, 108 KB gzipped), fetched once on first focus of the box and
 filtered in memory, so a keystroke costs no network — it used to run `LIKE '%q%'` over the whole
 history per keystroke (1,904 ms median against the primary; db.ts "The client-side search
-index"). The index carries no stats, so rows appear instantly with title + artist and one
-debounced `playsForTracksAction` call fills in counts, times and art for the matched ids alone.
+index"). The index carries no play counts, so rows appear instantly with title + artist + art and one
+debounced `playsForTracksAction` call fills in counts and times for the matched ids alone.
+Expanding a song row lists every play — exact time plus **where it was played from**, the same
+per-play `source` the day table's From column shows (`sourceExpr` in `db.ts`: the resolved
+playlist/album name, the context type when the name never resolved, blank when the song is no
+longer in the playlist it was credited to). The expansion costs no request: the play rows it
+reads are the ones already hydrated for the search.
 While the index is still loading (or if it failed) `searchPlaysAction` answers instead, so the
 box is never dead.
 
