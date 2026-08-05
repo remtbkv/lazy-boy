@@ -48,6 +48,7 @@ export function DenChrome({ name, image }: { name: string; image: string | null 
   const { playing } = useNowPlaying();
   const awake = !!playing?.isPlaying;
   const router = useRouter();
+  const tabRefs = useRef<Partial<Record<TabKey, HTMLAnchorElement>>>({});
   // ←/→ move between the top tabs. Neighboring routes are prefetched so the switch is
   // instant. Ignored while typing (search field) or with a dialog/sheet open, and when a
   // modifier is held (browser shortcuts), so it only fires on a bare arrow press.
@@ -64,6 +65,11 @@ export function DenChrome({ name, image }: { name: string; image: string | null 
       if (next < 0 || next >= TABS.length) return;
       e.preventDefault();
       router.push(TABS[next].href);
+      // Move DOM focus with the selection. Without this, the tab you clicked keeps
+      // browser focus after the route changes — and since the keydown itself is what
+      // upgrades the browser's :focus-visible heuristic, its ring reappears on the
+      // now-inactive old tab instead of the one arrow keys just navigated to.
+      tabRefs.current[TABS[next].key]?.focus();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -90,6 +96,9 @@ export function DenChrome({ name, image }: { name: string; image: string | null 
             <Link
               key={t.key}
               href={t.href}
+              ref={(el) => {
+                tabRefs.current[t.key] = el ?? undefined;
+              }}
               className={cn(
                 "rounded-md px-3 py-1.5 text-[15px] font-medium transition-colors",
                 t.key === active
