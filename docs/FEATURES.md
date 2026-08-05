@@ -92,12 +92,20 @@ changes.
 These aren't from the prototype; they're built on the local listen-history store (`db.ts`).
 Stats/sync internals live in [ARCHITECTURE](ARCHITECTURE.md) and [GOTCHAS](GOTCHAS.md).
 
-### History search  →  `searchPlaysAction` + `SearchIsland`
-The bottom search pill on Home searches the whole listen history by song title or artist and
-returns every matching play as its own row, newest first; the client groups them per song or
-per artist behind the songs/artists switch. DB-only — it never calls Spotify, and album art is
-the URL already stored on the track row, so typing can't cost API calls or hit a rate limit.
-Reads run against the local replica (see [GOTCHAS](GOTCHAS.md)), so the query is ~5–35 ms.
+### History search  →  the client-side index + `playsForTracksAction` + `SearchIsland`
+The bottom search pill on Home searches the whole listen history by song title or artist; the
+client groups the matches per song or per artist behind the songs/artists switch. DB-only — it
+never calls Spotify, and album art is the URL already stored on the track row, so typing can't
+cost API calls or hit a rate limit.
+
+**Matching runs in the browser.** `/api/history/search-index` serves every played track as
+`[id, name, artist]` (2,957 tracks, 108 KB gzipped), fetched once on first focus of the box and
+filtered in memory, so a keystroke costs no network — it used to run `LIKE '%q%'` over the whole
+history per keystroke (1,904 ms median against the primary; db.ts "The client-side search
+index"). The index carries no stats, so rows appear instantly with title + artist and one
+debounced `playsForTracksAction` call fills in counts, times and art for the matched ids alone.
+While the index is still loading (or if it failed) `searchPlaysAction` answers instead, so the
+box is never dead.
 
 (The older **Find** panel — "which playlists contain this song" — and its `/api/find*` routes
 and FTS5 trigram index were removed in `045d4a1`.)

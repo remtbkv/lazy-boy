@@ -1,10 +1,11 @@
 // Read-benchmark harness for the src/lib/db.ts query-conventions block.
 // READ-ONLY against the primary and the live replica file (local file measurements run on a
-// COPY of data/replica.db in os.tmpdir()). Modes: main | cold | sync | idx | day
+// COPY of data/replica.db in os.tmpdir()). Modes: main | cold | sync | idx | day | search
 import { createClient } from "@libsql/client";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { execFileSync } from "node:child_process";
 
 const MODE = process.argv[2] || "main";
@@ -466,6 +467,94 @@ async function modeDay() {
   if (bad > 0) process.exitCode = 1;
 }
 
+/** `search` — the history search, before and after it moved into the browser. Against the
+ *  PRIMARY (the shape production runs with LAZYBOY_NO_REPLICA=1). Three halves:
+ *    TIMING    the old per-keystroke query (searchHistory's `LIKE '%q%'`, unindexable → scans
+ *              `tracks`) against what the new path costs: the version check (one rowid seek,
+ *              per index request), the index build (once per version change, then cached), and
+ *              one hydration of the matched ids. Interleaved round-robin.
+ *    PAYLOAD   the served index body, raw / gzip / brotli — the number the client downloads.
+ *    EQUALITY  the known-answer half: for each sample query, every track the SQL search returns
+ *              must also be matched by the client-side substring filter over the index. The
+ *              client is allowed to find MORE (the SQL path is capped at 500 play rows, so a
+ *              song whose plays fall outside that window never came back); it is not allowed to
+ *              miss any. Exits non-zero on a miss.
+ *  `node --env-file=.env.local scripts/bench-reads.mjs search` */
+async function modeSearch() {
+  const SEARCH_INDEX = `SELECT t.id AS id, t.name AS name, t.artist AS artist
+     FROM plays p JOIN tracks t ON t.id = p.track_id
+     GROUP BY p.track_id
+     ORDER BY MAX(p.played_at) DESC`;
+  const VERSION = "SELECT MAX(rowid) AS v FROM tracks";
+  const hydrate = (n) =>
+    `${SELECT_PLAY("LEFT")} WHERE p.track_id IN (${Array(n).fill("?").join(",")})
+     ORDER BY p.played_at DESC LIMIT ?`;
+
+  const client = mkPrimary();
+  const index = (await client.execute(SEARCH_INDEX)).rows.map((r) => [
+    String(r.id),
+    String(r.name),
+    String(r.artist),
+  ]);
+  const sampleIds = index.slice(0, 50).map((e) => e[0]);
+
+  const { cells } = await runGroup(
+    client,
+    [
+      // db.ts searchHistory, as the search box called it per keystroke (limit 500).
+      { key: "oldLikeScan", run: (c) => c.execute({ sql: HIST("LEFT"), args: ["%the%", "%the%", 500] }) },
+      { key: "versionCheck", run: (c) => c.execute(VERSION) },
+      { key: "indexBuild", run: (c) => c.execute(SEARCH_INDEX) },
+      {
+        key: "hydrate50",
+        run: (c) => c.execute({ sql: hydrate(sampleIds.length), args: [...sampleIds, 3000] }),
+      },
+      SELECT1,
+    ],
+    7,
+  );
+  console.log("TIMING (primary)");
+  for (const [k, v] of Object.entries(cells)) {
+    console.log(`  ${k.padEnd(13)} ${v.median}ms (${v.min}-${v.max}, n=${v.n}) rows=${v.rows}`);
+  }
+
+  const body = Buffer.from(JSON.stringify(index));
+  const totalTracks = Number((await client.execute("SELECT COUNT(*) AS n FROM tracks")).rows[0].n);
+  console.log(
+    `PAYLOAD   ${index.length} played tracks of ${totalTracks} in the table — ` +
+      `raw ${body.length}B, gzip ${zlib.gzipSync(body, { level: 6 }).length}B, ` +
+      `brotli ${zlib.brotliCompressSync(body).length}B`,
+  );
+
+  // EQUALITY. Two query shapes on purpose: narrow ones, where the 500-row cap can't bite and
+  // the two answers should be identical, and a broad one that exercises the cap.
+  const QUERIES = ["love", "the", "a", "night", "back", "we"];
+  let missing = 0;
+  for (const q of QUERIES) {
+    const like = `%${q}%`;
+    const rows = (await client.execute({ sql: HIST("LEFT"), args: [like, like, 500] })).rows;
+    for (const mode of ["songs", "artists"]) {
+      const sql = new Set(
+        rows
+          .filter((r) => String(mode === "songs" ? r.name : r.artist).toLowerCase().includes(q))
+          .map((r) => String(r.id)),
+      );
+      const clientSide = new Set(
+        index.filter((e) => e[mode === "songs" ? 1 : 2].toLowerCase().includes(q)).map((e) => e[0]),
+      );
+      const missed = [...sql].filter((id) => !clientSide.has(id));
+      missing += missed.length;
+      console.log(
+        `EQUALITY  ${JSON.stringify(q).padEnd(9)} ${mode.padEnd(7)} sql=${sql.size} client=${clientSide.size}` +
+          ` missed=${missed.length}${missed.length ? ` ${missed.slice(0, 3).join(",")}` : ""}`,
+      );
+    }
+  }
+  console.log(`EQUALITY  ${missing} tracks missed by the client-side filter`);
+  if (missing > 0) process.exitCode = 1;
+  client.close();
+}
+
 /** Re-run measurement 10 alone and merge it into the existing results JSON. */
 async function modeIdx() {
   const RESULTS = path.join(REPO, "scripts", "bench-reads-results.json");
@@ -486,4 +575,5 @@ if (MODE === "cold") await modeCold();
 else if (MODE === "sync") await modeSync();
 else if (MODE === "idx") await modeIdx();
 else if (MODE === "day") await modeDay();
+else if (MODE === "search") await modeSearch();
 else await modeMain();

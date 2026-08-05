@@ -240,8 +240,11 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   still in the WAL.
 - **If a query is slow, count the rows it SCANS, not the rows it returns.** Both bad ones
   returned little. `searchHistory` is `LIKE '%q%'`, unindexable by construction, so it scans
-  `tracks` — left as-is, because on the replica it is ~6 ms and the table grows with distinct
-  songs, not plays. `sourceExpr` was worse and is fixed (next bullet). `getPlaysByDay` was the
+  `tracks` — ~6 ms on the replica but 1,904 ms median (1,383–3,133, n=7, 2026-08-05) against the
+  primary, which is what production runs. It is no longer on the keystroke path: **history
+  search matches in the BROWSER** against `/api/history/search-index` (db.ts, "The client-side
+  search index"), and `searchHistory` survives only as the fallback while that index loads.
+  `sourceExpr` was worse and is fixed (next bullet). `getPlaysByDay` was the
   third: `date(played_at, '±N minutes') = :day` is the *authority* on which local day a play
   belongs to, but it's a function of the column, so no index can serve it and one day's ~90
   rows cost a full `plays` scan. It now carries a redundant `played_at >= :from AND < :to` in

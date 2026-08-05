@@ -1109,6 +1109,106 @@ async function readPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]>
   return plainRows(res.rows) as unknown as TrackStats[];
 }
 
+// ── The client-side search index ────────────────────────────────────────────────────────
+// The history search box matches in the BROWSER, not here. It used to send every keystroke to
+// searchHistory(), whose `LIKE '%q%'` cannot use an index by construction (the note under "If
+// a query is slow, count the rows it SCANS"), so each character paid a round trip plus a scan
+// of `tracks` against the remote primary. What ships instead is this index — every track that
+// has ever been PLAYED, as [id, name, artist] — fetched once, filtered in memory, zero network
+// per keystroke.
+//
+// Only played tracks: the search returns plays, so the ~12,000 `tracks` rows that exist only
+// as playlist members were never results. That is what keeps the payload small — measured
+// 2026-08-05 over the 2,957 played tracks of 15,000 total: raw 170,172 B, gzip 108,027,
+// brotli 93,048. (A columnar shape — ids, names, artists as three parallel arrays — is
+// 98,109 gzip, 9% less, for a format the client has to reassemble; not worth it. Serving all
+// 15,000 tracks would be ~539 KB gzip.)
+//
+// What it replaces, medians (min–max) n=7 against the primary, 2026-08-05, interleaved
+// round-robin (`bench-reads.mjs search` re-runs all of this):
+//   searchHistory, per keystroke   1,904.5ms (1,382.8-3,132.7)   ← paid on every character
+//   this index, one build          2,743.6ms (1,664.6-3,407.8)   ← once per version change
+//   the version check              24.1ms (21.1-30.5)            ← one row, per request
+//   one hydration of 50 ids        222.2ms (196.9-2,774.2)       ← once per debounced query
+// The build is the most expensive single read on the page and that is fine: it runs when a
+// never-played song first appears, and the cache below serves every other request for free.
+// Same bench also runs the known-answer half — for six queries × both modes, every track the
+// SQL search returned is matched by the client-side substring filter (0 missed). On narrow
+// queries the two answers are identical; on a broad one the client finds MORE (the SQL path
+// stopped at 500 play rows, so songs whose plays fell outside that window never came back).
+//
+// Stats are deliberately NOT in here. Play counts, last-played times and album art change on
+// every play, so bundling them would both multiply the payload and invalidate it constantly.
+// The browser matches ids against this, then hydrates the matched ids alone through
+// getPlaysForTracks() — an indexed lookup whose cost is the ids asked for, not the table.
+//
+// Ordering is most-recently-played first, so the client's match order is the same newest-first
+// order the SQL search produced.
+export type SearchIndexEntry = [id: string, name: string, artist: string];
+
+/** The index's version marker: the highest rowid in `tracks`.
+ *
+ *  NOT `meta.write_seq` — that bumps on every play, so keying on it would re-download the
+ *  whole index after every listening session, and a replay of a known song changes nothing in
+ *  it. `tracks` gains a row exactly when a song is seen for the FIRST time, which is exactly
+ *  when this index gains an entry, and nothing in this file deletes from `tracks`, so the max
+ *  is monotone. One row, one b-tree seek (`SEARCH tracks`, not a scan) — cheap enough to read
+ *  on every index request.
+ *
+ *  STALENESS BOUND: this key does not move for an in-place edit of a track's name/artist (a
+ *  re-tag by Spotify), nor for the re-ordering a replay causes. Both are bounded to ~24h by
+ *  the daily bucket in the route's ETag (src/app/api/history/search-index/route.ts), which
+ *  makes the browser re-download once a day regardless. */
+export async function getSearchIndexVersion(): Promise<string> {
+  const client = await getReader();
+  const res = await client.execute("SELECT MAX(rowid) AS v FROM tracks");
+  return String(res.rows[0]?.v ?? 0);
+}
+
+/** Every played track as [id, name, artist], newest play first.
+ *
+ *  LIVE-shaped cache (the section above), except the key is the track-rowid version rather
+ *  than the write marker — see getSearchIndexVersion for why. So the ~7,000-row scan below
+ *  runs once per genuinely new song and every other request is free; the daily TTL is the
+ *  same bound the ETag applies on the client side. */
+const searchIndexCached = unstable_cache((_version: string) => readSearchIndex(), ["search-index"], {
+  revalidate: FROZEN_TTL_S,
+});
+export async function getSearchIndex(version: string): Promise<SearchIndexEntry[]> {
+  return searchIndexCached(version);
+}
+
+async function readSearchIndex(): Promise<SearchIndexEntry[]> {
+  const client = await getReader();
+  // GROUP BY p.track_id, not t.id: grouping on the tracks side makes the planner drive from
+  // `tracks` (SCAN t, 15,000 rows) to find the 2,957 that have plays. Driving from `plays`
+  // scans ~7,000 index entries and seeks each distinct track once — rows scanned is what
+  // Turso bills.
+  const res = await client.execute(
+    `SELECT t.id AS id, t.name AS name, t.artist AS artist
+     FROM plays p JOIN tracks t ON t.id = p.track_id
+     GROUP BY p.track_id
+     ORDER BY MAX(p.played_at) DESC`,
+  );
+  return res.rows.map((r) => [String(r.id), String(r.name), String(r.artist)]);
+}
+
+/** Every play of the given tracks, newest first — the stats half of the client-side search.
+ *  Same row shape as searchHistory (one row per play), so both search paths feed the same
+ *  table. Seeks idx_plays_track per id instead of scanning; `limit` is a safety bound, and a
+ *  result that hits it is treated as truncated by the caller. */
+export async function getPlaysForTracks(ids: string[], limit = 3000): Promise<TrackStats[]> {
+  if (ids.length === 0) return [];
+  const client = await getReader();
+  const holes = ids.map(() => "?").join(",");
+  const res = await client.execute({
+    sql: `${SELECT_PLAY} WHERE p.track_id IN (${holes})
+          ORDER BY p.played_at DESC LIMIT ?`,
+    args: [...ids, limit],
+  });
+  return plainRows(res.rows) as unknown as TrackStats[];
+}
+
 export async function getLastSync(): Promise<string | null> {
   return getMeta("last_sync");
 }

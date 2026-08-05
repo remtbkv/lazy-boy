@@ -36,7 +36,8 @@ src/app/(app)/           authed shell: layout calls auth() + owns the chrome (ch
 src/app/api/auth/        Auth.js route handler (NextAuth catch-all)
 src/app/api/tasks/       background-task progress polling endpoint
 src/app/api/playlists/sync  one full library scan → DB (client fires when stale)
-src/app/api/history/     listen-history search (reads the DB)
+src/app/api/history/search-index  the compact [id,name,artist] index Home's search box
+                         filters in the browser (authed, private, ETag'd)
 src/app/api/now-playing/ live "what's playing"; null when idle (never stale)
 src/app/api/sync/        on-load listen-history sync (POST; debounced server-side)
 src/app/api/cron/sync/   scheduled history sync (external pinger e.g. cron-job.org; daily Vercel cron backstop)

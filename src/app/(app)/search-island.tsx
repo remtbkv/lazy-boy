@@ -25,11 +25,15 @@ const HIDE_END = 360;
 export function SearchIsland({
   query,
   onQuery,
+  onFocus,
   placeholder,
   children,
 }: {
   query: string;
   onQuery: (v: string) => void;
+  /** Fired when the input takes focus — Home uses it to start fetching its search index
+   *  before the first character is typed. */
+  onFocus?: () => void;
   placeholder: string;
   children?: React.ReactNode;
 }) {
@@ -92,6 +96,7 @@ export function SearchIsland({
         <input
           value={query}
           onChange={(e) => onQuery(e.target.value)}
+          onFocus={onFocus}
           placeholder={placeholder}
           aria-label={placeholder}
           className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/70 sm:w-[15.25rem] sm:flex-none"

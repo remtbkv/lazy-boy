@@ -12,6 +12,7 @@ import {
   getMeId,
   getPlaylistsSyncedAt,
   getPlaysByDay,
+  getPlaysForTracks,
   getStoredPlaylists,
   searchHistory,
   type DayStats,
@@ -146,10 +147,27 @@ export async function refreshHistoryAction(
 }
 
 /** Full-history search (name or artist, SQL LIKE) — every play as its own row,
- *  newest first; the client groups per song/artist. */
+ *  newest first; the client groups per song/artist.
+ *
+ *  This is now the FALLBACK path: matching normally happens in the browser against
+ *  /api/history/search-index. It still runs while that index is in flight (or if it failed to
+ *  load), so the box is never dead. */
 export async function searchPlaysAction(query: string): Promise<TrackStats[]> {
   if (!(await allowed())) return [];
   const q = query.trim();
   if (!q) return [];
   return searchHistory(q, 500);
+}
+
+/** How many matched tracks one hydration call may ask about. The client caps its own match
+ *  list at the same number, so this only bounds a malformed request. */
+const MAX_HYDRATE_IDS = 400;
+
+/** Play rows for a set of track ids — the stats half of the client-side search: the browser
+ *  matched these ids against the index and needs their play counts, times and art. Same row
+ *  shape as searchPlaysAction, so both paths render through the same code. */
+export async function playsForTracksAction(ids: string[]): Promise<TrackStats[]> {
+  if (!(await allowed())) return [];
+  const clean = ids.filter((id) => typeof id === "string" && id.length > 0).slice(0, MAX_HYDRATE_IDS);
+  return getPlaysForTracks(clean);
 }
