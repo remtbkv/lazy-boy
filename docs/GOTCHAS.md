@@ -128,6 +128,16 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   `sync/history.ts`. Tables: `tracks`, `plays` (deduped on `played_at`), `contexts`
   (resolved playlist/album names for the "From" column). The listen history lives on the
   home page (`/home`, streamed below the quick actions) — per-day cards + a searchable log.
+- **Dev and benchmarks bill the PRODUCTION Turso quota — point heavy local work at the
+  local file DB.** `.env.local` carries `TURSO_DATABASE_URL`, so `next dev`, every open
+  localhost tab, `npm run build` prerenders, and every `bench-reads.mjs` run read the real
+  primary, and Turso bills rows SCANNED against the free plan's 500M/month. Two dev-heavy
+  days (2026-08-01 and 08-04/05) each burned on the order of 100M rows this way and drove
+  a 75%-quota warning email. Rule: benchmark/verification/agent runs default to the local
+  file (`data/listens.db` — run with `TURSO_DATABASE_URL` unset) unless the point is to
+  measure the primary itself; a deliberate primary-measuring run should state its expected
+  row cost before it loops. Don't leave localhost tabs open on a dev server pointed at the
+  primary — the 2-min sync poll re-renders (and pre-caching, re-scanned) all day.
 - **`recently-played` only returns the last 50 plays — this drives the whole sync
   design.** Spotify caps that endpoint at 50 and won't page back further, so any play
   that scrolls off before you poll is **gone forever**. Completeness therefore depends
