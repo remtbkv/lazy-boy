@@ -5,6 +5,7 @@ import { ArrowDown, ArrowUp, ChevronDown } from "lucide-react";
 import type { DayStats, TrackStats } from "@/lib/db";
 import { exactTimeShort, formatDuration, timeAgo } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { searchPerfEnabled, startSearchProbe, type IndexStatus } from "@/lib/search-perf";
 import { useNowPlaying } from "@/components/now-playing-context";
 import {
   allTimePlaysAction,
@@ -284,7 +285,10 @@ export function DenHome({
   // revalidates in one 304 with no body.
   const [index, setIndex] = useState<IndexEntry[] | null>(null);
   const indexReq = useRef<Promise<void> | null>(null);
+  // Where a query would be answered from right now. Only the perf readout reads it.
+  const indexStatus = useRef<IndexStatus>("fallback");
   const loadIndex = () => {
+    if (!indexReq.current) indexStatus.current = "fetching";
     indexReq.current ??= fetch("/api/history/search-index")
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
       .then((d: { images?: string[]; tracks?: [string, string, string, number][] }) => {
@@ -299,6 +303,7 @@ export function DenHome({
           Array.isArray(tracks) &&
           (tracks.length === 0 || (Array.isArray(tracks[0]) && tracks[0].length >= 4));
         if (!ok) throw new Error("search index: unrecognised payload shape");
+        indexStatus.current = "memory";
         setIndex(
           tracks.map(([id, name, artist, img]) => ({
             id,
@@ -313,8 +318,18 @@ export function DenHome({
       .catch(() => {
         // Nothing to retry: without an index every keystroke goes to the server instead, which
         // is exactly what this page did before the index existed.
+        indexStatus.current = "fallback";
       });
   };
+
+  // Opt-in timing readout (lib/search-perf.ts): one console line per query, off unless the
+  // `lb-perf` flag is set. Keyed on the query alone — the search effect below also re-runs when
+  // its data lands, and restarting the probe there would mean it never finished. Each keystroke
+  // supersedes the previous probe, so what gets logged is the wait after the last one.
+  useEffect(() => {
+    if (!searchPerfEnabled() || !query.trim()) return;
+    return startSearchProbe(query.trim(), indexStatus.current);
+  }, [query, mode]);
 
   // Fetched on IDLE after Home has painted, not on focus. Focus was too late in the one case
   // that matters: on a cold data cache the server has to build the index (~2.7s against the
@@ -598,6 +613,16 @@ export function DenHome({
 
         {searching ? (
           <div
+            // Read by the opt-in perf probe (lib/search-perf.ts) and by nothing else. `query`
+            // is what makes a mark attributable: without it a probe cannot tell its own rows
+            // from the ones still on screen from the previous keystroke.
+            data-search-results=""
+            data-query={query.trim()}
+            data-rows={groups.length}
+            // "1" stats are on screen · "x" the attempt failed, none are coming · "0" waiting.
+            // The failed state is its own value so the probe can stop and report an honest
+            // dash instead of sitting out its timeout.
+            data-hydrated={statsReady ? "1" : searchFailed ? "x" : "0"}
             className={cn(
               "thin-scroll min-h-0 flex-1 overflow-y-auto",
               searchPending && "opacity-60 transition-opacity",

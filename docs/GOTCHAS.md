@@ -315,6 +315,27 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   serial primary reads stack ~20-30ms each, so dedupe or `Promise.all` them. Never turn a
   single-session primary timing into a rule.
 
+## Measuring a search from the browser (`lb-perf`)
+
+Server logs cannot answer "how long did my search take" — matching runs in the browser against
+the client-side index and the rows are painted there, so the only honest clock is the one in
+the page. Open `/home?perf=1` once (it sticks; `?perf=0` or clearing `localStorage.lb-perf`
+turns it off) and every query logs one console line:
+
+```
+[lb-perf] “bitter” rows=6 paint=18ms art1=18ms artAll=18ms stats=276ms index=memory
+```
+
+All times are from the **last keystroke** (each keystroke supersedes the previous probe, so a
+burst of typing reports the wait after you stopped). `paint` = rows on screen, `art1` / `artAll`
+= first and last album image of the VISIBLE rows (off-screen rows are `loading="lazy"` and never
+fetch at all), `stats` = play counts and times filled in, `index` = where the query was answered
+(`memory` / `fetching` / `fallback`). A dash means it never arrived — `stats=—` is a failed
+hydration, which is reported rather than waited out. Everything is behind one boolean read, so
+with the flag off the readout costs nothing. Implementation: `src/lib/search-perf.ts`, which is
+the ablation harness that measured the album-art variants, so its numbers are comparable with
+the ones quoted in the commit history.
+
 ## Verifying UI with Playwright
 
 - The dev server is usually already running in the background; HMR is reliable now
