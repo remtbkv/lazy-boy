@@ -884,6 +884,19 @@ export async function searchHistory(query: string, limit = 300): Promise<TrackSt
 // with the range bound below that re-read scans ~90 rows, not ~7,000.
 // If the marker can't be read, the call runs UNCACHED: without it there is no proof an entry
 // is current, and fresh-but-slow beats stale.
+//
+// THE CACHE OUTLIVES THE DEPLOYMENT — so the key must identify the SHAPE, not just the data.
+// Vercel's Data Cache is not cleared by a deploy. Every key above answers "is this entry's DATA
+// current"; none of them answers "was this entry written by code that returned the same TYPE".
+// A deploy that changes what a cached function RETURNS therefore reads its predecessor's
+// entries and hands the new code an old-shaped value — which is exactly how the search index
+// shipped broken on 2026-08-05 (details on SEARCH_INDEX_SHAPE below; the payload arrived with
+// no tracks in it and every client silently lost its index).
+// The rule, for all of these: CHANGING THE RETURN SHAPE OF A CACHED READ MEANS MOVING ITS CACHE
+// KEY in the same commit — bump a shape token in the key parts (what `search-index` does) or
+// rename the key array. `TrackStats`, `DayStats` and `StoredPlaylist` are the shapes the four
+// entries below serve; add or remove a field on any of them and their keys must move with it.
+// A stale-shaped entry cannot be detected at runtime and does not expire for a day.
 const FROZEN_TTL_S = 86_400; // a frozen day re-reads at most once a day (see above)
 const LIVE_TTL_S = 3_600; // garbage bound only; write_seq in the key is what keeps these fresh
 // A day is frozen once it is today-2 or older in the user's zone.
@@ -1179,6 +1192,20 @@ async function readPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]>
 export type SearchIndexEntry = [id: string, name: string, artist: string, image: number];
 export type SearchIndex = { images: string[]; tracks: SearchIndexEntry[] };
 
+/** The payload FORMAT, and part of the cache key — BUMP IT with any change to the two types
+ *  above.
+ *
+ *  This is not defensive style, it is a bug that already shipped. Vercel's Data Cache outlives
+ *  a deployment, and the key here was (this function's key parts + the track-rowid version),
+ *  neither of which moves when the SHAPE changes. So the deploy that added album art asked for
+ *  a key whose entry had been written that morning by the previous deploy, got a cache HIT, and
+ *  served the OLD shape — a bare array, which the new route destructured as
+ *  `{ images, tracks }` into two undefineds and shipped a body with no tracks at all. Every
+ *  client that fetched it lost its index, and the search fell back to the server for every
+ *  keystroke, which is the regression this token prevents. The ETag carries it too, for the
+ *  same reason one layer up (a browser holding the old body). */
+export const SEARCH_INDEX_SHAPE = "v2";
+
 /** The index's version marker: the highest rowid in `tracks`.
  *
  *  NOT `meta.write_seq` — that bumps on every play, so keying on it would re-download the
@@ -1209,11 +1236,18 @@ export async function getSearchIndexVersion(): Promise<string> {
  *  The build is the slowest read on this page (2.7s median against the primary), so the FIRST
  *  request after a deploy pays it in full — which is why the client fires this on idle after
  *  Home mounts rather than waiting for the search box to be focused. */
-const searchIndexCached = unstable_cache((_version: string) => readSearchIndex(), ["search-index"], {
-  revalidate: FROZEN_TTL_S,
-});
+const searchIndexCached = unstable_cache(
+  (_version: string, _shape: string) => readSearchIndex(),
+  ["search-index", SEARCH_INDEX_SHAPE],
+  { revalidate: FROZEN_TTL_S },
+);
 export async function getSearchIndex(version: string): Promise<SearchIndex> {
-  return searchIndexCached(version);
+  // The shape token goes in BOTH the key parts and the arguments. Key parts are the documented
+  // cache key; passing it as an argument as well means the identity holds even if a Next
+  // version ever treats key parts as a namespace rather than as key material. Verified by
+  // experiment, not assumption: with the token unchanged, a rebuild reuses the previous build's
+  // entry (that is the hazard, and it reproduces); changing it forces a rebuild of the entry.
+  return searchIndexCached(version, SEARCH_INDEX_SHAPE);
 }
 
 async function readSearchIndex(): Promise<SearchIndex> {

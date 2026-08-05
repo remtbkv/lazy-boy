@@ -109,12 +109,15 @@ type SearchPlays = {
   rows: TrackStats[];
   /** Index path: the ids these rows cover. */
   ids: Set<string>;
-  /** Fallback path: the `mode:query` these rows answer. */
+  /** The `mode:query` these rows answer. Set on failure too — it is what stops the effect
+   *  re-firing forever, and what tells the view the query has been answered at all. */
   key: string;
   /** False when the server hit its row cap — see HYDRATE_ROW_CAP. */
   complete: boolean;
+  /** The request for `key` failed. Distinguishes "no results" from "no answer". */
+  failed: boolean;
 };
-const NO_PLAYS: SearchPlays = { rows: [], ids: new Set(), key: "", complete: true };
+const NO_PLAYS: SearchPlays = { rows: [], ids: new Set(), key: "", complete: true, failed: false };
 
 // The history half of Home: day strip → list → search island. The greeting and the action
 // dock render in the page shell instead, OUTSIDE this component's Suspense boundary, so they
@@ -284,14 +287,23 @@ export function DenHome({
   const loadIndex = () => {
     indexReq.current ??= fetch("/api/history/search-index")
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((d: { images: string[]; tracks: [string, string, string, number][] }) => {
+      .then((d: { images?: string[]; tracks?: [string, string, string, number][] }) => {
+        // A 200 does NOT mean a payload this build can read. A cache one layer up — the
+        // browser's, or Vercel's Data Cache, which outlives a deployment — can hand back a body
+        // written by an older shape of this route; that is what broke production on
+        // 2026-08-05. Both tokens now make that a miss rather than a hit, and this check is the
+        // last line: an unreadable payload counts as NO INDEX (the search falls back to the
+        // server), never as an empty or half-built one.
+        const tracks = d?.tracks;
+        const ok =
+          Array.isArray(tracks) &&
+          (tracks.length === 0 || (Array.isArray(tracks[0]) && tracks[0].length >= 4));
+        if (!ok) throw new Error("search index: unrecognised payload shape");
         setIndex(
-          d.tracks.map(([id, name, artist, img]) => ({
+          tracks.map(([id, name, artist, img]) => ({
             id,
             name,
             artist,
-            // `?.` because a browser can still hold a body from an older shape (the route's
-            // SHAPE token stops that, but a payload is a boundary — don't throw on it).
             image: img >= 0 ? (d.images?.[img] ?? null) : null,
             ln: name.toLowerCase(),
             la: artist.toLowerCase(),
@@ -299,8 +311,8 @@ export function DenHome({
         );
       })
       .catch(() => {
-        // Nothing to report and nothing to retry: without an index every keystroke goes to the
-        // server instead, which is exactly what this page did before.
+        // Nothing to retry: without an index every keystroke goes to the server instead, which
+        // is exactly what this page did before the index existed.
       });
   };
 
@@ -365,9 +377,18 @@ export function DenHome({
       // Fallback: the index is in flight or failed. This is the old path, unchanged — the box
       // is never dead, it just goes back to costing a round trip per query.
       const id = setTimeout(() => {
-        searchPlaysAction(q).then((rows) => {
-          if (liveKey.current === k) setPlays({ rows, ids: new Set(), key: k, complete: true });
-        });
+        searchPlaysAction(q)
+          .then((rows) => {
+            if (liveKey.current === k) setPlays({ rows, ids: new Set(), key: k, complete: true, failed: false });
+          })
+          // Without this the page hangs on "Searching…" for as long as it is open — a rejected
+          // action left `plays` untouched, so the pending flag below never cleared. That is the
+          // regression Rem hit: the index was unreadable (stale-shaped cache entry), every
+          // query fell through to here, and one failed action was terminal. Record the failure
+          // under the same key a success would use, so the view resolves and the effect stops.
+          .catch(() => {
+            if (liveKey.current === k) setPlays({ rows: [], ids: new Set(), key: k, complete: true, failed: true });
+          });
       }, SEARCH_DEBOUNCE_MS);
       return () => clearTimeout(id);
     }
@@ -379,10 +400,18 @@ export function DenHome({
     if (plays.complete && matched.every((m) => plays.ids.has(m.id))) return;
     const ids = matched.map((m) => m.id);
     const id = setTimeout(() => {
-      playsForTracksAction(ids).then((rows) => {
-        if (liveKey.current !== k) return;
-        setPlays({ rows, ids: new Set(ids), key: k, complete: rows.length < HYDRATE_ROW_CAP });
-      });
+      playsForTracksAction(ids)
+        .then((rows) => {
+          if (liveKey.current !== k) return;
+          setPlays({ rows, ids: new Set(ids), key: k, complete: rows.length < HYDRATE_ROW_CAP, failed: false });
+        })
+        // The rows are already on screen here, so a failure costs counts and times, not the
+        // result. Recording it under `key` is what stops the effect retrying on every render.
+        .catch(() => {
+          if (liveKey.current === k) {
+            setPlays({ rows: [], ids: new Set(), key: k, complete: true, failed: true });
+          }
+        });
       // 120ms: this no longer guards a slow query (the rows are already on screen), it just
       // stops a burst of typing firing a call per character.
     }, SEARCH_DEBOUNCE_MS);
@@ -460,6 +489,9 @@ export function DenHome({
   // Only the fallback path has nothing to show while it waits — the index path already has the
   // rows and is only missing their numbers.
   const searchPending = searching && !matched && !statsReady;
+  // Answered, but with a failure rather than results. Kept distinct from "no results": telling
+  // someone their song isn't in their history when the request simply failed is a lie.
+  const searchFailed = searching && plays.failed && plays.key === `${mode}:${query.trim()}`;
 
   const groups = useMemo<(SongGroup | ArtistGroup)[]>(() => {
     if (!searching) return [];
@@ -575,7 +607,9 @@ export function DenHome({
               <p className="py-10 text-center text-sm text-muted-foreground">
                 {searchPending
                   ? "Searching…"
-                  : `No ${mode === "songs" ? "songs" : "artists"} match “${query.trim()}”.`}
+                  : searchFailed
+                    ? "Couldn’t reach the server. Edit the search to try again."
+                    : `No ${mode === "songs" ? "songs" : "artists"} match “${query.trim()}”.`}
               </p>
             ) : (
               <ul className="divide-y divide-border/50">

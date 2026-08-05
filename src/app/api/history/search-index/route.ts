@@ -1,5 +1,5 @@
 import { auth } from "@/lib/auth";
-import { getSearchIndex, getSearchIndexVersion } from "@/lib/db";
+import { getSearchIndex, getSearchIndexVersion, SEARCH_INDEX_SHAPE } from "@/lib/db";
 
 // The compact search index Home filters in the browser: every played track as
 // [id, name, artist, image] (see "The client-side search index" in src/lib/db.ts for the shape,
@@ -17,23 +17,18 @@ import { getSearchIndex, getSearchIndexVersion } from "@/lib/db";
 // who you are" and the wrong one to paper over with `[]`.
 export const dynamic = "force-dynamic";
 
-// BUMP THIS whenever the JSON shape changes. Caught in testing, not theory: adding album art
-// left the data version and the day bucket unchanged, so a browser holding yesterday's body
-// revalidated to a 304 and kept parsing the OLD shape — art silently absent until the deploy
-// rolled past midnight. The data version answers "is the content current"; nothing else
-// answered "can this client still read it".
-const SHAPE = "v2";
-
 export async function GET(req: Request) {
   if (!(await auth())) return new Response("Unauthorized", { status: 401 });
 
   const version = await getSearchIndexVersion();
-  // Three parts. SHAPE is the format (above). The version moves when `tracks` gains a row (a
-  // song played for the first time) — that is the real content invalidation. The UTC day bucket
-  // is the backstop: the version cannot see an in-place re-tag of a track's name or art, so
-  // without it a stale entry could live in a browser cache indefinitely. With it, staleness is
-  // bounded at ~24h.
-  const etag = `"si-${SHAPE}-${version}-${new Date().toISOString().slice(0, 10)}"`;
+  // Three parts. SEARCH_INDEX_SHAPE is the payload format — the SAME token that keys the
+  // server-side cache entry (db.ts), so one bump moves both layers and neither can serve a
+  // shape this client can't read. The version moves when `tracks` gains a row (a song played
+  // for the first time), which is the real content invalidation. The UTC day bucket is the
+  // backstop: the version cannot see an in-place re-tag of a track's name or art, so without it
+  // a stale entry could live in a browser cache indefinitely. With it, staleness is bounded at
+  // ~24h.
+  const etag = `"si-${SEARCH_INDEX_SHAPE}-${version}-${new Date().toISOString().slice(0, 10)}"`;
   const headers: Record<string, string> = {
     ETag: etag,
     "Cache-Control": "private, max-age=0, must-revalidate",

@@ -224,6 +224,30 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   cache-busting query param instead; and never cache anything from `meta` (tokens, locks,
   `*_synced_at`) or the auth path — those are coordination reads and must stay live on the
   primary.
+- **The Data Cache OUTLIVES THE DEPLOY, so a cache key must identify the payload SHAPE, not
+  just the data.** This shipped broken on 2026-08-05 and is the one cross-deploy hazard every
+  `unstable_cache` entry in `db.ts` shares. The search index was keyed on
+  (key parts + `MAX(rowid)` version); adding album art changed what the cached function
+  RETURNED but moved neither, so the new deploy hit the previous deploy's entry, got the old
+  bare-array value, destructured it as `{ images, tracks }` into two undefineds and served a
+  body with no tracks in it. Every browser then silently lost its index and fell back to a
+  server search per keystroke. Reproduced locally, `next start`, no Vercel needed: build with a
+  marker in the cached value → request it → change the marker → rebuild **without** clearing
+  `.next/cache` → the route still serves the FIRST build's marker. Bump a shape token in the key
+  parts and the same rebuild serves the new one. So: **changing the return shape of a cached
+  read means moving its cache key in the same commit** (`SEARCH_INDEX_SHAPE` is the pattern —
+  it keys the entry AND rides in the ETag, so the server cache and the browser cache invalidate
+  together). `TrackStats` / `DayStats` / `StoredPlaylist` are the shapes the other cached reads
+  serve; add or remove a field on one of them and its key must move too. Nothing detects a
+  stale-shaped entry at runtime, and it does not expire for a day.
+- **A client must never treat "HTTP 200" as "a payload I can read", and never let a failed
+  request leave a spinner up.** Same incident, second half: the search box hung on "Searching…"
+  indefinitely, which was NOT the stale shape (that degrades to the server fallback) but a
+  rejected server action with no `.catch` — the state that renders the spinner was only ever
+  cleared on success. Any promise a view's pending flag depends on needs a failure path that
+  records the attempt under the same key a success would, or the UI waits forever. Verified by
+  aborting the action in Playwright: before, "Searching…" at 9s and counting; after, a real
+  message at 300ms.
 - **A bundled replica snapshot cannot speed up cold starts — the primary rotates its libSQL
   replication generation periodically** (observed 2026-08-01: as often as every ~7–11 min —
   gen 4470→4473 over ~25 min — but a later 19-min window sat on one generation; cadence is
