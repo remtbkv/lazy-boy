@@ -100,7 +100,10 @@ export function DenChrome({ name, image }: { name: string; image: string | null 
                 tabRefs.current[t.key] = el ?? undefined;
               }}
               className={cn(
-                "rounded-md px-3 py-1.5 text-[15px] font-medium transition-colors",
+                // No focus ring on the tabs: arrow-key nav moves DOM focus with the
+                // selection, and the ring hopping tab to tab reads as a stray box.
+                // Active state is already carried by the text weight/colour.
+                "rounded-md px-3 py-1.5 text-[15px] font-medium transition-colors outline-none focus-visible:outline-none",
                 t.key === active
                   ? "text-foreground"
                   : "text-muted-foreground/70 hover:text-foreground",
