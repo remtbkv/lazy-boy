@@ -191,6 +191,39 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   A cold instance is never blocked on the copy — `getReader()` returns the primary until the
   first sync lands — and if the replica can't be built at all, everything keeps working on
   the primary. Kill switch: `LAZYBOY_NO_REPLICA=1`.
+- **The render-path reads are cached in Next's data cache, and `meta.write_seq` — not a
+  timer — is what keeps them fresh.** With the replica off in production (the kill switch is
+  set there, so the syncs quota stops burning) every day-strip / per-day / playlist-grid read
+  is a scan against the remote primary, and Turso bills rows SCANNED: revisiting a day re-read
+  the whole `plays` table to produce a byte-identical answer. Measured 2026-08-05 against the
+  primary, medians (min–max), n=7, 6,995 plays: one day's plays 722 ms (170–1,023), the 14-day
+  strip 896 ms (235–3,008), the whole-history strip 1,405 ms (1,047–4,474) — the last of which
+  fired on *every* Home mount. (A second session half an hour later put the same day read at
+  136 ms; absolute figures are session weather, the shape isn't. `bench-reads.mjs day` re-runs it.) So `getPlaysByDay` / `getDailyStats` / `getAllTimePlays` /
+  `getStoredPlaylists` are wrapped in `unstable_cache` in two shapes:
+  **LIVE** (today, yesterday, the strip, the all-time list, the playlist grid) takes
+  `meta.write_seq` as an argument purely so it lands in the cache KEY — any write that changes
+  what they read bumps the marker, so the next read has a different key and recomputes. That is
+  the whole freshness guarantee for TODAY, and it is why the ~2-min sync still surfaces new
+  plays immediately: `recordPlays` bumps the marker, and `syncReader()` drops the request's
+  shared copy of it, so the re-read that follows a sync cannot be served the pre-sync entry.
+  The `revalidate` on those entries is a garbage bound on superseded keys, **not** the
+  freshness mechanism — never reach for a shorter TTL to "make it fresher", the key already
+  did it. **FROZEN** (a day older than **today−2 in the user's zone**) drops the marker from
+  the key, so every later visit — any tab, any instance — costs zero DB reads. The cutoff is
+  today−2, not yesterday: plays only land at "now", but a resumed sync backfills up to
+  Spotify's last-50-plays window, so yesterday must stay live. And frozen entries still expire
+  daily rather than living forever, because two columns of a past day are *derived* and can be
+  rewritten later — `source` resolves from `contexts` (a name that 403'd at play time can
+  resolve a month on) and from `plays.ctx_orphan`, which flips when a playlist's membership
+  changes. If the marker can't be read at all, the call runs UNCACHED — without it there is no
+  proof an entry is current, and fresh-but-slow beats stale.
+  Two traps when verifying this: `unstable_cache` is bypassed for any request carrying
+  `cache-control: no-cache` in dev (`incremental-cache/index.js`), so a probe fetched with
+  `cache: "no-store"` will show a DB read on every hit and look like the cache is dead — use a
+  cache-busting query param instead; and never cache anything from `meta` (tokens, locks,
+  `*_synced_at`) or the auth path — those are coordination reads and must stay live on the
+  primary.
 - **A bundled replica snapshot cannot speed up cold starts — the primary rotates its libSQL
   replication generation periodically** (observed 2026-08-01: as often as every ~7–11 min —
   gen 4470→4473 over ~25 min — but a later 19-min window sat on one generation; cadence is
@@ -208,7 +241,16 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
 - **If a query is slow, count the rows it SCANS, not the rows it returns.** Both bad ones
   returned little. `searchHistory` is `LIKE '%q%'`, unindexable by construction, so it scans
   `tracks` — left as-is, because on the replica it is ~6 ms and the table grows with distinct
-  songs, not plays. `sourceExpr` was worse and is fixed (next bullet).
+  songs, not plays. `sourceExpr` was worse and is fixed (next bullet). `getPlaysByDay` was the
+  third: `date(played_at, '±N minutes') = :day` is the *authority* on which local day a play
+  belongs to, but it's a function of the column, so no index can serve it and one day's ~90
+  rows cost a full `plays` scan. It now carries a redundant `played_at >= :from AND < :to` in
+  raw UTC alongside the `date()` equality — same window, expressed so `idx_plays_played_at` can
+  seek it (`SCAN p` → `SEARCH p USING INDEX idx_plays_played_at`). Verified equal rather than
+  assumed: identical rows for all 67 days in the store, and a deliberately 1h-off range made 29
+  of them disagree, so the check can actually fail (`bench-reads.mjs day` runs both halves). Add the same pair to any new day-scoped
+  query — the `date()` half alone is correct and slow, the range half alone is fast and wrong
+  at the boundary.
 - **A play's "From" is stored (`plays.ctx_orphan`), not derived per read.** The rule — blank
   the source when Spotify reports a playlist context but the song isn't in that cached
   playlist — used to be two correlated `playlist_tracks` subqueries per *output row*, which

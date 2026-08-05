@@ -4,6 +4,7 @@
 // runtime; falls back to a local SQLite file in dev when TURSO_DATABASE_URL is unset.
 import "server-only";
 import { cache } from "react";
+import { unstable_cache } from "next/cache";
 import path from "node:path";
 import fs from "node:fs";
 import { createClient, type Client, type InStatement } from "@libsql/client";
@@ -399,6 +400,17 @@ async function readWriteSeq(client: Client): Promise<string | null> {
   return res.rows[0] ? String(res.rows[0].value) : null;
 }
 
+// The primary's marker, read ONCE per request and shared: the freshness gate below and every
+// cached read (see "Read caching") both key off it, and three serial single-key primary reads
+// cost 65-72ms against 23-26ms for one (the round-trip note at the top of the file). Same
+// per-request box as readerBox/tokenBox; outside a request it's a plain read.
+const seqBox = cache(() => ({ p: null as Promise<string | null> | null }));
+function primaryWriteSeq(): Promise<string | null> {
+  const box = seqBox();
+  box.p ??= getClient().then(readWriteSeq);
+  return box.p;
+}
+
 // One freshness verdict per REQUEST, not per query: a page runs several scanning reads and
 // they must not each pay a primary round trip. Same shape as playsWithListened below and the
 // token box in auth.ts — React cache() gives a per-request box; outside a request (the cron
@@ -414,7 +426,7 @@ async function chooseReader(replica: Client): Promise<Client> {
   const primary = await getClient();
   let primarySeq: string | null;
   try {
-    primarySeq = await readWriteSeq(primary);
+    primarySeq = await primaryWriteSeq();
   } catch {
     // The marker read is the ONE thing standing between a read and its data, so it must not
     // be able to take reads down. If the primary is unreachable, serve the local copy and say
@@ -467,6 +479,13 @@ function backgroundSync(replica: Client): void {
  *  sees what was just written — the gate would route that read to the primary otherwise, and
  *  read-after-own-write shouldn't have to pay for a scan against it. */
 async function syncReader(): Promise<void> {
+  // Every caller of this just bumped the marker, so this request's shared copy of it is now
+  // one behind — and the cached reads below key off that copy, so leaving it in place would
+  // serve the PRE-write entry to the read that follows the write (exactly what
+  // refreshHistoryAction does: sync, then re-read the day). Dropped before the replica check
+  // on purpose: with LAZYBOY_NO_REPLICA=1 there is no replica and the rest of this is a no-op,
+  // but the cache keys still have to move.
+  seqBox().p = null;
   const r = gr.__listenReader;
   if (!r) return;
   try {
@@ -826,9 +845,81 @@ export async function searchHistory(query: string, limit = 300): Promise<TrackSt
   return plainRows(res.rows) as unknown as TrackStats[];
 }
 
+// ── Read caching (Next's data cache, keyed on the write marker) ─────────────────────────────
+// The render-path reads below answer the same question over and over — the day strip, one
+// day's plays, the playlist grid — against a store that only ever grows at "now". With the
+// replica off (LAZYBOY_NO_REPLICA=1, the note above) every one of them is a scan against the
+// primary, and Turso bills rows SCANNED, not returned, so a second visit to the same day
+// re-read the whole plays table to produce a byte-identical answer. Medians (min-max), n=7,
+// 2026-08-05, 6,995 plays, straight at the primary (`bench-reads.mjs day` re-runs the first two):
+//   one day's plays, unbounded scan   722ms (170-1,023)      ~6,995 rows scanned
+//   the same day, range-bounded       498ms (88-693)         ~90 rows scanned
+//   the 14-day strip                  896ms (235-3,008)
+//   the whole-history strip           1,405ms (1,047-4,474)  ← fired on EVERY Home mount
+//   the playlist grid                 28ms (24-55)
+//   one indexed meta key              21ms (20-115)
+// Half an hour later the same box measured 136ms (113-418) / 58ms (42-174) for the first two —
+// the absolute numbers are session weather, per the warning at the top of this file. What
+// reproduced across both replicates is the SHAPE: the unbounded read costs ~2× the bounded one
+// and scans ~75× the rows, and both are far above the ~20ms a cache hit replaces.
+//
+// So each goes through unstable_cache, in one of two shapes:
+//   • FROZEN — a day at or older than today-2 in the USER'S zone. Its plays can no longer
+//     change:
+//     plays only arrive at "now", and the furthest back a resumed sync can reach is Spotify's
+//     last-50-plays window. Two days of slack because that window is the bound, not the clock.
+//     Keyed on (day, offset) only, so every later visit — any tab, any instance, any day —
+//     is a cache hit and costs ZERO DB reads.
+//   • LIVE — today, yesterday, the strip, the all-time list, the playlist grid. Keyed on
+//     `meta.write_seq` (the same marker the replica gate uses), so ANY write that changes what
+//     they read produces a different cache key and the next read recomputes. That is what
+//     keeps TODAY honest on the existing ~2-min cadence: recordPlays bumps the marker exactly
+//     when new plays land, and syncReader() drops this request's copy of it, so the re-read
+//     that follows a sync cannot be served a pre-sync entry. The TTL on these entries is a
+//     garbage bound on superseded keys, NOT the freshness mechanism — the key is.
+// A frozen entry still expires daily rather than taking `revalidate: false`, even though its
+// plays are immutable: two of its columns are derived and can still be rewritten later — `source` resolves from `contexts`
+// (a name that 403'd at play time can resolve a month on) and from `plays.ctx_orphan`, which
+// flips when a playlist's membership changes. A day's expiry bounds that at one re-read, and
+// with the range bound below that re-read scans ~90 rows, not ~7,000.
+// If the marker can't be read, the call runs UNCACHED: without it there is no proof an entry
+// is current, and fresh-but-slow beats stale.
+const FROZEN_TTL_S = 86_400; // a frozen day re-reads at most once a day (see above)
+const LIVE_TTL_S = 3_600; // garbage bound only; write_seq in the key is what keeps these fresh
+// A day is frozen once it is today-2 or older in the user's zone.
+const FROZEN_AFTER_DAYS = 2;
+
+/** The cache-key component for a LIVE read: the primary's write marker, or null when it can't
+ *  be read (→ the caller must skip the cache rather than guess). */
+async function liveKey(): Promise<string | null> {
+  try {
+    return (await primaryWriteSeq()) ?? "0";
+  } catch {
+    return null;
+  }
+}
+
+function isFrozenDay(day: string, offsetMin: number): boolean {
+  const offMs = clampOffset(offsetMin) * 60_000;
+  const cutoff = new Date(Date.now() + offMs - FROZEN_AFTER_DAYS * 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+  return day <= cutoff;
+}
+
 /** Most-played tracks all-time, capped so the list never balloons to thousands.
  *  Feeds the history table when the "All time" card is selected. `plays` is all-time. */
+const allTimePlaysCached = unstable_cache(
+  (limit: number, _seq: string) => readAllTimePlays(limit),
+  ["all-time-plays"],
+  { revalidate: LIVE_TTL_S },
+);
 export async function getAllTimePlays(limit: number): Promise<TrackStats[]> {
+  const seq = await liveKey();
+  return seq === null ? readAllTimePlays(limit) : allTimePlaysCached(limit, seq);
+}
+
+async function readAllTimePlays(limit: number): Promise<TrackStats[]> {
   const client = await getReader();
   const res = await client.execute({
     sql: `${SELECT_TRACK} GROUP BY t.id
@@ -889,12 +980,25 @@ export async function recomputeAllTimeStats(): Promise<AllTimeStats> {
 // client-supplied, so it's clamped to a valid tz range and integer-ized before inlining.
 // One current offset is applied to all rows, so a play within ~1h of a *past* DST change
 // can land a day off — acceptable for personal history.
+function clampOffset(offsetMin: number): number {
+  return Math.max(-720, Math.min(840, Math.round(offsetMin) || 0));
+}
 function localDay(col: string, offsetMin: number): string {
-  const m = Math.max(-720, Math.min(840, Math.round(offsetMin) || 0));
+  const m = clampOffset(offsetMin);
   return `date(${col}, '${m >= 0 ? "+" : ""}${m} minutes')`;
 }
 
+const dailyStatsCached = unstable_cache(
+  (offsetMin: number, days: number, _seq: string) => readDailyStats(offsetMin, days),
+  ["daily-stats"],
+  { revalidate: LIVE_TTL_S },
+);
 export async function getDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
+  const seq = await liveKey();
+  return seq === null ? readDailyStats(offsetMin, days) : dailyStatsCached(offsetMin, days, seq);
+}
+
+async function readDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
   const client = await getReader();
   // Only fetch the recent window we actually display (a couple extra days of buffer for the
   // tz day-edge), so this stays cheap as total history grows — not a full-table scan. Uses
@@ -957,14 +1061,50 @@ export async function hasPlaysBeforeDay(day: string, offsetMin = 0): Promise<boo
 }
 
 /** Tracks played on a specific local day (YYYY-MM-DD), most-played first.
- *  `plays`/`lastPlayed`/`source` are scoped to that day, not all-time. */
+ *  `plays`/`lastPlayed`/`source` are scoped to that day, not all-time.
+ *
+ *  Two cache shapes, one per day-kind — see "Read caching" above for which and why. */
+const playsByDayFrozen = unstable_cache(
+  (day: string, offsetMin: number) => readPlaysByDay(day, offsetMin),
+  ["plays-by-day-frozen"],
+  { revalidate: FROZEN_TTL_S },
+);
+const playsByDayLive = unstable_cache(
+  (day: string, offsetMin: number, _seq: string) => readPlaysByDay(day, offsetMin),
+  ["plays-by-day-live"],
+  { revalidate: LIVE_TTL_S },
+);
 export async function getPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]> {
+  if (isFrozenDay(day, offsetMin)) return playsByDayFrozen(day, offsetMin);
+  const seq = await liveKey();
+  return seq === null ? readPlaysByDay(day, offsetMin) : playsByDayLive(day, offsetMin, seq);
+}
+
+async function readPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]> {
   const client = await getReader();
+  // The date() equality is the AUTHORITY on which local day a play belongs to — it stays.
+  // What it can't do is drive an index (a function of the column), so on its own this read
+  // SCANNED THE WHOLE plays TABLE for the ~90 rows of one day: `SCAN p USING COVERING INDEX
+  // sqlite_autoindex_plays_1`. The redundant range bound is the same window expressed in raw
+  // UTC instants, which idx_plays_played_at can seek: `SEARCH p USING INDEX
+  // idx_plays_played_at (played_at>? AND played_at<?)`. Interleaved medians against the primary,
+  // n=7 each, 2026-08-05: 722ms → 498ms in one session and 136ms → 58ms in another — and
+  // ~6,995 rows scanned → ~90, which is what the read quota actually counts.
+  // Verified equal, not assumed: old vs new returned identical rows for all 67 days in the
+  // store, and a deliberately 1h-off range made 29 of them disagree — the check can fail.
+  // Both halves re-run with `node --env-file=.env.local scripts/bench-reads.mjs day`.
+  const offMs = clampOffset(offsetMin) * 60_000;
+  const start = Date.parse(day + "T00:00:00.000Z") - offMs;
   const res = await client.execute({
     sql: `${SELECT_TRACK}
-          WHERE ${localDay("p.played_at", offsetMin)} = :day
+          WHERE p.played_at >= :from AND p.played_at < :to
+            AND ${localDay("p.played_at", offsetMin)} = :day
           GROUP BY t.id ORDER BY plays DESC, lastPlayed DESC`,
-    args: { day },
+    args: {
+      day,
+      from: new Date(start).toISOString(),
+      to: new Date(start + 86_400_000).toISOString(),
+    },
   });
   return plainRows(res.rows) as unknown as TrackStats[];
 }
@@ -1078,7 +1218,20 @@ export async function storePlaylists(rows: StoredPlaylist[], meId: string | null
   await syncReader();
 }
 
+// LIVE-keyed (see "Read caching"): the grid and the dock's panels both read this on every
+// visit, and the list only moves when storePlaylists rewrites it — which is also the only
+// branch that bumps the marker, since its unchanged fast path writes meta and nothing else.
+const storedPlaylistsCached = unstable_cache(
+  (_seq: string) => readStoredPlaylists(),
+  ["stored-playlists"],
+  { revalidate: LIVE_TTL_S },
+);
 export async function getStoredPlaylists(): Promise<StoredPlaylist[]> {
+  const seq = await liveKey();
+  return seq === null ? readStoredPlaylists() : storedPlaylistsCached(seq);
+}
+
+async function readStoredPlaylists(): Promise<StoredPlaylist[]> {
   const client = await getReader();
   const res = await client.execute(
     `SELECT id, name, owner_id AS ownerId, image, track_count AS trackCount

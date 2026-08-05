@@ -1,6 +1,6 @@
 // Read-benchmark harness for the src/lib/db.ts query-conventions block.
 // READ-ONLY against the primary and the live replica file (local file measurements run on a
-// COPY of data/replica.db in os.tmpdir()). Modes: main | cold | sync
+// COPY of data/replica.db in os.tmpdir()). Modes: main | cold | sync | idx | day
 import { createClient } from "@libsql/client";
 import fs from "node:fs";
 import os from "node:os";
@@ -400,6 +400,72 @@ async function modeMain() {
   console.log("WROTE scripts/bench-reads-results.json");
 }
 
+/** `day` — getPlaysByDay's two formulations, against the PRIMARY (the shape production runs
+ *  with LAZYBOY_NO_REPLICA=1). Both halves matter and both print:
+ *    TIMING    the `date()` equality alone (no index can serve it → full plays scan) vs the
+ *              same query with the redundant raw-UTC range bound that idx_plays_played_at can
+ *              seek. Interleaved round-robin, so a session-wide slowdown hits both equally.
+ *    EQUALITY  every local day in the store, old rows vs new rows, byte-compared. This is the
+ *              known-answer half — the range bound is only allowed to exist because it changes
+ *              nothing. Exits non-zero on any mismatch.
+ *  `node --env-file=.env.local scripts/bench-reads.mjs day [offsetMin]` (default −240, NY summer). */
+async function modeDay() {
+  const offsetMin = Number(process.argv[3] ?? -240);
+  const m = Math.max(-720, Math.min(840, Math.round(offsetMin) || 0));
+  const localDay = (col) => `date(${col}, '${m >= 0 ? "+" : ""}${m} minutes')`;
+  // db.ts getPlaysByDay, before and after.
+  const OLD = (day) => ({
+    sql: `${SELECT_TRACK("LEFT")} WHERE ${localDay("p.played_at")} = :day
+          GROUP BY t.id ORDER BY plays DESC, lastPlayed DESC`,
+    args: { day },
+  });
+  const NEW = (day) => {
+    const start = Date.parse(day + "T00:00:00.000Z") - m * 60_000;
+    return {
+      sql: `${SELECT_TRACK("LEFT")}
+            WHERE p.played_at >= :from AND p.played_at < :to
+              AND ${localDay("p.played_at")} = :day
+            GROUP BY t.id ORDER BY plays DESC, lastPlayed DESC`,
+      args: {
+        day,
+        from: new Date(start).toISOString(),
+        to: new Date(start + 86_400_000).toISOString(),
+      },
+    };
+  };
+
+  const client = mkPrimary();
+  const days = (
+    await client.execute(`SELECT DISTINCT ${localDay("played_at")} AS d FROM plays ORDER BY d`)
+  ).rows.map((r) => String(r.d));
+  // Time a day in the middle of the history, not the newest (today is still filling up).
+  const sample = days[Math.max(0, days.length - 3)];
+  const { cells } = await runGroup(
+    client,
+    [
+      { key: "unbounded", run: (c) => c.execute(OLD(sample)) },
+      { key: "rangeBound", run: (c) => c.execute(NEW(sample)) },
+      SELECT1,
+    ],
+    7,
+  );
+  console.log(`TIMING day=${sample} offsetMin=${m}`);
+  for (const [k, v] of Object.entries(cells)) {
+    console.log(`  ${k.padEnd(11)} ${v.median}ms (${v.min}-${v.max}, n=${v.n}) rows=${v.rows}`);
+  }
+
+  let bad = 0;
+  for (const d of days) {
+    const [a, b] = await Promise.all([client.execute(OLD(d)), client.execute(NEW(d))]);
+    if (ser(a.rows) !== ser(b.rows)) {
+      bad++;
+      console.log(`  MISMATCH ${d}: ${a.rows.length} rows vs ${b.rows.length}`);
+    }
+  }
+  console.log(`EQUALITY  ${days.length} days, ${bad} mismatches`);
+  if (bad > 0) process.exitCode = 1;
+}
+
 /** Re-run measurement 10 alone and merge it into the existing results JSON. */
 async function modeIdx() {
   const RESULTS = path.join(REPO, "scripts", "bench-reads-results.json");
@@ -419,4 +485,5 @@ async function modeIdx() {
 if (MODE === "cold") await modeCold();
 else if (MODE === "sync") await modeSync();
 else if (MODE === "idx") await modeIdx();
+else if (MODE === "day") await modeDay();
 else await modeMain();

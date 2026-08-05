@@ -149,6 +149,15 @@ export function DenHome({
     if (all.length) setDaily(all.slice(0, days));
   };
 
+  // One day into the cache. Shared by the click path and the neighbour prefetch below so a
+  // day fetched either way is stored — and persisted — identically.
+  const fetchDay = (day: string) =>
+    (day === "all" ? allTimePlaysAction() : dayTracksAction(day)).then((rows) => {
+      cache.current.set(day, rows);
+      persistDay(day, rows);
+      return rows;
+    });
+
   const select = (day: string) => {
     if (day === selected) return;
     setSelected(day);
@@ -159,17 +168,39 @@ export function DenHome({
     }
     const req = ++dayReq.current;
     setDayPending(true);
-    const load = day === "all" ? allTimePlaysAction() : dayTracksAction(day);
-    load
+    fetchDay(day)
       .then((rows) => {
-        cache.current.set(day, rows);
-        persistDay(day, rows);
         if (dayReq.current === req) setTracks(rows);
       })
       .finally(() => {
         if (dayReq.current === req) setDayPending(false);
       });
   };
+
+  // Prefetch the two days either side of the one you're on. Day switching was a server round
+  // trip per uncached day — 294ms median (229-334, n=8, dev + replica, 2026-08-05), and the
+  // dominant term in production is the read itself — paid AFTER the click, which is what made
+  // walking the strip feel slow. The neighbours are the days a click is actually going to ask
+  // for next, so they're fetched while you're reading the current one and the click becomes a
+  // cache hit. Cheap to be wrong: a past day's server-side entry is cached (db.ts "Read
+  // caching"), so an unused warm costs one indexed ~90-row read at most, and nothing after.
+  const warming = useRef(new Set<string>());
+  useEffect(() => {
+    const i = daily.findIndex((d) => d.day === selected);
+    if (i < 0) return; // "all", or a day the strip hasn't loaded — nothing adjacent to warm
+    for (const day of [daily[i + 1]?.day, daily[i - 1]?.day]) {
+      if (!day || cache.current.has(day) || warming.current.has(day)) continue;
+      warming.current.add(day);
+      void fetchDay(day)
+        .catch(() => {
+          /* a failed warm is invisible: the click path fetches it again for real */
+        })
+        .finally(() => warming.current.delete(day));
+    }
+    // fetchDay/persistDay are re-created every render but close over refs only; listing them
+    // would re-run this on every render instead of when the day (or the strip) changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, daily]);
 
   // ---- Search (debounced server action over the FULL history) ----
   const [query, setQuery] = useState("");
