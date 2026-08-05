@@ -481,7 +481,7 @@ async function modeDay() {
  *              miss any. Exits non-zero on a miss.
  *  `node --env-file=.env.local scripts/bench-reads.mjs search` */
 async function modeSearch() {
-  const SEARCH_INDEX = `SELECT t.id AS id, t.name AS name, t.artist AS artist
+  const SEARCH_INDEX = `SELECT t.id AS id, t.name AS name, t.artist AS artist, t.album_image AS image
      FROM plays p JOIN tracks t ON t.id = p.track_id
      GROUP BY p.track_id
      ORDER BY MAX(p.played_at) DESC`;
@@ -491,11 +491,18 @@ async function modeSearch() {
      ORDER BY p.played_at DESC LIMIT ?`;
 
   const client = mkPrimary();
-  const index = (await client.execute(SEARCH_INDEX)).rows.map((r) => [
-    String(r.id),
-    String(r.name),
-    String(r.artist),
-  ]);
+  // Same interning db.ts readSearchIndex does, so PAYLOAD below is the body actually served.
+  const images = [];
+  const seen = new Map();
+  const index = (await client.execute(SEARCH_INDEX)).rows.map((r) => {
+    const url = r.image == null ? null : String(r.image);
+    let at = -1;
+    if (url) {
+      at = seen.get(url) ?? -1;
+      if (at === -1) seen.set(url, (at = images.push(url) - 1));
+    }
+    return [String(r.id), String(r.name), String(r.artist), at];
+  });
   const sampleIds = index.slice(0, 50).map((e) => e[0]);
 
   const { cells } = await runGroup(
@@ -518,13 +525,20 @@ async function modeSearch() {
     console.log(`  ${k.padEnd(13)} ${v.median}ms (${v.min}-${v.max}, n=${v.n}) rows=${v.rows}`);
   }
 
-  const body = Buffer.from(JSON.stringify(index));
-  const totalTracks = Number((await client.execute("SELECT COUNT(*) AS n FROM tracks")).rows[0].n);
-  console.log(
-    `PAYLOAD   ${index.length} played tracks of ${totalTracks} in the table — ` +
-      `raw ${body.length}B, gzip ${zlib.gzipSync(body, { level: 6 }).length}B, ` +
-      `brotli ${zlib.brotliCompressSync(body).length}B`,
+  const ver = String((await client.execute(VERSION)).rows[0].v);
+  const body = Buffer.from(JSON.stringify({ v: ver, images, tracks: index }));
+  const noArt = Buffer.from(
+    JSON.stringify({ v: ver, tracks: index.map((e) => [e[0], e[1], e[2]]) }),
   );
+  const totalTracks = Number((await client.execute("SELECT COUNT(*) AS n FROM tracks")).rows[0].n);
+  const sz = (b) =>
+    `raw ${b.length}B, gzip ${zlib.gzipSync(b, { level: 6 }).length}B, brotli ${zlib.brotliCompressSync(b).length}B`;
+  console.log(
+    `PAYLOAD   ${index.length} played tracks of ${totalTracks} in the table, ` +
+      `${images.length} distinct album images`,
+  );
+  console.log(`  served (with art)  ${sz(body)}`);
+  console.log(`  without art        ${sz(noArt)}   ← what art costs`);
 
   // EQUALITY. Two query shapes on purpose: narrow ones, where the 500-row cap can't bite and
   // the two answers should be identical, and a broad one that exercises the cap.

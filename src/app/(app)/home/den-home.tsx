@@ -86,7 +86,15 @@ type ArtistGroup = {
 // One track in the client-side search index. `ln`/`la` are the lower-cased name/artist,
 // folded once when the index loads so a keystroke is ~3,000 String.includes calls over
 // strings already in the right case instead of ~3,000 fresh toLowerCase allocations.
-type IndexEntry = { id: string; name: string; artist: string; ln: string; la: string };
+// `image` is resolved from the payload's interned URL table at load time.
+type IndexEntry = {
+  id: string;
+  name: string;
+  artist: string;
+  image: string | null;
+  ln: string;
+  la: string;
+};
 
 // Cap on how many matched tracks a query may carry: a one-letter query matches thousands, and
 // these ids are exactly what the hydration call asks about. Mirrored server-side in
@@ -248,12 +256,14 @@ export function DenHome({
   // history — unindexable by construction (GOTCHAS: count the rows a query SCANS), so each
   // character paid a round trip plus a full `tracks` scan against remote Turso: 1,904.5ms
   // median (1,382.8-3,132.7), n=7, 2026-08-05, `bench-reads.mjs search`. Matching now runs in
-  // this browser against a compact index of every played track ([id, name, artist], 108,027 B
-  // gzipped, /api/history/search-index), so typing costs no network at all.
+  // this browser against a compact index of every played track
+  // ([id, name, artist, albumImage], 156,863 B gzipped, /api/history/search-index), so typing
+  // costs no network at all.
   //
-  // The index deliberately carries no stats — play counts, times and album art change on every
-  // play (db.ts, "The client-side search index") — so the contract on screen is: rows appear
-  // instantly from the index, and ONE debounced call fills their numbers in behind them.
+  // The index carries everything a row needs to look FINISHED — title, artist, art — and
+  // nothing that changes per play (db.ts, "The client-side search index"). So the contract on
+  // screen is: complete-looking rows appear instantly from the index, and ONE debounced call
+  // fills in the play counts and times behind them.
   //
   // The match is a plain case-insensitive substring, per mode: the title in Songs, the artist
   // in Artists. That is exactly what the SQL path answered (LIKE on name OR artist, then the
@@ -266,8 +276,7 @@ export function DenHome({
   const [expanded, setExpanded] = useState<string | null>(null);
   const searching = query.trim().length > 0;
 
-  // The index is fetched LAZILY — on first focus or first keystroke, never on page load, so it
-  // adds nothing to the render path — and then held in memory for the rest of the visit.
+  // The index is fetched off the render path and then held in memory for the rest of the visit.
   // Persistence across visits is the browser's HTTP cache plus the route's ETag: a reload
   // revalidates in one 304 with no body.
   const [index, setIndex] = useState<IndexEntry[] | null>(null);
@@ -275,12 +284,15 @@ export function DenHome({
   const loadIndex = () => {
     indexReq.current ??= fetch("/api/history/search-index")
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((d: { tracks: [string, string, string][] }) => {
+      .then((d: { images: string[]; tracks: [string, string, string, number][] }) => {
         setIndex(
-          d.tracks.map(([id, name, artist]) => ({
+          d.tracks.map(([id, name, artist, img]) => ({
             id,
             name,
             artist,
+            // `?.` because a browser can still hold a body from an older shape (the route's
+            // SHAPE token stops that, but a payload is a boundary — don't throw on it).
+            image: img >= 0 ? (d.images?.[img] ?? null) : null,
             ln: name.toLowerCase(),
             la: artist.toLowerCase(),
           })),
@@ -291,6 +303,27 @@ export function DenHome({
         // server instead, which is exactly what this page did before.
       });
   };
+
+  // Fetched on IDLE after Home has painted, not on focus. Focus was too late in the one case
+  // that matters: on a cold data cache the server has to build the index (~2.7s against the
+  // primary), so the first person to search after a deploy waited that out with the box already
+  // in front of them — the "still ~2s" report this whole change was meant to fix. Starting it
+  // during the idle gap between the page landing and a hand reaching the search box hides the
+  // build entirely. requestIdleCallback so it can never compete with hydration or the first
+  // paint; a plain timeout where that doesn't exist (Safari). Focus and the first keystroke
+  // stay wired to loadIndex() as backstops — it is idempotent, so whichever fires first wins.
+  useEffect(() => {
+    const w = window as Window & {
+      requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number;
+      cancelIdleCallback?: (h: number) => void;
+    };
+    if (w.requestIdleCallback) {
+      const h = w.requestIdleCallback(() => loadIndex(), { timeout: 2000 });
+      return () => w.cancelIdleCallback?.(h);
+    }
+    const t = setTimeout(loadIndex, 800);
+    return () => clearTimeout(t);
+  }, []);
 
   // The matched tracks, newest play first (the index arrives in that order, so the result
   // order is the one the SQL search produced). `null` means "no index answer" — still loading
@@ -441,7 +474,7 @@ export function DenHome({
     // The matched tracks: the client index when it's loaded, otherwise reconstructed from the
     // server's rows — those come newest-first too, so first appearance gives the same order.
     // Songs mode matches the TITLE only; artist matches belong to the other tab.
-    let entries: { id: string; name: string; artist: string }[];
+    let entries: { id: string; name: string; artist: string; image: string | null }[];
     if (matched) {
       entries = matched;
     } else {
@@ -452,7 +485,7 @@ export function DenHome({
           continue;
         }
         seen.add(r.id);
-        entries.push(r);
+        entries.push({ id: r.id, name: r.name, artist: r.artist, image: r.albumImage });
       }
     }
 
@@ -466,7 +499,9 @@ export function DenHome({
           name: e.name,
           artist: e.artist,
           album: newest?.album ?? null,
-          image: newest?.albumImage ?? null,
+          // From the index, so the art is in the first paint — the row reads as finished
+          // before the counts arrive rather than as a grey square that might still be loading.
+          image: e.image ?? newest?.albumImage ?? null,
           count: p.length || null,
           lastPlayed: newest?.lastPlayed ?? null,
           plays: p,
@@ -482,11 +517,11 @@ export function DenHome({
         g = { kind: "artist", artist: e.artist, count: null, lastPlayed: null, image: null };
         byArtist.set(e.artist, g);
       }
+      g.image ??= e.image; // index-supplied: art paints with the row, not after it
       const p = byId.get(e.id) ?? [];
       if (p.length === 0) continue;
       g.count = (g.count ?? 0) + p.length;
       if (!g.lastPlayed || p[0].lastPlayed > g.lastPlayed) g.lastPlayed = p[0].lastPlayed;
-      g.image ??= p[0].albumImage;
     }
     return [...byArtist.values()];
   }, [matched, plays, statsReady, searching, mode, query]);
@@ -777,9 +812,9 @@ function Art({ image, size = 11 }: { image: string | null; size?: 9 | 10 | 11 })
 // A matched song: one row no matter how many times it was played; the play count sits
 // on the right and the row expands to the exact listen times.
 //
-// Title and artist render immediately (they come from the client index); art, album, count and
+// Title, artist and art render immediately (they come from the client index); album, count and
 // time appear when the stats land. The row's height is set by the 44px thumbnail, so nothing
-// reflows as they fill in — and the empty thumbnail is the cue that they're still coming.
+// reflows as they fill in.
 function SongResult({
   group,
   expanded,

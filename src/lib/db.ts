@@ -1114,37 +1114,70 @@ async function readPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]>
 // searchHistory(), whose `LIKE '%q%'` cannot use an index by construction (the note under "If
 // a query is slow, count the rows it SCANS"), so each character paid a round trip plus a scan
 // of `tracks` against the remote primary. What ships instead is this index — every track that
-// has ever been PLAYED, as [id, name, artist] — fetched once, filtered in memory, zero network
-// per keystroke.
+// has ever been PLAYED, as [id, name, artist, albumImage] — fetched once, filtered in memory,
+// zero network per keystroke.
 //
 // Only played tracks: the search returns plays, so the ~12,000 `tracks` rows that exist only
 // as playlist members were never results. That is what keeps the payload small — measured
-// 2026-08-05 over the 2,957 played tracks of 15,000 total: raw 170,172 B, gzip 108,027,
-// brotli 93,048. (A columnar shape — ids, names, artists as three parallel arrays — is
-// 98,109 gzip, 9% less, for a format the client has to reassemble; not worth it. Serving all
-// 15,000 tracks would be ~539 KB gzip.)
+// 2026-08-05 over the 2,957 played tracks of 15,000 total, as served (whole body, including
+// the wrapper): raw 355,563 B, gzip 156,868, brotli 133,046. Serving all 15,000 tracks would
+// be ~539 KB gzip, so this stays well inside budget.
 //
-// What it replaces, medians (min–max) n=7 against the primary, 2026-08-05, interleaved
+// WHAT ACTUALLY CROSSES THE WIRE DEPENDS ON THE HOST, and `next start` is NOT it: measured
+// 2026-08-05, the production server gzips HTML and /_next/static chunks but sends every ROUTE
+// HANDLER uncompressed (/api/now-playing, which sets no headers of its own, behaves the same),
+// so a local first load transfers the full 355,563 B. Vercel's edge compresses text responses,
+// which is why the gzip figure is the one to reason about in production — but that is
+// unverified from here, so do not quote it as the local number. If it ever needs to shrink
+// uncompressed, the measured next step is stripping the shared `https://i.scdn.co/image/`
+// prefix from the interned URLs: 355,563 → 293,949 B raw (−17%), at the cost of baking
+// Spotify's CDN hostname into the payload format.
+//
+// Album art is in here even though it doubles the raw payload, because WITHOUT it a result row
+// paints as text with a grey square and only becomes a real row when the hydration call lands
+// — which reads as "still loading" no matter how fast the text was. Art is also the one
+// per-track field that does NOT churn (see the stats note below): a track's album image is
+// fixed at the album, where a play count changes every time you listen.
+// The image URLs are INTERNED — an `images` array plus an index per track — which is 156,863
+// gzip against 163,950 for repeating each URL inline (−4.3%), for one array lookup on the
+// client. Stripping the shared `https://i.scdn.co/image/` prefix as well saves another 62 KB
+// RAW but only 58 bytes gzipped, and would bake Spotify's CDN hostname into two files, so it
+// is deliberately not done. JSON.parse is 0.5ms for every one of these shapes.
+//
+// What it replaces, medians (min–max) n=7 against the primary, 2026-08-05 morning, interleaved
 // round-robin (`bench-reads.mjs search` re-runs all of this):
 //   searchHistory, per keystroke   1,904.5ms (1,382.8-3,132.7)   ← paid on every character
 //   this index, one build          2,743.6ms (1,664.6-3,407.8)   ← once per version change
 //   the version check              24.1ms (21.1-30.5)            ← one row, per request
 //   one hydration of 50 ids        222.2ms (196.9-2,774.2)       ← once per debounced query
-// The build is the most expensive single read on the page and that is fine: it runs when a
-// never-played song first appears, and the cache below serves every other request for free.
+// A second replicate the same afternoon put the SAME queries an order of magnitude lower —
+// search 231.2ms (77.7-1,428.4), build 266.3ms (150.2-9,373.9), hydration 80.1ms (53.7-283.1) —
+// which is the session-weather warning at the top of this file, not a change in the code. The
+// shape that reproduces: the build is the most expensive single read on the page, the version
+// check is a round trip, and both tails run to seconds. End to end, a cold build measured
+// through the route itself (fresh `next start`, cleared data cache, n=5) is 1,161ms
+// (636-2,217); the same request once the cache is warm is 106ms (96-182), which is a version
+// check plus 355 KB over loopback.
+// The build cost is fine: it runs when a never-played song first appears, and the cache below
+// serves every other request for free — but it is exactly why the client prefetches on idle
+// rather than on focus. Whoever loads the page first after a deploy pays it, and that person
+// should not be someone already staring at the search box.
 // Same bench also runs the known-answer half — for six queries × both modes, every track the
 // SQL search returned is matched by the client-side substring filter (0 missed). On narrow
 // queries the two answers are identical; on a broad one the client finds MORE (the SQL path
 // stopped at 500 play rows, so songs whose plays fell outside that window never came back).
 //
-// Stats are deliberately NOT in here. Play counts, last-played times and album art change on
-// every play, so bundling them would both multiply the payload and invalidate it constantly.
-// The browser matches ids against this, then hydrates the matched ids alone through
+// Stats are deliberately NOT in here. Play counts and last-played times change on every play,
+// so bundling them would both multiply the payload and invalidate it constantly — the version
+// key below moves only when a NEW song appears, which is precisely why per-play fields can't
+// live here. The browser matches ids against this, then hydrates the matched ids alone through
 // getPlaysForTracks() — an indexed lookup whose cost is the ids asked for, not the table.
 //
 // Ordering is most-recently-played first, so the client's match order is the same newest-first
 // order the SQL search produced.
-export type SearchIndexEntry = [id: string, name: string, artist: string];
+/** `image` indexes into SearchIndex.images; -1 when the track has no album art. */
+export type SearchIndexEntry = [id: string, name: string, artist: string, image: number];
+export type SearchIndex = { images: string[]; tracks: SearchIndexEntry[] };
 
 /** The index's version marker: the highest rowid in `tracks`.
  *
@@ -1155,42 +1188,64 @@ export type SearchIndexEntry = [id: string, name: string, artist: string];
  *  is monotone. One row, one b-tree seek (`SEARCH tracks`, not a scan) — cheap enough to read
  *  on every index request.
  *
- *  STALENESS BOUND: this key does not move for an in-place edit of a track's name/artist (a
- *  re-tag by Spotify), nor for the re-ordering a replay causes. Both are bounded to ~24h by
- *  the daily bucket in the route's ETag (src/app/api/history/search-index/route.ts), which
- *  makes the browser re-download once a day regardless. */
+ *  STALENESS BOUND: this key does not move for an in-place edit of a track's name, artist or
+ *  album image (a re-tag by Spotify), nor for the re-ordering a replay causes. All are bounded
+ *  to ~24h by the daily bucket in the route's ETag
+ *  (src/app/api/history/search-index/route.ts), which makes the browser re-download once a day
+ *  regardless. */
 export async function getSearchIndexVersion(): Promise<string> {
   const client = await getReader();
   const res = await client.execute("SELECT MAX(rowid) AS v FROM tracks");
   return String(res.rows[0]?.v ?? 0);
 }
 
-/** Every played track as [id, name, artist], newest play first.
+/** Every played track as [id, name, artist, image], newest play first.
  *
  *  LIVE-shaped cache (the section above), except the key is the track-rowid version rather
  *  than the write marker — see getSearchIndexVersion for why. So the ~7,000-row scan below
  *  runs once per genuinely new song and every other request is free; the daily TTL is the
- *  same bound the ETag applies on the client side. */
+ *  same bound the ETag applies on the client side.
+ *
+ *  The build is the slowest read on this page (2.7s median against the primary), so the FIRST
+ *  request after a deploy pays it in full — which is why the client fires this on idle after
+ *  Home mounts rather than waiting for the search box to be focused. */
 const searchIndexCached = unstable_cache((_version: string) => readSearchIndex(), ["search-index"], {
   revalidate: FROZEN_TTL_S,
 });
-export async function getSearchIndex(version: string): Promise<SearchIndexEntry[]> {
+export async function getSearchIndex(version: string): Promise<SearchIndex> {
   return searchIndexCached(version);
 }
 
-async function readSearchIndex(): Promise<SearchIndexEntry[]> {
+async function readSearchIndex(): Promise<SearchIndex> {
   const client = await getReader();
   // GROUP BY p.track_id, not t.id: grouping on the tracks side makes the planner drive from
   // `tracks` (SCAN t, 15,000 rows) to find the 2,957 that have plays. Driving from `plays`
   // scans ~7,000 index entries and seeks each distinct track once — rows scanned is what
   // Turso bills.
   const res = await client.execute(
-    `SELECT t.id AS id, t.name AS name, t.artist AS artist
+    `SELECT t.id AS id, t.name AS name, t.artist AS artist, t.album_image AS image
      FROM plays p JOIN tracks t ON t.id = p.track_id
      GROUP BY p.track_id
      ORDER BY MAX(p.played_at) DESC`,
   );
-  return res.rows.map((r) => [String(r.id), String(r.name), String(r.artist)]);
+  // Intern the art URLs: 2,957 tracks share 2,567 distinct images, and each URL is ~64 bytes
+  // that would otherwise be repeated inline (see the sizes above).
+  const images: string[] = [];
+  const seen = new Map<string, number>();
+  const tracks = res.rows.map((r): SearchIndexEntry => {
+    const url = r.image == null ? null : String(r.image);
+    let at = -1;
+    if (url) {
+      at = seen.get(url) ?? -1;
+      if (at === -1) {
+        at = images.length;
+        images.push(url);
+        seen.set(url, at);
+      }
+    }
+    return [String(r.id), String(r.name), String(r.artist), at];
+  });
+  return { images, tracks };
 }
 
 /** Every play of the given tracks, newest first — the stats half of the client-side search.
