@@ -42,6 +42,8 @@ src/app/api/search/       the two payloads Home's search box filters in the brow
 src/app/api/now-playing/ live "what's playing"; null when idle (never stale)
 src/app/api/sync/        on-load listen-history sync (POST; debounced server-side)
 src/app/api/cron/sync/   scheduled history sync (external pinger e.g. cron-job.org; daily Vercel cron backstop)
+src/app/api/cron/usage-check/  Turso quota guard: real usage vs month pace, 500 on breach
+                         (daily cron-job.org job e-mails on failure). docs/READ_QUOTA.md
 src/lib/auth.ts          Auth.js config + Spotify token refresh (centralized)
 src/lib/session.ts       getSpotify(): server-only authed Spotify client
 src/lib/spotify/         client.ts (fetch+pagination+429/403), resources.ts, domain.ts, types.ts
@@ -55,7 +57,11 @@ src/components/ui/       UI primitives — Base UI under the hood, NOT Radix (se
 src/components/          app components + shared: album-thumb, sort-menu, floating-bar,
                          now-playing, track-context-menu, playlists-client, playlist-grid,
                          merge-panel, track-list, clean-panel
-docs/                    ARCHITECTURE, FEATURES, ROADMAP, CONVENTIONS, GOTCHAS, SECURITY
+docs/                    ARCHITECTURE, FEATURES, ROADMAP, CONVENTIONS, GOTCHAS, SECURITY,
+                         READ_QUOTA (Turso quota: attribution, fixes, pre-registered measurements)
+scripts/backfill-from-backstop.mjs  replay the Zenbook backstop recorder's captured plays
+                         into the primary (the loss-repair path; recorder lives on the
+                         Zenbook at ~/lazyboy-recorder, lazyboy-recorder.timer, every 15 min)
 ```
 
 **Reuse before adding:** formatting → `lib/format.ts`; name search → `lib/filter.ts`; album
