@@ -92,28 +92,44 @@ changes.
 These aren't from the prototype; they're built on the local listen-history store (`db.ts`).
 Stats/sync internals live in [ARCHITECTURE](ARCHITECTURE.md) and [GOTCHAS](GOTCHAS.md).
 
-### History search  →  the client-side index + `playsForTracksAction` + `SearchIsland`
-The bottom search pill on Home searches the whole listen history by song title or artist; the
-client groups the matches per song or per artist behind the songs/artists switch. DB-only — it
-never calls Spotify, and album art is the URL already stored on the track row, so typing can't
-cost API calls or hit a rate limit.
+### Library search  →  the two search payloads + `SearchIsland`
+The bottom search pill on Home searches your **library** — every song in a playlist, in Liked
+Songs, or in the listen history — by title or artist; the client groups the matches per song or
+per artist behind the songs/artists switch. DB-only — it never calls Spotify, and album art is
+the URL already stored on the track row, so typing can't cost API calls or hit a rate limit.
 
-**Matching runs in the browser.** `/api/history/search-index` serves every played track as
-`[id, name, artist]` (2,957 tracks, 108 KB gzipped), fetched once on first focus of the box and
-filtered in memory, so a keystroke costs no network — it used to run `LIKE '%q%'` over the whole
-history per keystroke (1,904 ms median against the primary; db.ts "The client-side search
-index"). The index carries no play counts, so rows appear instantly with title + artist + art and one
-debounced `playsForTracksAction` call fills in counts and times for the matched ids alone.
-Expanding a song row lists every play — exact time plus **where it was played from**, the same
-per-play `source` the day table's From column shows (`sourceExpr` in `db.ts`: the resolved
-playlist/album name, the context type when the name never resolved, blank when the song is no
-longer in the playlist it was credited to). The expansion costs no request: the play rows it
-reads are the ones already hydrated for the search.
-While the index is still loading (or if it failed) `searchPlaysAction` answers instead, so the
-box is never dead.
+**Matching runs in the browser, over two payloads** (db.ts, "The client-side search payloads"),
+both fetched once on idle after Home mounts and filtered in memory, so a keystroke costs no
+network. It used to run `LIKE '%q%'` over the whole history per keystroke — 1,904 ms median
+against the primary.
+- `/api/search/library` — every track in a playlist or in Liked Songs as
+  `[name, artist, image, album, playlists]` (13,464 songs, 577 KB gzipped). This is the half
+  that makes a never-played song findable. It changes only when a playlist does, so a repeat
+  visit revalidates it in a 304 with no body.
+- `/api/search/history` — every played song plus every individual play as
+  `[track, minute, source]` (2,959 songs, 7,050 plays, 168 KB gzipped). Its version is the
+  write marker, so it is re-fetched after any listening — which is why it is the small half.
+
+The two are merged on the song's **identity**, `lower(artist) + lower(name)`, not on the track
+id: Spotify hands the same song a different id in a playlist than in recently-played, so an id
+join reports 338 of this store's played-and-in-a-playlist songs as never played
+(`bench-reads.mjs search` counts it, and checks the client's verdict against SQL's).
+
+Because the counts, times, playlists and per-play list all ride in the payloads, **a result row
+is complete in the frame it appears** — nothing fills in behind it, and expanding a row costs no
+request. A row that has never been played says so where its last-played time would be, and
+expands to the playlists it sits in; a played row expands to every play, with the exact time and
+**where it was played from** (the same per-play `source` the day table's From column shows —
+`sourceExpr` in `db.ts`: the resolved playlist/album name, the context type when the name never
+resolved, blank when the song is no longer in the playlist it was credited to). Results are
+ranked exact title → prefix → substring, played before never-played, and capped at 400 with the
+dropped count shown under the list.
+While the payloads are still loading (or if both failed) `searchPlaysAction` answers instead, so
+the box is never dead — it just answers over the history alone.
 
 (The older **Find** panel — "which playlists contain this song" — and its `/api/find*` routes
-and FTS5 trigram index were removed in `045d4a1`.)
+and FTS5 trigram index were removed in `045d4a1`. The library payload answers the same question
+inside a search result's expansion, without an index to maintain.)
 
 ### Resume  →  `resumePlaylistAction`  [PLAYBACK, PREMIUM]
 "Pick up where you left off" in a playlist, assuming in-order (non-shuffled) listening:

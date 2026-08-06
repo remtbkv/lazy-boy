@@ -245,7 +245,8 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   marker in the cached value → request it → change the marker → rebuild **without** clearing
   `.next/cache` → the route still serves the FIRST build's marker. Bump a shape token in the key
   parts and the same rebuild serves the new one. So: **changing the return shape of a cached
-  read means moving its cache key in the same commit** (`SEARCH_INDEX_SHAPE` is the pattern —
+  read means moving its cache key in the same commit** (`LIBRARY_INDEX_SHAPE` /
+  `HISTORY_INDEX_SHAPE` are the pattern —
   it keys the entry AND rides in the ETag, so the server cache and the browser cache invalidate
   together). `TrackStats` / `DayStats` / `StoredPlaylist` are the shapes the other cached reads
   serve; add or remove a field on one of them and its key must move too. Nothing detects a
@@ -275,9 +276,10 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
 - **If a query is slow, count the rows it SCANS, not the rows it returns.** Both bad ones
   returned little. `searchHistory` is `LIKE '%q%'`, unindexable by construction, so it scans
   `tracks` — ~6 ms on the replica but 1,904 ms median (1,383–3,133, n=7, 2026-08-05) against the
-  primary, which is what production runs. It is no longer on the keystroke path: **history
-  search matches in the BROWSER** against `/api/history/search-index` (db.ts, "The client-side
-  search index"), and `searchHistory` survives only as the fallback while that index loads.
+  primary, which is what production runs. It is no longer on the keystroke path: **library
+  search matches in the BROWSER** against `/api/search/{library,history}` (db.ts, "The
+  client-side search payloads"), and `searchHistory` survives only as the fallback while those
+  load.
   `sourceExpr` was worse and is fixed (next bullet). `getPlaysByDay` was the
   third: `date(played_at, '±N minutes') = :day` is the *authority* on which local day a play
   belongs to, but it's a function of the column, so no index can serve it and one day's ~90

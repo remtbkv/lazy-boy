@@ -7,7 +7,7 @@ import { cache } from "react";
 import { unstable_cache } from "next/cache";
 import path from "node:path";
 import fs from "node:fs";
-import { createClient, type Client, type InStatement } from "@libsql/client";
+import { createClient, type Client, type InStatement, type Row } from "@libsql/client";
 import type { Track } from "@/lib/spotify/types";
 import { CLEANED_PREFIX, BACKUP_PREFIX } from "@/lib/clean/names";
 import {
@@ -387,6 +387,29 @@ function writeSeqStmt(): InStatement {
 async function bumpWriteSeq(): Promise<void> {
   const client = await getClient();
   await client.execute(writeSeqStmt());
+}
+
+// ── The library marker (`meta.library_seq`) ─────────────────────────────────────────────
+// A second counter, bumped by the writes that change WHICH TRACKS ARE IN THE LIBRARY —
+// playlists, playlist_tracks, saved_tracks — and by nothing else. It versions the library
+// search payload ("The client-side search payloads" below), which is the largest body this app
+// serves and must therefore survive a listening session in the browser cache. write_seq cannot
+// do that job: it bumps on every play, so the payload would be re-downloaded whole after every
+// listen. It rides ALONGSIDE write_seq (never instead of it) — the replica gate still needs
+// the write announced.
+//
+// Same discipline as write_seq: bump in the same batch as the data, and only when the batch
+// actually changed something. A missing bump serves a stale library; an extra one costs a
+// re-download.
+const LIBRARY_SEQ_KEY = "library_seq";
+
+/** The bump, as a statement to append to a write batch. Starts the counter at 1 if absent. */
+function librarySeqStmt(): InStatement {
+  return {
+    sql: `INSERT INTO meta (key, value) VALUES ('${LIBRARY_SEQ_KEY}', '1')
+          ON CONFLICT(key) DO UPDATE SET value = CAST(meta.value AS INTEGER) + 1`,
+    args: [],
+  };
 }
 
 /** The marker as stored (a TEXT column, so compare as strings), or null before the first
@@ -893,7 +916,7 @@ export async function searchHistory(query: string, limit = 300): Promise<TrackSt
 // shipped broken on 2026-08-05 (details on SEARCH_INDEX_SHAPE below; the payload arrived with
 // no tracks in it and every client silently lost its index).
 // The rule, for all of these: CHANGING THE RETURN SHAPE OF A CACHED READ MEANS MOVING ITS CACHE
-// KEY in the same commit — bump a shape token in the key parts (what `search-index` does) or
+// KEY in the same commit — bump a shape token in the key parts (what the search payloads do) or
 // rename the key array. `TrackStats`, `DayStats` and `StoredPlaylist` are the shapes the four
 // entries below serve; add or remove a field on any of them and their keys must move with it.
 // A stale-shaped entry cannot be detected at runtime and does not expire for a day.
@@ -1122,180 +1145,251 @@ async function readPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]>
   return plainRows(res.rows) as unknown as TrackStats[];
 }
 
-// ── The client-side search index ────────────────────────────────────────────────────────
-// The history search box matches in the BROWSER, not here. It used to send every keystroke to
+// ── The client-side search payloads ─────────────────────────────────────────────────────
+// Home's search box matches in the BROWSER, not here. It used to send every keystroke to
 // searchHistory(), whose `LIKE '%q%'` cannot use an index by construction (the note under "If
 // a query is slow, count the rows it SCANS"), so each character paid a round trip plus a scan
-// of `tracks` against the remote primary. What ships instead is this index — every track that
-// has ever been PLAYED, as [id, name, artist, albumImage] — fetched once, filtered in memory,
-// zero network per keystroke.
+// of `tracks` against the remote primary. What ships instead is two payloads, each fetched
+// once per visit and filtered in memory:
 //
-// Only played tracks: the search returns plays, so the ~12,000 `tracks` rows that exist only
-// as playlist members were never results. That is what keeps the payload small — measured
-// 2026-08-05 over the 2,957 played tracks of 15,000 total, as served (whole body, including
-// the wrapper): raw 355,563 B, gzip 156,868, brotli 133,046. Serving all 15,000 tracks would
-// be ~539 KB gzip, so this stays well inside budget.
+//   LIBRARY — every track that sits in a playlist or in Liked Songs, as
+//             [name, artist, image, album, playlists]. This is what makes the box search the
+//             LIBRARY: a song you have never played is in here, and so is where it lives.
+//   HISTORY — every played song, plus every individual play as [track, minute, source]. The
+//             counts, the times and the expanded per-play list all come out of this, so a
+//             result row needs no follow-up request to finish.
 //
-// WHAT ACTUALLY CROSSES THE WIRE DEPENDS ON THE HOST, and `next start` is NOT it: measured
-// 2026-08-05, the production server gzips HTML and /_next/static chunks but sends every ROUTE
-// HANDLER uncompressed (/api/now-playing, which sets no headers of its own, behaves the same),
-// so a local first load transfers the full 355,563 B. Vercel's edge compresses text responses,
-// which is why the gzip figure is the one to reason about in production — but that is
-// unverified from here, so do not quote it as the local number. If it ever needs to shrink
-// uncompressed, the measured next step is stripping the shared `https://i.scdn.co/image/`
-// prefix from the interned URLs: 355,563 → 293,949 B raw (−17%), at the cost of baking
-// Spotify's CDN hostname into the payload format.
+// They are SPLIT because they change at completely different rates. The library changes when a
+// playlist does (a sync, at most every 15 min); the history changes every time a song finishes.
+// One payload would re-download the library — the big half — after every listen, which is
+// exactly what the version key on the old single index was contorted to avoid.
 //
-// Album art is in here even though it doubles the raw payload, because WITHOUT it a result row
-// paints as text with a grey square and only becomes a real row when the hydration call lands
-// — which reads as "still loading" no matter how fast the text was. Art is also the one
-// per-track field that does NOT churn (see the stats note below): a track's album image is
-// fixed at the album, where a play count changes every time you listen.
-// The image URLs are INTERNED — an `images` array plus an index per track — which is 156,863
-// gzip against 163,950 for repeating each URL inline (−4.3%), for one array lookup on the
-// client. Stripping the shared `https://i.scdn.co/image/` prefix as well saves another 62 KB
-// RAW but only 58 bytes gzipped, and would bake Spotify's CDN hostname into two files, so it
-// is deliberately not done. JSON.parse is 0.5ms for every one of these shapes.
+// Each is self-contained (its own interned images/albums), so either one alone renders a
+// complete row: if the library payload fails, search still answers over the history.
 //
-// What it replaces, medians (min–max) n=7 against the primary, 2026-08-05 morning, interleaved
-// round-robin (`bench-reads.mjs search` re-runs all of this):
-//   searchHistory, per keystroke   1,904.5ms (1,382.8-3,132.7)   ← paid on every character
-//   this index, one build          2,743.6ms (1,664.6-3,407.8)   ← once per version change
-//   the version check              24.1ms (21.1-30.5)            ← one row, per request
-//   one hydration of 50 ids        222.2ms (196.9-2,774.2)       ← once per debounced query
-// A second replicate the same afternoon put the SAME queries an order of magnitude lower —
-// search 231.2ms (77.7-1,428.4), build 266.3ms (150.2-9,373.9), hydration 80.1ms (53.7-283.1) —
-// which is the session-weather warning at the top of this file, not a change in the code. The
-// shape that reproduces: the build is the most expensive single read on the page, the version
-// check is a round trip, and both tails run to seconds. End to end, a cold build measured
-// through the route itself (fresh `next start`, cleared data cache, n=5) is 1,161ms
-// (636-2,217); the same request once the cache is warm is 106ms (96-182), which is a version
-// check plus 355 KB over loopback.
-// The build cost is fine: it runs when a never-played song first appears, and the cache below
-// serves every other request for free — but it is exactly why the client prefetches on idle
-// rather than on focus. Whoever loads the page first after a deploy pays it, and that person
-// should not be someone already staring at the search box.
-// Same bench also runs the known-answer half — for six queries × both modes, every track the
-// SQL search returned is matched by the client-side substring filter (0 missed). On narrow
-// queries the two answers are identical; on a broad one the client finds MORE (the SQL path
-// stopped at 500 play rows, so songs whose plays fell outside that window never came back).
+// IDENTITY, not track id. The client merges the two on lower(artist) + lower(name) — the same
+// song identity `idx_tracks_artist_name` and the orphan rule use. Spotify hands the same song
+// a different id in a playlist than in recently-played, so joining on id would report 338 of
+// this store's 2,538 played-and-in-a-playlist songs as never played (counted 2026-08-06
+// against data/replica.db, and it is why "is this played?" cannot be an id lookup).
 //
-// Stats are deliberately NOT in here. Play counts and last-played times change on every play,
-// so bundling them would both multiply the payload and invalidate it constantly — the version
-// key below moves only when a NEW song appears, which is precisely why per-play fields can't
-// live here. The browser matches ids against this, then hydrates the matched ids alone through
-// getPlaysForTracks() — an indexed lookup whose cost is the ids asked for, not the table.
+// SIZES as served, measured 2026-08-06 by `bench-reads.mjs search` over 13,464 library
+// identities (15,326 playlist memberships + 32 liked), 2,959 played identities and 7,050 plays:
+//   library  raw 1,638,540 B, gzip 576,795 B, brotli 421,924 B  ← 304s on a repeat visit
+//   history  raw   476,206 B, gzip 167,591 B, brotli 121,956 B  ← re-fetched after listening
+// So a cold visit downloads ~744 KB gzipped and a visit after a listening session ~168 KB —
+// against 156,868 gzip for the played-only index this replaces, which also paid a round trip
+// per query on top. The same bench times the builds against the primary: the library's member
+// scan is 5,424.3ms median (4,773.8-6,646.2, n=5) and the history's 2,556.7ms (2,067.6-2,693.7)
+// — both once per version change, and both a reason the client fetches on idle rather than on
+// focus. The version reads are one indexed meta key each (42.9ms / 150.1ms, same run).
 //
-// Ordering is most-recently-played first, so the client's match order is the same newest-first
-// order the SQL search produced.
-/** `image` indexes into SearchIndex.images; -1 when the track has no album art. */
-export type SearchIndexEntry = [id: string, name: string, artist: string, image: number];
-export type SearchIndex = { images: string[]; tracks: SearchIndexEntry[] };
+// The RAW figure is the one with a ceiling: a Vercel function response is capped at 4.5 MB, and
+// at 122 B per identity the library payload has room for ~36,000 songs — 2.7x this store. The
+// measured next lever is stripping the shared `https://i.scdn.co/image/` prefix off the
+// interned art URLs (−16% raw, −1% gzip); deliberately not spent yet, because it bakes
+// Spotify's CDN host into the payload format for bytes that are not yet scarce.
+// Locally none of this is compressed at all — `next start` serves route handlers uncompressed
+// (measured 2026-08-05); Vercel's edge compresses them, so gzip is the production number.
+//
+// Album art is in both payloads even though it is most of their weight, because WITHOUT it a
+// result row paints as text against a grey square and reads as "still loading" no matter how
+// fast the text was.
 
-/** The payload FORMAT, and part of the cache key — BUMP IT with any change to the two types
+/** Interned string table — repeated art URLs, album names, playlist names and "From" labels
+ *  are sent once and referenced by index. -1 means "none" (no art, no album, no source). */
+function interner() {
+  const values: string[] = [];
+  const seen = new Map<string, number>();
+  return {
+    values,
+    put(v: unknown): number {
+      if (v == null || v === "") return -1;
+      const s = String(v);
+      const at = seen.get(s);
+      if (at !== undefined) return at;
+      seen.set(s, values.length);
+      return values.push(s) - 1;
+    },
+  };
+}
+
+/** `image`/`album` index into the payload's interned tables; `playlists` holds indexes into
+ *  LibraryIndex.playlists (empty for a track that is only in Liked Songs). */
+export type LibraryTrack = [
+  name: string,
+  artist: string,
+  image: number,
+  album: number,
+  playlists: number[],
+];
+export type LibraryIndex = {
+  images: string[];
+  albums: string[];
+  playlists: string[];
+  tracks: LibraryTrack[];
+};
+
+/** A played song. Same interning convention as LibraryTrack; newest play first. */
+export type HistoryTrack = [name: string, artist: string, image: number, album: number];
+/** One play: its HistoryIndex.tracks row, the UTC minute it happened (epoch minutes — the
+ *  minute is all the UI ever renders), and its resolved "From" (index into
+ *  HistoryIndex.sources, -1 when the play has none). */
+export type HistoryPlay = [track: number, minute: number, source: number];
+export type HistoryIndex = {
+  images: string[];
+  albums: string[];
+  sources: string[];
+  tracks: HistoryTrack[];
+  plays: HistoryPlay[];
+};
+
+/** The payload FORMATS, and part of each cache key — BUMP ONE with any change to the types
  *  above.
  *
  *  This is not defensive style, it is a bug that already shipped. Vercel's Data Cache outlives
- *  a deployment, and the key here was (this function's key parts + the track-rowid version),
- *  neither of which moves when the SHAPE changes. So the deploy that added album art asked for
- *  a key whose entry had been written that morning by the previous deploy, got a cache HIT, and
- *  served the OLD shape — a bare array, which the new route destructured as
- *  `{ images, tracks }` into two undefineds and shipped a body with no tracks at all. Every
- *  client that fetched it lost its index, and the search fell back to the server for every
- *  keystroke, which is the regression this token prevents. The ETag carries it too, for the
- *  same reason one layer up (a browser holding the old body). */
-export const SEARCH_INDEX_SHAPE = "v2";
+ *  a deployment, and the key was (the cache function's key parts + a content version), neither
+ *  of which moves when the SHAPE changes. So the deploy that added album art asked for a key
+ *  whose entry had been written that morning by the previous deploy, got a cache HIT, and
+ *  served the OLD shape — which the new route destructured into undefineds and shipped a body
+ *  with no tracks at all. Every client that fetched it lost its index and fell back to the
+ *  server for every keystroke. The ETags carry the token too, for the same reason one layer up
+ *  (a browser holding the old body). */
+export const LIBRARY_INDEX_SHAPE = "v1";
+export const HISTORY_INDEX_SHAPE = "v1";
 
-/** The index's version marker: the highest rowid in `tracks`.
+/** The library payload's version: `meta.library_seq`, bumped by the writes that change which
+ *  tracks are in the library and by nothing else (see the marker's note). NOT write_seq —
+ *  that moves on every play, and this payload is the half that must survive a listening
+ *  session in the browser cache.
  *
- *  NOT `meta.write_seq` — that bumps on every play, so keying on it would re-download the
- *  whole index after every listening session, and a replay of a known song changes nothing in
- *  it. `tracks` gains a row exactly when a song is seen for the FIRST time, which is exactly
- *  when this index gains an entry, and nothing in this file deletes from `tracks`, so the max
- *  is monotone. One row, one b-tree seek (`SEARCH tracks`, not a scan) — cheap enough to read
- *  on every index request.
- *
- *  STALENESS BOUND: this key does not move for an in-place edit of a track's name, artist or
- *  album image (a re-tag by Spotify), nor for the re-ordering a replay causes. All are bounded
- *  to ~24h by the daily bucket in the route's ETag
- *  (src/app/api/history/search-index/route.ts), which makes the browser re-download once a day
- *  regardless. */
-export async function getSearchIndexVersion(): Promise<string> {
-  const client = await getReader();
-  const res = await client.execute("SELECT MAX(rowid) AS v FROM tracks");
-  return String(res.rows[0]?.v ?? 0);
+ *  STALENESS BOUND: it does not move for an in-place edit of a track's name, artist, album or
+ *  art (a re-tag by Spotify, or a play sync refreshing a track's fields). Those are bounded to
+ *  ~24h by the daily bucket in the route's ETag. */
+export async function getLibraryIndexVersion(): Promise<string> {
+  return (await getMeta(LIBRARY_SEQ_KEY)) ?? "0";
 }
 
-/** Every played track as [id, name, artist, image], newest play first.
- *
- *  LIVE-shaped cache (the section above), except the key is the track-rowid version rather
- *  than the write marker — see getSearchIndexVersion for why. So the ~7,000-row scan below
- *  runs once per genuinely new song and every other request is free; the daily TTL is the
- *  same bound the ETag applies on the client side.
- *
- *  The build is the slowest read on this page (2.7s median against the primary), so the FIRST
- *  request after a deploy pays it in full — which is why the client fires this on idle after
- *  Home mounts rather than waiting for the search box to be focused. */
-const searchIndexCached = unstable_cache(
-  (_version: string, _shape: string) => readSearchIndex(),
-  ["search-index", SEARCH_INDEX_SHAPE],
+/** The history payload's version: the write marker itself. Every play, and nothing else that
+ *  matters here, moves it. */
+export async function getHistoryIndexVersion(): Promise<string> {
+  return (await getMeta(WRITE_SEQ_KEY)) ?? "0";
+}
+
+// LIVE-shaped cache (the section above): keyed on a content version, with the daily TTL as a
+// garbage bound. So the scan below runs once per real change and every other request is free.
+const libraryIndexCached = unstable_cache(
+  (_version: string, _shape: string) => readLibraryIndex(),
+  ["library-index", LIBRARY_INDEX_SHAPE],
   { revalidate: FROZEN_TTL_S },
 );
-export async function getSearchIndex(version: string): Promise<SearchIndex> {
-  // The shape token goes in BOTH the key parts and the arguments. Key parts are the documented
-  // cache key; passing it as an argument as well means the identity holds even if a Next
-  // version ever treats key parts as a namespace rather than as key material. Verified by
-  // experiment, not assumption: with the token unchanged, a rebuild reuses the previous build's
-  // entry (that is the hazard, and it reproduces); changing it forces a rebuild of the entry.
-  return searchIndexCached(version, SEARCH_INDEX_SHAPE);
+export async function getLibraryIndex(version: string): Promise<LibraryIndex> {
+  // The shape token goes in BOTH the key parts and the arguments: key parts are the documented
+  // cache key, and passing it as an argument as well means the identity holds even if a Next
+  // version ever treats key parts as a namespace rather than as key material.
+  return libraryIndexCached(version, LIBRARY_INDEX_SHAPE);
 }
 
-async function readSearchIndex(): Promise<SearchIndex> {
+const historyIndexCached = unstable_cache(
+  (_version: string, _shape: string) => readHistoryIndex(),
+  ["history-index", HISTORY_INDEX_SHAPE],
+  { revalidate: FROZEN_TTL_S },
+);
+export async function getHistoryIndex(version: string): Promise<HistoryIndex> {
+  return historyIndexCached(version, HISTORY_INDEX_SHAPE);
+}
+
+async function readLibraryIndex(): Promise<LibraryIndex> {
   const client = await getReader();
-  // GROUP BY p.track_id, not t.id: grouping on the tracks side makes the planner drive from
-  // `tracks` (SCAN t, 15,000 rows) to find the 2,957 that have plays. Driving from `plays`
-  // scans ~7,000 index entries and seeks each distinct track once — rows scanned is what
-  // Turso bills.
+  // Driven from playlist_tracks (15k index entries, one seek per member) rather than from
+  // `tracks` with an EXISTS filter, which makes the planner scan all 15,000 track rows and
+  // then probe membership per row. Rows scanned is what Turso bills.
+  const [memberRes, savedRes, listRes] = await Promise.all([
+    client.execute(
+      `SELECT pt.playlist_id AS pid, t.name AS name, t.artist AS artist,
+              t.album AS album, t.album_image AS image
+       FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id`,
+    ),
+    client.execute(
+      `SELECT t.name AS name, t.artist AS artist, t.album AS album, t.album_image AS image
+       FROM saved_tracks s JOIN tracks t ON t.id = s.track_id`,
+    ),
+    client.execute("SELECT id, name FROM playlists"),
+  ]);
+
+  const images = interner();
+  const albums = interner();
+  const playlists = interner();
+  // Only playlists we can NAME: playlist_tracks can outlive its playlist row between a delete
+  // and the purge, and a membership we cannot label is one the UI could not render anyway.
+  const named = new Map<string, number>();
+  for (const r of listRes.rows) named.set(String(r.id), playlists.put(r.name));
+
+  const tracks: LibraryTrack[] = [];
+  const at = new Map<string, number>();
+  const add = (r: Row): number => {
+    const key = `${String(r.artist).toLowerCase()}\n${String(r.name).toLowerCase()}`;
+    const hit = at.get(key);
+    if (hit !== undefined) return hit;
+    at.set(key, tracks.length);
+    return (
+      tracks.push([
+        String(r.name),
+        String(r.artist),
+        images.put(r.image),
+        albums.put(r.album),
+        [],
+      ]) - 1
+    );
+  };
+  for (const r of memberRes.rows) {
+    const membership = tracks[add(r)][4];
+    const pl = named.get(String(r.pid));
+    // The same song can sit in a playlist under two ids (Spotify's re-issues), and in several
+    // playlists — both collapse here, so a playlist is listed once per song.
+    if (pl !== undefined && !membership.includes(pl)) membership.push(pl);
+  }
+  for (const r of savedRes.rows) add(r);
+  return {
+    images: images.values,
+    albums: albums.values,
+    playlists: playlists.values,
+    tracks,
+  };
+}
+
+async function readHistoryIndex(): Promise<HistoryIndex> {
+  const client = await getReader();
+  // A full plays scan, so it must stay on the replica — the same scan against the PRIMARY is
+  // seconds-scale (the note on playsWithListened).
   const res = await client.execute(
-    `SELECT t.id AS id, t.name AS name, t.artist AS artist, t.album_image AS image
+    `SELECT t.name AS name, t.artist AS artist, t.album AS album, t.album_image AS image,
+            p.played_at AS playedAt, ${sourceExpr("p", "c")} AS source
      FROM plays p JOIN tracks t ON t.id = p.track_id
-     GROUP BY p.track_id
-     ORDER BY MAX(p.played_at) DESC`,
+       LEFT JOIN contexts c ON c.uri = p.context_uri
+     ORDER BY p.played_at DESC`,
   );
-  // Intern the art URLs: 2,957 tracks share 2,567 distinct images, and each URL is ~64 bytes
-  // that would otherwise be repeated inline (see the sizes above).
-  const images: string[] = [];
-  const seen = new Map<string, number>();
-  const tracks = res.rows.map((r): SearchIndexEntry => {
-    const url = r.image == null ? null : String(r.image);
-    let at = -1;
-    if (url) {
-      at = seen.get(url) ?? -1;
-      if (at === -1) {
-        at = images.length;
-        images.push(url);
-        seen.set(url, at);
-      }
+  const images = interner();
+  const albums = interner();
+  const sources = interner();
+  const tracks: HistoryTrack[] = [];
+  const at = new Map<string, number>();
+  const plays = res.rows.map((r): HistoryPlay => {
+    const key = `${String(r.artist).toLowerCase()}\n${String(r.name).toLowerCase()}`;
+    let i = at.get(key);
+    if (i === undefined) {
+      at.set(key, (i = tracks.length));
+      tracks.push([String(r.name), String(r.artist), images.put(r.image), albums.put(r.album)]);
     }
-    return [String(r.id), String(r.name), String(r.artist), at];
+    return [i, Math.floor(Date.parse(String(r.playedAt)) / 60000), sources.put(r.source)];
   });
-  return { images, tracks };
-}
-
-/** Every play of the given tracks, newest first — the stats half of the client-side search.
- *  Same row shape as searchHistory (one row per play), so both search paths feed the same
- *  table. Seeks idx_plays_track per id instead of scanning; `limit` is a safety bound, and a
- *  result that hits it is treated as truncated by the caller. */
-export async function getPlaysForTracks(ids: string[], limit = 3000): Promise<TrackStats[]> {
-  if (ids.length === 0) return [];
-  const client = await getReader();
-  const holes = ids.map(() => "?").join(",");
-  const res = await client.execute({
-    sql: `${SELECT_PLAY} WHERE p.track_id IN (${holes})
-          ORDER BY p.played_at DESC LIMIT ?`,
-    args: [...ids, limit],
-  });
-  return plainRows(res.rows) as unknown as TrackStats[];
+  return {
+    images: images.values,
+    albums: albums.values,
+    sources: sources.values,
+    tracks,
+    plays,
+  };
 }
 
 export async function getLastSync(): Promise<string | null> {
@@ -1397,7 +1491,7 @@ export async function storePlaylists(rows: StoredPlaylist[], meId: string | null
   }
   // Reached only when the list really changed (the unchanged fast path above returns before
   // this and writes meta only), so the bump is unconditional here.
-  stmts.push(writeSeqStmt());
+  stmts.push(writeSeqStmt(), librarySeqStmt());
   await client.batch(stmts, "write");
   // This branch purges playlist_tracks for playlists that no longer exist, so membership can
   // change for several at once — a full pass, not a scoped one. (The unchanged fast path
@@ -1488,6 +1582,7 @@ export async function upsertStoredPlaylist(p: StoredPlaylist): Promise<void> {
         args: { id: p.id, name: p.name, ownerId: p.ownerId, image: p.image, trackCount: p.trackCount },
       },
       writeSeqStmt(),
+      librarySeqStmt(),
     ],
     "write",
   );
@@ -1559,7 +1654,7 @@ export async function storePlaylistTracks(
   }
   // Everything queued so far is playlist_tracks/tracks; the two meta stamps below are not
   // replica-served, so a call that diffed to no changes announces nothing.
-  if (stmts.length > 0) stmts.push(writeSeqStmt());
+  if (stmts.length > 0) stmts.push(writeSeqStmt(), librarySeqStmt());
   stmts.push({
     sql: `INSERT INTO meta (key, value) VALUES (:k, :v)
           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
@@ -1625,6 +1720,7 @@ export async function removeCachedPlaylistTrack(playlistId: string, uri: string)
         args: { pid: playlistId, uri },
       },
       writeSeqStmt(),
+      librarySeqStmt(),
     ],
     "write",
   );
@@ -1642,6 +1738,7 @@ export async function deletePlaylistFromDb(playlistId: string): Promise<void> {
       { sql: "DELETE FROM playlist_tracks WHERE playlist_id = :id", args: { id: playlistId } },
       { sql: "DELETE FROM meta WHERE key IN (:a, :b)", args: { a: `plsnap:${playlistId}`, b: `pltracks_at:${playlistId}` } },
       writeSeqStmt(),
+      librarySeqStmt(),
     ],
     "write",
   );
@@ -1700,7 +1797,7 @@ export async function storeSavedTracks(tracks: Track[]): Promise<void> {
   }
   // As in storePlaylistTracks: only the saved_tracks/tracks writes above are replica-served,
   // so a diff that came back empty writes the three stamps below and announces nothing.
-  if (stmts.length > 0) stmts.push(writeSeqStmt());
+  if (stmts.length > 0) stmts.push(writeSeqStmt(), librarySeqStmt());
   stmts.push(metaStmt("liked_total", String(tracks.length)));
   stmts.push(metaStmt("liked_top_added_at", tracks[0]?.addedAt ?? ""));
   stmts.push(metaStmt("saved_synced_at", new Date().toISOString()));

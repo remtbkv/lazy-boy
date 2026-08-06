@@ -467,106 +467,250 @@ async function modeDay() {
   if (bad > 0) process.exitCode = 1;
 }
 
-/** `search` — the history search, before and after it moved into the browser. Against the
- *  PRIMARY (the shape production runs with LAZYBOY_NO_REPLICA=1). Three halves:
+/** `search` — the two client-side search payloads, and the per-keystroke query they replaced.
+ *  Against the PRIMARY (the shape production runs with LAZYBOY_NO_REPLICA=1). Three halves:
  *    TIMING    the old per-keystroke query (searchHistory's `LIKE '%q%'`, unindexable → scans
- *              `tracks`) against what the new path costs: the version check (one rowid seek,
- *              per index request), the index build (once per version change, then cached), and
- *              one hydration of the matched ids. Interleaved round-robin.
- *    PAYLOAD   the served index body, raw / gzip / brotli — the number the client downloads.
- *    EQUALITY  the known-answer half: for each sample query, every track the SQL search returns
- *              must also be matched by the client-side substring filter over the index. The
- *              client is allowed to find MORE (the SQL path is capped at 500 play rows, so a
- *              song whose plays fall outside that window never came back); it is not allowed to
- *              miss any. Exits non-zero on a miss.
+ *              `tracks`) against what the new path costs: each payload's build (once per
+ *              version change, then cached) and the version reads (one indexed meta key each,
+ *              per request). Interleaved round-robin.
+ *    PAYLOAD   both bodies as served, raw / gzip / brotli — what the client downloads on a
+ *              cold visit, and what a visit after listening re-downloads (the history half
+ *              alone; the library half 304s).
+ *    EQUALITY  the known-answer half, over the LIBRARY now rather than the history: every
+ *              track the SQL search returns must also be matched by the client-side filter
+ *              over the merged payloads, and every song SQL says has plays must come out
+ *              played on the client's identity join (the id join, which is what an obvious
+ *              implementation would do, is reported next to it and is expected to MISS).
+ *              Exits non-zero on a miss.
  *  `node --env-file=.env.local scripts/bench-reads.mjs search` */
 async function modeSearch() {
-  const SEARCH_INDEX = `SELECT t.id AS id, t.name AS name, t.artist AS artist, t.album_image AS image
+  // SQL copied from db.ts readLibraryIndex / readHistoryIndex.
+  const LIB_MEMBERS = `SELECT pt.playlist_id AS pid, t.name AS name, t.artist AS artist,
+              t.album AS album, t.album_image AS image
+       FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id`;
+  const LIB_SAVED = `SELECT t.name AS name, t.artist AS artist, t.album AS album, t.album_image AS image
+       FROM saved_tracks s JOIN tracks t ON t.id = s.track_id`;
+  const LIB_LISTS = "SELECT id, name FROM playlists";
+  const HIST_INDEX = `SELECT t.name AS name, t.artist AS artist, t.album AS album, t.album_image AS image,
+            p.played_at AS playedAt, ${sourceExpr("p", "c")} AS source
      FROM plays p JOIN tracks t ON t.id = p.track_id
-     GROUP BY p.track_id
-     ORDER BY MAX(p.played_at) DESC`;
-  const VERSION = "SELECT MAX(rowid) AS v FROM tracks";
-  const hydrate = (n) =>
-    `${SELECT_PLAY("LEFT")} WHERE p.track_id IN (${Array(n).fill("?").join(",")})
-     ORDER BY p.played_at DESC LIMIT ?`;
+       LEFT JOIN contexts c ON c.uri = p.context_uri
+     ORDER BY p.played_at DESC`;
+  const META = "SELECT value FROM meta WHERE key = ?";
 
   const client = mkPrimary();
-  // Same interning db.ts readSearchIndex does, so PAYLOAD below is the body actually served.
-  const images = [];
-  const seen = new Map();
-  const index = (await client.execute(SEARCH_INDEX)).rows.map((r) => {
-    const url = r.image == null ? null : String(r.image);
-    let at = -1;
-    if (url) {
-      at = seen.get(url) ?? -1;
-      if (at === -1) seen.set(url, (at = images.push(url) - 1));
+  // The payload + equality halves read a SCRATCH COPY of the live replica: identical rows, but
+  // the equality queries are correlated subqueries over 15,000 tracks and are minutes-scale
+  // against remote Turso. Timing stays on the primary, where the build actually runs cold.
+  const copyPath = path.join(SCRATCH_DIR, "replica-copy.db");
+  for (const suffix of ["", "-wal"]) {
+    if (fs.existsSync(LIVE_REPLICA + suffix)) fs.copyFileSync(LIVE_REPLICA + suffix, copyPath + suffix);
+  }
+  const local = createClient({ url: `file:${copyPath}`, intMode: "number" });
+  const interner = () => {
+    const values = [];
+    const seen = new Map();
+    return {
+      values,
+      put(v) {
+        if (v == null || v === "") return -1;
+        const s = String(v);
+        const at = seen.get(s);
+        if (at !== undefined) return at;
+        seen.set(s, values.length);
+        return values.push(s) - 1;
+      },
+    };
+  };
+  const key = (r) => `${String(r.artist).toLowerCase()}\n${String(r.name).toLowerCase()}`;
+
+  // Both payloads, built exactly as db.ts builds them, so PAYLOAD below is the served body.
+  const [members, saved, lists, hist] = [
+    (await local.execute(LIB_MEMBERS)).rows,
+    (await local.execute(LIB_SAVED)).rows,
+    (await local.execute(LIB_LISTS)).rows,
+    (await local.execute(HIST_INDEX)).rows,
+  ];
+  const li = { images: interner(), albums: interner(), playlists: interner() };
+  const named = new Map(lists.map((r) => [String(r.id), li.playlists.put(r.name)]));
+  const libTracks = [];
+  const libAt = new Map();
+  const libAdd = (r) => {
+    const k = key(r);
+    const hit = libAt.get(k);
+    if (hit !== undefined) return hit;
+    libAt.set(k, libTracks.length);
+    return (
+      libTracks.push([
+        String(r.name),
+        String(r.artist),
+        li.images.put(r.image),
+        li.albums.put(r.album),
+        [],
+      ]) - 1
+    );
+  };
+  for (const r of members) {
+    const m = libTracks[libAdd(r)][4];
+    const pl = named.get(String(r.pid));
+    if (pl !== undefined && !m.includes(pl)) m.push(pl);
+  }
+  for (const r of saved) libAdd(r);
+
+  const hi = { images: interner(), albums: interner(), sources: interner() };
+  const histTracks = [];
+  const histAt = new Map();
+  const plays = hist.map((r) => {
+    const k = key(r);
+    let i = histAt.get(k);
+    if (i === undefined) {
+      histAt.set(k, (i = histTracks.length));
+      histTracks.push([
+        String(r.name),
+        String(r.artist),
+        hi.images.put(r.image),
+        hi.albums.put(r.album),
+      ]);
     }
-    return [String(r.id), String(r.name), String(r.artist), at];
+    return [i, Math.floor(Date.parse(String(r.playedAt)) / 60000), hi.sources.put(r.source)];
   });
-  const sampleIds = index.slice(0, 50).map((e) => e[0]);
 
   const { cells } = await runGroup(
     client,
     [
       // db.ts searchHistory, as the search box called it per keystroke (limit 500).
       { key: "oldLikeScan", run: (c) => c.execute({ sql: HIST("LEFT"), args: ["%the%", "%the%", 500] }) },
-      { key: "versionCheck", run: (c) => c.execute(VERSION) },
-      { key: "indexBuild", run: (c) => c.execute(SEARCH_INDEX) },
-      {
-        key: "hydrate50",
-        run: (c) => c.execute({ sql: hydrate(sampleIds.length), args: [...sampleIds, 3000] }),
-      },
+      { key: "libVersion", run: (c) => c.execute({ sql: META, args: ["library_seq"] }) },
+      { key: "libMembers", run: (c) => c.execute(LIB_MEMBERS) },
+      { key: "histVersion", run: (c) => c.execute({ sql: META, args: ["write_seq"] }) },
+      { key: "histBuild", run: (c) => c.execute(HIST_INDEX) },
       SELECT1,
     ],
-    7,
+    5,
   );
   console.log("TIMING (primary)");
   for (const [k, v] of Object.entries(cells)) {
     console.log(`  ${k.padEnd(13)} ${v.median}ms (${v.min}-${v.max}, n=${v.n}) rows=${v.rows}`);
   }
 
-  const ver = String((await client.execute(VERSION)).rows[0].v);
-  const body = Buffer.from(JSON.stringify({ v: ver, images, tracks: index }));
-  const noArt = Buffer.from(
-    JSON.stringify({ v: ver, tracks: index.map((e) => [e[0], e[1], e[2]]) }),
-  );
-  const totalTracks = Number((await client.execute("SELECT COUNT(*) AS n FROM tracks")).rows[0].n);
   const sz = (b) =>
     `raw ${b.length}B, gzip ${zlib.gzipSync(b, { level: 6 }).length}B, brotli ${zlib.brotliCompressSync(b).length}B`;
-  console.log(
-    `PAYLOAD   ${index.length} played tracks of ${totalTracks} in the table, ` +
-      `${images.length} distinct album images`,
+  const libBody = Buffer.from(
+    JSON.stringify({
+      v: "x",
+      images: li.images.values,
+      albums: li.albums.values,
+      playlists: li.playlists.values,
+      tracks: libTracks,
+    }),
   );
-  console.log(`  served (with art)  ${sz(body)}`);
-  console.log(`  without art        ${sz(noArt)}   ← what art costs`);
+  const histBody = Buffer.from(
+    JSON.stringify({
+      v: "x",
+      images: hi.images.values,
+      albums: hi.albums.values,
+      sources: hi.sources.values,
+      tracks: histTracks,
+      plays,
+    }),
+  );
+  const totalTracks = Number((await local.execute("SELECT COUNT(*) AS n FROM tracks")).rows[0].n);
+  console.log(
+    `PAYLOAD   ${libTracks.length} library identities (from ${members.length} memberships + ` +
+      `${saved.length} liked, ${totalTracks} rows in \`tracks\`), ` +
+      `${histTracks.length} played identities, ${plays.length} plays`,
+  );
+  console.log(`  library  ${sz(libBody)}   ← 304s unless the library changed`);
+  console.log(`  history  ${sz(histBody)}   ← re-fetched after any listening`);
+  console.log(`  per library identity: ${(libBody.length / libTracks.length).toFixed(0)}B raw`);
 
-  // EQUALITY. Two query shapes on purpose: narrow ones, where the 500-row cap can't bite and
-  // the two answers should be identical, and a broad one that exercises the cap.
-  const QUERIES = ["love", "the", "a", "night", "back", "we"];
+  // EQUALITY. The client's searchable set = the two payloads merged on identity.
+  const merged = new Map();
+  for (const [name, artist] of libTracks) merged.set(`${artist.toLowerCase()}\n${name.toLowerCase()}`, { name, artist, plays: 0 });
+  for (const [i, t] of histTracks.entries()) {
+    const k = `${t[1].toLowerCase()}\n${t[0].toLowerCase()}`;
+    if (!merged.has(k)) merged.set(k, { name: t[0], artist: t[1], plays: 0 });
+    merged.get(k).idx = i;
+  }
+  for (const [track] of plays) {
+    const t = histTracks[track];
+    merged.get(`${t[1].toLowerCase()}\n${t[0].toLowerCase()}`).plays += 1;
+  }
+  const LIB_LIKE = `SELECT DISTINCT t.name AS name, t.artist AS artist,
+        (SELECT COUNT(*) FROM plays p2 JOIN tracks t2 ON t2.id = p2.track_id
+          WHERE lower(t2.artist) = lower(t.artist) AND lower(t2.name) = lower(t.name)) AS plays,
+        (SELECT COUNT(*) FROM plays p3 WHERE p3.track_id = t.id) AS playsById
+     FROM tracks t
+     WHERE (t.name LIKE ? OR t.artist LIKE ?)
+       AND (EXISTS (SELECT 1 FROM playlist_tracks pt WHERE pt.track_id = t.id)
+         OR EXISTS (SELECT 1 FROM saved_tracks s WHERE s.track_id = t.id)
+         OR EXISTS (SELECT 1 FROM plays p WHERE p.track_id = t.id))`;
+  const QUERIES = ["love", "the", "night", "back", "we", "嘉宾"];
   let missing = 0;
+  let idMisses = 0;
   for (const q of QUERIES) {
     const like = `%${q}%`;
-    const rows = (await client.execute({ sql: HIST("LEFT"), args: [like, like, 500] })).rows;
+    const rows = (await local.execute({ sql: LIB_LIKE, args: [like, like] })).rows;
     for (const mode of ["songs", "artists"]) {
-      const sql = new Set(
-        rows
-          .filter((r) => String(mode === "songs" ? r.name : r.artist).toLowerCase().includes(q))
-          .map((r) => String(r.id)),
+      const sql = rows.filter((r) =>
+        String(mode === "songs" ? r.name : r.artist)
+          .toLowerCase()
+          .includes(q),
       );
       const clientSide = new Set(
-        index.filter((e) => e[mode === "songs" ? 1 : 2].toLowerCase().includes(q)).map((e) => e[0]),
+        [...merged.values()]
+          .filter((e) => (mode === "songs" ? e.name : e.artist).toLowerCase().includes(q))
+          .map((e) => `${e.artist.toLowerCase()}\n${e.name.toLowerCase()}`),
       );
-      const missed = [...sql].filter((id) => !clientSide.has(id));
+      const missed = sql.filter((r) => !clientSide.has(`${String(r.artist).toLowerCase()}\n${String(r.name).toLowerCase()}`));
       missing += missed.length;
+      // The played verdict, both ways of computing it.
+      let playedWrong = 0;
+      for (const r of sql) {
+        const e = merged.get(`${String(r.artist).toLowerCase()}\n${String(r.name).toLowerCase()}`);
+        if (!e) continue;
+        if (e.plays > 0 !== Number(r.plays) > 0) playedWrong++;
+        if (Number(r.plays) > 0 && Number(r.playsById) === 0) idMisses++;
+      }
+      missing += playedWrong;
       console.log(
-        `EQUALITY  ${JSON.stringify(q).padEnd(9)} ${mode.padEnd(7)} sql=${sql.size} client=${clientSide.size}` +
-          ` missed=${missed.length}${missed.length ? ` ${missed.slice(0, 3).join(",")}` : ""}`,
+        `EQUALITY  ${JSON.stringify(q).padEnd(9)} ${mode.padEnd(7)} sql=${sql.length} client=${clientSide.size}` +
+          ` missed=${missed.length} playedVerdictWrong=${playedWrong}`,
       );
     }
   }
-  console.log(`EQUALITY  ${missing} tracks missed by the client-side filter`);
+  console.log(`EQUALITY  ${missing} misses by the client-side filter (identity join)`);
+  console.log(
+    `EQUALITY  ${idMisses} rows a TRACK-ID join would have called never-played (identity says played)`,
+  );
+  // The same trap store-wide, independent of the sample queries: how many songs sit in a
+  // playlist AND have plays, counted by identity vs. counted by track id.
+  const byIdentity = Number(
+    (
+      await local.execute(
+        `SELECT COUNT(*) AS n FROM (SELECT DISTINCT lower(t.artist) a, lower(t.name) n
+           FROM plays p JOIN tracks t ON t.id = p.track_id) x
+         WHERE EXISTS (SELECT 1 FROM playlist_tracks pt JOIN tracks t2 ON t2.id = pt.track_id
+                       WHERE lower(t2.artist) = x.a AND lower(t2.name) = x.n)`,
+      )
+    ).rows[0].n,
+  );
+  const byId = Number(
+    (
+      await local.execute(
+        `SELECT COUNT(DISTINCT p.track_id) AS n FROM plays p
+         WHERE EXISTS (SELECT 1 FROM playlist_tracks pt WHERE pt.track_id = p.track_id)`,
+      )
+    ).rows[0].n,
+  );
+  console.log(
+    `EQUALITY  played-and-in-a-playlist: ${byIdentity} by identity, ${byId} by track id ` +
+      `— ${byIdentity - byId} songs an id join gets wrong`,
+  );
   if (missing > 0) process.exitCode = 1;
+  local.close();
   client.close();
+  fs.rmSync(SCRATCH_DIR, { recursive: true, force: true });
 }
 
 /** Re-run measurement 10 alone and merge it into the existing results JSON. */

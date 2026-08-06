@@ -11,7 +11,6 @@ import {
   allTimePlaysAction,
   dailyStatsAction,
   dayTracksAction,
-  playsForTracksAction,
   refreshHistoryAction,
   searchPlaysAction,
 } from "../history-actions";
@@ -58,67 +57,147 @@ function compareTracks(a: TrackStats, b: TrackStats, sort: Sort): number {
   }
 }
 
-// One search result: a song with all its plays collapsed behind it (expandable),
-// or an artist with their play total.
+// ---- The searchable set ------------------------------------------------------------------
+// One song, merged from the two search payloads (db.ts, "The client-side search payloads").
+// A song is in here if it sits in a playlist, in Liked Songs, or in the listen history — so
+// the box searches the LIBRARY, and `plays` being empty is a fact about the song ("never
+// played"), not a loading state. Everything a result row renders is on this object before the
+// first keystroke: nothing is fetched per query, and nothing fills in late.
 //
-// Title and artist come from the client-side index and are on screen the moment you type.
-// Everything derived from the plays themselves — count, lastPlayed, album, art — is null until
-// the stats for the matched ids land a beat later, so each of those is optional by
-// construction rather than by convention. See the search block below.
-type SongGroup = {
-  kind: "song";
-  id: string;
+// `key` is the song's IDENTITY — lower(artist) + "\n" + lower(name) — which is how the two
+// payloads are joined. Not the track id: Spotify hands the same song a different id in a
+// playlist than in recently-played, so an id join marks songs you play constantly as never
+// played (db.ts has the count). `ln`/`la` are the lower-cased name/artist, folded once at load
+// so a keystroke is one String.includes per song (13,464 in playlists or Liked Songs, plus
+// the 496 played ones that are in neither) over strings already in the right case.
+type Play = { minute: number; source: string | null };
+type Entry = {
+  key: string;
   name: string;
   artist: string;
+  image: string | null;
   album: string | null;
-  image: string | null;
-  count: number | null;
-  lastPlayed: string | null;
-  plays: TrackStats[];
-};
-type ArtistGroup = {
-  kind: "artist";
-  artist: string;
-  count: number | null;
-  lastPlayed: string | null;
-  image: string | null;
-};
-
-// One track in the client-side search index. `ln`/`la` are the lower-cased name/artist,
-// folded once when the index loads so a keystroke is ~3,000 String.includes calls over
-// strings already in the right case instead of ~3,000 fresh toLowerCase allocations.
-// `image` is resolved from the payload's interned URL table at load time.
-type IndexEntry = {
-  id: string;
-  name: string;
-  artist: string;
-  image: string | null;
+  /** Playlists the song is in, by name. Empty for a song known only from the history. */
+  playlists: string[];
+  /** Newest first. Empty = never played. */
+  plays: Play[];
   ln: string;
   la: string;
 };
 
-// Cap on how many matched tracks a query may carry: a one-letter query matches thousands, and
-// these ids are exactly what the hydration call asks about. Mirrored server-side in
-// playsForTracksAction.
-const MAX_MATCHES = 400;
-// The row cap in getPlaysForTracks (db.ts). A hydration that comes back at the cap may be
-// missing plays, which makes its counts unsafe to re-use for a narrower query.
-const HYDRATE_ROW_CAP = 3000;
-const SEARCH_DEBOUNCE_MS = 120;
-
-type SearchPlays = {
-  rows: TrackStats[];
-  /** Index path: the ids these rows cover. */
-  ids: Set<string>;
-  /** The `mode:query` these rows answer. Set on failure too — it is what stops the effect
-   *  re-firing forever, and what tells the view the query has been answered at all. */
-  key: string;
-  /** False when the server hit its row cap — see HYDRATE_ROW_CAP. */
-  complete: boolean;
-  /** The request for `key` failed. Distinguishes "no results" from "no answer". */
-  failed: boolean;
+// One search result: a song with all its plays collapsed behind it (expandable), or an artist
+// with their totals.
+type SongGroup = { kind: "song"; entry: Entry };
+type ArtistGroup = {
+  kind: "artist";
+  artist: string;
+  image: string | null;
+  songs: number;
+  plays: number;
+  last: number | null;
 };
-const NO_PLAYS: SearchPlays = { rows: [], ids: new Set(), key: "", complete: true, failed: false };
+
+/** The wire shapes. Kept as tuples for size — see db.ts for what each slot means. */
+type LibraryPayload = {
+  images: string[];
+  albums: string[];
+  playlists: string[];
+  tracks: [string, string, number, number, number[]][];
+};
+type HistoryPayload = {
+  images: string[];
+  albums: string[];
+  sources: string[];
+  tracks: [string, string, number, number][];
+  plays: [number, number, number][];
+};
+
+// How many results a query may show. A one-letter query matches thousands of songs and the
+// only cost left is DOM: every one of them is already in memory, matched and ranked. What is
+// dropped is reported under the list rather than silently truncated.
+const MAX_RESULTS = 400;
+const SEARCH_DEBOUNCE_MS = 120;
+const NO_FALLBACK = { key: "", rows: [] as TrackStats[], failed: false };
+
+/** "12 songs" / "1 song". */
+const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
+
+/** Epoch minutes (what the payloads carry) → the ISO string the formatters take. */
+function iso(minute: number): string {
+  return new Date(minute * 60000).toISOString();
+}
+
+// A 200 does NOT mean a payload this build can read. A cache one layer up — the browser's, or
+// Vercel's Data Cache, which outlives a deployment — can hand back a body written by an older
+// shape of the route; that is what broke production on 2026-08-05. The shape tokens make that
+// a miss rather than a hit, and this is the last line: an unreadable payload counts as NO
+// payload (the other half, or the server, answers), never as an empty or half-built one.
+const fetchPayload = <T,>(url: string, ok: (d: T) => boolean): Promise<T | null> =>
+  fetch(url)
+    .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+    .then((d: T) => {
+      if (!ok(d)) throw new Error(`${url}: unrecognised payload shape`);
+      return d;
+    })
+    .catch(() => null);
+
+/** Merge the two payloads into the searchable set. Either may be missing — each payload is
+ *  self-contained, so the library alone gives songs with no play data and the history alone
+ *  gives exactly what this box used to search. */
+function buildEntries(lib: LibraryPayload | null, hist: HistoryPayload | null): Entry[] {
+  const entries: Entry[] = [];
+  const at = new Map<string, number>();
+  const add = (name: string, artist: string, image: string | null, album: string | null) => {
+    const key = `${artist.toLowerCase()}\n${name.toLowerCase()}`;
+    const hit = at.get(key);
+    if (hit !== undefined) return entries[hit];
+    at.set(key, entries.length);
+    const e: Entry = {
+      key,
+      name,
+      artist,
+      image,
+      album,
+      playlists: [],
+      plays: [],
+      ln: name.toLowerCase(),
+      la: artist.toLowerCase(),
+    };
+    entries.push(e);
+    return e;
+  };
+  const pick = (table: string[], i: number) => (i >= 0 ? (table[i] ?? null) : null);
+
+  if (lib) {
+    for (const [name, artist, img, alb, pls] of lib.tracks) {
+      const e = add(name, artist, pick(lib.images, img), pick(lib.albums, alb));
+      for (const p of pls) {
+        const n = lib.playlists[p];
+        if (n) e.playlists.push(n);
+      }
+    }
+  }
+  if (hist) {
+    // The history's own art/album only lands on songs the library didn't already describe —
+    // for anything in a playlist the library's copy is the one already on screen elsewhere.
+    const byIndex = hist.tracks.map(([name, artist, img, alb]) =>
+      add(name, artist, pick(hist.images, img), pick(hist.albums, alb)),
+    );
+    // Plays arrive newest-first and are pushed in order, so each song's list stays that way.
+    for (const [track, minute, source] of hist.plays) {
+      byIndex[track]?.plays.push({ minute, source: pick(hist.sources, source) });
+    }
+  }
+  return entries;
+}
+
+/** Match rank: an exact title beats a title that starts with the query, which beats one that
+ *  merely contains it. The library is 5x the size of the history, so without this a typed-out
+ *  title can sit below a hundred incidental substring hits — the old index was small enough
+ *  for plain recency order to pass for relevance. */
+function tier(hay: string, q: string): number {
+  return hay === q ? 0 : hay.startsWith(q) ? 1 : 2;
+}
 
 // The history half of Home: day strip → list → search island. The greeting and the action
 // dock render in the page shell instead, OUTSIDE this component's Suspense boundary, so they
@@ -255,71 +334,81 @@ export function DenHome({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, daily]);
 
-  // ---- Search (matched in the browser; stats hydrated behind the rows) -------------------
+  // ---- Search (the whole answer is matched in the browser) -------------------------------
   // Every keystroke used to be a debounced server action running `LIKE '%q%'` over the whole
   // history — unindexable by construction (GOTCHAS: count the rows a query SCANS), so each
   // character paid a round trip plus a full `tracks` scan against remote Turso: 1,904.5ms
   // median (1,382.8-3,132.7), n=7, 2026-08-05, `bench-reads.mjs search`. Matching now runs in
-  // this browser against a compact index of every played track
-  // ([id, name, artist, albumImage], 156,863 B gzipped, /api/history/search-index), so typing
-  // costs no network at all.
+  // this browser, over two payloads fetched once per visit (db.ts, "The client-side search
+  // payloads"), so typing costs no network at all.
   //
-  // The index carries everything a row needs to look FINISHED — title, artist, art — and
-  // nothing that changes per play (db.ts, "The client-side search index"). So the contract on
-  // screen is: complete-looking rows appear instantly from the index, and ONE debounced call
-  // fills in the play counts and times behind them.
+  // Two things that used to be true are not any more:
+  //   • It searched your HISTORY. A song sitting in a playlist you had never played was not in
+  //     the index and came back "No songs match" — which is what it was designed to do (the
+  //     results were plays) and reads as a bug once you know the song is right there. The
+  //     library payload is the fix, and it is why a row now has to say whether it was played.
+  //   • Rows appeared first and their numbers arrived a beat later, from one debounced
+  //     hydration call per query. Counts, times, the per-play list and the playlists a song
+  //     lives in are all in the payloads now, so a row is complete in the frame it appears.
+  //
+  // What it costs: 43.8ms median (15.8-130.2, n=25, five queries x five reps, in-browser rAF,
+  // dev) from the keystroke to the painted frame, against 12.2ms for the old index. The extra
+  // is the work that used to happen 900ms later in a second update — matching 13,960 songs
+  // instead of 2,959, and painting up to 400 COMPLETE rows instead of 400 stubs. Slower per
+  // keystroke, one paint instead of two, and nothing on screen is provisional.
   //
   // The match is a plain case-insensitive substring, per mode: the title in Songs, the artist
-  // in Artists. That is exactly what the SQL path answered (LIKE on name OR artist, then the
-  // grouping below kept only rows whose relevant field matched), so this moved WHERE matching
-  // runs, not WHAT matches. lib/filter.ts's fuzzyFilter is the other shared matcher and is
-  // deliberately not used here: it splits the query into order-independent tokens and re-ranks,
-  // which is a different — and for this box, wider — answer than the one being replaced.
+  // in Artists — unchanged. What is new is the ORDER: exact, then prefix, then substring, and
+  // played before never-played inside each. lib/filter.ts's fuzzyFilter is the other shared
+  // matcher and is deliberately not used here: it splits the query into order-independent
+  // tokens, which is a wider answer than this box has ever given.
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<"songs" | "artists">("songs");
   const [expanded, setExpanded] = useState<string | null>(null);
   const searching = query.trim().length > 0;
 
-  // The index is fetched off the render path and then held in memory for the rest of the visit.
-  // Persistence across visits is the browser's HTTP cache plus the route's ETag: a reload
-  // revalidates in one 304 with no body.
-  const [index, setIndex] = useState<IndexEntry[] | null>(null);
-  const indexReq = useRef<Promise<void> | null>(null);
+  // The payloads are fetched off the render path and then held in memory for the rest of the
+  // visit. Persistence across visits is the browser's HTTP cache plus each route's ETag: the
+  // library half revalidates in one 304 with no body unless a playlist changed.
+  const [entries, setEntries] = useState<Entry[] | null>(null);
+  const libReq = useRef<Promise<LibraryPayload | null> | null>(null);
+  const histReq = useRef<Promise<HistoryPayload | null> | null>(null);
   // Where a query would be answered from right now. Only the perf readout reads it.
   const indexStatus = useRef<IndexStatus>("fallback");
+
   const loadIndex = () => {
-    if (!indexReq.current) indexStatus.current = "fetching";
-    indexReq.current ??= fetch("/api/history/search-index")
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((d: { images?: string[]; tracks?: [string, string, string, number][] }) => {
-        // A 200 does NOT mean a payload this build can read. A cache one layer up — the
-        // browser's, or Vercel's Data Cache, which outlives a deployment — can hand back a body
-        // written by an older shape of this route; that is what broke production on
-        // 2026-08-05. Both tokens now make that a miss rather than a hit, and this check is the
-        // last line: an unreadable payload counts as NO INDEX (the search falls back to the
-        // server), never as an empty or half-built one.
-        const tracks = d?.tracks;
-        const ok =
-          Array.isArray(tracks) &&
-          (tracks.length === 0 || (Array.isArray(tracks[0]) && tracks[0].length >= 4));
-        if (!ok) throw new Error("search index: unrecognised payload shape");
-        indexStatus.current = "memory";
-        setIndex(
-          tracks.map(([id, name, artist, img]) => ({
-            id,
-            name,
-            artist,
-            image: img >= 0 ? (d.images?.[img] ?? null) : null,
-            ln: name.toLowerCase(),
-            la: artist.toLowerCase(),
-          })),
-        );
-      })
-      .catch(() => {
-        // Nothing to retry: without an index every keystroke goes to the server instead, which
-        // is exactly what this page did before the index existed.
+    // Idempotent, and it HAS to be: this is called from an effect that also reads `entries`, so
+    // a call that re-attached a handler to the already-resolved requests would rebuild the set,
+    // hand back a new array identity, re-run the effect and call this again — a render loop
+    // that pins the tab. One handler per pair of requests; a re-fetch only happens after a
+    // ref is cleared (new plays landed).
+    if (libReq.current && histReq.current) return;
+    if (!libReq.current) indexStatus.current = "fetching";
+    libReq.current ??= fetchPayload<LibraryPayload>(
+      "/api/search/library",
+      (d) => Array.isArray(d?.tracks) && (!d.tracks.length || d.tracks[0]?.length >= 5),
+    );
+    histReq.current ??= fetchPayload<HistoryPayload>(
+      "/api/search/history",
+      (d) =>
+        Array.isArray(d?.tracks) &&
+        Array.isArray(d?.plays) &&
+        (!d.tracks.length || d.tracks[0]?.length >= 4),
+    );
+    const [lib, hist] = [libReq.current, histReq.current];
+    void Promise.all([lib, hist]).then(([l, h]) => {
+      // A refresh that found new plays drops the history request to force a re-fetch; ignore a
+      // pair that was superseded while in flight.
+      if (libReq.current !== lib || histReq.current !== hist) return;
+      // Both halves failed: nothing to match against, so queries go to the server. An earlier
+      // successful build is kept — a failed refresh should not empty the box.
+      if (!l && !h) {
         indexStatus.current = "fallback";
-      });
+        return;
+      }
+      indexStatus.current = "memory";
+      setEntries(buildEntries(l, h));
+    });
   };
 
   // Opt-in timing readout (lib/search-perf.ts): one console line per query, off unless the
@@ -352,26 +441,12 @@ export function DenHome({
     return () => clearTimeout(t);
   }, []);
 
-  // The matched tracks, newest play first (the index arrives in that order, so the result
-  // order is the one the SQL search produced). `null` means "no index answer" — still loading
-  // or failed — which is what routes the query to the server fallback below.
-  const matched = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q || !index) return null;
-    const out: IndexEntry[] = [];
-    for (const e of index) {
-      if ((mode === "songs" ? e.ln : e.la).includes(q)) {
-        out.push(e);
-        if (out.length >= MAX_MATCHES) break;
-      }
-    }
-    return out;
-  }, [index, query, mode]);
-
-  // Plays behind the current results — from the hydration call on the index path, from the old
-  // search action on the fallback path. Both return one row per play, so the grouping below
-  // doesn't care which ran.
-  const [plays, setPlays] = useState<SearchPlays>(NO_PLAYS);
+  // The server fallback, for the window before the payloads land (and the case where both
+  // failed). Same action the box used before any of this existed, so it is never dead — but it
+  // only knows the history, so its answer is the narrower one.
+  const [fallback, setFallback] = useState<{ key: string; rows: TrackStats[]; failed: boolean }>(
+    NO_FALLBACK,
+  );
   // The mode+query in the box right now, checked when a response lands so a slow answer to an
   // old query can never overwrite a newer one. Updated in the effect (which runs on every
   // change), not during render.
@@ -383,55 +458,25 @@ export function DenHome({
     liveKey.current = k;
     if (!q) return;
     loadIndex();
-    // This effect re-runs when `plays` lands (it reads it, below), so without this the answer
-    // to a query would schedule the next request for the SAME query — a self-feeding loop.
-    // `key` is set to the query a response was fetched for, on both paths.
-    if (plays.key === k) return;
-
-    if (!matched) {
-      // Fallback: the index is in flight or failed. This is the old path, unchanged — the box
-      // is never dead, it just goes back to costing a round trip per query.
-      const id = setTimeout(() => {
-        searchPlaysAction(q)
-          .then((rows) => {
-            if (liveKey.current === k) setPlays({ rows, ids: new Set(), key: k, complete: true, failed: false });
-          })
-          // Without this the page hangs on "Searching…" for as long as it is open — a rejected
-          // action left `plays` untouched, so the pending flag below never cleared. That is the
-          // regression Rem hit: the index was unreadable (stale-shaped cache entry), every
-          // query fell through to here, and one failed action was terminal. Record the failure
-          // under the same key a success would use, so the view resolves and the effect stops.
-          .catch(() => {
-            if (liveKey.current === k) setPlays({ rows: [], ids: new Set(), key: k, complete: true, failed: true });
-          });
-      }, SEARCH_DEBOUNCE_MS);
-      return () => clearTimeout(id);
-    }
-    if (matched.length === 0) return;
-    // Typing narrows: every match for "abc" is also a match for "ab". So once a complete set of
-    // plays is in hand, extending the query needs no request at all — the test is simply
-    // whether the ids now wanted are already covered, which also catches going back to a
-    // shorter query or flipping modes.
-    if (plays.complete && matched.every((m) => plays.ids.has(m.id))) return;
-    const ids = matched.map((m) => m.id);
+    // Matched in the browser: no request at all, for any query.
+    if (entries) return;
+    // This effect re-runs when the answer lands (it reads `fallback`), so without this the
+    // answer to a query would schedule the next request for the SAME query — a self-feeding
+    // loop. `key` is set on failure too: without it a rejected action left the view on
+    // "Searching…" for as long as the page stayed open, which is the regression Rem hit when a
+    // stale-shaped cache entry sent every query down this path.
+    if (fallback.key === k) return;
     const id = setTimeout(() => {
-      playsForTracksAction(ids)
+      searchPlaysAction(q)
         .then((rows) => {
-          if (liveKey.current !== k) return;
-          setPlays({ rows, ids: new Set(ids), key: k, complete: rows.length < HYDRATE_ROW_CAP, failed: false });
+          if (liveKey.current === k) setFallback({ key: k, rows, failed: false });
         })
-        // The rows are already on screen here, so a failure costs counts and times, not the
-        // result. Recording it under `key` is what stops the effect retrying on every render.
         .catch(() => {
-          if (liveKey.current === k) {
-            setPlays({ rows: [], ids: new Set(), key: k, complete: true, failed: true });
-          }
+          if (liveKey.current === k) setFallback({ key: k, rows: [], failed: true });
         });
-      // 120ms: this no longer guards a slow query (the rows are already on screen), it just
-      // stops a burst of typing firing a call per character.
     }, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(id);
-  }, [query, mode, matched, plays]);
+  }, [query, mode, entries, fallback]);
 
   // ---- Live refresh: pull new plays from Spotify -----------------------------------------
   // Everything else on this page reads the local store, and the store only grows when
@@ -462,10 +507,13 @@ export function DenHome({
       const followingLatest = selected === (daily[0]?.day ?? null);
       const want = searching ? null : selected === "all" ? "all" : followingLatest ? "latest" : null;
       const r = await refreshHistoryAction(want, daily.length);
-      // New plays landed. If one of them was a song never played before, the search index we
-      // are holding doesn't have it — drop our copy so the next keystroke re-asks. Usually a
-      // 304 with no body: the ETag only moves when `tracks` actually gained a row.
-      if (r.added > 0) indexReq.current = null;
+      // New plays landed, so the history payload we are holding is behind: drop it and rebuild
+      // from a fresh copy. Only that half — the library payload does not move when you listen,
+      // which is the whole reason the two are separate.
+      if (r.added > 0) {
+        histReq.current = null;
+        loadIndex();
+      }
       if (!r.ok || selRef.current !== at) return;
       setDaily(r.daily);
       setAllTime(r.allTime);
@@ -496,82 +544,91 @@ export function DenHome({
     };
   }, []);
 
-  // Whether the plays in hand answer what is on screen. On the index path that's id coverage;
-  // on the fallback path it's the query they were fetched for.
-  const statsReady = matched
-    ? matched.every((m) => plays.ids.has(m.id))
-    : plays.key === `${mode}:${query.trim()}`;
-  // Only the fallback path has nothing to show while it waits — the index path already has the
-  // rows and is only missing their numbers.
-  const searchPending = searching && !matched && !statsReady;
+  // Nothing to wait for once the payloads are in: a query is answered by the memo below in the
+  // frame it is typed. These two flags describe the fallback path only.
+  const answered = fallback.key === `${mode}:${query.trim()}`;
+  const searchPending = searching && !entries && !answered;
   // Answered, but with a failure rather than results. Kept distinct from "no results": telling
-  // someone their song isn't in their history when the request simply failed is a lie.
-  const searchFailed = searching && plays.failed && plays.key === `${mode}:${query.trim()}`;
+  // someone their song isn't in their library when the request simply failed is a lie.
+  const searchFailed = searching && !entries && answered && fallback.failed;
 
-  const groups = useMemo<(SongGroup | ArtistGroup)[]>(() => {
-    if (!searching) return [];
-    const q = query.trim().toLowerCase();
-    const rows = statsReady ? plays.rows : [];
-    const byId = new Map<string, TrackStats[]>();
-    for (const r of rows) {
-      const list = byId.get(r.id);
-      if (list) list.push(r);
-      else byId.set(r.id, [r]);
-    }
-    // The matched tracks: the client index when it's loaded, otherwise reconstructed from the
-    // server's rows — those come newest-first too, so first appearance gives the same order.
-    // Songs mode matches the TITLE only; artist matches belong to the other tab.
-    let entries: { id: string; name: string; artist: string; image: string | null }[];
-    if (matched) {
-      entries = matched;
-    } else {
-      entries = [];
-      const seen = new Set<string>();
-      for (const r of rows) {
-        if (seen.has(r.id) || !(mode === "songs" ? r.name : r.artist).toLowerCase().includes(q)) {
-          continue;
-        }
-        seen.add(r.id);
-        entries.push({ id: r.id, name: r.name, artist: r.artist, image: r.albumImage });
+  // The fallback's play rows folded into the same Entry shape the payloads produce, so the
+  // grouping below has one input and the rows render through one code path. Its songs are
+  // always played ones (they came out of the history) and it knows no playlists.
+  const fallbackEntries = useMemo<Entry[] | null>(() => {
+    if (entries || !answered || fallback.rows.length === 0) return null;
+    const by = new Map<string, Entry>();
+    for (const r of fallback.rows) {
+      const key = `${r.artist.toLowerCase()}\n${r.name.toLowerCase()}`;
+      let e = by.get(key);
+      if (!e) {
+        e = {
+          key,
+          name: r.name,
+          artist: r.artist,
+          image: r.albumImage,
+          album: r.album,
+          playlists: [],
+          plays: [],
+          ln: r.name.toLowerCase(),
+          la: r.artist.toLowerCase(),
+        };
+        by.set(key, e);
       }
+      // One row per play, newest first — the same order the payload's plays arrive in.
+      e.plays.push({ minute: Math.floor(Date.parse(r.lastPlayed) / 60000), source: r.source });
     }
+    return [...by.values()];
+  }, [entries, fallback, answered]);
+
+  // Matching, ranking and grouping, all in memory. `total` is what matched before the display
+  // cap, so the list can say what it dropped instead of silently truncating.
+  const { groups, total } = useMemo<{ groups: (SongGroup | ArtistGroup)[]; total: number }>(() => {
+    const none = { groups: [], total: 0 };
+    const q = query.trim().toLowerCase();
+    const source = entries ?? fallbackEntries;
+    if (!q || !source) return none;
 
     if (mode === "songs") {
-      return entries.map((e) => {
-        const p = byId.get(e.id) ?? [];
-        const newest = p[0]; // rows come newest-first
-        return {
-          kind: "song",
-          id: e.id,
-          name: e.name,
-          artist: e.artist,
-          album: newest?.album ?? null,
-          // From the index, so the art is in the first paint — the row reads as finished
-          // before the counts arrive rather than as a grey square that might still be loading.
-          image: e.image ?? newest?.albumImage ?? null,
-          count: p.length || null,
-          lastPlayed: newest?.lastPlayed ?? null,
-          plays: p,
-        };
-      });
+      const hits = source.filter((e) => e.ln.includes(q));
+      hits.sort(
+        (a, b) =>
+          tier(a.ln, q) - tier(b.ln, q) ||
+          // Played first, most recent first. A song you listen to is the one you meant.
+          (b.plays[0]?.minute ?? -1) - (a.plays[0]?.minute ?? -1) ||
+          a.name.localeCompare(b.name),
+      );
+      return {
+        groups: hits.slice(0, MAX_RESULTS).map((entry): SongGroup => ({ kind: "song", entry })),
+        total: hits.length,
+      };
     }
-    // Artists: the matched tracks folded per artist, so an artist's total is the sum over
-    // their matched songs.
+
+    // Artists: every song by a matching artist folded into one row, so the totals are over the
+    // whole artist, not over the songs whose titles happened to match.
     const byArtist = new Map<string, ArtistGroup>();
-    for (const e of entries) {
-      let g = byArtist.get(e.artist);
+    for (const e of source) {
+      if (!e.la.includes(q)) continue;
+      let g = byArtist.get(e.la);
       if (!g) {
-        g = { kind: "artist", artist: e.artist, count: null, lastPlayed: null, image: null };
-        byArtist.set(e.artist, g);
+        g = { kind: "artist", artist: e.artist, image: null, songs: 0, plays: 0, last: null };
+        byArtist.set(e.la, g);
       }
-      g.image ??= e.image; // index-supplied: art paints with the row, not after it
-      const p = byId.get(e.id) ?? [];
-      if (p.length === 0) continue;
-      g.count = (g.count ?? 0) + p.length;
-      if (!g.lastPlayed || p[0].lastPlayed > g.lastPlayed) g.lastPlayed = p[0].lastPlayed;
+      g.image ??= e.image;
+      g.songs += 1;
+      g.plays += e.plays.length;
+      const last = e.plays[0]?.minute ?? null;
+      if (last != null && (g.last == null || last > g.last)) g.last = last;
     }
-    return [...byArtist.values()];
-  }, [matched, plays, statsReady, searching, mode, query]);
+    const artists = [...byArtist.values()];
+    artists.sort(
+      (a, b) =>
+        tier(a.artist.toLowerCase(), q) - tier(b.artist.toLowerCase(), q) ||
+        (b.last ?? -1) - (a.last ?? -1) ||
+        a.artist.localeCompare(b.artist),
+    );
+    return { groups: artists.slice(0, MAX_RESULTS), total: artists.length };
+  }, [entries, fallbackEntries, mode, query]);
 
   // ---- Sort (day / all-time list) ----
   const [sort, setSort] = useState<Sort>("recent");
@@ -619,10 +676,10 @@ export function DenHome({
             data-search-results=""
             data-query={query.trim()}
             data-rows={groups.length}
-            // "1" stats are on screen · "x" the attempt failed, none are coming · "0" waiting.
-            // The failed state is its own value so the probe can stop and report an honest
-            // dash instead of sitting out its timeout.
-            data-hydrated={statsReady ? "1" : searchFailed ? "x" : "0"}
+            // "1" the rows are complete · "x" the attempt failed, nothing is coming · "0"
+            // waiting on the server fallback. On the payload path a row is never partial, so
+            // this is "1" from the first frame.
+            data-hydrated={searchPending ? "0" : searchFailed ? "x" : "1"}
             className={cn(
               "thin-scroll min-h-0 flex-1 overflow-y-auto",
               searchPending && "opacity-60 transition-opacity",
@@ -637,37 +694,46 @@ export function DenHome({
                     : `No ${mode === "songs" ? "songs" : "artists"} match “${query.trim()}”.`}
               </p>
             ) : (
-              <ul className="divide-y divide-border/50">
-                {groups.map((g) =>
-                  g.kind === "song" ? (
-                    <SongResult
-                      key={g.id}
-                      group={g}
-                      expanded={expanded === g.id}
-                      onToggle={() => setExpanded((e) => (e === g.id ? null : g.id))}
-                    />
-                  ) : (
-                    <li key={g.artist}>
-                      <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 py-2 sm:gap-4">
-                        <Art image={g.image} />
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-medium select-text">{g.artist}</p>
-                          {/* The play total arrives after the row does; the non-breaking space
-                              holds the line so nothing reflows when it lands. */}
-                          <p className="text-[13px] text-muted-foreground">
-                            {g.count == null
-                              ? " "
-                              : `${g.count} ${g.count === 1 ? "play" : "plays"}`}
-                          </p>
+              <>
+                <ul className="divide-y divide-border/50">
+                  {groups.map((g) =>
+                    g.kind === "song" ? (
+                      <SongResult
+                        key={g.entry.key}
+                        entry={g.entry}
+                        expanded={expanded === g.entry.key}
+                        onToggle={() =>
+                          setExpanded((e) => (e === g.entry.key ? null : g.entry.key))
+                        }
+                      />
+                    ) : (
+                      <li key={g.artist}>
+                        <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 py-2 sm:gap-4">
+                          <Art image={g.image} />
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium select-text">{g.artist}</p>
+                            {/* Library first, listening second: how much of them you HAVE is
+                                the fact that survives an artist you've never got to. */}
+                            <p className="text-[13px] text-muted-foreground">
+                              {plural(g.songs, "song")}
+                              {g.plays > 0 ? ` · ${plural(g.plays, "play")}` : ""}
+                            </p>
+                          </div>
+                          <PlayedAt last={g.last} />
                         </div>
-                        <p className="text-xs tabular-nums text-muted-foreground">
-                          {g.lastPlayed ? timeAgo(g.lastPlayed) : ""}
-                        </p>
-                      </div>
-                    </li>
-                  ),
-                )}
-              </ul>
+                      </li>
+                    ),
+                  )}
+                </ul>
+                {total > groups.length ? (
+                  // Never truncate silently: a capped list that says nothing reads as the whole
+                  // answer. Typing one more character is the fix, and the count says so.
+                  <p className="py-3 text-center text-xs text-muted-foreground/70">
+                    Showing the first {groups.length.toLocaleString()} of{" "}
+                    {total.toLocaleString()} matches.
+                  </p>
+                ) : null}
+              </>
             )}
           </div>
         ) : (
@@ -868,26 +934,42 @@ function Art({ image, size = 11 }: { image: string | null; size?: 9 | 10 | 11 })
   );
 }
 
-// A matched song: one row no matter how many times it was played; the play count sits
-// on the right and the row expands to the exact listen times, each with where it was played
-// from. Both come from the hydrated play rows, so the expansion needs no request of its own.
-//
-// Title, artist and art render immediately (they come from the client index); album, count and
-// time appear when the stats land. The row's height is set by the 44px thumbnail, so nothing
-// reflows as they fill in.
+/** The right-hand slot of a result row: when the song was last played, or that it never was.
+ *
+ *  A never-played song is a normal result now that the box searches the library, so the row has
+ *  to SAY that rather than leave the slot empty — an empty slot reads as a number still
+ *  loading, which is the thing this whole change removed. It sits at half ink and in the same
+ *  place a timestamp would, so a run of them settles into a column instead of shouting once per
+ *  line, and ranking puts played songs first within each match tier, so they cluster. */
+function PlayedAt({ last }: { last: number | null }) {
+  return last == null ? (
+    <p className="text-xs text-muted-foreground/50">Never played</p>
+  ) : (
+    <p className="text-xs tabular-nums text-muted-foreground">{timeAgo(iso(last))}</p>
+  );
+}
+
+// A matched song: one row no matter how many times it was played; the play count sits on the
+// right and the row expands to where the song lives and the exact times it ran. Everything
+// here is already in memory when the row mounts — art, album, counts, times, playlists — so
+// the row is complete in its first frame and nothing reflows behind it.
 function SongResult({
-  group,
+  entry,
   expanded,
   onToggle,
 }: {
-  group: SongGroup;
+  entry: Entry;
   expanded: boolean;
   onToggle: () => void;
 }) {
-  const { name, artist, album, image, count, lastPlayed, plays } = group;
+  const { name, artist, album, image, playlists, plays } = entry;
   const SHOW = 12;
+  const IN_SHOW = 4;
   const [showAllPlays, setShowAllPlays] = useState(false);
   const listed = showAllPlays ? plays : plays.slice(0, SHOW);
+  // A never-played song still expands — to the playlists it sits in, which is the answer to
+  // the question that put it on screen.
+  const detail = plays.length > 0 || playlists.length > 0;
   return (
     <li>
       <button
@@ -903,37 +985,37 @@ function SongResult({
         </div>
         <p className="hidden truncate text-[13px] text-muted-foreground md:block">{album}</p>
         <div className="text-right">
-          {count != null && count > 1 ? (
-            <p className="text-sm font-medium tabular-nums">×{count}</p>
+          {plays.length > 1 ? (
+            <p className="text-sm font-medium tabular-nums">×{plays.length}</p>
           ) : null}
-          <p className="text-xs tabular-nums text-muted-foreground">
-            {lastPlayed ? timeAgo(lastPlayed) : ""}
-          </p>
+          <PlayedAt last={plays[0]?.minute ?? null} />
         </div>
         <ChevronDown
           className={cn(
             "size-4 text-muted-foreground/60 transition-transform",
             expanded && "rotate-180",
-            // Nothing to expand until the plays are in.
-            plays.length === 0 && "opacity-0",
+            !detail && "opacity-0",
           )}
         />
       </button>
-      {expanded && plays.length > 0 ? (
+      {expanded && detail ? (
         <ul className="mb-2 ml-[3.75rem] space-y-1 border-l border-border/60 pl-4">
+          {playlists.length > 0 ? (
+            <li className="text-[13px] text-muted-foreground/80">
+              In {playlists.slice(0, IN_SHOW).join(", ")}
+              {playlists.length > IN_SHOW ? ` +${playlists.length - IN_SHOW} more` : ""}
+            </li>
+          ) : null}
           {listed.map((p, i) => (
             <li key={i} className="flex items-baseline gap-3 text-[13px] text-muted-foreground">
               {/* Fixed width from sm up so the sources line up into a column rather than
                   ragging off each timestamp. */}
               <span className="shrink-0 tabular-nums sm:min-w-[8.5rem]">
-                {exactTimeShort(p.lastPlayed)}
+                {exactTimeShort(iso(p.minute))}
               </span>
-              {/* Where THAT play was listened from — the same per-play value the day table
-                  shows in its From column, carried on the row by db.ts's sourceExpr: the
-                  resolved playlist/album name, the bare context type when the name never
-                  resolved, and NULL when the song is no longer in the playlist it was
-                  credited to (ctx_orphan). Nothing is rendered for a null, same as a play
-                  with no context at all. */}
+              {/* Where THAT play was listened from — the resolved playlist/album name, the bare
+                  context type when the name never resolved, and nothing at all when the song is
+                  no longer in the playlist it was credited to (db.ts's ctx_orphan). */}
               {p.source ? <span className="truncate">{p.source}</span> : null}
             </li>
           ))}
