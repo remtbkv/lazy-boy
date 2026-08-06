@@ -31,10 +31,13 @@ Every per-query figure below was verified with `EXPLAIN QUERY PLAN` against a co
 `data/replica.db` (same schema, same data, same engine family as the primary), 2026-08-06.
 Traffic was measured by tailing production logs for 58 minutes (`vercel logs --json`,
 2026-08-06 19:16–20:14 UTC): **41 hits on `/api/cron/sync`, nothing else** — a strict
-120 s pinger interleaved with a ~5-min second scheduler, ≈ **42 ticks/hour ≈ 1,018/day**.
-(The route comment says the 5-min one is GitHub Actions; the repo has no workflows left —
-the second pinger is external and unidentified. 258 historical Actions runs exist, so it
-predates the workflow deletion.)
+120 s pinger interleaved with a ~5-min second scheduler. **11 of the 41 returned 401**
+(artifact-check pass, same log file): the ~5-min pinger sends a stale secret, is rejected
+before any Spotify or DB work, and has been syncing nothing — so it costs ~0 rows and the
+effective paying cadence is the 2-min pinger's **30 ticks/hour ≈ 720/day**. (The route
+comment used to say the 5-min source was GitHub Actions; the workflows are deleted, so the
+401-ing survivor is an external leftover — find and delete it in the cron-job.org
+dashboard, or wherever it lives.)
 
 Per sync call (`syncRecentPlays` — the cron tick AND every open-tab refresh both pay this):
 
@@ -50,15 +53,17 @@ tracks probes ~14.4K.
 
 The model, per day, at today's store size:
 
-- cron ticks, steady: 1,018 × 14.25K ≈ **14.5M/day**
+- cron ticks, steady: 720 authenticated × 14.25K ≈ **10.3M/day** (the 401-ing 5-min
+  pinger's ~288 hits/day cost ~0)
 - ticks landing plays (~50–80/day): × ~21.6K ≈ **1.4M/day**
-- an open Home tab: refreshes every 120 s + twice per track change + on visibility
-  (`den-home.tsx`) — each is a full sync call: ≈ **0.9M per hour the tab is open**
+- an open Home tab: `refreshHistoryAction` every 120 s + twice per track change + on
+  visibility (`den-home.tsx`), and `SyncOnLoad`'s `POST /api/sync` (server-debounced to
+  ~1/min) — each is a full sync call: ≈ **0.9–1.7M per hour the tab is open**
 - cache-miss re-reads after each write-marker bump (daily strip, all-time list, today):
   ~5K × ~15 bumps/day ≈ 0.1M/day
 - hourly library sync steady state + daily cron: ~20K/day — noise
 
-Closed-app model ≈ **16M/day**; with a 6 h listening session ≈ 21M; the Aug 5→6 window
+Closed-app model ≈ **12M/day**; with a 6 h listening session ≈ 18–22M; the Aug 5→6 window
 also contained dev + benchmarking (bench-reads ≈ 1M measured; the dev remainder is not
 reconstructable). The model accounts for ~half to two-thirds of the measured 41.3M/day;
 the residual is attributed to dev-day traffic **[UNVERIFIED]** and to possible
@@ -81,11 +86,12 @@ Counter readings come from the Turso dashboard (or the platform API once a token
 Both windows: no local dev, no benchmarks, app closed except where stated; tick traffic
 confirmed by a log tail during the window.
 
-- **W0 — baseline, before the fix deploys, ≥6 h.** Prediction: 14–25M/day pace
-  (0.6–1.05M/h). Null (model wrong): the pace stays ≥35M/day with no dev running — then
-  something big is unattributed and the fixes must NOT be declared the answer.
-- **W1 — after the fix deploys, ≥6 h.** Prediction: ≤1M/day pace closed-app (ticks
-  1,018 × ~160 rows ≈ 0.16M + throttled recomputes ≈ 0.3M + margin). Failure bar: >3M/day
+- **W0 — baseline, before the fix deploys, ≥6 h.** Prediction: 10–24M/day pace
+  (0.45–1.0M/h; the range is model ± the index-entry calibration unknown). Null (model
+  wrong): the pace stays ≥35M/day with no dev running — then something big is
+  unattributed and the fixes must NOT be declared the answer.
+- **W1 — after the fix deploys, ≥6 h.** Prediction: ≤1M/day pace closed-app (720 ticks
+  × ~160 rows ≈ 0.12M + throttled recomputes ≈ 0.3M + margin). Failure bar: >3M/day
   means a sibling path is still scanning — hunt it, don't celebrate.
 - A trivial no-op scores: W1/W0 ≈ 1.0. The fix claims W1/W0 ≤ 0.1 at unchanged tick rate.
 - Projected month at the W1 bar: ≤ ~30M/month + Rem's interactive use ≈ **≤10% of the
