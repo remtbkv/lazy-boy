@@ -3,7 +3,7 @@ import { getValidAccessToken } from "@/lib/auth";
 import { spotifyClient, SpotifyError } from "@/lib/spotify";
 import { syncRecentPlays } from "@/lib/sync/history";
 import { syncLibrary } from "@/lib/sync/library";
-import { getLibrarySyncedAt } from "@/lib/db";
+import { getLibrarySyncedAt, recomputeAllTimeStats } from "@/lib/db";
 import { ensureCronJobEnabled } from "@/lib/cronjob";
 
 // Rebuild the library index at most hourly (snapshot-diffing makes a run cheap, but no
@@ -23,8 +23,10 @@ function safeEqual(a: string, b: string): boolean {
   return ab.length === bb.length && timingSafeEqual(ab, bb);
 }
 
-// Backstop sync, triggered by the schedulers (GitHub Actions every 5 min + Vercel daily
-// cron, see vercel.json). Runs without a session using the stored token, so history stays
+// Backstop sync, triggered by the schedulers: cron-job.org every 2 min, a second external
+// ~5-min pinger (measured in production logs 2026-08-06 — the GitHub Actions workflow that
+// used to be the 5-min source was deleted, so its identity is unconfirmed), and Vercel's
+// daily cron (vercel.json). Runs without a session using the stored token, so history stays
 // current even when the app hasn't been opened. Callers send `Authorization: Bearer
 // $CRON_SECRET`; anything else is rejected so the endpoint can't be triggered by randoms.
 export async function GET(req: Request) {
@@ -39,6 +41,10 @@ export async function GET(req: Request) {
   // Vercel's cron carries this header, so the 2-min pings themselves skip the check.
   if (req.headers.get("x-vercel-cron")) {
     await ensureCronJobEnabled();
+    // Daily heal for the throttled all-time recompute: a listening session's last plays
+    // can land inside the 10-min gate and stay uncounted until the next session — this
+    // bounds that staleness at a day for the cost of one full scan.
+    await recomputeAllTimeStats();
   }
   const token = await getValidAccessToken();
   if (!token) {

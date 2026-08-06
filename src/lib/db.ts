@@ -204,6 +204,13 @@ async function init(): Promise<Client> {
   await client.execute(
     "CREATE INDEX IF NOT EXISTS idx_plays_context ON plays (context_uri)",
   );
+  // recomputeOrphanFlags({newOnly}) filters on `ctx_orphan IS NULL`. Without this partial
+  // index that is a full plays scan on every sync tick that lands a play — ~7.2K billed
+  // rows against a replica-less primary to find the handful of new rows. The index holds
+  // only the unverdicted rows (normally ≈0), so the same UPDATE scans just those.
+  await client.execute(
+    "CREATE INDEX IF NOT EXISTS idx_plays_orphan_null ON plays (id) WHERE ctx_orphan IS NULL",
+  );
   return client;
 }
 
@@ -643,9 +650,21 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
   let added = 0;
   for (const i of insertResultIdx) added += Number(results[i].rowsAffected);
   // New plays landed → refresh the cached all-time totals so Home reads them instantly
-  // (instead of running the expensive gap scan on render). Only on a real change.
-  if (added > 0) await recomputeAllTimeStats();
+  // (instead of running the expensive gap scan on render). Only on a real change, and at
+  // most every 10 min: the recompute is a full plays scan (~14K billed rows replica-less),
+  // and during a listening session plays land on many consecutive ticks. The card can lag
+  // the newest plays by ≤10 min mid-session; the end-of-session tail is healed by the
+  // daily cron's unconditional recompute (cron/sync route).
+  if (added > 0) await maybeRecomputeAllTimeStats();
   return added;
+}
+
+const ALLTIME_RECOMPUTE_MIN_MS = 10 * 60 * 1000;
+
+async function maybeRecomputeAllTimeStats(): Promise<void> {
+  const v = await getMeta("alltime_at");
+  if (v && Date.now() - (Number(v) || 0) < ALLTIME_RECOMPUTE_MIN_MS) return;
+  await recomputeAllTimeStats();
 }
 
 /** Cache resolved context (playlist/album/artist) names so "From" shows a name. */
@@ -674,9 +693,41 @@ export async function recordContexts(contexts: ContextRecord[]): Promise<void> {
 // names appear within a month with no manual cleanup, at ~a few extra calls/month.
 const NEGATIVE_RECHECK_MS = 30 * 24 * 60 * 60 * 1000;
 
+/** The candidates from `cands` that have no `contexts` row yet. This is the per-sync
+ *  resolution check: a never-seen context can only enter the store via a play in the
+ *  incoming batch, so checking the batch's own URIs (≤50, indexed) answers the same
+ *  question the full unresolvedContextUris() scan answered — that scan billed ~14K
+ *  primary rows per sync call (plays scan + contexts probe per row) and ran ~1,000+
+ *  times a day across the cron tick and the open-tab refresh. The negative-cache
+ *  re-check that the full query also covers is not lost: the sync runs the full pass
+ *  once a day (see syncRecentPlays). */
+export async function unseenContexts(
+  cands: { uri: string; type: string }[],
+): Promise<{ uri: string; type: string }[]> {
+  if (cands.length === 0) return [];
+  const client = await getReader();
+  const uris = [...new Set(cands.map((c) => c.uri))];
+  const res = await client.execute({
+    sql: `SELECT uri FROM contexts WHERE uri IN (${uris.map(() => "?").join(",")})`,
+    args: uris,
+  });
+  const seen = new Set(res.rows.map((r) => String(r.uri)));
+  const out: { uri: string; type: string }[] = [];
+  for (const c of cands) {
+    if (!seen.has(c.uri)) {
+      seen.add(c.uri); // dedupe within the batch too
+      out.push(c);
+    }
+  }
+  return out;
+}
+
 /** Context URIs worth resolving: never-seen ones first, then negative-cached ones whose
  *  re-check window has lapsed. Callers cap the batch, so the ordering keeps stale
- *  re-checks from starving genuinely new contexts. */
+ *  re-checks from starving genuinely new contexts.
+ *
+ *  A full plays scan (~14K billed rows replica-less) — the once-a-day pass only.
+ *  Per-sync resolution goes through unseenContexts() above. */
 export async function unresolvedContextUris(): Promise<{ uri: string; type: string }[]> {
   const client = await getReader();
   const cutoff = new Date(Date.now() - NEGATIVE_RECHECK_MS).toISOString();
@@ -1006,6 +1057,9 @@ export async function recomputeAllTimeStats(): Promise<AllTimeStats> {
     stats = { plays: plays.length, uniqueTracks: tracks.size, durationMs, since: plays[0].playedAt };
   }
   await setMeta("alltime_stats", JSON.stringify(stats));
+  // The throttle stamp for maybeRecomputeAllTimeStats — set here so every compute path
+  // (write-triggered, cold-cache, daily heal) resets the window.
+  await setMeta("alltime_at", String(Date.now()));
   return stats;
 }
 
@@ -1394,6 +1448,16 @@ async function readHistoryIndex(): Promise<HistoryIndex> {
 
 export async function getLastSync(): Promise<string | null> {
   return getMeta("last_sync");
+}
+
+// The once-a-day full context pass (unresolvedContextUris) is gated on this stamp;
+// every other sync call uses the batch-bounded unseenContexts(). Epoch ms, 0 = never.
+export async function getContextsFullCheckAt(): Promise<number> {
+  const v = await getMeta("contexts_full_check_at");
+  return v ? Number(v) || 0 : 0;
+}
+export async function setContextsFullCheckAt(): Promise<void> {
+  await setMeta("contexts_full_check_at", String(Date.now()));
 }
 
 // ---- playlists (persistent library cache; avoids re-scanning Spotify per load) ----

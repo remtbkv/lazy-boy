@@ -273,6 +273,24 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   a corrupt file; the failure only surfaces on the first query). Minimal correct sidecar set
   when copying a replica: `.db` + `-info` + `-wal` — omitting `-wal` silently loses every row
   still in the WAL.
+- **Turso meters four dimensions and blocks on ANY of them — optimizing one silently loads
+  another, twice now.** Rows read, rows written, syncs and storage each have their own cap,
+  and exceeding any single one blocks every query until the calendar month resets. Incident
+  one (Aug 3): the eager replica warm was burning the 3 GB syncs quota → replica turned off
+  in prod → every scanning read became billed primary rows. Incident two (Aug 6): the
+  rows-read counter hit 86% — dominated by `unresolvedContextUris`, a full plays scan +
+  per-row contexts probe (~14K billed rows) that ran on EVERY sync call (~1,000+/day across
+  the cron tick, the second ~5-min pinger, and the open tab's 2-min refresh), replica-less.
+  It was invisible because it is milliseconds on a local file and its cost lives on a
+  dashboard nobody re-visits. The rules this bought: (1) any change that moves traffic
+  between the replica, the primary, and the cache states its expected cost on *every*
+  metered dimension before it ships — the model and per-path costs live in
+  `docs/READ_QUOTA.md`; (2) a per-call read may not scan a table that grows with history —
+  bound it to the batch in hand (`unseenContexts()`: a new context can only arrive via the
+  incoming plays, so check those ≤50 URIs; the full scan survives as a once-a-day pass for
+  the 30-day negative-cache recheck); (3) the guard is `/api/cron/usage-check` + a daily
+  cron-job.org job with failure e-mail — the real counter, checked mechanically, not a
+  convention about benchmarks.
 - **If a query is slow, count the rows it SCANS, not the rows it returns.** Both bad ones
   returned little. `searchHistory` is `LIKE '%q%'`, unindexable by construction, so it scans
   `tracks` — ~6 ms on the replica but 1,904 ms median (1,383–3,133, n=7, 2026-08-05) against the

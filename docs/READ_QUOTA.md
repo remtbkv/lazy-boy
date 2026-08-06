@@ -1,0 +1,160 @@
+# The Turso rows-read quota: attribution, fixes, and the guard
+
+Written 2026-08-06, before the fixes below deployed — the measurement windows are
+pre-registered here so the post-fix reading can be judged against a prediction made in
+advance, not fitted after the fact.
+
+## What "rows read" means
+
+Turso bills rows **scanned**, not returned (docs.turso.tech/help/usage-and-billing). A
+full-table scan charges one read per row considered; a `count(*)` charges every row; an
+indexed probe charges what it examines. Free plan: 500M rows read / 10M rows written /
+3 GB syncs per calendar month, and exceeding **any one** metric blocks **every** query on
+the database until the month resets.
+
+## State when this was written
+
+- Production has run **replica-less** since the first deploy after 2026-08-03
+  (`LAZYBOY_NO_REPLICA=1`, set in Vercel that day to stop the embedded replica's
+  bootstrap traffic from blowing the 3 GB syncs quota — see GOTCHAS "The replica and the
+  syncs quota"). With the replica off, **every scanning read is a primary scan and every
+  scanned row is billed.**
+- Counter readings (Turso dashboard, Rem's screenshots): Aug 3 12:20 PM 167.99M → Aug 5
+  4:35 PM 391.89M → Aug 6 1:52 PM 428.51M / 500M (86%). The last 21.3 h = +36.6M ≈
+  **41.3M/day**, with ~71.5M of headroom left — under two days at that pace.
+- Store size: 7,194 plays (6,951 with a context), 15,019 tracks, 15,327 playlist_tracks,
+  180 playlists, 74 contexts (71 distinct in plays).
+
+## Attribution (bottom-up model, plans verified locally)
+
+Every per-query figure below was verified with `EXPLAIN QUERY PLAN` against a copy of
+`data/replica.db` (same schema, same data, same engine family as the primary), 2026-08-06.
+Traffic was measured by tailing production logs for 58 minutes (`vercel logs --json`,
+2026-08-06 19:16–20:14 UTC): **41 hits on `/api/cron/sync`, nothing else** — a strict
+120 s pinger interleaved with a ~5-min second scheduler, ≈ **42 ticks/hour ≈ 1,018/day**.
+(The route comment says the 5-min one is GitHub Actions; the repo has no workflows left —
+the second pinger is external and unidentified. 258 historical Actions runs exist, so it
+predates the workflow deletion.)
+
+Per sync call (`syncRecentPlays` — the cron tick AND every open-tab refresh both pay this):
+
+| read | plan | rows billed |
+|---|---|---|
+| `unresolvedContextUris()` | `SCAN plays` + probe `contexts` per row | **~14.1K** (7,194 + 6,951) |
+| `recordPlays` cached-tracks + existing-plays | indexed probes | ~120 |
+| meta reads (cooldown, tokens, seq) | indexed | ~10 |
+
+Per tick that lands new plays, add: `recomputeOrphanFlags({newOnly})` `SCAN plays` ~7.2K
+(no index on `ctx_orphan`), `recomputeAllTimeStats` → `playsWithListened` full scan +
+tracks probes ~14.4K.
+
+The model, per day, at today's store size:
+
+- cron ticks, steady: 1,018 × 14.25K ≈ **14.5M/day**
+- ticks landing plays (~50–80/day): × ~21.6K ≈ **1.4M/day**
+- an open Home tab: refreshes every 120 s + twice per track change + on visibility
+  (`den-home.tsx`) — each is a full sync call: ≈ **0.9M per hour the tab is open**
+- cache-miss re-reads after each write-marker bump (daily strip, all-time list, today):
+  ~5K × ~15 bumps/day ≈ 0.1M/day
+- hourly library sync steady state + daily cron: ~20K/day — noise
+
+Closed-app model ≈ **16M/day**; with a 6 h listening session ≈ 21M; the Aug 5→6 window
+also contained dev + benchmarking (bench-reads ≈ 1M measured; the dev remainder is not
+reconstructable). The model accounts for ~half to two-thirds of the measured 41.3M/day;
+the residual is attributed to dev-day traffic **[UNVERIFIED]** and to possible
+undercounting of index-entry scans in the model (if Turso bills index entries and table
+rows separately, several terms roughly double). The clean baseline window below resolves
+the calibration; the ranking of terms does not depend on it — `unresolvedContextUris` is
+the dominant term in every path at any plausible calibration.
+
+**The defect class** (this is the second instance, not the first): *a read path whose
+resource cost is invisible until a dashboard shows a percentage, so optimizing one metered
+dimension silently loads another.* Instance one: the eager replica warm burned syncs; the
+Aug 3 fix (replica off) moved the whole scan load onto billed primary reads. Instance two:
+`unresolvedContextUris` re-derived "which contexts need resolving" from a full plays scan
+on every sync call — correct, tiny on a local file, and ~14K billed rows per call against
+the primary, ~1,000+ calls/day.
+
+## Pre-registered measurement windows
+
+Counter readings come from the Turso dashboard (or the platform API once a token exists).
+Both windows: no local dev, no benchmarks, app closed except where stated; tick traffic
+confirmed by a log tail during the window.
+
+- **W0 — baseline, before the fix deploys, ≥6 h.** Prediction: 14–25M/day pace
+  (0.6–1.05M/h). Null (model wrong): the pace stays ≥35M/day with no dev running — then
+  something big is unattributed and the fixes must NOT be declared the answer.
+- **W1 — after the fix deploys, ≥6 h.** Prediction: ≤1M/day pace closed-app (ticks
+  1,018 × ~160 rows ≈ 0.16M + throttled recomputes ≈ 0.3M + margin). Failure bar: >3M/day
+  means a sibling path is still scanning — hunt it, don't celebrate.
+- A trivial no-op scores: W1/W0 ≈ 1.0. The fix claims W1/W0 ≤ 0.1 at unchanged tick rate.
+- Projected month at the W1 bar: ≤ ~30M/month + Rem's interactive use ≈ **≤10% of the
+  500M cap**, against 86% burned in the first 6 days of August.
+
+Outcomes are recorded at the bottom of this file as readings land.
+
+## The fixes (shipped together with this doc)
+
+1. **Context resolution is bounded by the batch, not the table.** A new unresolved
+   context can only enter via a play in the incoming sync batch, so the per-call check
+   is now an indexed `IN` over ≤50 URIs (~50 rows) instead of a 14.1K-row scan. The
+   30-day negative-cache re-check (self-healing for 403'd names) survives as a
+   once-a-day full pass gated by `meta.contexts_full_check_at`.
+2. **`recomputeOrphanFlags({newOnly})` uses a partial index** (`idx_plays_orphan_null`,
+   `WHERE ctx_orphan IS NULL`) — scans only unverdicted rows (≈ the new plays), not all
+   of `plays`. Verified: `SCAN p USING INDEX idx_plays_orphan_null`.
+3. **`recomputeAllTimeStats` is throttled to once per 10 min** (`meta.alltime_at`).
+   Its full plays scan ran on every tick that landed plays; the all-time card can lag a
+   listen by ≤10 min, and the next gated tick heals it. The scan itself still grows
+   linearly with history — the incremental-accumulator version is the queued next lever,
+   to take when the guard shows this term mattering again.
+
+What deliberately did NOT change: the pinger cadence (42 ticks/h is Rem's freshness
+choice; post-fix a tick costs ~160 rows so cadence stopped mattering), the render-path
+caching (already keyed on the write marker), and the replica (stays off — see
+ARCHITECTURE for the read-architecture decision).
+
+## The guard (a mechanism, not a convention)
+
+Two dashboard-at-86% surprises in one week establish that a doc rule is not a guard. The
+standing mechanism is `/api/cron/usage-check`: reads the org's usage from Turso's
+platform API (`TURSO_PLATFORM_TOKEN`), compares **every** metered dimension (rows read,
+rows written, syncs, storage) against a pro-rated month line with a 1.5× allowance, and
+returns HTTP 500 on breach. A daily cron-job.org job calls it; cron-job.org emails on
+failing jobs, so a breach lands in Rem's inbox while there is still headroom, instead of
+in a dashboard nobody re-visits. Tripping it deliberately (allowance temporarily set
+below current usage) is part of its acceptance test — a guard that has never fired is a
+guard that does not work.
+
+## Sibling sweep — every read path, its shape, its verdict
+
+Verdicts: **bounded** = cost independent of history size, or indexed to the rows it
+returns; **linear-rare** = full scan but only on real change, cost named; **fixed**.
+
+| path | shape | verdict |
+|---|---|---|
+| `unresolvedContextUris` (per-sync) | was `SCAN plays`+probes every call | **fixed** → bounded (≤50 indexed rows) |
+| `recomputeOrphanFlags({newOnly})` | was `SCAN plays` per landing tick | **fixed** → bounded (partial index) |
+| `recomputeAllTimeStats` | full plays scan + tracks probes (~14.4K) | **fixed** → throttled 10 min; linear growth remains, queued lever: incremental accumulator |
+| `recomputeOrphanFlags({})` full pass | predicate over every play × its playlist's members ≈ **1.3M+ rows** | linear-rare: only on a playlist-list rewrite (`library_seq` = 5 lifetime). A landmine if that path ever runs hot — the change-probe in `storePlaylists` is what keeps it cold |
+| `recomputeOrphanFlags({playlistId})` | indexed by `idx_plays_context` + predicate over that playlist's plays | bounded per changed playlist |
+| `readHistoryIndex` (search payload) | full plays scan ×3 probes ≈ 21.6K, once per `write_seq` change | linear-rare: ~15/day ≈ 0.3M/day; grows with history — same queued lever class |
+| `readLibraryIndex` | playlist_tracks scan + probes ≈ 30K, once per `library_seq` change | linear-rare: `library_seq` moved 5× ever |
+| `readDailyStats` | indexed 16-day window (~1.7K + probes) per bump | bounded by window |
+| `readPlaysByDay` | indexed day range ~90 rows + frozen-day cache | bounded |
+| `readAllTimePlays` | full scan + per-track subquery ≈ 25K, once per bump when the view is open | linear-rare, cached on `write_seq` |
+| `searchHistory` LIKE | scans tracks; **fallback only** since `13515d8` | linear-rare, user-triggered |
+| `playsWithListened` | full plays scan + probes | only called by `recomputeAllTimeStats`/`getDailyStats`-adjacent paths above |
+| `recordPlays` reads | indexed probes ~120 | bounded |
+| `storePlaylistTracks` cached-positions read | indexed per playlist | bounded |
+| `storePlaylists` change-probe | 180-row scan hourly | bounded (table is the playlist list) |
+| `recomputeUniqueSongCount` | DISTINCT over playlist_tracks + probes ≈ 30K | linear-rare: only when the library actually changed |
+| meta reads (tokens, locks, seq, stamps) | single-key indexed | bounded |
+| `api_log` writes/reads | indexed, 1 h TTL | bounded |
+
+## Measurement outcomes
+
+*(filled in as readings land)*
+
+- W0: —
+- W1: —
