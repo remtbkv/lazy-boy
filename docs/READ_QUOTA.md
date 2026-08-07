@@ -166,10 +166,26 @@ returns; **linear-rare** = full scan but only on real change, cost named; **fixe
   of open-tab listening plus the search-feature deploy, vs the model's 0.5–1.0M/h
   closed-app + ~1.7M/h open-tab. The ~1.4× gap is consistent with the index-entry
   calibration unknown; at that pace the cap was ~15 h away when the fix deployed.
-- **W1 (post-fix):** deploy live Aug 6 10:46 PM; T0 = 455,169,706 at 10:48 PM
-  (API, org `remtbkv`). Pre-registered prediction for the overnight window (~6.5 h,
-  listening tapering off): **+0.1–0.6M**; failure bar **>2M** = a sibling path still
-  scans — hunt it. Reading lands here when taken (~5:15 AM).
+- **W1 (post-fix, overnight Aug 6→7): +17.53M by 5:15 AM — fails the naive bar, and the
+  mechanism is NOT a surviving scan.** The split, from the readings + DB markers:
+  - **W1a (dirty):** the counter climbed at ~2.7M/h average until some point before
+    5:15 AM. Last play recorded 12:58 AM; at ~5:26 AM Spotify rate-banned the app
+    (`spotify_cooldown_until` = 9:04 AM ET — a ~3.6 h Retry-After). The only mechanism
+    at that scale: **an already-open tab keeps its old client and, via Vercel's skew
+    protection, keeps invoking the OLD deployment's pre-fix server actions** — a deploy
+    does not reach an open tab until it reloads. The same stale-tab hammering is the
+    plausible trigger of the Spotify ban. Multiplier beyond the modeled ~1.7M/h
+    unexplained — possibly several stale tabs/devices. [UNVERIFIED beyond the markers]
+  - **W1b:** 5:15→8:51 AM: **+1,168 rows total** — but ticks were short-circuiting on
+    the cooldown (~2 rows each), so this proves the skip path only, not the fix.
+  - **W1c (the clean test):** pre-registered 9:20 AM→1:20 PM, cooldown lifted, normal
+    ticks on the new code. Prediction **≤0.1M** (30 ticks/h × ~100–160 rows + margin);
+    if Rem uses the app on the NEW build add ~0.1M/h; **>1M = investigate a survivor.**
+  - **Loss check during the 5:26–9:04 AM sync outage: zero.** The Zenbook backstop's
+    last captured play (12:58 AM) matches the primary's exactly; timer alive (last run
+    8:45 AM). Property 2 held through its first real incident.
+  - Operational lesson, standing: **after any lazyboy deploy, close or reload every open
+    lazyboy tab** — old tabs run pre-fix code indefinitely and bill accordingly.
 - **Guard acceptance:** fired on the real condition Aug 6 10:52 PM — HTTP 500 naming
   `rows_read` (91.04%) and `bytes_synced` (75.15%) as breached, exact same code path
   prod runs (local `next start`, real platform API). Prod redeployed with
