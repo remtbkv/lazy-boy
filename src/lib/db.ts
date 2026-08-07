@@ -2010,6 +2010,61 @@ export async function playedTracksInContext(
   }[];
 }
 
+/** A track row by song identity — lower(artist), lower(name), the same identity the
+ *  orphan rule and the client-side search merge use — plus every named playlist any
+ *  id-variant of the song sits in (Spotify hands the same song different ids across
+ *  contexts). Feeds the search-row context menu, which has name+artist but no uri.
+ *  All indexed: idx_tracks_artist_name for the row, idx_pltracks_track per id. */
+export async function findTrackWithPlaylists(
+  name: string,
+  artist: string,
+): Promise<{
+  track: {
+    id: string;
+    title: string;
+    artist: string;
+    uri: string;
+    album: string | null;
+    albumImage: string | null;
+    durationMs: number | null;
+  } | null;
+  playlists: { id: string; name: string }[];
+}> {
+  const client = await getReader();
+  // INNER JOIN convention from the file header: equality on the identity index.
+  const trackRes = await client.execute({
+    sql: `SELECT id, name AS title, artist, uri, album, album_image AS albumImage,
+            duration_ms AS durationMs
+          FROM tracks WHERE lower(artist) = lower(:artist) AND lower(name) = lower(:name)
+          ORDER BY id LIMIT 8`,
+    args: { artist, name },
+  });
+  const rows = plainRows(trackRes.rows) as unknown as {
+    id: string;
+    title: string;
+    artist: string;
+    uri: string;
+    album: string | null;
+    albumImage: string | null;
+    durationMs: number | null;
+  }[];
+  if (rows.length === 0) return { track: null, playlists: [] };
+  const ids = rows.map((r) => r.id);
+  const plRes = await client.execute({
+    sql: `SELECT DISTINCT p.id, p.name, p.position
+          FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id
+          WHERE pt.track_id IN (${ids.map(() => "?").join(",")})
+          ORDER BY p.position`,
+    args: ids,
+  });
+  return {
+    track: rows[0],
+    playlists: (plainRows(plRes.rows) as unknown as { id: string; name: string }[]).map(
+      ({ id, name: n }) => ({ id, name: n }),
+    ),
+  };
+}
+
 /** Cached name for a playback context uri, tri-state: `undefined` = never cached (worth
  *  resolving), `null` = negative-cached (known-unresolvable — don't re-hit Spotify), string =
  *  the name. The distinction matters: collapsing NULL rows into a string made this return the

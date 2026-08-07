@@ -13,6 +13,7 @@ import { syncLibrary } from "@/lib/sync/library";
 import {
   clearSpotifyTokens,
   deletePlaylistFromDb,
+  findTrackWithPlaylists,
   getCleanBackupPref,
   getMeId,
   getPlaylistTracks,
@@ -282,6 +283,74 @@ export async function addToQueueAction(uri: string): Promise<ActionResult> {
     if (e instanceof SpotifyError && (e.status === 404 || e.status === 403)) {
       return { ok: false, error: "No active device — start playing on Spotify first." };
     }
+    return fail(e);
+  }
+}
+
+/** Play one track now, no context (e.g. from a search row). */
+export async function playTrackAction(uri: string): Promise<ActionResult> {
+  try {
+    const sp = await getSpotify();
+    await sp.playTracks([uri]);
+    return { ok: true };
+  } catch (e) {
+    unstable_rethrow(e);
+    if (e instanceof SpotifyError && (e.status === 404 || e.status === 403)) {
+      return { ok: false, error: "No active device — start playing on Spotify first." };
+    }
+    return fail(e);
+  }
+}
+
+/** Start a playlist playing AT a given track — the "play it where it lives" option on
+ *  the search-row menu, so what follows is the playlist, not silence. */
+export async function playFromPlaylistAction(
+  playlistId: string,
+  trackUri: string,
+): Promise<ActionResult> {
+  try {
+    const sp = await getSpotify();
+    await sp.playContext(`spotify:playlist:${playlistId}`, trackUri);
+    return { ok: true };
+  } catch (e) {
+    unstable_rethrow(e);
+    if (e instanceof SpotifyError && (e.status === 404 || e.status === 403)) {
+      return { ok: false, error: "No active device — start playing on Spotify first." };
+    }
+    return fail(e);
+  }
+}
+
+/** Resolve a search row (identity only — the payloads carry no uri) into the full track
+ *  + the playlists it lives in, for the right-click menu. Indexed lookups, ~10 rows. */
+export async function trackMenuAction(
+  name: string,
+  artist: string,
+): Promise<
+  ActionResult<{
+    track: Track;
+    playlists: { id: string; name: string }[];
+  }>
+> {
+  if (!(await auth())) return { ok: false, error: "Not signed in." };
+  try {
+    const { track, playlists } = await findTrackWithPlaylists(name, artist);
+    if (!track) return { ok: false, error: "This song isn't in the library yet." };
+    return {
+      ok: true,
+      track: {
+        id: track.id,
+        title: track.title,
+        artist: track.artist,
+        uri: track.uri,
+        album: track.album ?? undefined,
+        albumImage: track.albumImage,
+        durationMs: track.durationMs ?? undefined,
+      },
+      playlists,
+    };
+  } catch (e) {
+    unstable_rethrow(e);
     return fail(e);
   }
 }

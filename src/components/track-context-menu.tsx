@@ -1,14 +1,19 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState, useTransition, type ReactNode } from "react";
-import { CircleMinus, CirclePlus, ListPlus } from "lucide-react";
+import { CircleMinus, CirclePlus, ListPlus, ListMusic, Play } from "lucide-react";
 import { toast } from "@/lib/toast";
 import {
   addToQueueAction,
+  playFromPlaylistAction,
+  playTrackAction,
   removeFromPlaylistAction,
   saveToLikedAction,
 } from "@/app/(app)/actions";
 import type { Track } from "@/lib/spotify";
+
+// "Play from <playlist>" lists at most this many before it stops being a menu.
+const PLAY_FROM_MAX = 3;
 
 // A lightweight right-click menu for a track — custom (not Base UI) so it's
 // reliable. Positioned at the cursor and clamped to the viewport. Mirrors the
@@ -20,6 +25,8 @@ export function TrackContextMenu({
   onClose,
   playlistId,
   onRemoved,
+  withPlay,
+  playFrom,
 }: {
   track: Track;
   x: number;
@@ -29,6 +36,11 @@ export function TrackContextMenu({
   // offers "Remove from this playlist".
   playlistId?: string;
   onRemoved?: (track: Track) => void;
+  // "Play now" (bare track, no context) — the search rows opt in.
+  withPlay?: boolean;
+  // Playlists to offer "Play from <name>" for: starts that playlist AT this track, so
+  // what follows is the playlist rather than silence. Capped to PLAY_FROM_MAX.
+  playFrom?: { id: string; name: string }[];
 }) {
   const [pending, start] = useTransition();
 
@@ -109,6 +121,25 @@ export function TrackContextMenu({
         e.stopPropagation();
       }}
     >
+      {withPlay ? (
+        <Item
+          icon={<Play className="size-4" />}
+          label="Play now"
+          disabled={pending}
+          onClick={() => run(() => playTrackAction(track.uri), `Playing ${track.title}`)}
+        />
+      ) : null}
+      {(playFrom ?? []).slice(0, PLAY_FROM_MAX).map((p) => (
+        <Item
+          key={p.id}
+          icon={<ListMusic className="size-4" />}
+          label={`Play from ${p.name}`}
+          disabled={pending}
+          onClick={() =>
+            run(() => playFromPlaylistAction(p.id, track.uri), `Playing from ${p.name}`)
+          }
+        />
+      ))}
       <Item
         icon={<ListPlus className="size-4" />}
         label="Add to queue"
