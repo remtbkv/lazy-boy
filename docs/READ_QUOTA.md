@@ -120,8 +120,15 @@ Outcomes are recorded at the bottom of this file as readings land.
    (`meta.slow_seq_pub`: write_seq, published at most every 10 min) instead of live
    write_seq. Measured live (Aug 7 morning): keyed live, a listening session with the
    app open cost ~60K rows per landed play ≈ 2M/hour — the last unbounded-in-practice
-   path. New plays now appear in search/all-time up to 10 min late mid-session; the day
-   strip and day views stay live.
+   path. The day strip and day views stay live.
+6. **(Added Aug 7)** Search stays INSTANT despite 5: a landed play is an append, so the
+   client patches its in-memory index with the delta instead of waiting for a rebuild —
+   `refreshHistoryAction` takes the index's newest play minute and returns the plays it
+   is missing (`searchHistory("", n)` head check ~3 billed rows steady-state, delta rows
+   only when there is one; includes cron-synced plays, which `added` alone would miss),
+   and `patchHistoryPayload` (`src/lib/history-patch.ts`, known-answer tested) merges
+   them newest-first, idempotently. The 10-min lag now applies only to a cold page load
+   and to the all-time list.
 
 What deliberately did NOT change: the pinger cadence (42 ticks/h is Rem's freshness
 choice; post-fix a tick costs ~160 rows so cadence stopped mattering), the render-path

@@ -84,6 +84,10 @@ export type HistoryRefresh = {
    *  lands on the correct day even when the local date has just rolled over. */
   day: string | null;
   tracks: TrackStats[] | null;
+  /** The plays this sync just landed (newest first), so the client can patch its
+   *  in-memory search index instantly — the server payload only rebuilds every 10 min
+   *  (db.ts, the slow marker). An indexed read of `added` rows, bounded by the delta. */
+  newPlays: TrackStats[] | null;
 };
 
 const NO_REFRESH: HistoryRefresh = {
@@ -93,6 +97,7 @@ const NO_REFRESH: HistoryRefresh = {
   allTime: { plays: 0, durationMs: 0, since: null },
   day: null,
   tracks: null,
+  newPlays: null,
 };
 
 /** Pull new plays from Spotify into the local store, then re-read what's on screen.
@@ -112,6 +117,11 @@ const NO_REFRESH: HistoryRefresh = {
 export async function refreshHistoryAction(
   want: "latest" | "all" | null,
   days: number,
+  // The newest play minute the client's in-memory search index already holds. The delta
+  // returned in `newPlays` is computed against THIS, not against what this call inserted:
+  // a play the cron tick synced seconds earlier is just as missing from the client's index
+  // as one we insert here, and `added` alone would skip it.
+  sinceMinute: number | null = null,
 ): Promise<HistoryRefresh> {
   // getSpotify() throws a login REDIRECT when there's no session. Returning empty instead
   // keeps a signed-out caller from being bounced mid-render — no session, nothing to sync.
@@ -120,9 +130,22 @@ export async function refreshHistoryAction(
     const sp = await getSpotify();
     const { added } = await syncRecentPlays(sp);
     const tz = await tzOffsetMinutes();
-    const [daily, allTime] = await Promise.all([
+    const [daily, allTime, newPlays] = await Promise.all([
       getDailyStats(tz, Math.max(14, Math.min(days, 100000))),
       getAllTimeStats(),
+      // The plays the client's index is missing, for its instant search patch.
+      // searchHistory with an empty query is "newest N plays, one row each" via
+      // idx_plays_played_at, so the steady-state cost is a 1-row head check and a delta
+      // fetch only runs when there is one — bounded by the delta, never a scan.
+      (async (): Promise<TrackStats[] | null> => {
+        if (sinceMinute == null) return added > 0 ? searchHistory("", Math.min(added, 50)) : null;
+        const head = await searchHistory("", 1);
+        const newest = head[0] ? Math.floor(Date.parse(head[0].lastPlayed) / 60000) : null;
+        if (newest == null || newest <= sinceMinute) return null;
+        const rows = await searchHistory("", 50);
+        const fresh = rows.filter((r) => Math.floor(Date.parse(r.lastPlayed) / 60000) > sinceMinute);
+        return fresh.length > 0 ? fresh : null;
+      })(),
     ]);
     const day =
       want === "latest"
@@ -136,7 +159,7 @@ export async function refreshHistoryAction(
         : day
           ? await getPlaysByDay(day, tz)
           : null;
-    return { ok: true, added, daily, allTime, day, tracks };
+    return { ok: true, added, daily, allTime, day, tracks, newPlays };
   } catch (e) {
     // A missing/expired session throws a redirect — let it through rather than reporting it
     // as a failed sync.

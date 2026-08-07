@@ -6,6 +6,7 @@ import type { DayStats, TrackStats } from "@/lib/db";
 import { exactTimeShort, formatDuration, timeAgo } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { searchPerfEnabled, startSearchProbe, type IndexStatus } from "@/lib/search-perf";
+import { patchHistoryPayload } from "@/lib/history-patch";
 import { useNowPlaying } from "@/components/now-playing-context";
 import {
   allTimePlaysAction,
@@ -506,13 +507,29 @@ export function DenHome({
       // cases refresh the stats but skip rows we'd only overwrite with identical ones.
       const followingLatest = selected === (daily[0]?.day ?? null);
       const want = searching ? null : selected === "all" ? "all" : followingLatest ? "latest" : null;
-      const r = await refreshHistoryAction(want, daily.length);
-      // New plays landed, so the history payload we are holding is behind: drop it and rebuild
-      // from a fresh copy. Only that half — the library payload does not move when you listen,
-      // which is the whole reason the two are separate.
-      if (r.added > 0) {
-        histReq.current = null;
-        loadIndex();
+      // Tell the server the newest play minute the in-memory index holds, so it can hand
+      // back exactly the plays the index is missing — including ones the cron tick synced
+      // (those return added=0 here and would otherwise slip through until the next payload).
+      const held = histReq.current ? await histReq.current : null;
+      const r = await refreshHistoryAction(want, daily.length, held?.plays[0]?.[1] ?? null);
+      // New plays the index is missing. The server payload only rebuilds every 10 min (the
+      // slow marker), so a refetch would come back without them — instead PATCH the copy in
+      // memory with the delta, and search knows the play instantly. The next cold load
+      // reconciles from the server. Only the history half — the library payload does not
+      // move when you listen, which is the whole reason the two are separate.
+      if (r.newPlays?.length) {
+        const hist = histReq.current ? await histReq.current : null;
+        if (hist) {
+          const patched = patchHistoryPayload(hist, r.newPlays);
+          histReq.current = Promise.resolve(patched);
+          const lib = libReq.current ? await libReq.current : null;
+          setEntries(buildEntries(lib, patched));
+        } else {
+          // No payload in memory yet (still fetching or failed) — the old drop-and-refetch
+          // is the right fallback; the ≤10-min-stale copy beats none.
+          histReq.current = null;
+          loadIndex();
+        }
       }
       if (!r.ok || selRef.current !== at) return;
       setDaily(r.daily);
