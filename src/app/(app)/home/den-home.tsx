@@ -7,6 +7,8 @@ import { exactTimeShort, formatDuration, timeAgo } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { searchPerfEnabled, startSearchProbe, type IndexStatus } from "@/lib/search-perf";
 import { patchHistoryPayload } from "@/lib/history-patch";
+import { addPlay, reconcilePlays, type Provisional } from "@/lib/optimistic-play";
+import { IdentityTrackMenu } from "@/components/identity-track-menu";
 import { useNowPlaying } from "@/components/now-playing-context";
 import {
   allTimePlaysAction,
@@ -532,14 +534,30 @@ export function DenHome({
         }
       }
       if (!r.ok || selRef.current !== at) return;
-      setDaily(r.daily);
+      // Fold the still-unconfirmed optimistic plays into the server truth before it hits
+      // the screen — otherwise a sync that hasn't caught a play yet would make the row the
+      // handoff just added flicker out (optimistic-play.ts owns the confirm/expire rules).
+      const provs = provisionalsRef.current;
+      const bump = provs.length
+        ? reconcilePlays(r.tracks ?? [], provs, Date.now())
+        : { rows: r.tracks ?? [], remaining: [] };
+      provisionalsRef.current = bump.remaining;
+      setDaily(
+        bump.remaining.length && r.daily.length
+          ? [
+              { ...r.daily[0], plays: r.daily[0].plays + bump.remaining.length },
+              ...r.daily.slice(1),
+            ]
+          : r.daily,
+      );
       setAllTime(r.allTime);
       if (!r.day || !r.tracks) return;
-      cache.current.set(r.day, r.tracks);
+      const rows = r.day === r.daily[0]?.day ? bump.rows : r.tracks;
+      cache.current.set(r.day, rows);
       // The local day rolled over while the tab sat open — follow it onto the new day instead
       // of leaving you parked on what used to be "today".
       if (r.day !== at) setSelected(r.day);
-      setTracks(r.tracks);
+      setTracks(rows);
     };
   });
 
@@ -548,6 +566,89 @@ export function DenHome({
     const t = setTimeout(() => void doRefresh.current(), 4000);
     return () => clearTimeout(t);
   }, [nowPlayingId]);
+
+  // ---- The play handoff: bar → today's list, same update ----
+  // The client watched the song play; when it leaves the bar (track change or stop) it can
+  // appear in today's list immediately — no waiting for the sync round trip. Gated on ≥30s
+  // of observed progress, because that is what Spotify itself records as a play: an early
+  // skip never gets a row, so nothing has to be retracted later. The refresh that follows
+  // (the nowPlayingId effect above) confirms it against the store within seconds.
+  const provisionalsRef = useRef<Provisional[]>([]);
+  const [freshKey, setFreshKey] = useState<string | null>(null);
+  const lastPlayingRef = useRef<{
+    id: string;
+    title: string;
+    artist: string;
+    albumImage: string | null;
+    durationMs: number;
+    source: string | null;
+    maxProgress: number;
+  } | null>(null);
+  useEffect(() => {
+    const prev = lastPlayingRef.current;
+    const finish = (p: NonNullable<typeof prev>) => {
+      if (p.maxProgress < 30_000) return;
+      const nowIso = new Date().toISOString();
+      const row = {
+        id: p.id,
+        name: p.title,
+        artist: p.artist,
+        uri: `spotify:track:${p.id}`,
+        album: null,
+        albumImage: p.albumImage,
+        durationMs: p.durationMs || null,
+        plays: 1,
+        lastPlayed: nowIso,
+        firstPlayed: nowIso,
+        source: p.source,
+      };
+      provisionalsRef.current.push({ row, at: Date.now() });
+      const today = daily[0]?.day;
+      setDaily((d) =>
+        d.length
+          ? [
+              {
+                ...d[0],
+                plays: d[0].plays + 1,
+                durationMs: d[0].durationMs + Math.min(p.maxProgress, p.durationMs || p.maxProgress),
+              },
+              ...d.slice(1),
+            ]
+          : d,
+      );
+      if (today && selRef.current === today) {
+        setTracks((ts) => {
+          const next = addPlay(ts, row);
+          cache.current.set(today, next);
+          return next;
+        });
+        setFreshKey(`${row.artist.toLowerCase()}\n${row.name.toLowerCase()}`);
+        setTimeout(() => setFreshKey(null), 1600);
+      }
+    };
+    if (playing?.track) {
+      if (prev && prev.id === playing.track.id) {
+        prev.maxProgress = Math.max(prev.maxProgress, playing.progressMs);
+        prev.source = playing.context?.name ?? prev.source;
+      } else {
+        if (prev) finish(prev);
+        lastPlayingRef.current = {
+          id: playing.track.id,
+          title: playing.track.title,
+          artist: playing.track.artist,
+          albumImage: playing.track.albumImage,
+          durationMs: playing.durationMs,
+          source: playing.context?.name ?? null,
+          maxProgress: playing.progressMs,
+        };
+      }
+    } else if (prev) {
+      finish(prev);
+      lastPlayingRef.current = null;
+    }
+    // `daily` is deliberately not a dep: the effect must fire exactly on player movement.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playing]);
 
   useEffect(() => {
     const id = setInterval(() => void doRefresh.current(), 120_000);
@@ -647,6 +748,18 @@ export function DenHome({
     return { groups: artists.slice(0, MAX_RESULTS), total: artists.length };
   }, [entries, fallbackEntries, mode, query]);
 
+  // ---- Right-click menu (search rows + day rows — identity-resolved) ----
+  const [ctxMenu, setCtxMenu] = useState<{
+    name: string;
+    artist: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const openMenu = (name: string, artist: string) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    setCtxMenu({ name, artist, x: e.clientX, y: e.clientY });
+  };
+
   // ---- Sort (day / all-time list) ----
   const [sort, setSort] = useState<Sort>("recent");
   const [dir, setDir] = useState<"asc" | "desc">("desc");
@@ -722,6 +835,7 @@ export function DenHome({
                         onToggle={() =>
                           setExpanded((e) => (e === g.entry.key ? null : g.entry.key))
                         }
+                        onMenu={openMenu(g.entry.name, g.entry.artist)}
                       />
                     ) : (
                       <li key={g.artist}>
@@ -816,7 +930,14 @@ export function DenHome({
                   </thead>
                   <tbody className="divide-y divide-border/50">
                     {dayRows.map((t) => (
-                      <tr key={`${t.id}-${t.lastPlayed}`}>
+                      <tr
+                        key={`${t.id}-${t.lastPlayed}`}
+                        onContextMenu={openMenu(t.name, t.artist)}
+                        className={cn(
+                          freshKey === `${t.artist.toLowerCase()}\n${t.name.toLowerCase()}` &&
+                            "row-fresh",
+                        )}
+                      >
                         <td className="py-2 pr-3">
                           <div className="flex min-w-0 items-center gap-3">
                             <Art image={t.albumImage} size={10} />
@@ -899,6 +1020,15 @@ export function DenHome({
           ))}
         </div>
       </SearchIsland>
+      {ctxMenu ? (
+        <IdentityTrackMenu
+          name={ctxMenu.name}
+          artist={ctxMenu.artist}
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          onClose={() => setCtxMenu(null)}
+        />
+      ) : null}
     </>
   );
 }
@@ -974,10 +1104,12 @@ function SongResult({
   entry,
   expanded,
   onToggle,
+  onMenu,
 }: {
   entry: Entry;
   expanded: boolean;
   onToggle: () => void;
+  onMenu?: (e: React.MouseEvent) => void;
 }) {
   const { name, artist, album, image, playlists, plays } = entry;
   const SHOW = 12;
@@ -992,6 +1124,7 @@ function SongResult({
       <button
         type="button"
         onClick={onToggle}
+        onContextMenu={onMenu}
         aria-expanded={expanded}
         className="grid w-full grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-3 py-2 text-left sm:gap-4 md:grid-cols-[auto_minmax(0,5fr)_minmax(0,4fr)_auto_auto]"
       >

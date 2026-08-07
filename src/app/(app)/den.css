@@ -108,3 +108,16 @@
     animation: none;
   }
 }
+
+/* ---- The play handoff (bar -> today's list) ------------------------------------- */
+/* The row a finished song just landed on: a brief lift-in plus a green wash that decays,
+   timed to read as the song "arriving" from the player bar in the same beat the bar
+   moves on. Applied by den-home for ~1.6s via the freshKey state. */
+@keyframes den-row-fresh {
+  0%   { opacity: 0; transform: translateY(-6px); background-color: rgba(29, 185, 84, 0.14); }
+  35%  { opacity: 1; transform: translateY(0);    background-color: rgba(29, 185, 84, 0.10); }
+  100% { opacity: 1; transform: translateY(0);    background-color: transparent; }
+}
+.row-fresh > td {
+  animation: den-row-fresh 1.4s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
