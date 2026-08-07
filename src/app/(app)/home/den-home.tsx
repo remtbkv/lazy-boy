@@ -561,7 +561,12 @@ export function DenHome({
     };
   });
 
+  // Visible tabs only: the now-playing state is broadcast to every tab (one leader polls,
+  // the rest listen), so without this gate N open Home tabs would each run the sync round
+  // trip on every track change and every interval tick. A hidden tab does nothing; the
+  // visibilitychange handler below catches it up the moment it's looked at again.
   useEffect(() => {
+    if (document.visibilityState !== "visible") return;
     void doRefresh.current();
     const t = setTimeout(() => void doRefresh.current(), 4000);
     return () => clearTimeout(t);
@@ -651,7 +656,9 @@ export function DenHome({
   }, [playing]);
 
   useEffect(() => {
-    const id = setInterval(() => void doRefresh.current(), 120_000);
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") void doRefresh.current();
+    }, 120_000);
     const onVisible = () => {
       if (document.visibilityState === "visible") void doRefresh.current();
     };

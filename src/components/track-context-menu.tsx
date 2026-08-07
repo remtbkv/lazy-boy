@@ -27,6 +27,7 @@ export function TrackContextMenu({
   onRemoved,
   withPlay,
   playFrom,
+  playOnly,
 }: {
   track: Track;
   x: number;
@@ -38,6 +39,8 @@ export function TrackContextMenu({
   onRemoved?: (track: Track) => void;
   // "Play now" (bare track, no context) — the search rows opt in.
   withPlay?: boolean;
+  // Play-focused menu only (no Save to Liked / Share) — the search/day rows use this.
+  playOnly?: boolean;
   // Playlists to offer "Play from <name>" for: starts that playlist AT this track, so
   // what follows is the playlist rather than silence. Capped to PLAY_FROM_MAX.
   playFrom?: { id: string; name: string }[];
@@ -146,12 +149,14 @@ export function TrackContextMenu({
         disabled={pending}
         onClick={() => run(() => addToQueueAction(track.uri), "Added to queue")}
       />
-      <Item
-        icon={<CirclePlus className="size-4" />}
-        label="Save to Liked Songs"
-        disabled={pending}
-        onClick={() => run(() => saveToLikedAction(track.id), "Saved to Liked Songs")}
-      />
+      {playOnly ? null : (
+        <Item
+          icon={<CirclePlus className="size-4" />}
+          label="Save to Liked Songs"
+          disabled={pending}
+          onClick={() => run(() => saveToLikedAction(track.id), "Saved to Liked Songs")}
+        />
+      )}
       {playlistId ? (
         <Item
         icon={<CircleMinus className="size-4" />}
@@ -166,7 +171,7 @@ export function TrackContextMenu({
         }
         />
       ) : null}
-      <Item icon={<ShareIcon />} label="Share" onClick={share} />
+      {playOnly ? null : <Item icon={<ShareIcon />} label="Share" onClick={share} />}
     </div>
   );
 }
@@ -210,7 +215,7 @@ function Item({
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className="flex w-full items-center gap-2.5 whitespace-nowrap rounded-md px-2.5 py-2 text-left text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+      className="flex w-full cursor-pointer items-center gap-2.5 whitespace-nowrap rounded-md px-2.5 py-2 text-left text-foreground transition-colors hover:bg-accent disabled:cursor-default disabled:opacity-50"
     >
       <span className="text-muted-foreground">{icon}</span>
       {label}

@@ -62,6 +62,7 @@ export function IdentityTrackMenu({
       y={y}
       onClose={onClose}
       withPlay
+      playOnly
       playFrom={res.playlists}
     />
   );
