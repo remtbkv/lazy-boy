@@ -160,7 +160,17 @@ returns; **linear-rare** = full scan but only on real change, cost named; **fixe
 
 ## Measurement outcomes
 
-*(filled in as readings land)*
-
-- W0: —
-- W1: —
+- **W0 (pre-fix, dirty):** never got a clean window — deliberately traded for cap safety.
+  The platform API (token, Aug 6 10:48 PM) put the counter at **455,169,706 (91.0%)**:
+  +26.66M over the 8.93 h since the 1:52 PM dashboard reading ≈ **2.99M/h** — an evening
+  of open-tab listening plus the search-feature deploy, vs the model's 0.5–1.0M/h
+  closed-app + ~1.7M/h open-tab. The ~1.4× gap is consistent with the index-entry
+  calibration unknown; at that pace the cap was ~15 h away when the fix deployed.
+- **W1 (post-fix):** deploy live Aug 6 10:46 PM; T0 = 455,169,706 at 10:48 PM
+  (API, org `remtbkv`). Pre-registered prediction for the overnight window (~6.5 h,
+  listening tapering off): **+0.1–0.6M**; failure bar **>2M** = a sibling path still
+  scans — hunt it. Reading lands here when taken (~5:15 AM).
+- **Guard acceptance:** fired on the real condition Aug 6 10:52 PM — HTTP 500 naming
+  `rows_read` (91.04%) and `bytes_synced` (75.15%) as breached, exact same code path
+  prod runs (local `next start`, real platform API). Prod redeployed with
+  `TURSO_PLATFORM_TOKEN` + `TURSO_ORG` minutes later.
