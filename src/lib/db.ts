@@ -1002,7 +1002,10 @@ const allTimePlaysCached = unstable_cache(
   { revalidate: LIVE_TTL_S },
 );
 export async function getAllTimePlays(limit: number): Promise<TrackStats[]> {
-  const seq = await liveKey();
+  // Slow marker, not the live one: this read costs ~25K billed rows per rebuild (full
+  // scan + a per-track source subquery), and per-play freshness on the all-time ranking
+  // is not worth ~2M/hour of listening (see the slow-marker note).
+  const seq = await slowSeq();
   return seq === null ? readAllTimePlays(limit) : allTimePlaysCached(limit, seq);
 }
 
@@ -1324,10 +1327,42 @@ export async function getLibraryIndexVersion(): Promise<string> {
   return (await getMeta(LIBRARY_SEQ_KEY)) ?? "0";
 }
 
-/** The history payload's version: the write marker itself. Every play, and nothing else that
- *  matters here, moves it. */
+// ── The slow marker (`meta.slow_seq_pub`) ───────────────────────────────────────────────
+// A published, at-most-every-10-min copy of write_seq, for the reads whose rebuild is
+// EXPENSIVE and whose freshness is worth trading: the history search payload (~22K billed
+// rows per rebuild) and the all-time list (~25K). Keyed on live write_seq, a listening
+// session rebuilt both once per play — measured 2026-08-07 at ~60K billed rows per landed
+// play, ~2M/hour of listening, which at August's remaining headroom was days from the
+// quota block. On this marker they rebuild at most every 10 minutes: a new play appears
+// in search and the all-time list up to 10 min late mid-session (the same staleness the
+// all-time totals already accept), while the day strip and day views stay on the live
+// marker and remain instant.
+// Publish rule: move the published seq only when write_seq moved AND the published copy is
+// ≥10 min old. Two instances racing the publish both write a valid seq — the loser costs
+// one extra rebuild, never a wrong answer. If the live marker can't be read, return null
+// like liveKey() — the caller runs uncached rather than guessing.
+const SLOW_SEQ_MIN_MS = 10 * 60 * 1000;
+
+async function slowSeq(): Promise<string | null> {
+  const seq = await liveKey();
+  if (seq === null) return null;
+  const raw = await getMeta("slow_seq_pub");
+  if (raw) {
+    try {
+      const pub = JSON.parse(raw) as { seq: string; at: number };
+      if (pub.seq === seq || Date.now() - pub.at < SLOW_SEQ_MIN_MS) return pub.seq;
+    } catch {
+      /* republish below */
+    }
+  }
+  await setMeta("slow_seq_pub", JSON.stringify({ seq, at: Date.now() }));
+  return seq;
+}
+
+/** The history payload's version: the slow marker (write_seq, published at most every
+ *  10 min) — the rebuild is a full plays scan, so it must not run once per play. */
 export async function getHistoryIndexVersion(): Promise<string> {
-  return (await getMeta(WRITE_SEQ_KEY)) ?? "0";
+  return (await slowSeq()) ?? "0";
 }
 
 // LIVE-shaped cache (the section above): keyed on a content version, with the daily TTL as a

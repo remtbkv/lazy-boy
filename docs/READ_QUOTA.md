@@ -115,6 +115,14 @@ Outcomes are recorded at the bottom of this file as readings land.
    linearly with history — the incremental-accumulator version is the queued next lever,
    to take when the guard shows this term mattering again.
 
+5. **(Added Aug 7)** The expensive derived reads — the history search payload (~22K
+   billed rows per rebuild) and the all-time list (~25K) — key on a **slow marker**
+   (`meta.slow_seq_pub`: write_seq, published at most every 10 min) instead of live
+   write_seq. Measured live (Aug 7 morning): keyed live, a listening session with the
+   app open cost ~60K rows per landed play ≈ 2M/hour — the last unbounded-in-practice
+   path. New plays now appear in search/all-time up to 10 min late mid-session; the day
+   strip and day views stay live.
+
 What deliberately did NOT change: the pinger cadence (42 ticks/h is Rem's freshness
 choice; post-fix a tick costs ~160 rows so cadence stopped mattering), the render-path
 caching (already keyed on the write marker), and the replica (stays off — see
@@ -186,6 +194,19 @@ returns; **linear-rare** = full scan but only on real change, cost named; **fixe
     8:45 AM). Property 2 held through its first real incident.
   - Operational lesson, standing: **after any lazyboy deploy, close or reload every open
     lazyboy tab** — old tabs run pre-fix code indefinitely and bill accordingly.
+- **W1c superseded by direct per-tick measurement (Aug 7, 11:50 AM–12:00 PM ET).** A 15 s
+  counter-vs-tick timeline pinned the live costs: **steady tick = 159 rows** (the fix
+  works — 99% below the pre-fix 14.25K), a landed-play tick with the 10-min-gated
+  all-time recompute = ~14.8K (by design, ≤6/h while listening), and **~60K rows per
+  landed play when the app is open** — the live-keyed rebuilds of the search payload +
+  all-time list, which was the morning's ~2.1M/h (+5.16M, 9:20–11:47 AM, ~35 plays
+  landed) and is what fix 5 (the slow marker) removes. Rem reports no tab was open
+  overnight; the stale-tab attribution for W1a is **withdrawn to UNVERIFIED** — after
+  subtracting his listening until 12:58 AM, several million of the overnight +17.5M
+  remain unattributed, possibly counter-lag/batching around the Turso instance migration
+  (all usage accrues on a new instance since Aug 6 afternoon; the old one is frozen at
+  428.39M). The forward-looking truth is the measured per-path costs above, not the
+  overnight aggregate.
 - **Guard acceptance:** fired on the real condition Aug 6 10:52 PM — HTTP 500 naming
   `rows_read` (91.04%) and `bytes_synced` (75.15%) as breached, exact same code path
   prod runs (local `next start`, real platform API). Prod redeployed with
