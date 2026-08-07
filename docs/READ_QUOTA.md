@@ -175,6 +175,19 @@ returns; **linear-rare** = full scan but only on real change, cost named; **fixe
 
 ## Measurement outcomes
 
+**Where it landed (Aug 7, 1:30 PM ET):** counter 482.98M (96.6%), headroom **17.0M for
+24.5 days ≈ 0.69M/day budget**. Measured steady state after the fixes: cron tick ~159–349
+rows (30/h), plus a ~190-row event every ~30 s while an old-build tab session was alive ≈
+**~0.8M/day total** — near budget, with the daily usage-check e-mail as the tripwire. The
+Aug 7 midday burst (+5.1M, 11:47 AM–1:20 PM, only 12 plays) ran on the pre-slow-marker
+build and stopped exactly when the session expired (13:10 bounce to /login); its exact
+per-request composition is **[UNVERIFIED]** — the leading candidates are old-build
+per-play rebuilds plus server-fallback searches, neither reproducible after the session
+died. Contingency if the budget is still exceeded: drop the cron cadence (2 min → 5–10
+min) in cron-job.org — safe now that the Zenbook backstop owns loss protection — worth
+~0.1–0.2M/day. Queued: attribute the ~190-row/30 s residual once the new build is the
+only client.
+
 - **W0 (pre-fix, dirty):** never got a clean window — deliberately traded for cap safety.
   The platform API (token, Aug 6 10:48 PM) put the counter at **455,169,706 (91.0%)**:
   +26.66M over the 8.93 h since the 1:52 PM dashboard reading ≈ **2.99M/h** — an evening
