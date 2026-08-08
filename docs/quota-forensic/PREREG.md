@@ -68,6 +68,27 @@ probe writes' read-side cost, expected 0).** A jump of ≥100K with reads blocke
 throughout is meter-side back-posting, demonstrated with no client activity at all —
 support-ticket-grade evidence.
 
+## P4 — windowed per-database usage sweep (fires at API recovery, before P2)
+
+Research finding (Aug 8): `GET .../databases/lazy-boy/usage?from=&to=` accepts ISO-8601
+windows (offset mandatory) — potentially retroactive sub-month resolution the org
+endpoint lacks. Pre-registration:
+1. **Validation first** (the endpoint could ignore the params): a July window
+   (2026-07-01→07-31) must return ≈0 (DB predates August? if the DB is older, expect
+   July's actual usage, distinctly ≠ August's); two half-month August windows must
+   ≈sum to the month total; a 1-hour quiet window (Aug 7 5:15–8:51 AM ET ≈ the
+   +1,168-rows cooldown stretch) must return ≈0.001M — this stretch is the known-answer
+   test. Only if validation passes do the sweep results count.
+2. **The sweep**: hourly windows across Aug 7 12:00 PM ET → Aug 8 2:00 AM ET (the
+   +31M mystery + the block crossing), then daily windows Aug 1–8. Deliverable: when
+   did the burn actually execute (per the meter), when did the block engage, was the
+   evening burn uniform or lumped.
+3. **Instance-boundary bracket**: windows straddling Aug 6 ~2 PM (3d5671ac freeze) and
+   Aug 8 ~1:00–1:45 AM (fa59eb0e appearance): does windowed usage double-count or
+   drop across instance replacement? Compare sum-of-instances vs total per window.
+Interpretation guard: if validation (1) fails, the endpoint is current-cycle-only and
+P4 aborts with that fact recorded (itself worth knowing for the ticket).
+
 ## Readings log (append-only)
 
 | ts (ET) | source | rows_read | rows_written | bytes_synced | note |

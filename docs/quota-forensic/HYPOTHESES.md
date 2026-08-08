@@ -8,6 +8,24 @@ costs — even with an open, visible tab and continuous listening — bound the 
 hot aggregates saw only 0.15–0.4M/h. Roughly 27M of the evening window has no
 client-side account.
 
+## Research update (Aug 8 ~2 AM) — the structural frame
+
+Turso's own source (`libsql-server/src/stats.rs`): per-instance counters are
+monotonic-since-database-creation in-process atomics, flushed to disk every 5 s; the
+billing-cycle number is therefore a DERIVED DIFFERENCE computed by an external
+scraper/rollup. Predicted failure modes of exactly that design match our anomalies
+1:1 — counter rollback after a crash is maintainer-filed (libsql#863), a replaced
+instance's series freezing at an exact value is what differencing does at migration,
+enforcement lag past the block line is a lagging rollup, and a hanging usage endpoint
+is an on-demand aggregation fan-out. The only cadence figure Turso ever published is
+"usage is reported hourly" (Vercel-integration blog). H1 and H2 are therefore not
+rivals but two faces of one structural hypothesis: **the counter is honest about
+execution but posts through a lagged, migration-fragile differencing pipeline.**
+Sub-hour truth requires our own high-res polling; the per-db usage endpoint accepts
+from/to windows (P4) for retroactive slicing. New named third-party readers to rule
+in/out: Turso dashboard's Drizzle Studio and AI Insights both bill the org's quota
+(official statements) — Rem's dashboard visits during the crisis were not free.
+
 ## H1 — Delayed/batched posting (usage executed earlier, posted late) — conf 0.35 ↑
 
 Server posts usage to the org counter in lumps (per connection close / periodic flush /

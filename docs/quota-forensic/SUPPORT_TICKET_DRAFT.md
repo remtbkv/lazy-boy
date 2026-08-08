@@ -40,6 +40,12 @@ single database `lazy-boy` (aws-us-east-1), August 2026 billing period.
 5. **Posting latency.** [P2 result: measured latency between executed writes and the
    usage counter reflecting them, short-lived vs long-lived connections: …]
 
+Context I've already gathered: `libsql-server`'s stats are monotonic-since-creation
+per-instance atomics flushed every 5 s (`src/stats.rs`), so the billing-cycle figure
+must be derived by differencing — and counter rollback after a crash was filed by your
+own team as tursodatabase/libsql#863. My observations look like that class of artifact
+surfacing at instance-migration boundaries.
+
 Questions:
 - Is org-level usage the sum of per-instance counters, and how is usage carried across
   an instance migration? Can a migration double-count or drop usage?
