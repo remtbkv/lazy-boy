@@ -1,0 +1,276 @@
+# BRIDGE.md — the self-hosted DB bridge (2026-08-08 → Sep 1)
+
+Turso's free org is read-blocked for the rest of August (`Operation was blocked: SQL read
+operations are forbidden`), so production could not render anything. This is the bridge that
+brings it back at $0 until the calendar month resets: **the store moves to a `sqld` (libSQL
+server) instance on the Zenbook, reached from Vercel through a Cloudflare quick tunnel.** It
+is a three-week measure, not a new architecture — Sep 1 reverts to Turso, and the revert
+procedure is written down below *before* it is needed.
+
+## Architecture
+
+```
+Vercel (lazy-boy, production)
+  @libsql/client  ──HTTPS/Hrana──►  https://<random>.trycloudflare.com
+                                        │  Cloudflare quick tunnel (no account, no cost)
+                                        ▼
+                                   Zenbook  cloudflared  ──►  127.0.0.1:8090
+                                                                  sqld 0.24.32
+                                                                  ~/lazyboy-sqld/data
+```
+
+- The app is unchanged. `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` are just pointed somewhere
+  else; `@libsql/client` speaks the same Hrana-over-HTTP protocol to `sqld` that it speaks to
+  Turso.
+- **Auth is a JWT**, not a Turso token. `sqld` runs with `--auth-jwt-key-file` holding an
+  Ed25519 *public* key; the token in `TURSO_AUTH_TOKEN` is an `EdDSA`-signed JWT minted on the
+  Zenbook (`~/lazyboy-sqld/mint-jwt.mjs`, valid 12 months). An unauthenticated request gets
+  401, so the tunnel being world-reachable is not the same as the database being open.
+- `sqld` listens on **127.0.0.1 only**. The tunnel is the sole path in.
+- `LAZYBOY_NO_REPLICA=1` stays set in production. The embedded replica would pull the whole
+  store over Rem's home upstream on every cold instance; every read goes to the bridge
+  directly, which is cheap here because rows are not metered.
+
+## What is on the bridge, and how it got there
+
+Seeded from `data/replica.db` on the Mac (the embedded replica, synced 2026-08-08 03:11 —
+the freshest complete copy of the primary that exists while reads are blocked), snapshotted
+with `sqlite3 .backup` and shipped by `scp` (sha256 verified equal on both ends), then dropped
+in as `~/lazyboy-sqld/data/dbs/default/data`. `sqld` logged `replication log not found,
+recovering from database file` and adopted it. Row counts matched the source exactly:
+
+| table | source copy | bridge after import |
+|---|---|---|
+| plays | 7330 | 7330 |
+| tracks | 15024 | 15024 |
+| playlists | 180 | 180 |
+| playlist_tracks | 15328 | 15328 |
+| meta | 372 | 372 |
+| contexts | 74 | 74 |
+| saved_tracks | 29 | 29 |
+| api_log | 7594 | 7594 |
+
+The copy stopped at `played_at = 2026-08-07T19:29:49.568Z`. The gap since was repaired from
+the Zenbook backstop recorder with `scripts/backfill-from-backstop.mjs`: 277 captured rows,
+**112 inserted**, and a second run inserted **0** (the script is idempotent). Every one of the
+recorder's 277 rows is present in the bridge, and the bridge's play count in the recorder's
+window is exactly 277 — no duplicates, nothing dropped.
+
+### Writes during the bridge
+
+**Writes land on the Zenbook, not on Turso.** Everything the app records between now and the
+revert — plays, playlist syncs, tokens, `write_seq` — lives only in `~/lazyboy-sqld/data`
+until it is replayed back into Turso on Sep 1.
+
+That is survivable because **the plays are never solely on the bridge**: `lazyboy-recorder`
+(`~/lazyboy-recorder`, `lazyboy-recorder.timer`, every 15 min) keeps its own independent
+capture of Spotify's recently-played into its own SQLite file, and it does not touch Turso or
+the bridge. If the Zenbook's bridge data were lost outright, the irreplaceable part — the
+listen history — is re-derivable from the recorder with the same backfill script. The
+derived/cached parts (playlist track caches, `alltime_stats`, context names) rebuild from
+Spotify on the next sync.
+
+### The Spotify token rows were left alone — deliberately
+
+The plan called for deleting a stale `spotify_tokens` row so production would mint fresh
+tokens on first login. Checking first changed the answer, so it was not deleted:
+
+- Production reads/writes **`spotify_tokens`**; dev uses **`spotify_tokens_dev`**
+  (`src/lib/db.ts`, `NODE_ENV === "production" ? ... : ...`).
+- The recorder owns *neither* key — it keeps its chain in `~/lazyboy-recorder/tokens.json`.
+- The recorder's current refresh token is **byte-identical** to the one in the seeded
+  `spotify_tokens_dev` row (compared by tail). This app's refresh flow is client-secret Basic
+  auth, which does not rotate the refresh token, so an app-side refresh cannot orphan the
+  recorder's chain — the rotation hazard in GOTCHAS applies to the PKCE flow, not this one.
+
+So both rows were kept. Keeping `spotify_tokens` is also what let production come back
+without a manual re-login: the stored refresh token is the newest of its chain (nothing has
+been able to use it since reads were blocked).
+
+## The tunnel and the rotation updater
+
+A Cloudflare **quick** tunnel needs no account and costs nothing, and in exchange the hostname
+is re-randomised **every time `cloudflared` restarts** (crash, reboot, network drop). So the
+URL is not a constant and nothing may hard-code it.
+
+`~/lazyboy-tunnel/run.sh` pipes `cloudflared`'s own output through a reader that pulls the
+assigned `https://….trycloudflare.com` hostname out of it (ignoring `api.trycloudflare.com`,
+which is cloudflared's control plane), writes it to `~/lazyboy-tunnel/current-url`, and — only
+when it *differs* from the previous one — calls `~/lazyboy-tunnel/on-rotate.sh`, which:
+
+1. `PATCH`es the `TURSO_DATABASE_URL` project env var **in place** (same env-var id, so its
+   `production`/`preview` targets are preserved — a remove+add would silently drop `preview`);
+2. finds the newest READY production deployment and **redeploys** it, because a Vercel env
+   change does not reach a deployment that is already running;
+3. appends a line to `~/lazyboy-tunnel/rotations.log`.
+
+It is gated on a sentinel file, `~/lazyboy-tunnel/ARMED`. Without that file the new URL is
+recorded and logged (`action=recorded-only (not ARMED)`) and production is left untouched —
+which is how the tunnel was brought up and tested before cutover. Delete the sentinel and the
+tunnel keeps running without ever touching production again.
+
+**This is the one place something automated deploys to production.** It is deliberate and
+narrow: it fires only on a hostname change, and without it a `cloudflared` restart silently
+breaks production until someone notices.
+
+## Files and units created
+
+On the **Zenbook** (all additive, all `lazyboy-*`; nothing `diveloop-*` was touched):
+
+| path | what |
+|---|---|
+| `~/lazyboy-sqld/bin/sqld` | libSQL server 0.24.32, official `x86_64-unknown-linux-gnu` release, sha256 verified against the published `.sha256` |
+| `~/lazyboy-sqld/data/` | the store (`dbs/default/data` is the SQLite file) |
+| `~/lazyboy-sqld/mint-jwt.mjs` | Ed25519 keypair + JWT minter (re-runnable; reuses the existing private key) |
+| `~/lazyboy-sqld/jwt-private.pem` | signing key, `0600` — never leaves the Zenbook |
+| `~/lazyboy-sqld/jwt-public.pem` | what `sqld` verifies against |
+| `~/lazyboy-sqld/jwt-token.txt` | the token production uses, `0600`, expires 2027-08-03 |
+| `~/lazyboy-tunnel/cloudflared` | official `cloudflared` 2026.7.3 linux-amd64 |
+| `~/lazyboy-tunnel/run.sh` | tunnel supervisor + URL change detector |
+| `~/lazyboy-tunnel/on-rotate.sh` | Vercel env patch + production redeploy |
+| `~/lazyboy-tunnel/env` | `0600` — Vercel token, project/team ids, env-var ids |
+| `~/lazyboy-tunnel/current-url` | the live bridge URL |
+| `~/lazyboy-tunnel/rotations.log` | one line per URL change |
+| `~/lazyboy-tunnel/ARMED` | sentinel: present = the updater may touch production |
+| `~/.config/systemd/user/lazyboy-sqld.service` | `Restart=always`, user unit, lingering already on |
+| `~/.config/systemd/user/lazyboy-tunnel.service` | `Restart=always`, `After=lazyboy-sqld.service` |
+
+No secret in this table has its value written into this repo — the repo is public.
+
+## Latency
+
+Read paths, measured with the repo's own harness (`scripts/bench-reads.mjs main`,
+medians of n=15) from the **Mac through the tunnel**, next to the Turso-primary figures the
+docs already carry (`docs/GOTCHAS.md`, `docs/READ_QUOTA.md`, measured 2026-08-05):
+
+| path | Turso primary (documented) | bridge, via tunnel |
+|---|---|---|
+| `SELECT 1` round trip | ~47 ms | 55–71 ms |
+| all-time list | 705 ms | 102 ms |
+| history search | 344 ms | 83 ms |
+| daily-stats scan | 705–903 ms | 81–132 ms |
+
+The bridge is *faster* on everything that scans, despite an extra hop: the tunnel adds fixed
+round-trip cost, and in exchange the query runs against a local SQLite file on the Zenbook
+instead of Turso's remote row-metered engine.
+
+A whole authed **Home render** against the bridge, server-rendered, cache-busted so nothing is
+served from Next's data cache: **median 184 ms** (159–285, n=7), against 21 ms for `/login`,
+which renders the same shell and touches no database. Measured on the Mac's dev server with
+`LAZYBOY_NO_REPLICA=1` — the same replica-off configuration production runs.
+
+What none of this measures is **Vercel's** latency to the tunnel. These numbers are from the
+Mac; production reaches the Zenbook over Rem's home upstream, and that leg is unmeasured. The
+tunnel hostname does resolve to Cloudflare anycast (`104.16.230.132`, AS13335), so the
+verified path already leaves the LAN and crosses the public edge — but the figure a Vercel
+function would see is not in evidence, and the first real Home render in production should be
+timed and written here.
+
+## What the cutover verified, and what it could not
+
+Cutover, 2026-08-08 ~4:20 PM ET: both env vars patched to the bridge (HTTP 200 each), a fresh
+production deployment `dpl_6R7PX8KiJAkkxvynP5ZQ5s77cdZM` built clean and went READY, and
+`lazy-spotify.vercel.app` serves `/`, `/login` and `/api/build` at 200.
+
+**Not verified: a logged-in production page render.** The automation browser's Spotify session
+had expired, so "Connect Spotify" landed on Spotify's credential form rather than the two-click
+consent, and entering Rem's credentials is out of bounds. The fallback check — driving
+`/api/cron/sync` — is also unavailable: production's `CRON_SECRET` does not match the one in
+`.env.local` (that request returns 401), and the value cannot be read back out of Vercel.
+
+So the last unproven link is narrow and specific: **a Vercel function actually reaching the
+tunnel.** Everything on either side of it is verified — the same URL, the same JWT and the same
+`@libsql/client` serve the whole app correctly from another machine over the public Cloudflare
+edge, and production is configured with exactly those values. Rem opening the site logged in is
+the one-step confirmation.
+
+**Separately: `/api/cron/sync` was already returning 401 every ~5 minutes before the bridge
+existed** — the external pinger's bearer does not match production's `CRON_SECRET`. That is not
+a quota problem and the bridge does not fix it; scheduled app-closed syncing has simply not been
+running. Repairing it needs the secret re-set on both sides (Vercel env + the cron-job.org job),
+which needs credentials only Rem can read.
+
+## The revert (Sep 1)
+
+Written down before the switch was made. Every step is one command.
+
+**1. Point production back at Turso.** The old values are not readable back out of Vercel
+(both vars are `sensitive`, i.e. write-only), so the source of truth for the revert is
+`~/projects/lazyboy/.env.local`, which was verified on 2026-08-08 to still authenticate
+against Turso (HTTP 200 with a `BLOCKED` *quota* error, versus HTTP 400 for a deliberately
+bad token — so the credential is live, only the quota is not).
+
+```bash
+cd ~/projects/lazyboy && set -a && . ./.env.local && set +a && \
+VT=$(python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/Library/Application Support/com.vercel.cli/auth.json')))['token'])") && \
+for pair in "MYq6jff96jW0aPcS:$TURSO_DATABASE_URL" "N5D1ouIKdJ5Hhg32:$TURSO_AUTH_TOKEN"; do \
+  curl -s -o /dev/null -w "%{http_code}\n" -X PATCH \
+    "https://api.vercel.com/v9/projects/prj_UA3749Btv0RiQPwuymee4MdZZ7HA/env/${pair%%:*}?teamId=team_omHOXItW1PXTC6XJ6WBBv16M" \
+    -H "Authorization: Bearer $VT" -H 'content-type: application/json' \
+    -d "{\"value\":\"${pair#*:}\"}"; done
+```
+
+(`MYq6jff96jW0aPcS` = `TURSO_DATABASE_URL`, `N5D1ouIKdJ5Hhg32` = `TURSO_AUTH_TOKEN`. Patching
+by env-var id keeps both `production` and `preview` targets attached.)
+
+**2. Disarm the rotation updater first**, or the next tunnel restart will patch the URL
+straight back to the bridge:
+
+```bash
+ssh ubuntu 'rm -f ~/lazyboy-tunnel/ARMED'
+```
+
+**3. Redeploy production** so the reverted env reaches the running functions:
+
+```bash
+cd ~/projects/lazyboy && vercel redeploy "$(vercel ls lazy-boy --prod --json 2>/dev/null | head -1)" --prod
+```
+
+or, equivalently, push any commit to `main`.
+
+**4. Replay everything the bridge recorded back into Turso.** The listen history is the part
+that must not be lost, and the recorder's capture is the authority for it:
+
+```bash
+ssh ubuntu 'python3 -c "
+import sqlite3
+c=sqlite3.connect(\"/home/remtbkv/lazyboy-recorder/backstop.db\")
+[print(r[0]) for r in c.execute(\"select raw from plays\")]"' > /tmp/backstop.jsonl && \
+cd ~/projects/lazyboy && node --env-file=.env.local scripts/backfill-from-backstop.mjs /tmp/backstop.jsonl
+```
+
+The script is idempotent (inserts only what is missing), so running it twice is safe and the
+second run must report `0 inserted`. The playlist/track caches and `alltime_stats` do not need
+replaying — they rebuild from Spotify on the next sync. Note the recorder's window: it keeps
+every play it has ever captured, so this covers the whole bridge period, but confirm
+`min(played_at)` in `backstop.db` still predates the cutover before relying on it.
+
+**5. Tear the bridge down** once step 4 has been verified against real Turso row counts:
+
+```bash
+ssh ubuntu 'systemctl --user disable --now lazyboy-tunnel.service lazyboy-sqld.service && \
+  systemctl --user daemon-reload'
+```
+
+Keep `~/lazyboy-sqld/data` until the Turso side has been checked — it is the only copy of any
+non-play state written during the bridge. Delete it, `~/lazyboy-tunnel`, and the two unit
+files when satisfied. **Do not stop `lazyboy-recorder`** — it predates the bridge and is the
+standing insurance for the listen history.
+
+## Failure modes worth knowing
+
+- **Zenbook offline / asleep → production has no database.** The app degrades the way it does
+  against any unreachable primary. The recorder still captures, so nothing is permanently
+  lost, but the site is down for the duration. This is the real cost of the $0 route.
+- **`cloudflared` restarts → new hostname.** Covered by the rotation updater above, at the
+  price of a production redeploy each time. Watch `~/lazyboy-tunnel/rotations.log`.
+- **The Vercel token in `~/lazyboy-tunnel/env` is the Mac CLI's own credential** (the token
+  previously stored on the Zenbook for `lazyboy-logtail` had expired — that unit had been
+  failing every request since ~09:35 on 2026-08-08). If someone runs `vercel logout` on the
+  Mac, the rotation updater loses its ability to patch the env and the log will show
+  `action=FAILED env-patch http=403`. A named token from the Vercel dashboard would be
+  sturdier; the API refuses to mint one from a CLI OAuth session.
+- **`/api/cron/sync` was already returning 401** before any of this — the external pinger's
+  bearer does not match `CRON_SECRET`, so scheduled syncs have not been running at all. That
+  is a separate breakage from the quota block and it survives the bridge; the in-app 2-minute
+  sync still works while a tab is open.
