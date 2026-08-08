@@ -150,6 +150,11 @@ docs already carry (`docs/GOTCHAS.md`, `docs/READ_QUOTA.md`, measured 2026-08-05
 | history search | 344 ms | 83 ms |
 | daily-stats scan | 705–903 ms | 81–132 ms |
 
+Provenance: the last run in `scripts/bench-reads-results.json` (`startedAt`
+`2026-08-08T20:18:29.995Z`). The harness labels whatever `TURSO_DATABASE_URL` points at
+"primary", so that run's `primary` block is the **bridge**, not Turso — the give-away is
+`rowCounts.plays.primary = 7447` against a `localCopy` of 7330.
+
 The bridge is *faster* on everything that scans, despite an extra hop: the tunnel adds fixed
 round-trip cost, and in exchange the query runs against a local SQLite file on the Zenbook
 instead of Turso's remote row-metered engine.
