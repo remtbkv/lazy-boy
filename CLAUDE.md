@@ -53,6 +53,8 @@ src/lib/db.ts            libSQL/Turso store (listen-history + tokens); async; fi
                          getReader() = local embedded replica (row-scanning reads). GOTCHAS.md
 src/lib/read-costs.ts    the MODELED rows-read cost of every named read path + the residual
                          alarm rule; what db.ts's usage_ledger records. docs/READ_QUOTA.md
+src/lib/build-skew.ts    when a tab running an old bundle reloads itself (debounce/throttle/
+                         defer). Fed by the build id the now-playing poll carries. GOTCHAS.md
 src/lib/format.ts        duration/time/day formatting (shared)
 src/lib/filter.ts        fuzzyFilter — substring+prefix name search (shared)
 src/components/ui/       UI primitives — Base UI under the hood, NOT Radix (see GOTCHAS.md)

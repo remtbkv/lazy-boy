@@ -457,6 +457,30 @@ rendered between the content and `<FloatingBar>` poisons that measurement (its r
 viewport-relative) and zeroes the clearance. Keep fixed-position extras (back-to-top etc.)
 *after* the pill in JSX; DOM order doesn't matter visually for fixed elements.
 
+## Deployment skew + stale tabs
+
+A deploy does not reach an open tab until that tab reloads, so a tab left open keeps
+executing the old bundle — and calling whatever the old code called — indefinitely. That is
+what the Aug 7→8 burn was: one always-on tab on a pre-fix build, refreshing ~2×/min at a flat
+~2.55M rows/h for 15+ hours (`docs/quota-forensic/OLD_BUILD_COST.md`). The guard closes the
+window to minutes. `next.config.ts` mints a `NEXT_PUBLIC_BUILD_ID` (Vercel's commit sha; a
+timestamp locally) and inlines it into both bundles, `/api/now-playing` returns it on every
+reply — so the beacon rides the 6s poll the app already makes, with no new endpoint and no
+extra request — and `src/lib/build-skew.ts` decides when the tab reloads itself. Its three
+constants each cover a different failure, so don't tighten them casually: a mismatch must
+hold **continuously for 3 min**, because a deploy mid-propagation serves old and new replies
+alternately and a flapping edge must not reload; **one reload per 10 min** per browser
+(localStorage stamp), because a beacon that could never agree would otherwise reload-loop;
+and a reload is **deferred while the tab is visible and was touched in the last 60 s**, so
+nobody's page is yanked mid-use — the streak keeps running and it fires at the next idle or
+hidden moment, and a hidden tab (the expensive kind) reloads immediately. Known answers:
+`node scripts/test-build-skew.mjs`. The one thing that would blind it: **Vercel Skew
+Protection**. It works by pinning a client's requests to the deployment it was served from,
+so the poll would return the old build's own id, the two would agree forever, and no tab
+would ever notice. Check on the deployed app — a `__vdpl` cookie means it's enabled; if it
+ever is, the beacon has to be fetched without cookies (`credentials: "omit"`, hence
+unauthenticated) to escape the pin.
+
 ## Production security
 
 See `docs/SECURITY.md` before any public deploy. Biggest item: the listen-history DB is

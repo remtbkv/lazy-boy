@@ -1,6 +1,16 @@
 import type { NextConfig } from "next";
 
+// Identity of THIS build, minted once when the config is evaluated (i.e. once per build,
+// once per `next dev` process). The now-playing poll carries it back to the browser so a
+// tab still running an old bundle notices and reloads itself — see docs/GOTCHAS.md
+// "Deployment skew + stale tabs". On Vercel it's the commit sha; locally a timestamp, so
+// two successive dev servers are distinguishable.
+const BUILD_ID = process.env.VERCEL_GIT_COMMIT_SHA || `local-${Date.now().toString(36)}`;
+
 const nextConfig: NextConfig = {
+  // `env` inlines at build time into BOTH bundles — the route handler and the client
+  // comparator therefore compare the same literal.
+  env: { NEXT_PUBLIC_BUILD_ID: BUILD_ID },
   // Client-side Router Cache. Every page here is `force-dynamic`, and Next's default for
   // dynamic routes is staleTimes 0 — i.e. re-fetch the whole RSC payload on EVERY navigation,
   // including going Back to a page you were just on. That's why revisits felt as slow as first

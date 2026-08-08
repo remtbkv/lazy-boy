@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 import { playerSetPlayingAction } from "@/app/(app)/actions";
+import { evaluateSkew } from "@/lib/build-skew";
 
 export type NowPlayingTrack = {
   id: string;
@@ -39,13 +40,17 @@ const Ctx = createContext<NowPlayingValue | null>(null);
 
 // Cross-tab messages on the shared BroadcastChannel.
 type NPMessage =
-  | { type: "state"; playing: Playing; at: number } // a real poll result
+  | { type: "state"; playing: Playing; at: number; build?: string } // a real poll result
   | { type: "optimistic"; playing: Playing; until: number; at: number } // a user action
   | { type: "request" }; // a new tab asking the leader for the current state
 
 const CHANNEL = "lb-nowplaying";
 const CACHE_KEY = "lb-nowplaying";
 const LEADER_LOCK = "lb-nowplaying-leader";
+// This bundle's build id (inlined by next.config.ts), and where the last skew reload was
+// stamped — the throttle that keeps a broken beacon from reload-looping.
+const BUILD_ID = process.env.NEXT_PUBLIC_BUILD_ID;
+const RELOAD_STAMP_KEY = "lb-build-reload-at";
 const POLL_MS = 6000;
 // A track boundary is predictable (progress + duration are both known), so instead of
 // waiting up to POLL_MS for the steady interval to notice a song change, the poller that
@@ -86,6 +91,65 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
 
   // Monotonic guard for our own fetches: a slow older response must not overwrite a newer one.
   const refreshSeq = useRef(0);
+
+  // Stale-build detection. The poll's reply carries the server's build id; a tab whose own
+  // id no longer matches is running a bundle the deploy left behind and must reload itself
+  // (docs/GOTCHAS.md "Deployment skew + stale tabs"). Every tab evaluates — followers see
+  // the id on the leader's broadcast, so a non-polling tab is covered too.
+  const mismatchSinceRef = useRef<number | null>(null);
+  const serverBuildRef = useRef<string | undefined>(undefined);
+  const lastInteractionRef = useRef<number | null>(null);
+
+  const checkSkew = useCallback((serverBuild: string | undefined) => {
+    // No beacon = no information (an older server, a mid-propagation reply). Leave the
+    // streak untouched rather than reading silence as either agreement or skew.
+    if (!serverBuild) return;
+    serverBuildRef.current = serverBuild;
+    let lastReloadAt: number | null = null;
+    try {
+      const raw = localStorage.getItem(RELOAD_STAMP_KEY);
+      if (raw) lastReloadAt = Number(raw) || null;
+    } catch {
+      /* storage unavailable */
+    }
+    const now = Date.now();
+    const decision = evaluateSkew({
+      clientBuild: BUILD_ID,
+      serverBuild,
+      now,
+      mismatchSince: mismatchSinceRef.current,
+      lastReloadAt,
+      visible: document.visibilityState === "visible",
+      lastInteractionAt: lastInteractionRef.current,
+    });
+    mismatchSinceRef.current = decision.mismatchSince;
+    if (decision.reload) {
+      try {
+        localStorage.setItem(RELOAD_STAMP_KEY, String(now));
+      } catch {
+        /* storage unavailable — the debounce still bounds the rate */
+      }
+      location.reload();
+    }
+  }, []);
+
+  // Interaction is what defers a reload, and hiding the tab is what un-defers it: a hidden
+  // tab stops polling, so without this re-check a deferred reload would wait for the tab to
+  // be looked at again — exactly the tab we most want to reload.
+  useEffect(() => {
+    const touch = () => {
+      lastInteractionRef.current = Date.now();
+    };
+    const onVisibilityChange = () => checkSkew(serverBuildRef.current);
+    window.addEventListener("pointerdown", touch, { passive: true, capture: true });
+    window.addEventListener("keydown", touch, { passive: true, capture: true });
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("pointerdown", touch, { capture: true });
+      window.removeEventListener("keydown", touch, { capture: true });
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [checkSkew]);
 
   // Post a message on the shared channel (+ mirror state to localStorage so a brand-new tab
   // can paint instantly before the leader answers its `request`).
@@ -140,12 +204,15 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     try {
       const res = await fetch("/api/now-playing", { cache: "no-store" });
       if (!res.ok) return;
-      const data = (await res.json()) as { playing: Playing };
+      const data = (await res.json()) as { playing: Playing; build?: string };
+      // Independent of the ordering/suppression guards below: the build id is about this
+      // tab's code, not about what's playing, and a superseded reply reports it just as well.
+      checkSkew(data.build);
       if (aliveRef.current && seq === refreshSeq.current && Date.now() >= suppressUntil.current) {
         const at = Date.now();
         lastAppliedAt.current = at;
         setPlaying(data.playing);
-        broadcast({ type: "state", playing: data.playing, at });
+        broadcast({ type: "state", playing: data.playing, at, build: data.build });
         // Only the owner of real polling schedules the next boundary poll — otherwise every
         // open tab would independently hit Spotify at track boundaries, multiplying the rate
         // the leader election exists to prevent.
@@ -154,7 +221,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     } catch {
       /* transient — keep the last known state rather than flicker */
     }
-  }, [broadcast, scheduleEndOfTrackPoll]);
+  }, [broadcast, scheduleEndOfTrackPoll, checkSkew]);
 
   // Keep the ref-indirection current so scheduleEndOfTrackPoll's timeout always calls the
   // latest pollOnce without depending on it directly (see the comment above it).
@@ -223,6 +290,9 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       const msg = e.data;
       if (msg.type === "state") {
         applyShared(msg.playing, msg.at);
+        // A follower never fetches, so the leader's broadcast is its only view of the
+        // server's build id.
+        checkSkew(msg.build);
       } else if (msg.type === "optimistic") {
         // A user action elsewhere — apply it and match its suppression so neither this tab's
         // view nor the leader's next poll clobbers it before Spotify catches up.
@@ -233,7 +303,12 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
         }
       } else if (msg.type === "request" && isLeaderRef.current) {
         // Only the leader answers a newcomer, with the freshest state it has.
-        broadcast({ type: "state", playing: playingRef.current, at: lastAppliedAt.current });
+        broadcast({
+          type: "state",
+          playing: playingRef.current,
+          at: lastAppliedAt.current,
+          build: serverBuildRef.current,
+        });
       }
     };
 
@@ -274,7 +349,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       bc.close();
       bcRef.current = null;
     };
-  }, [pollOnce, applyShared, broadcast]);
+  }, [pollOnce, applyShared, broadcast, checkSkew]);
 
   // Show a track as playing immediately (e.g. double-click a song); the next poll confirms.
   const playOptimistic = useCallback(
