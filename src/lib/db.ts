@@ -11,6 +11,19 @@ import { createClient, type Client, type InStatement, type Row } from "@libsql/c
 import type { Track } from "@/lib/spotify/types";
 import { CLEANED_PREFIX, BACKUP_PREFIX } from "@/lib/clean/names";
 import {
+  CALIBRATION,
+  STEADY_SYNC_TICK_ROWS,
+  allTimeListRebuildRows,
+  contextsFullPassRows,
+  dailyStatsRows,
+  dayPlaysRows,
+  historyPayloadRebuildRows,
+  landedSyncTickRows,
+  libraryPayloadRebuildRows,
+  searchHistoryLikeRows,
+  uniqueSongCountRows,
+} from "@/lib/read-costs";
+import {
   tracksNeedingWrite,
   playKey,
   newPlays,
@@ -178,6 +191,16 @@ async function init(): Promise<Client> {
       retry_after INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_api_log_ts ON api_log (ts);
+    -- Per-reader modeled rows-read attribution, one row per (UTC day, reader). See "The
+    -- read-cost ledger" near the bottom of this file. The primary key is (day, reader) so
+    -- the upsert is an indexed probe and a day's rows are a range seek.
+    CREATE TABLE IF NOT EXISTS usage_ledger (
+      day TEXT NOT NULL,
+      reader TEXT NOT NULL,
+      calls INTEGER NOT NULL DEFAULT 0,
+      modeled_rows INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (day, reader)
+    );
   `);
   // Migrate older DBs that predate the album/duration columns.
   const info = await client.execute("PRAGMA table_info(tracks)");
@@ -741,6 +764,11 @@ export async function unresolvedContextUris(): Promise<{ uri: string; type: stri
           ORDER BY isNew DESC`,
     args: { cutoff },
   });
+  // Ledgered here, not at the call site: this is the once-a-day pass, and the sync route
+  // cannot see whether the gate opened on this tick.
+  ledgerAddLinear("contexts_full_pass", (plays) =>
+    contextsFullPassRows(plays, Math.round(plays * CONTEXTED_PLAY_FRACTION)),
+  );
   return (plainRows(res.rows) as unknown as { uri: string; type: string }[]).map(
     ({ uri, type }) => ({ uri, type }),
   );
@@ -916,6 +944,9 @@ export async function searchHistory(query: string, limit = 300): Promise<TrackSt
           ORDER BY p.played_at DESC LIMIT ?`,
     args: [like, like, limit],
   });
+  // Only the LIKE branch is ledgered: the empty-query branch above is the bounded indexed
+  // head/delta read the history refresh uses, and charging it this cost would be a lie.
+  void ledgerAdd("search_fallback", searchHistoryLikeRows());
   return plainRows(res.rows) as unknown as TrackStats[];
 }
 
@@ -1016,6 +1047,9 @@ async function readAllTimePlays(limit: number): Promise<TrackStats[]> {
           ORDER BY plays DESC, lastPlayed DESC, t.name ASC LIMIT ?`,
     args: [limit],
   });
+  // Inside the read, not in getAllTimePlays: a cache hit costs nothing and must not be
+  // charged as a rebuild. Same rule for every instrumented read below.
+  ledgerAddLinear("alltime_list", allTimeListRebuildRows);
   return plainRows(res.rows) as unknown as TrackStats[];
 }
 
@@ -1113,6 +1147,8 @@ async function readDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
     trackId: string;
     durationMs: number | null;
   }[];
+  // The window's real row count, so this one is modeled off what was actually scanned.
+  void ledgerAdd("day_strip", dailyStatsRows(rows.length));
   // Minutes to add to UTC for the user's local day (clamped, integer), same convention as
   // localDay() — toISOString() formats in UTC, so shifting first gives the local calendar day.
   const offMs = Math.max(-720, Math.min(840, Math.round(offsetMin) || 0)) * 60000;
@@ -1199,6 +1235,10 @@ async function readPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]>
       to: new Date(start + 86_400_000).toISOString(),
     },
   });
+  // A frozen day served from the cache never reaches here and is correctly charged nothing.
+  // The returned rows are grouped per song, so the day's typical play count models the scan
+  // better than res.rows.length would.
+  void ledgerAdd("day_plays", dayPlaysRows());
   return plainRows(res.rows) as unknown as TrackStats[];
 }
 
@@ -1439,6 +1479,8 @@ async function readLibraryIndex(): Promise<LibraryIndex> {
     if (pl !== undefined && !membership.includes(pl)) membership.push(pl);
   }
   for (const r of savedRes.rows) add(r);
+  // Membership rows are what this scan is driven from, so they size its cost directly.
+  void ledgerAdd("library_payload", libraryPayloadRebuildRows(memberRes.rows.length));
   return {
     images: images.values,
     albums: albums.values,
@@ -1472,6 +1514,8 @@ async function readHistoryIndex(): Promise<HistoryIndex> {
     }
     return [i, Math.floor(Date.parse(String(r.playedAt)) / 60000), sources.put(r.source)];
   });
+  // One row per play came back, so this is the scanned count rather than a modeled one.
+  void ledgerAdd("history_payload", historyPayloadRebuildRows(res.rows.length));
   return {
     images: images.values,
     albums: albums.values,
@@ -1647,6 +1691,9 @@ export async function recomputeUniqueSongCount(): Promise<number> {
      )`,
   );
   const n = res.rows[0] ? Number(res.rows[0].n) : 0;
+  // The DISTINCT count returns one row, so the scan is modeled from the library's size, not
+  // from what came back.
+  void ledgerAdd("unique_song_count", uniqueSongCountRows());
   await setMeta("unique_song_count", String(n));
   return n;
 }
@@ -2237,4 +2284,166 @@ export async function getApiLogSummary(): Promise<{
     };
   });
   return { windows };
+}
+
+// ── The read-cost ledger (`usage_ledger`) ───────────────────────────────────────────────
+// Continuous attribution for the rows-read quota. Turso reports ONE counter per
+// organization; it cannot say which read path spent it, which is how a month of burn went
+// unattributed (docs/READ_QUOTA.md). So every named read path records what it MODELS itself
+// to cost as it runs — src/lib/read-costs.ts owns the model — and /api/cron/usage-check
+// diffs a day's total against the platform counter, writing the platform number and the
+// unexplained residual back into this same table.
+//
+// META-CLASS DATA, so the marker rules at the top of the file apply the way they do to
+// api_log: written via getClient() (the primary), read via getClient(), and it MUST NOT bump
+// write_seq. Nothing serves usage_ledger from the replica, and this is written on
+// essentially every request — a bump here would pin the freshness gate in the "behind" state
+// permanently, which is the exact failure the marker exists to prevent.
+//
+// IT MUST NEVER BREAK OR SLOW THE THING IT MEASURES. ledgerAdd swallows every error and
+// every call site fires it with `void`, off the awaited path (the same contract as
+// logSpotifyRequest). A missing attribution row is a hole in a diagnostic; an attribution
+// row that throws, or that adds a round trip to a render, is an outage caused by the
+// instrument. Where a call site already runs a `client.batch` write the ledger deliberately
+// stays OUT of that batch: saving one round trip is not worth a ledger failure being able
+// to fail a real write.
+//
+// Reader names are stable and few (see docs/READ_QUOTA.md "Continuous attribution" for the
+// list). Two are reserved: `_platform_total` and `_residual` are written by the
+// reconciliation, not by a read path, and `_platform_error` records a day the platform API
+// could not be reached. The leading underscore is what distinguishes them, so a real reader
+// must never start with one.
+
+export type LedgerRow = { day: string; reader: string; calls: number; modeledRows: number };
+
+/** The UTC calendar day, which is the day Turso's quota accounting uses. */
+function utcDay(at: number = Date.now()): string {
+  return new Date(at).toISOString().slice(0, 10);
+}
+
+/** Charge one call of `reader` its modeled row cost against today (UTC). Fire-and-forget:
+ *  callers use `void ledgerAdd(...)`, and this never rejects. */
+export async function ledgerAdd(reader: string, modeledRows: number): Promise<void> {
+  try {
+    const client = await getClient();
+    await client.execute({
+      sql: `INSERT INTO usage_ledger (day, reader, calls, modeled_rows)
+            VALUES (:day, :reader, 1, :rows)
+            ON CONFLICT(day, reader) DO UPDATE SET
+              calls = calls + 1,
+              modeled_rows = modeled_rows + excluded.modeled_rows`,
+      // `|| 0` also normalises a NaN cost — a broken model term must not write a NULL-ish
+      // row that then poisons the day's SUM.
+      args: { day: utcDay(), reader, rows: Math.round(modeledRows) || 0 },
+    });
+  } catch {
+    /* attribution must never break its caller */
+  }
+}
+
+/** Record an ABSOLUTE figure for a named day, replacing whatever was there. The
+ *  reconciliation uses this rather than ledgerAdd: it writes a measured total for a day that
+ *  is already closed, so a second run of the daily cron must overwrite the number, not add
+ *  to it. `calls` still increments, so a re-run is visible. Never rejects. */
+export async function ledgerSet(day: string, reader: string, modeledRows: number): Promise<void> {
+  try {
+    const client = await getClient();
+    await client.execute({
+      sql: `INSERT INTO usage_ledger (day, reader, calls, modeled_rows)
+            VALUES (:day, :reader, 1, :rows)
+            ON CONFLICT(day, reader) DO UPDATE SET
+              calls = calls + 1,
+              modeled_rows = excluded.modeled_rows`,
+      args: { day, reader, rows: Math.round(modeledRows) || 0 },
+    });
+  } catch {
+    /* attribution must never break its caller */
+  }
+}
+
+/** The last `days` days of the ledger, newest day first. A range seek on the primary key
+ *  over a table with one row per (day, reader) — tens of rows, not a scan. */
+export async function readLedger(days: number): Promise<LedgerRow[]> {
+  const client = await getClient();
+  const cutoff = utcDay(Date.now() - Math.max(0, days - 1) * 86_400_000);
+  const res = await client.execute({
+    sql: `SELECT day, reader, calls, modeled_rows AS modeledRows FROM usage_ledger
+          WHERE day >= :cutoff ORDER BY day DESC, reader ASC`,
+    args: { cutoff },
+  });
+  return plainRows(res.rows) as unknown as LedgerRow[];
+}
+
+/** What the model says one day cost, across the real read paths only — the reserved
+ *  `_`-prefixed rows are the reconciliation's own output and would otherwise be counted as
+ *  spend. This is the left-hand side of the residual. */
+export async function ledgerDayModeledTotal(day: string): Promise<number> {
+  const client = await getClient();
+  const res = await client.execute({
+    sql: `SELECT COALESCE(SUM(modeled_rows), 0) AS total FROM usage_ledger
+          WHERE day = :day AND substr(reader, 1, 1) <> '_'`,
+    args: { day },
+  });
+  return res.rows[0] ? Number(res.rows[0].total) || 0 : 0;
+}
+
+// The linear terms in the cost model need the store's size. It comes from the cached
+// all-time stats (one indexed meta key), memoized briefly so attribution doesn't add a round
+// trip to every instrumented call, and falling back to read-costs.ts's calibration size when
+// the cache is cold — a modeled cost must never block on a scan to learn how big a table is.
+const STORE_SIZE_MEMO_MS = 60_000;
+let storeSizeMemo: { at: number; plays: number } | null = null;
+
+async function modeledPlaysCount(): Promise<number> {
+  if (storeSizeMemo && Date.now() - storeSizeMemo.at < STORE_SIZE_MEMO_MS) {
+    return storeSizeMemo.plays;
+  }
+  let plays: number = CALIBRATION.plays;
+  try {
+    const v = await getMeta("alltime_stats");
+    if (v) {
+      const n = Number((JSON.parse(v) as AllTimeStats).plays);
+      if (n > 0) plays = n;
+    }
+  } catch {
+    /* keep the calibration default */
+  }
+  storeSizeMemo = { at: Date.now(), plays };
+  return plays;
+}
+
+/** Share of plays carrying a playback context, from the calibration store (6,951 / 7,194).
+ *  Used to size the `contexts` probe half of the daily full pass. */
+const CONTEXTED_PLAY_FRACTION = CALIBRATION.contextedPlays / CALIBRATION.plays;
+
+/** Ledger a cost that is LINEAR in history size, resolving the size off the awaited path so
+ *  the caller pays nothing for it. Not async on purpose: the whole chain, including the
+ *  size lookup, hangs off the returned-and-discarded promise. */
+function ledgerAddLinear(reader: string, cost: (plays: number) => number): void {
+  void modeledPlaysCount()
+    .then((plays) => ledgerAdd(reader, cost(plays)))
+    .catch(() => {
+      /* attribution must never break its caller */
+    });
+}
+
+/** Ledger one whole sync call under `reader`, picking the steady or landed-play cost from
+ *  what the sync actually inserted. Async only because the landed cost is linear in history
+ *  size; every call site fires it with `void`, and it never rejects.
+ *
+ *  `extraRows` is for a caller that does bounded reads of its own on top of the sync
+ *  (refreshHistoryAction's head/delta check). Reads that have their OWN reader — the strip,
+ *  a day, the all-time list — must not be passed here; they are already counted. */
+export async function ledgerSyncCall(
+  reader: string,
+  added: number,
+  extraRows = 0,
+): Promise<void> {
+  try {
+    const rows =
+      added > 0 ? landedSyncTickRows(await modeledPlaysCount()) : STEADY_SYNC_TICK_ROWS;
+    await ledgerAdd(reader, rows + extraRows);
+  } catch {
+    /* attribution must never break its caller */
+  }
 }
