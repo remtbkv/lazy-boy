@@ -120,6 +120,26 @@ agrees with what they saw (11:50–12:00 windowed = 15,556 ≈ the timeline's ob
 ~15.5K including its landed-play tick). No counter lag, no lumpy posting: pulse and
 the live counter agree at every granularity checked.
 
+## P5 — the forecast window (pre-registered NOW; opens at unblock + fix deploy)
+
+Invariant-1's bar, stated before the window opens. Conditions: plan upgraded, the
+library-sync fix deployed, no stale tabs (auto-reload guard live), app otherwise in
+ordinary closed-app use, window ≥12 h.
+
+**Prediction:** rows_read accrues at **0.10–0.35M/day** closed-app: 720 steady ticks
+× ~160 ≈ 0.115M + hourly library sync on its fixed path (probe-pass or image-only
+update: ≤1K/h ≈ 0.024M/day) + daily crons/full-context pass ≈ 0.03M + margin for the
+uncalibrated index-entry unknown (the stated ×2–3 tolerance covers it). Interactive
+use adds ~0.1–0.3M per active hour (payload rebuilds on the 10-min slow marker).
+**Tolerance: the window's realized daily pace ≤1M/day closed-app.** The trivial
+predictor (last week's ~60M/day carried forward) is beaten by construction if the
+window lands anywhere under 6M/day; the model's claim is the ~60× tighter 1M bar.
+**Failure trigger:** >1M/day closed-app → a surviving hot path; drill 5-min windows
++ the ledger's per-reader rows immediately (the mechanism now exists to name it in
+minutes, which is invariant 2's point).
+First-hour checks: the :10-:25 burst slot shows NO ~2.5M burst; the
+`storePlaylists-diff` log line names the rotating field; `library_seq` read once.
+
 ## Readings log (append-only)
 
 | ts (ET) | source | rows_read | rows_written | bytes_synced | note |

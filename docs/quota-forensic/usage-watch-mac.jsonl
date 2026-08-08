@@ -68,3 +68,4 @@
 {"ts": "2026-08-08T07:11:06Z", "ok": true, "rows_read": 513981704, "rows_written": 242887, "bytes_synced": 2446729216, "storage": 0, "instances": [{"uuid": "55ae7a03", "rows_read": 85588681}, {"uuid": "3d5671ac", "rows_read": 428393023}]}
 {"ts": "2026-08-08T07:12:06Z", "ok": true, "rows_read": 513981704, "rows_written": 242887, "bytes_synced": 2446729216, "storage": 0, "instances": [{"uuid": "3d5671ac", "rows_read": 428393023}, {"uuid": "55ae7a03", "rows_read": 85588681}]}
 {"ts": "2026-08-08T07:13:06Z", "ok": true, "rows_read": 513981704, "rows_written": 242887, "bytes_synced": 2446729216, "storage": 0, "instances": [{"uuid": "3d5671ac", "rows_read": 428393023}, {"uuid": "55ae7a03", "rows_read": 85588681}]}
+{"ts": "2026-08-08T07:14:07Z", "ok": true, "rows_read": 513981704, "rows_written": 242887, "bytes_synced": 2446729216, "storage": 0, "instances": [{"uuid": "3d5671ac", "rows_read": 428393023}, {"uuid": "55ae7a03", "rows_read": 85588681}]}
