@@ -18,3 +18,11 @@
 {"ts":"2026-08-08T06:18:29Z","ok":false,"error":"usage endpoint timeout","blocked_reads":"True"}
 {"ts":"2026-08-08T06:20:19Z","ok":false,"error":"usage endpoint timeout","blocked_reads":"True"}
 {"ts":"2026-08-08T06:22:09Z","ok":false,"error":"usage endpoint timeout","blocked_reads":"True"}
+{"ts": "2026-08-08T06:23:59Z", "ok": true, "rows_read": 513980496, "rows_written": 240871, "bytes_synced": 2446729216, "storage": 0, "instances": [{"uuid": "3d5671ac", "rows_read": 428393023}, {"uuid": "55ae7a03", "rows_read": 85587473}]}
+{"ts": "2026-08-08T06:24:59Z", "ok": true, "rows_read": 513980496, "rows_written": 240871, "bytes_synced": 2446729216, "storage": 0, "instances": [{"uuid": "3d5671ac", "rows_read": 428393023}, {"uuid": "55ae7a03", "rows_read": 85587473}]}
+{"ts": "2026-08-08T06:25:59Z", "ok": true, "rows_read": 513980496, "rows_written": 240871, "bytes_synced": 2446729216, "storage": 0, "instances": [{"uuid": "3d5671ac", "rows_read": 428393023}, {"uuid": "55ae7a03", "rows_read": 85587473}]}
+{"ts": "2026-08-08T06:26:59Z", "ok": true, "rows_read": 513980496, "rows_written": 240871, "bytes_synced": 2446729216, "storage": 0, "instances": [{"uuid": "3d5671ac", "rows_read": 428393023}, {"uuid": "55ae7a03", "rows_read": 85587473}]}
+{"ts": "2026-08-08T06:28:00Z", "ok": true, "rows_read": 513980496, "rows_written": 240871, "bytes_synced": 2446729216, "storage": 0, "instances": [{"uuid": "3d5671ac", "rows_read": 428393023}, {"uuid": "55ae7a03", "rows_read": 85587473}]}
+{"ts": "2026-08-08T06:29:00Z", "ok": true, "rows_read": 513980496, "rows_written": 240871, "bytes_synced": 2446729216, "storage": 0, "instances": [{"uuid": "3d5671ac", "rows_read": 428393023}, {"uuid": "55ae7a03", "rows_read": 85587473}]}
+{"ts": "2026-08-08T06:30:00Z", "ok": true, "rows_read": 513980897, "rows_written": 241675, "bytes_synced": 2446729216, "storage": 0, "instances": [{"uuid": "3d5671ac", "rows_read": 428393023}, {"uuid": "55ae7a03", "rows_read": 85587874}]}
+{"ts": "2026-08-08T06:31:00Z", "ok": true, "rows_read": 513980903, "rows_written": 241684, "bytes_synced": 2446729216, "storage": 0, "instances": [{"uuid": "55ae7a03", "rows_read": 85587880}, {"uuid": "3d5671ac", "rows_read": 428393023}]}

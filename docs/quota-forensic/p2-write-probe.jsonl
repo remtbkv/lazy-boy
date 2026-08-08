@@ -1,0 +1,3 @@
+{"ts":"2026-08-08T06:29:06.540Z","kind":"start","baseline":{"rows_read":513980496,"rows_written":240871}}
+{"ts":"2026-08-08T06:29:54.706Z","kind":"start","baseline":{"rows_read":513980497,"rows_written":241075}}
+{"ts":"2026-08-08T06:31:04.671Z","kind":"start","baseline":{"rows_read":513980903,"rows_written":241684}}

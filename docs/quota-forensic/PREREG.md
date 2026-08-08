@@ -96,3 +96,24 @@ P4 aborts with that fact recorded (itself worth knowing for the ticket).
 | Aug 8 1:06 AM | platform API (prep) | 513,980,496 | 240,871 | 2.28 GB | 2 instances: 3d5671ac frozen, 55ae7a03 |
 | Aug 8 1:37–1:47 AM | platform API | — | — | — | usage endpoint unresponsive (4 timeouts); org endpoint fine; instance set now = {fa59eb0e} only |
 | Aug 8 2:22 AM | platform API | — | — | — | endpoint now returns an ERROR body: `error getting pulse usage for organization 51721ab6-…: received response with status code 502` — the internal usage backend is named "pulse" and is 502ing; outage ongoing since ≥1:37 AM |
+| Aug 8 2:23 AM | platform API | 513,980,496 | 240,871 | 2.4467 GB | RECOVERED after ~46 min. **P3 verdict: rows_read EXACTLY equal to the 1:06 AM value — no back-posting during the blocked window.** Instances sum exactly: 3d5671ac 428,393,023 (syncs 2.4209 GB — the source of the old "2.42" org readings) + 55ae7a03 85,587,473 (syncs 25.9 MB ≈ the migration's own transfer, billed to the customer quota). org storage_bytes = 0 while instances carry ~9.7 MB each — live aggregation artifact. The 1:06 AM "2.28 GB" dip = transient partial aggregation, now self-corrected ABOVE the old value. |
+
+## P4 outcome (Aug 8 ~2:30 AM) — validation PASSED, mystery decomposed
+
+Known-answer checks: quiet-cooldown window returns **exactly 1,168**; Aug 1–4 + Aug 5–8
+= 513,980,496 exactly; per-instance July+Aug splits internally exact (267,372,781 +
+161,020,242 = 428,393,023). The windowed endpoint is real retroactive truth.
+
+Hourly sweep, Aug 7 → Aug 8 (ET): burn is a FLAT ~2.52–2.76M/h from 10:00 AM Aug 7
+through 12:59 AM Aug 8 (one 2× hour at 2 PM: 5.12M), then **0 from 1 AM on** — the
+block engaged at ~514M (≈14M of enforcement lag at that rate ≈ 5 h) and the meter
+recorded nothing after. July total: 335,952,305 (same pattern era, under the cap).
+rows_written in burn hours ~700–970/h ≈ one write per ~4–6 s = the 6 s now-playing
+poll fingerprint of an OPEN TAB whose old build still logged successful now-playing
+calls. Verdict shift: the burn was REAL, steady, and time-driven (not play-driven,
+not meter fiction) — an always-open tab pinned to a pre-fix deployment by Vercel skew
+protection, refreshing ~2×/min at ~21–42K rows/cycle, unchanged through the 3:41 PM
+deploy (deploys never reach open tabs), silenced only by Spotify cooldowns and the
+quota block. The live-counter timelines missed it because the org counter posts this
+component in lumps the 6-min windows dodged — pulse's retroactive time-bucketing is
+what finally showed it.
