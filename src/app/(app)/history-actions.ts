@@ -13,11 +13,13 @@ import {
   getPlaylistsSyncedAt,
   getPlaysByDay,
   getStoredPlaylists,
+  ledgerSyncCall,
   searchHistory,
   type DayStats,
   type StoredPlaylist,
   type TrackStats,
 } from "@/lib/db";
+import { HISTORY_REFRESH_EXTRA_ROWS } from "@/lib/read-costs";
 import { tzOffsetMinutes } from "@/lib/tz";
 
 // Listen-history data actions for Home — DB reads only, except refreshHistoryAction (below),
@@ -129,6 +131,11 @@ export async function refreshHistoryAction(
   try {
     const sp = await getSpotify();
     const { added } = await syncRecentPlays(sp);
+    // This fires every 120 s from an open tab, twice per track change and on visibility, so
+    // it is the term an open tab contributes. Only the sync plus this action's own bounded
+    // head/delta check are charged here — the strip, the day and the all-time list below are
+    // ledgered under their own readers, and counting them twice would hide a real residual.
+    void ledgerSyncCall("history_refresh", added, HISTORY_REFRESH_EXTRA_ROWS);
     const tz = await tzOffsetMinutes();
     const [daily, allTime, newPlays] = await Promise.all([
       getDailyStats(tz, Math.max(14, Math.min(days, 100000))),

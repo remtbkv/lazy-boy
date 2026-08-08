@@ -3,7 +3,7 @@ import { getValidAccessToken } from "@/lib/auth";
 import { spotifyClient, SpotifyError } from "@/lib/spotify";
 import { syncRecentPlays } from "@/lib/sync/history";
 import { syncLibrary } from "@/lib/sync/library";
-import { getLibrarySyncedAt, recomputeAllTimeStats } from "@/lib/db";
+import { getLibrarySyncedAt, ledgerSyncCall, recomputeAllTimeStats } from "@/lib/db";
 import { ensureCronJobEnabled } from "@/lib/cronjob";
 
 // Rebuild the library index at most hourly (snapshot-diffing makes a run cheap, but no
@@ -60,6 +60,10 @@ export async function GET(req: Request) {
   };
   try {
     const { added, skipped } = await syncRecentPlays(spotifyClient(token));
+    // Attribution for the dominant traffic on this database: ~720 of these a day, and which
+    // of the two costs a tick paid depends entirely on whether it landed a play. A skipped
+    // tick short-circuits on the cooldown for ~2 rows and is deliberately not ledgered.
+    if (!skipped) void ledgerSyncCall(added > 0 ? "sync_tick_landed" : "sync_tick_steady", added);
     // Rate-limited/cooling down: don't pile the heavier library scan onto a throttle.
     if (skipped) return Response.json({ ok: true, added, skipped });
     // Heavier, lower-frequency upkeep — each self-gates so this stays cheap on most ticks.

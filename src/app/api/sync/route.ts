@@ -1,6 +1,6 @@
 import { auth } from "@/lib/auth";
 import { spotifyClient, SpotifyError } from "@/lib/spotify";
-import { getLastSync } from "@/lib/db";
+import { getLastSync, ledgerSyncCall } from "@/lib/db";
 import { syncRecentPlays } from "@/lib/sync/history";
 
 // In-app history sync. SyncOnLoad pings this on load, every 2 min while open, and on
@@ -21,6 +21,9 @@ export async function POST() {
   }
   try {
     const { added, skipped } = await syncRecentPlays(spotifyClient(session.accessToken));
+    // The open tab's share of the burn, kept separate from the cron's: the debounce above
+    // already returned for the calls that did no work, so what reaches here really synced.
+    if (!skipped) void ledgerSyncCall("sync_onload", added);
     return Response.json({ ok: true, added, skipped });
   } catch (e) {
     // A rate-limit self-heals; don't 500 the open app's background poll over it.
