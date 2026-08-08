@@ -117,3 +117,19 @@ deploy (deploys never reach open tabs), silenced only by Spotify cooldowns and t
 quota block. The live-counter timelines missed it because the org counter posts this
 component in lumps the 6-min windows dodged — pulse's retroactive time-bucketing is
 what finally showed it.
+
+**Model-vs-meter residuals (honest, open):** the git-archaeology reconstruction
+(OLD_BUILD_COST.md) models the idle stale tab at 27.6K rows/min worst-case vs the
+observed 42.5K/min — a ~1.5× gap whose leading candidate is index-entry billing on
+reads (the calibration unknown READ_QUOTA.md flagged and never measured; "as few as
+one row read" for indexed lookups per Turso's pricing FAQ, but multi-entry range
+probes are uncharacterized). And the burn hours carry ~700–970 rows_written/h vs
+~120/h modeled — the extra ~600–850/h writer is UNIDENTIFIED (the 6 s now-playing
+api_log theory fails: the skip for successful polls shipped Aug 1, before any
+plausible tab age... unless the tab predates Aug 1 entirely, which the replica-era
+code makes cost-inconsistent). Both residuals are calibratable post-unblock (P2
+measures the api_log write multiplier directly; a controlled open-tab hour measures
+the true per-cycle read cost) and neither threatens the primary attribution — the
+burn's flatness, its on/off edges (cooldown, block), and its indifference to the
+3:41 PM deploy are the signature of one long-lived stale-build tab regardless of the
+exact per-cycle constant.
