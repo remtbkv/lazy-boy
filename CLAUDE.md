@@ -40,6 +40,8 @@ src/app/api/search/       the two payloads Home's search box filters in the brow
                          (authed, private, ETag'd): library/ = every track in a playlist or
                          Liked Songs, history/ = every played track + every play
 src/app/api/now-playing/ live "what's playing"; null when idle (never stale)
+src/app/api/build/       this deployment's build id, unauthenticated, no DB — fetched with
+                         credentials omitted so it escapes Vercel's deployment pinning
 src/app/api/sync/        on-load listen-history sync (POST; debounced server-side)
 src/app/api/cron/sync/   scheduled history sync (external pinger e.g. cron-job.org; daily Vercel cron backstop)
 src/app/api/cron/usage-check/  Turso quota guard: real usage vs month pace, 500 on breach
@@ -54,7 +56,8 @@ src/lib/db.ts            libSQL/Turso store (listen-history + tokens); async; fi
 src/lib/read-costs.ts    the MODELED rows-read cost of every named read path + the residual
                          alarm rule; what db.ts's usage_ledger records. docs/READ_QUOTA.md
 src/lib/build-skew.ts    when a tab running an old bundle reloads itself (debounce/throttle/
-                         defer). Fed by the build id the now-playing poll carries. GOTCHAS.md
+                         defer). The unpinned /api/build probe overrules the cheaper
+                         now-playing beacon, which a pinned tab can fake. GOTCHAS.md
 src/lib/format.ts        duration/time/day formatting (shared)
 src/lib/filter.ts        fuzzyFilter — substring+prefix name search (shared)
 src/components/ui/       UI primitives — Base UI under the hood, NOT Radix (see GOTCHAS.md)

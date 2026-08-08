@@ -464,22 +464,34 @@ executing the old bundle — and calling whatever the old code called — indefi
 what the Aug 7→8 burn was: one always-on tab on a pre-fix build, refreshing ~2×/min at a flat
 ~2.55M rows/h for 15+ hours (`docs/quota-forensic/OLD_BUILD_COST.md`). The guard closes the
 window to minutes. `next.config.ts` mints a `NEXT_PUBLIC_BUILD_ID` (Vercel's commit sha; a
-timestamp locally) and inlines it into both bundles, `/api/now-playing` returns it on every
-reply — so the beacon rides the 6s poll the app already makes, with no new endpoint and no
-extra request — and `src/lib/build-skew.ts` decides when the tab reloads itself. Its three
-constants each cover a different failure, so don't tighten them casually: a mismatch must
-hold **continuously for 3 min**, because a deploy mid-propagation serves old and new replies
-alternately and a flapping edge must not reload; **one reload per 10 min** per browser
-(localStorage stamp), because a beacon that could never agree would otherwise reload-loop;
-and a reload is **deferred while the tab is visible and was touched in the last 60 s**, so
-nobody's page is yanked mid-use — the streak keeps running and it fires at the next idle or
-hidden moment, and a hidden tab (the expensive kind) reloads immediately. Known answers:
-`node scripts/test-build-skew.mjs`. The one thing that would blind it: **Vercel Skew
-Protection**. It works by pinning a client's requests to the deployment it was served from,
-so the poll would return the old build's own id, the two would agree forever, and no tab
-would ever notice. Check on the deployed app — a `__vdpl` cookie means it's enabled; if it
-ever is, the beacon has to be fetched without cookies (`credentials: "omit"`, hence
-unauthenticated) to escape the pin.
+timestamp locally) and inlines it into both bundles; the tab compares it against the server's
+and `src/lib/build-skew.ts` decides when to reload itself.
+
+**It reads two sources, and the difference between them is the point.** `/api/now-playing`
+returns the id on every reply, so that beacon is free — it rides the 6s poll the app already
+makes. But **Vercel skew protection pins a client's requests to the deployment that served
+it**, which is what kept the burner tab on pre-fix server actions for a day: a pinned tab's
+poll answers with the pinned tab's *own* id, so its "match" means nothing and that beacon
+alone would never fire. The escape is the cookie that does the pinning. Every ~5 min (a
+counter on the existing poll — no second timer) the leader fetches `/api/build` with
+`credentials: "omit"`; no cookie goes out, so the request lands on the *current* deployment
+and its answer can be believed. Hence the asymmetry in the decision module: an authoritative
+match clears the streak, a poll match clears only a streak no probe has contradicted, and a
+probe saying "stale" while the poll says "current" is not a tie — that divergence *is* the
+pinned-tab signature and counts as mismatch. `/api/build` is deliberately unauthenticated
+(a request with no credentials is one no session can attach to) and must stay free of auth
+and DB work; a tab hits it for as long as it stays open. Followers never fetch either
+endpoint — they read both ids off the leader's broadcast.
+
+The three brakes each cover a different failure, so don't tighten them casually: a mismatch
+must hold **continuously for 3 min**, because a deploy mid-propagation serves old and new
+replies alternately and a *fresh* tab seeing that flap must not reload; **one reload per
+10 min** per browser (localStorage stamp), because a beacon that could never agree would
+otherwise reload-loop; and a reload is **deferred while the tab is visible and was touched in
+the last 60 s**, so nobody's page is yanked mid-use — the streak keeps running and it fires
+at the next idle or hidden moment, and a hidden tab (the expensive kind) reloads immediately.
+End to end a pinned stale tab reloads within ~3–8 min of a deploy (probe cadence + debounce).
+Known answers, including the pinned case and its control: `node scripts/test-build-skew.mjs`.
 
 ## Production security
 
