@@ -89,6 +89,37 @@ endpoint lacks. Pre-registration:
 Interpretation guard: if validation (1) fails, the endpoint is current-cycle-only and
 P4 aborts with that fact recorded (itself worth knowing for the ticket).
 
+## P2 outcome (Aug 8, probe 2:31–3:07 AM) — the meter is row-exact; posting ≤30 s
+
+400 controlled api_log inserts (200 short-lived batch-of-singles, then 200 over one
+20-min long-lived connection): counter moved **exactly +1,200 written** (3/insert =
+row + ts-index + autoincrement bookkeeping) and **+800 read** (2/insert — plain
+INSERTs bill reads). Increments visible within 15–30 s DURING the open connection;
+nothing at close. Background rows_read across the whole probe: zero unaccounted —
+P1's flat-line held to the row. Also measured: `CREATE TABLE IF NOT EXISTS` and
+`batch("write")` are both REJECTED under a read block (schema/transaction reads),
+single-statement writes pass; and a failed rolled-back batch still bills its writes
+(matches the documented "uncommitted transactions incur row writes").
+
+## The burst decomposition (Aug 8 ~3:10 AM) — the real burner
+
+5-min windows inside the 12 PM ET burn hour: **the entire 2.57M lands in ONE bucket
+(12:15–12:20: 2,544,558 reads + 645 writes)**; every other bucket is 300–15K. Same
+signature Aug 7 8:10 PM (2,547,293/638) and **Aug 5 3:10 PM (2,631,014/622 — before
+any August fix shipped)**. July hours show a smaller-store variant (~339K + 5.2K
+writes hourly). Verdict: the burner is the HOURLY CRON LIBRARY SYNC's full-rewrite
+path — `storePlaylists`' change-probe (built Jun 27) fails nearly every hour on a
+volatile field (156/180 stored playlists carry rotating `mosaic.scdn.co` art URLs),
+so every hour: playlist delete-all+reinsert (~640 writes) + `recomputeOrphanFlags()`
+full pass (~2.5M reads). Server-side, cron-driven, present on EVERY build including
+current — it resumes the moment reads unblock unless fixed. No stale tab required;
+the earlier tab attribution is withdrawn (tabs remain a real secondary cost class;
+the auto-reload guard ships anyway). The two 6-min live timelines saw quiet windows
+because the burst rides one ~5-min slot per hour — for their exact minutes the meter
+agrees with what they saw (11:50–12:00 windowed = 15,556 ≈ the timeline's observed
+~15.5K including its landed-play tick). No counter lag, no lumpy posting: pulse and
+the live counter agree at every granularity checked.
+
 ## Readings log (append-only)
 
 | ts (ET) | source | rows_read | rows_written | bytes_synced | note |
