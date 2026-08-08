@@ -1,8 +1,8 @@
 # The Turso rows-read quota: attribution, fixes, and the guard
 
-Written 2026-08-06, before the fixes below deployed — the measurement windows are
-pre-registered here so the post-fix reading can be judged against a prediction made in
-advance, not fitted after the fact.
+Measurement record started 2026-08-06; resolved 2026-08-08 (see "Where August
+actually went" at the bottom). Live pre-registrations and the full evidence chain:
+docs/quota-forensic/PREREG.md.
 
 ## What "rows read" means
 
@@ -68,9 +68,10 @@ also contained dev + benchmarking (bench-reads ≈ 1M measured; the dev remainde
 reconstructable). The model accounts for ~half to two-thirds of the measured 41.3M/day;
 the residual is attributed to dev-day traffic **[UNVERIFIED]** and to possible
 undercounting of index-entry scans in the model (if Turso bills index entries and table
-rows separately, several terms roughly double). The clean baseline window below resolves
-the calibration; the ranking of terms does not depend on it — `unresolvedContextUris` is
-the dominant term in every path at any plausible calibration.
+rows separately, several terms roughly double — still uncalibrated). The residual this
+model could not account for was later measured to be the hourly library-sync burst
+("Where August actually went", below); within the paths this model does cover,
+`unresolvedContextUris` was the dominant term at any plausible calibration.
 
 **The defect class** (this is the second instance, not the first): *a read path whose
 resource cost is invisible until a dashboard shows a percentage, so optimizing one metered
@@ -79,25 +80,6 @@ Aug 3 fix (replica off) moved the whole scan load onto billed primary reads. Ins
 `unresolvedContextUris` re-derived "which contexts need resolving" from a full plays scan
 on every sync call — correct, tiny on a local file, and ~14K billed rows per call against
 the primary, ~1,000+ calls/day.
-
-## Pre-registered measurement windows
-
-Counter readings come from the Turso dashboard (or the platform API once a token exists).
-Both windows: no local dev, no benchmarks, app closed except where stated; tick traffic
-confirmed by a log tail during the window.
-
-- **W0 — baseline, before the fix deploys, ≥6 h.** Prediction: 10–24M/day pace
-  (0.45–1.0M/h; the range is model ± the index-entry calibration unknown). Null (model
-  wrong): the pace stays ≥35M/day with no dev running — then something big is
-  unattributed and the fixes must NOT be declared the answer.
-- **W1 — after the fix deploys, ≥6 h.** Prediction: ≤1M/day pace closed-app (720 ticks
-  × ~160 rows ≈ 0.12M + throttled recomputes ≈ 0.3M + margin). Failure bar: >3M/day
-  means a sibling path is still scanning — hunt it, don't celebrate.
-- A trivial no-op scores: W1/W0 ≈ 1.0. The fix claims W1/W0 ≤ 0.1 at unchanged tick rate.
-- Projected month at the W1 bar: ≤ ~30M/month + Rem's interactive use ≈ **≤10% of the
-  500M cap**, against 86% burned in the first 6 days of August.
-
-Outcomes are recorded at the bottom of this file as readings land.
 
 ## The fixes (shipped together with this doc)
 
@@ -244,61 +226,29 @@ returns; **linear-rare** = full scan but only on real change, cost named; **fixe
 | meta reads (tokens, locks, seq, stamps) | single-key indexed | bounded |
 | `api_log` writes/reads | indexed, 1 h TTL | bounded |
 
-## Measurement outcomes
+## Where August actually went (resolved 2026-08-08)
 
-**Where it landed (Aug 7, 1:30 PM ET):** counter 482.98M (96.6%), headroom **17.0M for
-24.5 days ≈ 0.69M/day budget**. Measured steady state after the fixes: cron tick ~159–349
-rows (30/h), plus a ~190-row event every ~30 s while an old-build tab session was alive ≈
-**~0.8M/day total** — near budget, with the daily usage-check e-mail as the tripwire. The
-Aug 7 midday burst (+5.1M, 11:47 AM–1:20 PM, only 12 plays) ran on the pre-slow-marker
-build and stopped exactly when the session expired (13:10 bounce to /login); its exact
-per-request composition is **[UNVERIFIED]** — the leading candidates are old-build
-per-play rebuilds plus server-fallback searches, neither reproducible after the session
-died. Contingency if the budget is still exceeded: drop the cron cadence (2 min → 5–10
-min) in cron-job.org — safe now that the Zenbook backstop owns loss protection — worth
-~0.1–0.2M/day. Queued: attribute the ~190-row/30 s residual once the new build is the
-only client.
+The forensic (docs/quota-forensic/ — PREREG.md holds every measurement with
+provenance) closed the attribution with Turso's windowed usage API, which passed
+known-answer validation to the row (a quiet 3.6 h window returned exactly its
+endpoint-diffed 1,168; month splits sum exactly; 400 controlled inserts billed
+exactly +1,200 written / +800 read, posting within 30 s even mid-connection).
 
-- **W0 (pre-fix, dirty):** never got a clean window — deliberately traded for cap safety.
-  The platform API (token, Aug 6 10:48 PM) put the counter at **455,169,706 (91.0%)**:
-  +26.66M over the 8.93 h since the 1:52 PM dashboard reading ≈ **2.99M/h** — an evening
-  of open-tab listening plus the search-feature deploy, vs the model's 0.5–1.0M/h
-  closed-app + ~1.7M/h open-tab. The ~1.4× gap is consistent with the index-entry
-  calibration unknown; at that pace the cap was ~15 h away when the fix deployed.
-- **W1 (post-fix, overnight Aug 6→7): +17.53M by 5:15 AM — fails the naive bar, and the
-  mechanism is NOT a surviving scan.** The split, from the readings + DB markers:
-  - **W1a (dirty):** the counter climbed at ~2.7M/h average until some point before
-    5:15 AM. Last play recorded 12:58 AM; at ~5:26 AM Spotify rate-banned the app
-    (`spotify_cooldown_until` = 9:04 AM ET — a ~3.6 h Retry-After). The only mechanism
-    at that scale: **an already-open tab keeps its old client and, via Vercel's skew
-    protection, keeps invoking the OLD deployment's pre-fix server actions** — a deploy
-    does not reach an open tab until it reloads. The same stale-tab hammering is the
-    plausible trigger of the Spotify ban. Multiplier beyond the modeled ~1.7M/h
-    unexplained — possibly several stale tabs/devices. [UNVERIFIED beyond the markers]
-  - **W1b:** 5:15→8:51 AM: **+1,168 rows total** — but ticks were short-circuiting on
-    the cooldown (~2 rows each), so this proves the skip path only, not the fix.
-  - **W1c (the clean test):** pre-registered 9:20 AM→1:20 PM, cooldown lifted, normal
-    ticks on the new code. Prediction **≤0.1M** (30 ticks/h × ~100–160 rows + margin);
-    if Rem uses the app on the NEW build add ~0.1M/h; **>1M = investigate a survivor.**
-  - **Loss check during the 5:26–9:04 AM sync outage: zero.** The Zenbook backstop's
-    last captured play (12:58 AM) matches the primary's exactly; timer alive (last run
-    8:45 AM). Property 2 held through its first real incident.
-  - Operational lesson, standing: **after any lazyboy deploy, close or reload every open
-    lazyboy tab** — old tabs run pre-fix code indefinitely and bill accordingly.
-- **W1c superseded by direct per-tick measurement (Aug 7, 11:50 AM–12:00 PM ET).** A 15 s
-  counter-vs-tick timeline pinned the live costs: **steady tick = 159 rows** (the fix
-  works — 99% below the pre-fix 14.25K), a landed-play tick with the 10-min-gated
-  all-time recompute = ~14.8K (by design, ≤6/h while listening), and **~60K rows per
-  landed play when the app is open** — the live-keyed rebuilds of the search payload +
-  all-time list, which was the morning's ~2.1M/h (+5.16M, 9:20–11:47 AM, ~35 plays
-  landed) and is what fix 5 (the slow marker) removes. Rem reports no tab was open
-  overnight; the stale-tab attribution for W1a is **withdrawn to UNVERIFIED** — after
-  subtracting his listening until 12:58 AM, several million of the overnight +17.5M
-  remain unattributed, possibly counter-lag/batching around the Turso instance migration
-  (all usage accrues on a new instance since Aug 6 afternoon; the old one is frozen at
-  428.39M). The forward-looking truth is the measured per-path costs above, not the
-  overnight aggregate.
-- **Guard acceptance:** fired on the real condition Aug 6 10:52 PM — HTTP 500 naming
-  `rows_read` (91.04%) and `bytes_synced` (75.15%) as breached, exact same code path
-  prod runs (local `next start`, real platform API). Prod redeployed with
-  `TURSO_PLATFORM_TOKEN` + `TURSO_ORG` minutes later.
+**The dominant burner was the hourly cron library sync's full-rewrite path**: the
+storePlaylists change-probe failed nearly every hour on a volatile field (156/180
+stored playlists carry rotating mosaic.scdn.co art), so every hour ran the playlist
+delete-all+reinsert (~640 billed writes) plus recomputeOrphanFlags()'s unscoped
+~2.5M-row pass — one ~5-min burst per hour, ~60M/day at August's store size,
+measured identically on Aug 5 (pre-fix era) and Aug 7 (post-fix), because the path
+is server-side and every "fix era" shipped around it. July's 336M was the same
+mechanism at July's store size. The per-query fixes below were all real and all
+correct — they just never touched the burst path. Fixed 2026-08-08 by the
+three-tier probe + gated orphan pass (see the sweep table); the forecast
+pre-registration for the post-unblock validation window is
+docs/quota-forensic/PREREG.md §P5.
+
+The meter itself: billing data exact at every check; the real Turso-side defects
+are reporting-layer (the "pulse" aggregation outage of Aug 8 1:37–2:23 AM,
+org storage_bytes=0, a transient bytes_synced dip during instance migration) plus
+quota enforcement lagging ~14M past the 500M line. Ticket draft:
+docs/quota-forensic/SUPPORT_TICKET_DRAFT.md (optional, Rem's call).
