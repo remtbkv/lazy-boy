@@ -315,7 +315,9 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   playlist is synced, but the expression re-derived it on every render. Now
   `recomputeOrphanFlags()` refreshes the flag exactly when membership can have moved —
   `{newOnly}` for plays just recorded, `{playlistId}` when one playlist's tracks change,
-  unscoped for the backfill and for a library-list rewrite — and writes only rows whose
+  unscoped for the backfill and for a library-list rewrite that actually dropped memberships
+  (`needsFullOrphanPass`: the playlist id set moved, or the purge deleted rows — the unscoped
+  pass bills ~2.5M rows, so a rename or a reorder must not trigger it) — and writes only rows whose
   verdict actually flips, so a steady-state sync writes zero rows. Measured on the live DB
   (medians, n=5): all-time list 63 ms → 8.9 ms and history search 36 ms → 5.7 ms on the
   replica, rows identical, 0 mismatches against the old expression across all 6,644 plays.

@@ -131,6 +131,56 @@ export function uniqueSongCountRows(members: number = CALIBRATION.libraryMembers
   return SCAN_PLUS_PROBE * members;
 }
 
+// ── The library-sync write path ─────────────────────────────────────────────────────────
+
+/** How many rows the unscoped orphan pass bills per playlist member it walks: 2 for the walk
+ *  itself (the `playlist_tracks` entry and its `tracks` probe) times the ~2× index-entry
+ *  factor this file's calibration unknown documents. Back-checked against the measurement
+ *  below rather than derived from the query plan alone. */
+const ORPHAN_ROWS_PER_MEMBER = 4;
+
+/** `recomputeOrphanFlags({})` — the UNSCOPED full pass, and the single largest figure in this
+ *  file. For every play whose context is a cached playlist, ORPHAN_PREDICATE walks that
+ *  playlist's whole membership (a `playlist_tracks` entry per member, each with a `tracks`
+ *  probe), so the cost multiplies TWO table sizes: plays × the average playlist size
+ *  (members / playlists). Nothing else here does that, which is why this one term dwarfs the
+ *  rest and why the fix was to stop calling it hourly rather than to make it cheaper.
+ *
+ *  CALIBRATED AGAINST A MEASUREMENT, not a plan reading: Turso's windowed usage endpoint puts
+ *  the hourly library sync's rewrite path at **2,544,558 rows_read in a single 5-minute
+ *  bucket** (Aug 7 2026, 12:15–12:20 PM ET), reproduced at 2,547,293 (Aug 7 8:10 PM) and
+ *  2,631,014 (Aug 5 3:10 PM, before any August fix shipped) — docs/quota-forensic/PREREG.md,
+ *  "The burst decomposition". At the calibration store this models 2.45M against that 2.54M,
+ *  ~4% low, the gap being that the store grew between the Aug 6 calibration reading and the
+ *  Aug 7 measurement. */
+export function orphanFullPassRows(
+  plays: number = CALIBRATION.plays,
+  members: number = CALIBRATION.libraryMembers,
+  playlists: number = CALIBRATION.playlists,
+): number {
+  return ORPHAN_ROWS_PER_MEMBER * plays * (members / playlists);
+}
+
+/** `storePlaylists`' rewrite branch, READ side: the change-probe's ordered scan of `playlists`
+ *  (~180) plus the purge, `DELETE FROM playlist_tracks WHERE playlist_id NOT IN (SELECT id
+ *  FROM playlists)`, which walks every membership row and probes the playlists key per row
+ *  (~30.7K). ~30.9K at calibration.
+ *
+ *  Its WRITE side is the number the forensics actually saw — ~640 rows_written per rewrite
+ *  (180 deletes + 180 inserts plus index bookkeeping; the 645 / 638 / 622 writes in the same
+ *  burst buckets as the reads above) — but this ledger accounts rows_READ, so that figure
+ *  stays in this comment rather than in the return value.
+ *
+ *  The probe half runs on EVERY library sync, including the two tiers that don't rewrite; at
+ *  180 rows a few dozen times a day it sits below the noise floor of the residual it would
+ *  feed, so only the rewrite branch is instrumented (same reasoning as playlistGridRows). */
+export function playlistRewriteRows(
+  members: number = CALIBRATION.libraryMembers,
+  playlists: number = CALIBRATION.playlists,
+): number {
+  return playlists + SCAN_PLUS_PROBE * members;
+}
+
 // ── The render-path reads ───────────────────────────────────────────────────────────────
 
 /** `readPlaysByDay` — one local day. The redundant UTC range bound lets

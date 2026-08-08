@@ -20,6 +20,8 @@ import {
   historyPayloadRebuildRows,
   landedSyncTickRows,
   libraryPayloadRebuildRows,
+  orphanFullPassRows,
+  playlistRewriteRows,
   searchHistoryLikeRows,
   uniqueSongCountRows,
 } from "@/lib/read-costs";
@@ -29,6 +31,9 @@ import {
   newPlays,
   diffPositions,
   diffKeyed,
+  diffPlaylistList,
+  needsFullOrphanPass,
+  type PlaylistListRow,
   type TrackFields,
 } from "@/lib/store-diff";
 
@@ -842,6 +847,10 @@ async function recomputeOrphanFlags(
     : `(p.ctx_orphan IS NULL OR p.ctx_orphan <> (${ORPHAN_PREDICATE}))${
         opts.playlistId ? " AND p.context_uri = :uri" : ""
       }`;
+  // Only the UNSCOPED pass is ledgered. The other two scopes are bounded by construction (a
+  // ≤50-row partial index, one playlist's plays) and would be noise; this one is the ~2.5M
+  // term that went unattributed for a month.
+  if (!opts.newOnly && !opts.playlistId) ledgerAddLinear("orphan_full_pass", orphanFullPassRows);
   const res = await client.execute({
     sql: `UPDATE plays AS p SET ctx_orphan = (${ORPHAN_PREDICATE}) WHERE ${where}`,
     args: opts.playlistId && !opts.newOnly ? { uri: `spotify:playlist:${opts.playlistId}` } : {},
@@ -1554,9 +1563,11 @@ export async function storePlaylists(rows: StoredPlaylist[], meId: string | null
   const now = new Date().toISOString();
 
   // Cheap change-probe (a read, never on a render path — this only runs in the background
-  // library sync): if the playlist list already matches the cache — same id/name/owner/image/
-  // count in the same order — skip the full delete-all + reinsert and just bump the synced-at
-  // marker. A steady-state hourly sync then writes ~1 row instead of ~2× the playlist count.
+  // library sync). Its verdict is three-way, not two-way (diffPlaylistList, store-diff.ts):
+  // nothing moved / only artwork moved / the list itself moved. The two-way version — anything
+  // but an exact match takes the full delete-all + reinsert — is what made this path the
+  // dominant term of the whole quota crisis: rotating `mosaic.scdn.co` art meant "not an exact
+  // match" nearly every hour.
   // (Per-playlist track changes are handled separately by the snapshot-gated loop in
   // syncLibrary; a song swap that leaves the count unchanged correctly doesn't rewrite the
   // list here.)
@@ -1566,23 +1577,69 @@ export async function storePlaylists(rows: StoredPlaylist[], meId: string | null
         "SELECT id, name, owner_id AS ownerId, image, track_count AS trackCount FROM playlists ORDER BY position",
       )
     ).rows,
-  ) as unknown as { id: string; name: string; ownerId: string | null; image: string | null; trackCount: number }[];
-  const unchanged =
-    cached.length === rows.length &&
-    rows.every((r, i) => {
-      const c = cached[i];
-      return (
-        c.id === r.id &&
-        c.name === r.name &&
-        (c.ownerId ?? null) === (r.ownerId ?? null) &&
-        (c.image ?? null) === (r.image ?? null) &&
-        Number(c.trackCount) === r.trackCount
-      );
-    });
-  if (unchanged) {
+  ) as unknown as PlaylistListRow[];
+  const diff = diffPlaylistList(rows, cached);
+
+  // ONE line, before any write path, naming the field that actually differed. The whole fix
+  // rests on a claim about WHICH field moves hourly (artwork), and the only way to keep that
+  // claim honest in production is to have the probe say so every time it fires: Vercel
+  // captures stdout and the Zenbook's logtail archives it. First differing field only — a dump
+  // of 180 rows an hour is not a diagnostic.
+  if (diff.firstDiff) {
+    console.log(
+      JSON.stringify({
+        tag: "storePlaylists-diff",
+        firstDiff: diff.firstDiff,
+        idSetChanged: diff.idSetChanged,
+        count: rows.length,
+      }),
+    );
+  }
+
+  if (diff.tier === "unchanged") {
     // Meta only, so no marker bump (and, as before, no sync): nothing the replica serves moved.
     await setMeta("playlists_synced_at", now);
     if (meId) await setMeta("me_id", meId);
+    return;
+  }
+
+  // The synced-at / me_id stamps, as batchable statements — both write tiers below end with
+  // them, and neither is replica-served, so neither is what decides a marker bump.
+  const stampStmts: InStatement[] = [
+    {
+      sql: `INSERT INTO meta (key, value) VALUES ('playlists_synced_at', :v)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      args: { v: now },
+    },
+  ];
+  if (meId) {
+    stampStmts.push({
+      sql: `INSERT INTO meta (key, value) VALUES ('me_id', :v)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      args: { v: meId },
+    });
+  }
+
+  if (diff.tier === "image-only") {
+    // Same playlists, same names, same owners, same counts, same order — only artwork URLs
+    // rotated. That is not a structural change and must not be treated as one: no delete-all,
+    // no reinsert, no purge, no full orphan pass. Just the rows whose image moved.
+    //   • NO library_seq. The library search payload reads `SELECT id, name FROM playlists`
+    //     and takes its art from `tracks` — playlist artwork is not in it — so this cannot
+    //     make it stale, and its ETag carries a daily date bucket that bounds an in-place
+    //     re-tag to ~24h regardless (src/app/api/search/library/route.ts).
+    //   • YES write_seq. `playlists` IS replica-served — readStoredPlaylists/getStoredPlaylist
+    //     go through getReader(), and the grid's cache entry is keyed on the marker — and the
+    //     rule at the top of this file is that any write to a replica-served table announces
+    //     itself. An unannounced image update serves the old art off a stale copy.
+    const stmts: InStatement[] = diff.imageChanges.map((c) => ({
+      sql: "UPDATE playlists SET image = :image WHERE id = :id",
+      args: { image: c.image, id: c.id },
+    }));
+    stmts.push(...stampStmts, writeSeqStmt());
+    await client.batch(stmts, "write");
+    // Pull the replica up to the write we just made, so the read that follows is fresh.
+    await syncReader();
     return;
   }
 
@@ -1603,7 +1660,9 @@ export async function storePlaylists(rows: StoredPlaylist[], meId: string | null
   );
   // Drop cached tracks for playlists that no longer exist (deleted/unfollowed), so a
   // stale playlist can't keep feeding the library union. Runs after the re-insert
-  // above, so the subquery sees the fresh list.
+  // above, so the subquery sees the fresh list. Its index in the batch is kept because its
+  // rowsAffected is what decides the orphan pass below.
+  const purgeAt = stmts.length;
   stmts.push({
     sql: "DELETE FROM playlist_tracks WHERE playlist_id NOT IN (SELECT id FROM playlists)",
     args: [],
@@ -1620,33 +1679,28 @@ export async function storePlaylists(rows: StoredPlaylist[], meId: string | null
           AND substr(key, 13) NOT IN (SELECT id FROM playlists)`,
     args: [],
   });
-  stmts.push({
-    sql: `INSERT INTO meta (key, value) VALUES ('playlists_synced_at', :v)
-          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-    args: { v: new Date().toISOString() },
-  });
-  if (meId) {
-    stmts.push({
-      sql: `INSERT INTO meta (key, value) VALUES ('me_id', :v)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-      args: { v: meId },
-    });
-  }
-  // Reached only when the list really changed (the unchanged fast path above returns before
-  // this and writes meta only), so the bump is unconditional here.
+  stmts.push(...stampStmts);
+  // Reached only when the LIST really changed (the unchanged and image-only tiers above return
+  // before this), so both bumps are unconditional here.
   stmts.push(writeSeqStmt(), librarySeqStmt());
-  await client.batch(stmts, "write");
-  // This branch purges playlist_tracks for playlists that no longer exist, so membership can
-  // change for several at once — a full pass, not a scoped one. (The unchanged fast path
-  // above returns before this and costs nothing.)
-  await recomputeOrphanFlags();
+  const results = await client.batch(stmts, "write");
+  // ~640 rows_written and ~31K rows_read per rewrite; the ledger accounts reads, so that is
+  // what the modeled figure carries (read-costs.ts states the write half).
+  void ledgerAdd("playlist_rewrite", playlistRewriteRows());
+  // The full orphan pass costs ~2.5M billed reads at the current store, ~80× the rest of this
+  // branch put together, so it runs only when the purge above could actually have moved a
+  // membership. needsFullOrphanPass owns that rule and states why; a rename or a reorder
+  // rewrites the list and skips it.
+  const purged = Number(results[purgeAt]?.rowsAffected ?? 0);
+  if (needsFullOrphanPass(diff.idSetChanged, purged)) await recomputeOrphanFlags();
   // Pull the replica up to the write we just made, so the read that follows is fresh.
   await syncReader();
 }
 
 // LIVE-keyed (see "Read caching"): the grid and the dock's panels both read this on every
-// visit, and the list only moves when storePlaylists rewrites it — which is also the only
-// branch that bumps the marker, since its unchanged fast path writes meta and nothing else.
+// visit, and the list only moves when storePlaylists writes to `playlists` — its rewrite
+// branch or its image-only branch, both of which bump the marker, so the next read is a
+// different cache key. Its unchanged tier writes meta and nothing else, and bumps nothing.
 const storedPlaylistsCached = unstable_cache(
   (_seq: string) => readStoredPlaylists(),
   ["stored-playlists"],

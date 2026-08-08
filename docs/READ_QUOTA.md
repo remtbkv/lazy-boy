@@ -179,6 +179,8 @@ so a cache HIT costs nothing and is counted as nothing. The readers:
 | `search_fallback` | `searchHistory`'s LIKE path (not the bounded empty-query branch) |
 | `contexts_full_pass` | the once-a-day `unresolvedContextUris` scan |
 | `unique_song_count` | `recomputeUniqueSongCount` |
+| `orphan_full_pass` | the UNSCOPED `recomputeOrphanFlags()` — the ~2.5M term; the two bounded scopes are not ledgered |
+| `playlist_rewrite` | `storePlaylists`' delete-all + reinsert branch (its read side: the probe and the purge) |
 | `usage_check` | the daily guard's own reads |
 
 Two readers are reserved and written by the reconciliation, not by a read path:
@@ -226,7 +228,7 @@ returns; **linear-rare** = full scan but only on real change, cost named; **fixe
 | `unresolvedContextUris` (per-sync) | was `SCAN plays`+probes every call | **fixed** → bounded (≤50 indexed rows) |
 | `recomputeOrphanFlags({newOnly})` | was `SCAN plays` per landing tick | **fixed** → bounded (partial index) |
 | `recomputeAllTimeStats` | full plays scan + tracks probes (~14.4K) | **fixed** → throttled 10 min; linear growth remains, queued lever: incremental accumulator |
-| `recomputeOrphanFlags({})` full pass | predicate over every play × its playlist's members ≈ **1.3M+ rows** | linear-rare: only on a playlist-list rewrite (`library_seq` = 5 lifetime). A landmine if that path ever runs hot — the change-probe in `storePlaylists` is what keeps it cold |
+| `recomputeOrphanFlags({})` full pass | predicate over every play × its playlist's members. Estimated here at ≈1.3M rows; **measured at 2,544,558** (Aug 7 12:15–12:20 PM ET, windowed usage endpoint — the estimate was ~2× low, see `orphanFullPassRows`) | ~~linear-rare (`library_seq` = 5 lifetime)~~ **FALSIFIED.** It was not rare and it was not cold: it ran on the hourly cron sync for weeks, and it is the single largest term of the whole crisis (~60M/day). The change-probe was never keeping it cold, because a rotating artwork URL counted as a list change. **Now:** the rewrite branch runs it only when membership can actually have moved — the playlist ID SET changed, or the `playlist_tracks` purge reported `rowsAffected > 0` (`needsFullOrphanPass`). A rename, a reorder or a count drift rewrites the list and skips it. Ledgered as `orphan_full_pass`, so a return to hourly is now visible on `/usage` instead of only in the platform counter |
 | `recomputeOrphanFlags({playlistId})` | indexed by `idx_plays_context` + predicate over that playlist's plays | bounded per changed playlist |
 | `readHistoryIndex` (search payload) | full plays scan ×3 probes ≈ 21.6K, once per `write_seq` change | linear-rare: ~15/day ≈ 0.3M/day; grows with history — same queued lever class |
 | `readLibraryIndex` | playlist_tracks scan + probes ≈ 30K, once per `library_seq` change | linear-rare: `library_seq` moved 5× ever |
@@ -237,7 +239,7 @@ returns; **linear-rare** = full scan but only on real change, cost named; **fixe
 | `playsWithListened` | full plays scan + probes | only called by `recomputeAllTimeStats`/`getDailyStats`-adjacent paths above |
 | `recordPlays` reads | indexed probes ~120 | bounded |
 | `storePlaylistTracks` cached-positions read | indexed per playlist | bounded |
-| `storePlaylists` change-probe | 180-row scan hourly | bounded (table is the playlist list) |
+| `storePlaylists` change-probe | 180-row scan hourly | bounded, and always was — its READ cost was never the issue. Its **verdict** was: two-way (exact match → stamp, anything else → delete-all + reinsert + full orphan pass), so the rotating `mosaic.scdn.co` art on 156 of 180 rows failed the match nearly every hour and took the expensive branch with it. ~~"the change-probe is what keeps the full pass cold"~~ **FALSIFIED** by the same measurements. **Now three-way** (`diffPlaylistList`, src/lib/store-diff.ts): identical → stamp meta, no marker; **images only → per-row `UPDATE playlists SET image`**, `write_seq` bumped (the table is replica-served), no `library_seq` (the search payload reads only `id, name` from `playlists`), no purge, no orphan pass; anything else → the rewrite, ledgered as `playlist_rewrite`. When it does differ it logs one `storePlaylists-diff` line naming the first differing field, so the claim "it's the artwork" stays checkable in production. Known answers: `node scripts/test-playlist-sync.mjs` |
 | `recomputeUniqueSongCount` | DISTINCT over playlist_tracks + probes ≈ 30K | linear-rare: only when the library actually changed |
 | meta reads (tokens, locks, seq, stamps) | single-key indexed | bounded |
 | `api_log` writes/reads | indexed, 1 h TTL | bounded |
