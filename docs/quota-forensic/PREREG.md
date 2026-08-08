@@ -184,3 +184,12 @@ the true per-cycle read cost) and neither threatens the primary attribution — 
 burn's flatness, its on/off edges (cooldown, block), and its indifference to the
 3:41 PM deploy are the signature of one long-lived stale-build tab regardless of the
 exact per-cycle constant.
+
+## P1 outcome (closed Aug 8 7:29 AM) — flat to the row for 6.4 h
+
+Zenbook poller, 305 one-minute readings 2:23–7:29 AM ET (counter already frozen at
+513,980,496 from 1:06 AM): total movement +1,210, every row of it mapping to our
+logged probe statements (P2's 400 inserts × 2 reads each, the rolled-back batch's
++400, ~10 diagnostic statements, and the final +2 from the two cleanup DELETEs).
+**Zero unaccounted rows_read across the whole blocked window.** No back-posting, no
+hidden reader, meter flat when clients are silent. P1's null trace confirmed.
