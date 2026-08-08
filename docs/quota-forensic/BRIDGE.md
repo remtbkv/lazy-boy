@@ -113,6 +113,27 @@ tunnel keeps running without ever touching production again.
 narrow: it fires only on a hostname change, and without it a `cloudflared` restart silently
 breaks production until someone notices.
 
+It was exercised rather than assumed — `systemctl --user restart lazyboy-tunnel` on
+2026-08-08, which is exactly the event it exists for:
+
+```
+20:33:24Z url=https://knives-…-appreciated.trycloudflare.com
+         prev=https://staff-…-dosage.trycloudflare.com
+         env-patch=200 redeploy=200 id=dpl_pYKRjsnTCnoGN5Jr3PFmh6VtWAtD
+```
+
+The redeploy went READY in ~70 s, `lazy-spotify.vercel.app` re-aliased to it, and the new
+hostname serves authenticated queries (401 without the JWT). Restarting `lazyboy-sqld` on its
+own does **not** rotate the URL — the tunnel keeps its hostname, and the store came back with
+the same row count.
+
+**One race to know about: pushing to `main` deploys this project** (auto-deploy is on for
+`lazy-boy`, unlike diveloop's web project). A push whose build starts *before* a rotation's env
+patch but finishes *after* the rotation's redeploy would become the newest production
+deployment while carrying the previous URL — Vercel snapshots project env at build time. It is
+a narrow window, and the fix is the same as any stale-env deployment: redeploy. If production
+ever looks dead right after a push, check `rotations.log` for a rotation in the same minute.
+
 ## Files and units created
 
 On the **Zenbook** (all additive, all `lazyboy-*`; nothing `diveloop-*` was touched):
