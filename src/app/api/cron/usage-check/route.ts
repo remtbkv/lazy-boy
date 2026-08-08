@@ -36,7 +36,7 @@ const ABSOLUTE_CEILING = 0.9;
 // TURSO_DATABASE_URL so a URL format change can't silently point the reconciliation at
 // nothing; override only if the database is renamed.
 const DATABASE_NAME = process.env.TURSO_DATABASE_NAME || "lazy-boy";
-// The platform API hung for over 20 minutes on 2026-08-07. Whatever it does, it does not get
+// The platform API hung for over 20 minutes on 2026-08-08. Whatever it does, it does not get
 // to hold the guard open — a reconciliation that can't complete is recorded and skipped.
 const PLATFORM_TIMEOUT_MS = 15_000;
 
