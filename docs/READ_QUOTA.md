@@ -147,6 +147,75 @@ in a dashboard nobody re-visits. Tripping it deliberately (allowance temporarily
 below current usage) is part of its acceptance test — a guard that has never fired is a
 guard that does not work.
 
+## Continuous attribution (the ledger)
+
+The guard above answers *am I burning too fast*. It cannot answer *on what* — and a month of
+this database's burn went unattributed for exactly that reason: Turso publishes one counter
+per organization, and the per-path model lived in this document, recomputed by hand after the
+fact. The ledger makes the attribution continuous instead.
+
+**How it works.** Every named read path records what it MODELS itself to cost as it runs.
+`src/lib/read-costs.ts` owns the model — one named constant or formula per path, each with a
+comment saying what it was calibrated against and when, and with the linear terms taking the
+current plays count as a parameter rather than baking in an August store size.
+`usage_ledger (day, reader, calls, modeled_rows)` in `src/lib/db.ts` stores it, one row per
+(UTC day, reader). Writes are `void ledgerAdd(...)` — fire-and-forget, error-swallowing, off
+the awaited path, and deliberately not batched into any real write. Attribution that can slow
+a render or fail a batch is worse than no attribution. It is meta-class data, so it does
+**not** bump `write_seq` (the marker rule in `db.ts`; api_log is excluded for the same
+reason).
+
+Instrumentation sits at the choke points, and inside the read rather than at its call site,
+so a cache HIT costs nothing and is counted as nothing. The readers:
+
+| reader | what it counts |
+|---|---|
+| `sync_tick_steady` / `sync_tick_landed` | `/api/cron/sync`, split on whether the tick landed a play |
+| `sync_onload` | `POST /api/sync`, the open tab's on-load sync |
+| `history_refresh` | `refreshHistoryAction` — the sync plus its own head/delta check only |
+| `history_payload` / `library_payload` | the two search payloads, on actual rebuild |
+| `alltime_list` | `readAllTimePlays`, on actual rebuild |
+| `day_strip` / `day_plays` | `readDailyStats` / `readPlaysByDay`, on actual execution |
+| `search_fallback` | `searchHistory`'s LIKE path (not the bounded empty-query branch) |
+| `contexts_full_pass` | the once-a-day `unresolvedContextUris` scan |
+| `unique_song_count` | `recomputeUniqueSongCount` |
+| `usage_check` | the daily guard's own reads |
+
+Two readers are reserved and written by the reconciliation, not by a read path:
+`_platform_total` and `_residual` (plus `_platform_error` for a day the platform API could
+not be reached). A real reader never starts with an underscore.
+
+**The reconciliation.** `/api/cron/usage-check`, after its pace check, fetches yesterday's
+(the last CLOSED UTC day) real `rows_read` for this database from Turso's windowed usage
+endpoint, sums the day's ledger, and writes both the meter and the residual back into the
+ledger. It returns **500 — the same email path as a pace breach** — when the day is
+unexplained: `|residual| > max(1,000,000, 0.5 × platform_day_total)` **and**
+`platform_day_total > 200,000`. A platform API that times out records `_platform_error` and
+does **not** alarm; it hung for 20+ minutes on Aug 7, and paging on an unreachable meter
+trains you to ignore the one email that matters. `fetchPlatformDayUsage` is isolated and
+marked swappable for the same reason: if the windowed endpoint proves unreliable, the
+replacement strategy behind the same signature is differencing daily snapshots of the
+month-to-date total.
+
+**The thresholds are provisional.** They are sized to catch a burn of the shape that actually
+happened — millions of unattributed rows — not calibrated against a measured distribution of
+the residual, because nobody has one. P2/P4 (the posting-lag experiments) are what calibrates
+them: usage attributed to a day can still be arriving when the next day's cron reads it,
+which shows as a spurious positive residual followed by a matching negative one. Until then,
+treat a single day's alarm as a reason to look, not as proof.
+
+**Known model biases**, stated rather than discovered later. The landed-tick cost includes
+the all-time recompute, which is gated to once per 10 minutes; the sync route cannot see
+whether the gate opened, so consecutive landed ticks in one window are over-charged. That
+inflates the ledger and therefore *shrinks* the residual — the bias runs toward
+under-alarming, never toward a false alarm. And the ledger's own writes (~2 rows each, ~3K a
+day) are not ledgered: an instrument that measures itself does not terminate.
+
+**Where to look:** `/usage` — authed, no nav link, last 14 days as a per-day reader table with
+the platform total and residual called out. Known-answer tests:
+`node scripts/test-ledger.mjs` (throwaway file DB; the reconciliation math is imported from
+the shipped source, the storage SQL is a copy that must match `db.ts`).
+
 ## Sibling sweep — every read path, its shape, its verdict
 
 Verdicts: **bounded** = cost independent of history size, or indexed to the rows it

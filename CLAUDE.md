@@ -31,7 +31,7 @@ src/app/(auth)/          login page (unauthenticated shell)
 src/app/(app)/           authed shell: layout calls auth() + owns the chrome (chrome.tsx,
                          den.css skin, now-playing provider); pages bring their own <main>
                          home/ (greeting, action dock, day strip, song table), playlists/,
-                         playlists/[id]/, friends/
+                         playlists/[id]/, friends/, usage/ (the rows-read ledger, no nav link)
                          history-actions.ts  Home's listen-history reads + the Spotify sync
 src/app/api/auth/        Auth.js route handler (NextAuth catch-all)
 src/app/api/tasks/       background-task progress polling endpoint
@@ -51,6 +51,8 @@ src/lib/tasks/           in-memory task registry (clean-playlist progress); swap
 src/lib/db.ts            libSQL/Turso store (listen-history + tokens); async; file: fallback in dev.
                          Two clients: getClient() = primary (all writes + `meta`),
                          getReader() = local embedded replica (row-scanning reads). GOTCHAS.md
+src/lib/read-costs.ts    the MODELED rows-read cost of every named read path + the residual
+                         alarm rule; what db.ts's usage_ledger records. docs/READ_QUOTA.md
 src/lib/format.ts        duration/time/day formatting (shared)
 src/lib/filter.ts        fuzzyFilter — substring+prefix name search (shared)
 src/components/ui/       UI primitives — Base UI under the hood, NOT Radix (see GOTCHAS.md)
