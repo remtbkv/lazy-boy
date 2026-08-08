@@ -20,7 +20,10 @@ instead of re-investigating. (Pairs with `CLAUDE.md`, `AGENTS.md`, and the other
   server served stale compiled code; it was moved to `~/projects` on 2026-06-01 to
   fix that, so HMR is now reliable. If a change still "isn't taking effect" (e.g.
   HMR websocket noise in a sandbox), the hard reset is:
-  `pkill -f "next dev"; rm -rf .next/dev; PORT=3000 npm run dev`.
+  `kill $(lsof -ti tcp:3000 -sTCP:LISTEN); rm -rf .next/dev; PORT=3000 npm run dev`.
+  **Kill by port, never `pkill -f "next dev"`.** That pattern matches every Next dev server
+  on the machine, and this Mac routinely runs DiveLoop's three (:4000 web, :4001 dashboard,
+  :4002 monitor) alongside this one — it took them all down on 2026-08-08.
 - **Never run `npm run build` while `next dev` is running** — both write `.next`,
   so the dev server starts returning 500s / `ERR_INCOMPLETE_CHUNKED_ENCODING` and
   client navigation (`router.push`) silently fails. Symptom: arrow-key/link nav
