@@ -95,3 +95,4 @@ P4 aborts with that fact recorded (itself worth knowing for the ticket).
 |---|---|---|---|---|---|
 | Aug 8 1:06 AM | platform API (prep) | 513,980,496 | 240,871 | 2.28 GB | 2 instances: 3d5671ac frozen, 55ae7a03 |
 | Aug 8 1:37–1:47 AM | platform API | — | — | — | usage endpoint unresponsive (4 timeouts); org endpoint fine; instance set now = {fa59eb0e} only |
+| Aug 8 2:22 AM | platform API | — | — | — | endpoint now returns an ERROR body: `error getting pulse usage for organization 51721ab6-…: received response with status code 502` — the internal usage backend is named "pulse" and is 502ing; outage ongoing since ≥1:37 AM |
