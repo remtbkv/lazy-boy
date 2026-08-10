@@ -320,9 +320,63 @@ into its Authorization header and keep it as a second pinger for whenever the Ze
 down. The second is only worth it after Sep 1 — while the bridge is up, a Zenbook that is
 down means there is no database to sync into anyway.
 
-## The revert (Sep 1)
+## Posture change (2026-08-10): the bridge is the architecture
 
-Written down before the switch was made. Every step is one command.
+Rem's call, after the Funnel cutover made the path stable: **stay self-hosted past Sep 1.**
+The bridge is no longer a three-week measure, and the revert below becomes a *fallback
+procedure* rather than a scheduled event.
+
+What decided it:
+
+- Rows are not metered on the Zenbook, and the workload that broke Turso is already fixed in
+  code anyway — `6b8b1e6` took the sync tick from ~14.25K rows to **159 measured**
+  (`read-costs.ts`), and `ec8cd0f` stopped the hourly playlist full-rewrite.
+- Every scanning read is 5–8× faster against a local SQLite file than against the remote
+  metered engine (the latency table above: all-time list 102 ms vs 705 ms).
+- The failure that actually hurt was never the Zenbook — it was the quick tunnel's rotating
+  hostname, and that is gone.
+
+**A live Turso standby is not buildable, and was not built.** libSQL replication only flows
+*out of* a primary into embedded replicas; Turso Cloud cannot follow a self-hosted `sqld`
+primary, so "reads on the Zenbook, Turso hot for uptime" has no mechanism to stay in sync.
+The direction that does exist meters `bytes_synced`, which is the *other* dimension in breach
+this month (76% used against 32% of the month elapsed). So durability is a backup problem,
+not a replication problem.
+
+### The nightly snapshot (what replaces Turso as the safety net)
+
+`~/lazyboy-backup/backup.py`, `lazyboy-backup.timer`, daily at **04:40 America/New_York**
+(the box's own timezone), `Persistent=true`:
+
+1. SQLite's **online backup API** against the live file — `sqld` keeps serving throughout, no
+   stop, no lock held over the copy.
+2. `PRAGMA integrity_check`, then a per-table row-count comparison against the live store. The
+   copy may trail by a play or two (writes continue during the backup) but may not be missing
+   rows wholesale.
+3. Only then gzip and `rclone copy` to `onedrive-backup:lazyboy-db`. **A snapshot that fails
+   either check is kept locally and never uploaded**, so a bad copy cannot overwrite good ones
+   offsite. Retention: 14 days local, 60 days remote.
+
+First run, 2026-08-10 22:16 UTC: `7972KB plays=7522`, uploaded. Verified as a *restore*, not
+just as an upload — the file was pulled back down from OneDrive, decompressed, and opened:
+`integrity ok`, plays 7522, tracks 15036, playlists 181, latest play `2026-08-10T22:12:26Z`.
+
+Three copies of the listen history now exist and none of them is Turso: the live store, the
+nightly offsite snapshot, and `lazyboy-recorder`'s independent capture.
+
+### So why keep Turso at all
+
+For durability, we do not — the snapshot covers that. What the free Turso database still buys
+is a **pre-built serving endpoint**: it speaks the protocol the app already uses, so if the
+Zenbook is lost, production comes back with one env patch instead of standing up a host. Even
+that is replaceable — a fresh Turso DB can be created from a dump in minutes — so the account
+is worth keeping only because it costs nothing and its quota resets Sep 1. No nightly import
+into Turso is built; a restore into it would be a one-shot, done on the day it is needed.
+
+## The revert (now the fallback procedure, not a Sep 1 event)
+
+Written down before the switch was made. Every step is one command. Run this if the Zenbook is
+lost or self-hosting stops being worth it — not on a date.
 
 **1. Point production back at Turso.** The old values are not readable back out of Vercel
 (both vars are `sensitive`, i.e. write-only), so the source of truth for the revert is

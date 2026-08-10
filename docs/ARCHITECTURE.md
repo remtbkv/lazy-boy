@@ -175,6 +175,15 @@ SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped 
   closed-app burn above ~3M rows/day, or history growth pushes the bounded paths past ~30%
   of quota, build the Zenbook read store (incremental `SELECT`-based pull, not the libSQL
   sync protocol) and serve precomputed artifacts outward.
+- **Superseded 2026-08-10: the store IS on the Zenbook now, and stays there.** Not by the
+  reversal condition above — Turso's free org hard-blocked reads on Aug 8 at 102.8% of the
+  month's rows_read, production could render nothing, and the emergency bridge became the
+  architecture when Rem chose to keep it. `TURSO_DATABASE_URL` points at `sqld` on the
+  Zenbook through a Tailscale Funnel; rows are not metered there and every scanning read got
+  5–8× faster (`docs/quota-forensic/BRIDGE.md`). Turso is now a restore target, not a
+  dependency. The bullet above is kept because its reasoning about replica sync cost and the
+  apartment-machine dependency is still the live tradeoff — the second half of it is what we
+  accepted.
 - **The history's loss floor is the Zenbook backstop recorder, not Turso.** Spotify hands
   back only the last ~50 plays, so any window where nothing can write (Turso quota-blocked —
   all four metered dimensions hard-block every query — or plain unreachable) is a permanent
