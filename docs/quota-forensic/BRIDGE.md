@@ -297,12 +297,20 @@ read:
 |---|---|
 | `~/lazyboy-cron/ping.sh` | curls `/api/cron/sync` with the bearer, appends the reply to `ping.log` (trimmed to 2000 lines), exits non-zero on any non-200 |
 | `~/lazyboy-cron/env` | `0600` — `CRON_SECRET` + `SYNC_URL` |
-| `~/.config/systemd/user/lazyboy-cron-sync.{service,timer}` | every 5 min, `Persistent=true`, `OnBootSec=3min` |
+| `~/.config/systemd/user/lazyboy-cron-sync.{service,timer}` | every 2 min, `Persistent=true`, `OnBootSec=3min` |
 
-Five minutes, not the old two: Spotify's recently-played returns the last 50 plays, so a
-5-minute gap loses nothing, and sync ticks were the dominant traffic in the read-quota
-forensic (`READ_QUOTA.md`) — the interval matters again on Sep 1 when the store goes back to
-Turso's metered reads. First timed run logged `http=200 {"ok":true,"added":0,"library":"fresh"}`.
+**The interval is 2 minutes because staleness is the point, not because rows are free.** It
+started at 5 min on the reasoning that Spotify's recently-played returns the last 50 plays, so
+a longer gap cannot *lose* a play. Rem overruled it: a 2-minute tick is a bit less than one
+song, so with the app closed the history is never more than about a track behind, and 5 min is
+visibly stale. First timed run logged `http=200 {"ok":true,"added":0,"library":"fresh"}`.
+
+The cost is real and lands on **Sep 1**, when the store goes back to Turso's metered reads:
+`READ_QUOTA.md` models a steady tick at ~14.25K rows, so 720 ticks/day (2 min) is ~10.3M
+rows/day against ~4.1M at 5 min. Sync ticks were the dominant traffic in the quota forensic.
+Nothing about the interval needs changing before the revert — but the revert should not be
+done without deciding how that 10.3M/day fits the quota, or `unresolvedContextUris()`'s
+`SCAN plays` (the ~14.1K of the 14.25K) needs an index first.
 
 **The cron-job.org jobs are now redundant and still hold the old secret**, so they keep
 401ing, and the daily Vercel cron's watchdog (`ensureCronJobEnabled`) keeps re-enabling the
