@@ -270,15 +270,47 @@ Then `TURSO_DATABASE_URL` (env id `MYq6jff96jW0aPcS`) was patched to
 | fetched from a third-party network, off the tailnet entirely | 200, `Hello, this is HTTP API v2 (Hrana over HTTP)` |
 | `lazy-spotify.vercel.app` `/login`, `/api/build`, `/api/now-playing` | 200 |
 
-Still unproven, same gap as the first cutover: **a logged-in production render**. Every
-unauthenticated route either short-circuits before the store (`/api/now-playing` returns
-`{playing:null}` without a session) or needs `CRON_SECRET`, so nothing reachable from here
-makes a Vercel function talk to the database. Rem opening the site logged in is the
-confirmation.
-
 **The quick tunnel is retired, not deleted.** `~/lazyboy-tunnel/ARMED` is removed and
 `lazyboy-tunnel.service` is `disable --now`, so nothing can patch production again; the files
 and units stay on disk. `lazyboy-sqld` and `lazyboy-recorder` are untouched and active.
+
+**The last unproven leg is now proven.** Rotating `CRON_SECRET` (below) made
+`/api/cron/sync` callable, and a Vercel function ran the full stored-token sync against the
+Funnel: `{"ok":true,"added":50,"library":"synced"}`, after which the bridge's `plays` went
+7464 → 7514 and `playlists` 180 → 181. Vercel reaches the Zenbook, reads and writes.
+
+## The cron sync pinger (2026-08-10)
+
+`/api/cron/sync` had been answering 401 to its external pinger since before the bridge — the
+bearer configured at cron-job.org did not match production's `CRON_SECRET`, so closed-app
+history sync had simply not been running. Neither value was readable (`CRON_SECRET` is
+`sensitive` on Vercel, i.e. write-only, and so are `CRONJOB_API_KEY`/`CRONJOB_JOB_ID`), so the
+mismatch could not be diagnosed from either end — only replaced.
+
+`CRON_SECRET` (env id `NmuaggzYwOZqASsu`) was rotated to a fresh 24-byte value, written to
+`.env.local` as well, and production redeployed (`dpl_5MiS3MBnioLdLJb5kdyNoj9m4w5R`). The
+pinger now runs on the **Zenbook** instead of cron-job.org — the box is already always-on for
+`lazyboy-recorder`, and this drops a third-party dependency whose credential nobody could
+read:
+
+| path | what |
+|---|---|
+| `~/lazyboy-cron/ping.sh` | curls `/api/cron/sync` with the bearer, appends the reply to `ping.log` (trimmed to 2000 lines), exits non-zero on any non-200 |
+| `~/lazyboy-cron/env` | `0600` — `CRON_SECRET` + `SYNC_URL` |
+| `~/.config/systemd/user/lazyboy-cron-sync.{service,timer}` | every 5 min, `Persistent=true`, `OnBootSec=3min` |
+
+Five minutes, not the old two: Spotify's recently-played returns the last 50 plays, so a
+5-minute gap loses nothing, and sync ticks were the dominant traffic in the read-quota
+forensic (`READ_QUOTA.md`) — the interval matters again on Sep 1 when the store goes back to
+Turso's metered reads. First timed run logged `http=200 {"ok":true,"added":0,"library":"fresh"}`.
+
+**The cron-job.org jobs are now redundant and still hold the old secret**, so they keep
+401ing, and the daily Vercel cron's watchdog (`ensureCronJobEnabled`) keeps re-enabling the
+sync job after cron-job.org disables it for failures. Two ways to settle it, both needing
+Rem's cron-job.org account: delete the job, or paste the new `CRON_SECRET` (in `.env.local`)
+into its Authorization header and keep it as a second pinger for whenever the Zenbook is
+down. The second is only worth it after Sep 1 — while the bridge is up, a Zenbook that is
+down means there is no database to sync into anyway.
 
 ## The revert (Sep 1)
 
