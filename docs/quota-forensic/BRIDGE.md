@@ -7,14 +7,19 @@ server) instance on the Zenbook, reached from Vercel through a Cloudflare quick 
 is a three-week measure, not a new architecture — Sep 1 reverts to Turso, and the revert
 procedure is written down below *before* it is needed.
 
+> **2026-08-10: the path in changed.** The Cloudflare quick tunnel and its rotation updater
+> are retired — production now reaches `sqld` over a **Tailscale Funnel** at a permanent
+> hostname, `https://ubuntu.tail026729.ts.net`. Read "The tunnel and the rotation updater"
+> and "Latency" as history; the live setup is under **"Funnel cutover"** near the end.
+
 ## Architecture
 
 ```
 Vercel (lazy-boy, production)
-  @libsql/client  ──HTTPS/Hrana──►  https://<random>.trycloudflare.com
-                                        │  Cloudflare quick tunnel (no account, no cost)
+  @libsql/client  ──HTTPS/Hrana──►  https://ubuntu.tail026729.ts.net   (permanent)
+                                        │  Tailscale Funnel
                                         ▼
-                                   Zenbook  cloudflared  ──►  127.0.0.1:8090
+                                   Zenbook  tailscaled  ──►  127.0.0.1:8090
                                                                   sqld 0.24.32
                                                                   ~/lazyboy-sqld/data
 ```
@@ -216,6 +221,65 @@ a quota problem and the bridge does not fix it; scheduled app-closed syncing has
 running. Repairing it needs the secret re-set on both sides (Vercel env + the cron-job.org job),
 which needs credentials only Rem can read.
 
+## Funnel cutover (2026-08-10) — what the quick tunnel actually cost
+
+The quick tunnel took production down for a day and a half, exactly the way the rotation
+updater was built to prevent.
+
+**What happened.** `cloudflared` re-randomises its hostname on every restart, and it restarts
+about daily — 2026-08-09 04:03 ET and 2026-08-10 04:03 ET, both logged in `rotations.log`.
+Both times `on-rotate.sh` tried to patch `TURSO_DATABASE_URL` and got
+`403 {"invalidToken":true}`, so production stayed pinned to the 2026-08-08 hostname
+(`knives-…`), which by then did not resolve. `/login` and `/api/build` kept serving 200 —
+neither touches the store — so the only visible symptom was that every authed page threw
+"An error occurred in the Server Components render". That is what Rem saw.
+
+**Root cause of the 403.** `~/lazyboy-tunnel/env` held a *copy* of the Mac's Vercel CLI
+credential. That value is a short-lived OAuth **access** token: the CLI silently swaps it for
+a new one using its `refreshToken` whenever a `vercel` command runs (`auth.json` carries
+`expiresAt`), so the Mac never noticed. The Zenbook's frozen copy simply expired. A copied
+access token cannot survive on a second machine — the earlier note in "Failure modes" blamed
+`vercel logout`, which was the wrong diagnosis.
+
+**The fix is to stop needing any of it.** Tailscale Funnel gives a hostname that never
+changes, so nothing has to patch Vercel and nothing has to hold a Vercel token:
+
+```bash
+# on the Zenbook, once
+sudo tailscale set --operator=$USER
+sudo tailscale funnel --bg 8090          # serves 443 → 127.0.0.1:8090, persists across reboots
+```
+
+Funnel had to be enabled once for the tailnet from the admin console (Rem did this). The first
+`https://` request failed the TLS handshake while Let's Encrypt validated the DNS-01 challenge;
+`sudo tailscale cert ubuntu.tail026729.ts.net` on the third try logged `got cert`, and
+tailscaled renews it from then on.
+
+Then `TURSO_DATABASE_URL` (env id `MYq6jff96jW0aPcS`) was patched to
+`https://ubuntu.tail026729.ts.net` (200) and production redeployed
+(`dpl_4jZScm4irZb9J1otQK7cgxSGMC7N`, READY in ~50 s). `TURSO_AUTH_TOKEN` is unchanged — same
+`sqld`, same JWT.
+
+**Verified after cutover:**
+
+| check | result |
+|---|---|
+| public path, forced to the Funnel anycast IP (`curl --resolve …:443:199.38.181.54`) | 200 |
+| authed Hrana query `select count(*) from plays` through the Funnel | 200, **7464** rows |
+| same query with no `Authorization` header | 401 (`AuthHeaderNotFound` in sqld's log) |
+| fetched from a third-party network, off the tailnet entirely | 200, `Hello, this is HTTP API v2 (Hrana over HTTP)` |
+| `lazy-spotify.vercel.app` `/login`, `/api/build`, `/api/now-playing` | 200 |
+
+Still unproven, same gap as the first cutover: **a logged-in production render**. Every
+unauthenticated route either short-circuits before the store (`/api/now-playing` returns
+`{playing:null}` without a session) or needs `CRON_SECRET`, so nothing reachable from here
+makes a Vercel function talk to the database. Rem opening the site logged in is the
+confirmation.
+
+**The quick tunnel is retired, not deleted.** `~/lazyboy-tunnel/ARMED` is removed and
+`lazyboy-tunnel.service` is `disable --now`, so nothing can patch production again; the files
+and units stay on disk. `lazyboy-sqld` and `lazyboy-recorder` are untouched and active.
+
 ## The revert (Sep 1)
 
 Written down before the switch was made. Every step is one command.
@@ -245,6 +309,10 @@ straight back to the bridge:
 ```bash
 ssh ubuntu 'rm -f ~/lazyboy-tunnel/ARMED'
 ```
+
+(Already done on 2026-08-10, along with `systemctl --user disable --now lazyboy-tunnel`. The
+Funnel replaces it and needs no teardown step here beyond step 5's
+`sudo tailscale funnel --https=443 off`.)
 
 **3. Redeploy production** so the reverted env reaches the running functions:
 
@@ -288,14 +356,16 @@ standing insurance for the listen history.
 - **Zenbook offline / asleep → production has no database.** The app degrades the way it does
   against any unreachable primary. The recorder still captures, so nothing is permanently
   lost, but the site is down for the duration. This is the real cost of the $0 route.
-- **`cloudflared` restarts → new hostname.** Covered by the rotation updater above, at the
-  price of a production redeploy each time. Watch `~/lazyboy-tunnel/rotations.log`.
-- **The Vercel token in `~/lazyboy-tunnel/env` is the Mac CLI's own credential** (the token
-  previously stored on the Zenbook for `lazyboy-logtail` had expired — that unit had been
-  failing every request since ~09:35 on 2026-08-08). If someone runs `vercel logout` on the
-  Mac, the rotation updater loses its ability to patch the env and the log will show
-  `action=FAILED env-patch http=403`. A named token from the Vercel dashboard would be
-  sturdier; the API refuses to mint one from a CLI OAuth session.
+- ~~**`cloudflared` restarts → new hostname.**~~ Gone with the Funnel cutover: the hostname is
+  permanent, nothing patches Vercel, and no Vercel credential lives on the Zenbook. It cost a
+  day and a half of production downtime before it was fixed — see "Funnel cutover" above.
+- **The Funnel's hostname is only as reachable as `tailscaled`.** Same shape of dependency as
+  before, minus the rotation: if the node drops off the tailnet, production has no database.
+- **A copied Vercel CLI token expires within days.** `auth.json`'s `token` is a short-lived
+  OAuth access token that the CLI refreshes in place; a copy on another machine dies quietly
+  and every API call comes back `403 invalidToken`. If anything on the Zenbook ever needs the
+  Vercel API again, mint a named token in the dashboard — the API refuses to mint one from a
+  CLI OAuth session.
 - **`/api/cron/sync` was already returning 401** before any of this — the external pinger's
   bearer does not match `CRON_SECRET`, so scheduled syncs have not been running at all. That
   is a separate breakage from the quota block and it survives the bridge; the in-app 2-minute
