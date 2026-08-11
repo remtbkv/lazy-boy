@@ -18,7 +18,9 @@
 //
 // Backfilled plays get ctx_orphan = NULL, which renders as non-orphan until the next
 // orphan recompute gives them a real verdict — same as any play recorded before its
-// playlist was cached.
+// playlist was cached. Home reads a materialized payload (meta.home_payload, db.ts) that
+// this script does not write; the next sync tick that lands a play rebuilds it, so
+// backfilled days appear on Home then rather than immediately.
 //
 // Pass --db <path-or-url> to target a scratch copy instead of the primary (how the
 // known-answer test below is run):

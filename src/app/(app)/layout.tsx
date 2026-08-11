@@ -7,6 +7,7 @@ import { SyncOnLoad } from "@/components/sync-on-load";
 import { TimezoneCookie } from "@/components/timezone-cookie";
 import { NowPlayingProvider } from "@/components/now-playing-context";
 import { ScrollbarHover } from "@/components/scrollbar-hover";
+import { MetricsCollector } from "@/components/metrics-collector";
 import { DenBottomNav, DenChrome } from "./chrome";
 import "./den.css";
 
@@ -54,6 +55,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         <SyncOnLoad />
         <TimezoneCookie />
         <ScrollbarHover />
+        <MetricsCollector />
       </NowPlayingProvider>
     </div>
   );

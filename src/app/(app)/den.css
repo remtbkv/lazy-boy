@@ -100,11 +100,30 @@
 .den-sheet { animation: den-sheet-up 0.3s cubic-bezier(0.32, 0.72, 0, 1); }
 .den-scrim { animation: den-fade-in 0.25s ease-out; }
 
+/* ---- Day list: the "From" cell scrolls its own text on hover ---------------------
+   A song usually lives in more than one playlist, so that cell's text is often wider than the
+   column — which cannot grow without pushing every other column around. It clips to an ellipsis
+   at rest and, only while the cursor is on that cell, walks the full string past and back so the
+   rest of it can be read. One pass each way at a constant speed, with a hold at both ends: the
+   distance (--den-marquee-x) and the duration come from den-home, which measures the actual
+   overflow on hover, so nothing speeds up to fit and nothing travels further than it hides.
+   The inner span is inline at rest — that is what lets the ellipsis render — and inline-block
+   only while it moves, because a transform does not apply to an inline box. */
+@keyframes den-marquee {
+  0%, 15%   { transform: translateX(0); }
+  85%, 100% { transform: translateX(var(--den-marquee-x, 0)); }
+}
+.den-marquee[data-run] > span {
+  display: inline-block;
+  animation: den-marquee var(--den-marquee-dur, 6s) linear infinite alternate;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .den-panda-asleep,
   .den-panda-awake,
   .den-sheet,
-  .den-scrim {
+  .den-scrim,
+  .den-marquee[data-run] > span {
     animation: none;
   }
 }

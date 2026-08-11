@@ -492,6 +492,7 @@ async function modeSearch() {
        FROM saved_tracks s JOIN tracks t ON t.id = s.track_id`;
   const LIB_LISTS = "SELECT id, name FROM playlists";
   const HIST_INDEX = `SELECT t.name AS name, t.artist AS artist, t.album AS album, t.album_image AS image,
+            t.duration_ms AS durationMs,
             p.played_at AS playedAt, ${sourceExpr("p", "c")} AS source
      FROM plays p JOIN tracks t ON t.id = p.track_id
        LEFT JOIN contexts c ON c.uri = p.context_uri
@@ -570,6 +571,7 @@ async function modeSearch() {
         String(r.artist),
         hi.images.put(r.image),
         hi.albums.put(r.album),
+        Number(r.durationMs) || 0,
       ]);
     }
     return [i, Math.floor(Date.parse(String(r.playedAt)) / 60000), hi.sources.put(r.source)];

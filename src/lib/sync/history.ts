@@ -8,6 +8,8 @@ import {
   getContextsFullCheckAt,
   setContextsFullCheckAt,
   getSpotifyCooldownUntil,
+  hasHomePayload,
+  rebuildHomePayload,
   type PlayRecord,
   type ContextRecord,
 } from "@/lib/db";
@@ -83,6 +85,24 @@ export async function syncRecentPlays(
   await recordContexts(resolved);
   // Stamp only after a completed pass, so a throw above retries it on the next call.
   if (fullDue) await setContextsFullCheckAt();
+
+  // Home renders from one materialized row (db.ts, "The Home payload"), so the sync that
+  // changes the data is what has to rewrite it. This is the single point both triggers pass
+  // through — /api/sync (open tab) and /api/cron/sync (the ~2-min pinger), plus
+  // refreshHistoryAction — so the rebuild belongs here and not in either route; adding it per
+  // route would mean two places to keep in step and one of them eventually missed.
+  // Rebuilt when plays landed (the stored payload is now wrong) and when the row is simply
+  // absent — a store nothing has synced into yet, or the first tick after a deploy that moved
+  // the payload's shape. A steady tick (nothing new, row present) pays one indexed meta read
+  // and no writes. AFTER recordContexts so newly resolved names are in the payload's "From".
+  // Never fatal: the payload is a cache Home computes inline when it's missing, and a
+  // scheduler that gets a 500 here would eventually disable itself over a failure that cost
+  // nothing.
+  try {
+    if (added > 0 || !(await hasHomePayload())) await rebuildHomePayload();
+  } catch (e) {
+    console.error("[home-payload] rebuild after sync failed", e);
+  }
 
   return { added };
 }

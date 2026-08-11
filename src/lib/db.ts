@@ -206,6 +206,19 @@ async function init(): Promise<Client> {
       modeled_rows INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (day, reader)
     );
+    -- Append-only client performance log: one row per timing the browser reports. See
+    -- "Client performance metrics" at the bottom of this file. Read only by the usage page's
+    -- 7-day summary, which filters on ts.
+    CREATE TABLE IF NOT EXISTS client_metrics (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts TEXT NOT NULL,
+      session TEXT,
+      page TEXT,
+      event TEXT,
+      value REAL,
+      meta TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_client_metrics_ts ON client_metrics (ts);
   `);
   // Migrate older DBs that predate the album/duration columns.
   const info = await client.execute("PRAGMA table_info(tracks)");
@@ -1134,8 +1147,11 @@ export async function getDailyStats(offsetMin = 0, days = 14): Promise<DayStats[
   return seq === null ? readDailyStats(offsetMin, days) : dailyStatsCached(offsetMin, days, seq);
 }
 
-async function readDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
-  const client = await getReader();
+// `source` overrides the reader for callers that must not read a copy — the Home payload
+// rebuild passes the primary (see "The Home payload"). Everyone else omits it and gets the
+// replica gate.
+async function readDailyStats(offsetMin = 0, days = 14, source?: Client): Promise<DayStats[]> {
+  const client = source ?? (await getReader());
   // Only fetch the recent window we actually display (a couple extra days of buffer for the
   // tz day-edge), so this stays cheap as total history grows — not a full-table scan. Uses
   // idx_plays_played_at. Listened ms = gap to the next play, capped at song length, computed
@@ -1218,8 +1234,9 @@ export async function getPlaysByDay(day: string, offsetMin = 0): Promise<TrackSt
   return seq === null ? readPlaysByDay(day, offsetMin) : playsByDayLive(day, offsetMin, seq);
 }
 
-async function readPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]> {
-  const client = await getReader();
+// `source`: same override as readDailyStats — the Home payload rebuild reads the primary.
+async function readPlaysByDay(day: string, offsetMin = 0, source?: Client): Promise<TrackStats[]> {
+  const client = source ?? (await getReader());
   // The date() equality is the AUTHORITY on which local day a play belongs to — it stays.
   // What it can't do is drive an index (a function of the column), so on its own this read
   // SCANNED THE WHOLE plays TABLE for the ~90 rows of one day: `SCAN p USING COVERING INDEX
@@ -1251,6 +1268,142 @@ async function readPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]>
   return plainRows(res.rows) as unknown as TrackStats[];
 }
 
+// ── The Home payload (`meta.home_payload`) ──────────────────────────────────────────────
+// Everything /home renders, materialized as ONE row at WRITE time, so a page load costs one
+// indexed meta read instead of a query plan.
+//
+// What it replaces: the page ran two reads in parallel (the 14-day strip + the all-time
+// totals) and then a third that could not start until the first answered, because which day
+// Home opens on is `daily[0].day`. Two or three sequential waves, on every load. The primary
+// is a self-hosted sqld reached over a Tailscale Funnel, where a round trip is ~70ms+ before
+// any query runs, so the waves cost more than the work in them — and they recomputed an answer
+// that cannot change between syncs. Plays only arrive through syncRecentPlays (the ~2-min
+// pinger on /api/cron/sync, the open tab's POST /api/sync), so the write is the only moment
+// the answer moves: build it there, read it here.
+//
+// Reads inside the rebuild go to getClient() (the PRIMARY), not getReader(). Everywhere else
+// a scanning read may be served by the replica because a stale answer lives exactly as long
+// as one request; here it would be written into a row that every later page load serves until
+// something else writes. The gate would usually say the copy is current — "usually" is not the
+// bar for something persisted. The rebuild also calls readDailyStats/readPlaysByDay directly
+// rather than their unstable_cache wrappers: those exist to keep a RENDER fresh against
+// write_seq, and the write path has no use for a cache entry it is in the middle of making
+// redundant.
+//
+// It does NOT bump write_seq. Per the write-marker rule above, a write that only touches
+// `meta` must not bump: nothing reads `meta` from the replica (getMeta() → getClient()), so
+// there is no copy to announce this to, and an extra bump would gate-fail every other
+// instance's replica for a write it will never serve.
+//
+// The row OUTLIVES A DEPLOY — the same hazard the Data Cache has — so it carries a shape
+// token. A deploy that changes what the payload holds would otherwise hand new code the old
+// deploy's object; instead the mismatch reads as absent, Home falls back to the live queries
+// for that one load, and the next rebuild writes the new shape. Move HOME_PAYLOAD_SHAPE in the
+// same commit as any change to HomePayload.
+//
+// Staleness bound: the rebuild is triggered by the sync, so the two columns that are DERIVED
+// rather than recorded — `source` (a context name that 403'd can resolve later) and
+// `ctx_orphan` (flips when a playlist's membership changes) — can sit stale in the payload
+// until the next sync that lands a play rebuilds it. Same tradeoff the frozen-day cache
+// entries take, and it self-heals on the next play.
+export const HOME_PAYLOAD_SHAPE = "v1";
+const HOME_PAYLOAD_KEY = "home_payload";
+// The strip width Home renders on first paint; it extends on demand from dailyStatsAction.
+const HOME_DAILY_DAYS = 14;
+// The user's zone, fixed. The payload is built on the WRITE path, where there is no browser
+// and therefore no `tzoffset` cookie — tzOffsetMinutes() returns 0 (UTC) in a cron context,
+// which would bucket days wrong for every read of the payload. This app is single-user and
+// that user is in New York, so the zone is a constant; the OFFSET is not, and is computed
+// per rebuild below rather than pinned to whichever of −240/−300 was true when this shipped.
+const HOME_TZ = "America/New_York";
+
+export type HomePayload = {
+  shape: string;
+  builtAt: string; // ISO, for debugging a payload that looks wrong
+  tzOffsetMinutes: number; // the offset the day buckets below were computed with
+  daily: DayStats[];
+  allTime: AllTimeStats;
+  initialDay: string;
+  initialTracks: TrackStats[];
+};
+
+/** Minutes to ADD to UTC for `zone` at `at` — the same convention as tz.ts's
+ *  tzOffsetMinutes(), read off the zone itself so it follows DST (−240 in EDT, −300 in EST).
+ *  Intl formats the instant as the zone's wall clock; that clock read as if it were UTC,
+ *  minus the real instant, is the offset. */
+function zoneOffsetMinutes(zone: string, at: Date = new Date()): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: zone,
+    hourCycle: "h23", // without this midnight can format as hour 24
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(at);
+  const f: Record<string, number> = {};
+  for (const p of parts) if (p.type !== "literal") f[p.type] = Number(p.value);
+  const wall = Date.UTC(f.year, f.month - 1, f.day, f.hour, f.minute, f.second);
+  // The parts have second resolution, so compare against a second-truncated instant.
+  return Math.round((wall - Math.floor(at.getTime() / 1000) * 1000) / 60_000);
+}
+
+/** Recompute Home's whole first paint and store it. Called from the sync (see
+ *  `syncRecentPlays`) whenever plays land, and by Home itself when the row is missing. */
+export async function rebuildHomePayload(): Promise<HomePayload> {
+  const client = await getClient();
+  const tzOffsetMinutes = zoneOffsetMinutes(HOME_TZ);
+  const [daily, allTime] = await Promise.all([
+    readDailyStats(tzOffsetMinutes, HOME_DAILY_DAYS, client),
+    // Already a single meta read off the primary, refreshed on write by recordPlays.
+    getAllTimeStats(),
+  ]);
+  // Write-path time, not a render — the day the payload's `initialDay` falls back to.
+  const todayLocal = new Date(Date.now() + tzOffsetMinutes * 60_000).toISOString().slice(0, 10);
+  // Serial by necessity: which day Home opens on depends on which days have plays. It costs
+  // one extra round trip HERE, once per sync that landed something, instead of on every load.
+  const initialDay = daily[0]?.day ?? todayLocal;
+  const initialTracks = await readPlaysByDay(initialDay, tzOffsetMinutes, client);
+  const payload: HomePayload = {
+    shape: HOME_PAYLOAD_SHAPE,
+    builtAt: new Date().toISOString(),
+    tzOffsetMinutes,
+    daily,
+    allTime,
+    initialDay,
+    initialTracks,
+  };
+  await setMeta(HOME_PAYLOAD_KEY, JSON.stringify(payload));
+  return payload;
+}
+
+/** The stored payload, or null when there is none to serve — absent (nothing has synced into
+ *  this store yet), unparseable, or written by a deploy with a different shape. Null is the
+ *  caller's cue to compute inline and trigger a rebuild, never to render nothing. */
+export async function getHomePayload(): Promise<HomePayload | null> {
+  const v = await getMeta(HOME_PAYLOAD_KEY);
+  if (!v) return null;
+  try {
+    const p = JSON.parse(v) as HomePayload;
+    return p?.shape === HOME_PAYLOAD_SHAPE ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a payload of the current shape exists. Separate from getHomePayload() because the
+ *  steady-state sync tick asks this every ~2 minutes and has no use for the body (~20KB over
+ *  the funnel); json_extract answers it with the same one indexed meta row and a few bytes. */
+export async function hasHomePayload(): Promise<boolean> {
+  const client = await getClient();
+  const res = await client.execute({
+    sql: `SELECT json_extract(value, '$.shape') AS shape FROM meta WHERE key = ?`,
+    args: [HOME_PAYLOAD_KEY],
+  });
+  return !!res.rows[0] && String(res.rows[0].shape) === HOME_PAYLOAD_SHAPE;
+}
+
 // ── The client-side search payloads ─────────────────────────────────────────────────────
 // Home's search box matches in the BROWSER, not here. It used to send every keystroke to
 // searchHistory(), whose `LIKE '%q%'` cannot use an index by construction (the note under "If
@@ -1261,9 +1414,19 @@ async function readPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]>
 //   LIBRARY — every track that sits in a playlist or in Liked Songs, as
 //             [name, artist, image, album, playlists]. This is what makes the box search the
 //             LIBRARY: a song you have never played is in here, and so is where it lives.
-//   HISTORY — every played song, plus every individual play as [track, minute, source]. The
-//             counts, the times and the expanded per-play list all come out of this, so a
-//             result row needs no follow-up request to finish.
+//   HISTORY — every played song as [name, artist, image, album, durationMs], plus every
+//             individual play as [track, minute, source]. The counts, the times and the
+//             expanded per-play list all come out of this, so a result row needs no follow-up
+//             request to finish.
+//
+// The history half is no longer only a SEARCH payload: Home's day list derives from it too
+// (den-home.tsx, "Days from memory"). Every play carries the minute it happened, so grouping
+// those minutes into local days in the browser reproduces getPlaysByDay's answer for every day
+// the payload has fully seen — and a day slide stops being a server action against a primary
+// that is a ~70ms round trip away before it runs a query. That is what `durationMs` is doing in
+// the track tuple: search never renders a length, the day list does. Adding a field here is
+// therefore a UI decision as much as a search one — the whole rendered row must be present, or
+// the derivation has to fall back to the server for the one column it lacks.
 //
 // They are SPLIT because they change at completely different rates. The library changes when a
 // playlist does (a sync, at most every 15 min); the history changes every time a song finishes.
@@ -1283,6 +1446,13 @@ async function readPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]>
 // identities (15,326 playlist memberships + 32 liked), 2,959 played identities and 7,050 plays:
 //   library  raw 1,638,540 B, gzip 576,795 B, brotli 421,924 B  ← 304s on a repeat visit
 //   history  raw   476,206 B, gzip 167,591 B, brotli 121,956 B  ← re-fetched after listening
+// The `durationMs` slot (shape v2) is the only field added since: measured 2026-08-11 by
+// rebuilding both variants of the history payload over a copy of data/replica.db (3,025 played
+// identities, 7,330 plays), it costs +21,161 B raw (+4.3%), +11,870 B gzip (+7.0%) and
+// +10,369 B brotli (+8.5%) — ~7 B per played song raw, and proportionally more compressed
+// because six-digit durations are the highest-entropy thing in the body. That buys every day
+// slide after the payload lands, so it is paid once per listening session against a round trip
+// per day walked.
 // So a cold visit downloads ~744 KB gzipped and a visit after a listening session ~168 KB —
 // against 156,868 gzip for the played-only index this replaces, which also paid a round trip
 // per query on top. The same bench times the builds against the primary: the library's member
@@ -1336,8 +1506,21 @@ export type LibraryIndex = {
   tracks: LibraryTrack[];
 };
 
-/** A played song. Same interning convention as LibraryTrack; newest play first. */
-export type HistoryTrack = [name: string, artist: string, image: number, album: number];
+/** A played song. Same interning convention as LibraryTrack; newest play first.
+ *
+ *  `durationMs` is 0 when the store has no length for the track (the UI renders that as "—").
+ *  It is NOT here for search — a result row never shows a length — but for Home's DAY list,
+ *  which derives every day's rows from this payload in the browser and renders a Length
+ *  column. Without it a derived day would have to leave that column empty, or fetch, which is
+ *  the round trip the derivation exists to remove. It is one number per played SONG (not per
+ *  play), so it is the cheapest field in the payload. */
+export type HistoryTrack = [
+  name: string,
+  artist: string,
+  image: number,
+  album: number,
+  durationMs: number,
+];
 /** One play: its HistoryIndex.tracks row, the UTC minute it happened (epoch minutes — the
  *  minute is all the UI ever renders), and its resolved "From" (index into
  *  HistoryIndex.sources, -1 when the play has none). */
@@ -1362,7 +1545,8 @@ export type HistoryIndex = {
  *  server for every keystroke. The ETags carry the token too, for the same reason one layer up
  *  (a browser holding the old body). */
 export const LIBRARY_INDEX_SHAPE = "v1";
-export const HISTORY_INDEX_SHAPE = "v1";
+// v2 added the per-song durationMs slot (Home derives its day lists from this payload).
+export const HISTORY_INDEX_SHAPE = "v2";
 
 /** The library payload's version: `meta.library_seq`, bumped by the writes that change which
  *  tracks are in the library and by nothing else (see the marker's note). NOT write_seq —
@@ -1504,6 +1688,7 @@ async function readHistoryIndex(): Promise<HistoryIndex> {
   // seconds-scale (the note on playsWithListened).
   const res = await client.execute(
     `SELECT t.name AS name, t.artist AS artist, t.album AS album, t.album_image AS image,
+            t.duration_ms AS durationMs,
             p.played_at AS playedAt, ${sourceExpr("p", "c")} AS source
      FROM plays p JOIN tracks t ON t.id = p.track_id
        LEFT JOIN contexts c ON c.uri = p.context_uri
@@ -1519,7 +1704,15 @@ async function readHistoryIndex(): Promise<HistoryIndex> {
     let i = at.get(key);
     if (i === undefined) {
       at.set(key, (i = tracks.length));
-      tracks.push([String(r.name), String(r.artist), images.put(r.image), albums.put(r.album)]);
+      // 0, not null, for an unknown length: the tuple stays all-numbers after the two names,
+      // which is what keeps the JSON small (`0` is one byte, `null` is four).
+      tracks.push([
+        String(r.name),
+        String(r.artist),
+        images.put(r.image),
+        albums.put(r.album),
+        Number(r.durationMs) || 0,
+      ]);
     }
     return [i, Math.floor(Date.parse(String(r.playedAt)) / 60000), sources.put(r.source)];
   });
@@ -2500,4 +2693,123 @@ export async function ledgerSyncCall(
   } catch {
     /* attribution must never break its caller */
   }
+}
+
+// ── Client performance metrics (`client_metrics`) ───────────────────────────────────────
+// What the BROWSER measured, per real page load: ttfb/fcp/lcp, the app's own
+// `performance.mark("lb:…")` marks, and how long the visit stayed visible. Append-only, one
+// row per timing, posted in batches by /api/metrics (src/lib/metrics-client.ts collects
+// them). It exists so "the home page feels slow" becomes a query instead of a memory.
+//
+// FENCED EXACTLY LIKE api_log: written via getClient() (the primary), read via getClient(),
+// and it MUST NOT bump write_seq. getReader() never serves this table, so a bump would only
+// push the replica's freshness gate into the "behind" state on every page load — the exact
+// failure the marker rule at the top of the file exists to prevent.
+//
+// Volume is a handful of rows per page view on a single-user app, so the 7-day summary below
+// pulls its window and does the percentiles in JS rather than carrying window functions.
+
+export type ClientMetricInput = {
+  session: string;
+  page: string;
+  event: string;
+  value?: number | null;
+  meta?: string | null;
+};
+
+/** One event's distribution over the summary window. */
+export type MetricStat = { n: number; p50: number; p95: number };
+
+export type ClientMetricsPage = {
+  page: string;
+  views: number;
+  avgVisitMs: number | null;
+  /** Keyed by event name; an event with no samples on this page is absent. */
+  stats: Record<string, MetricStat>;
+};
+
+/** The timing events the usage page charts. Anything else (a new `lb:` mark) still lands in
+ *  the table — it just isn't summarised until it is named here. */
+export const SUMMARY_EVENTS = ["ttfb", "fcp", "lcp", "data-rendered", "history-ready"] as const;
+
+const CLIENT_METRICS_WINDOW_MS = 7 * 86_400_000;
+
+/** Append a batch of reported timings. One statement batch, on the primary; `ts` is stamped
+ *  HERE rather than trusted from the browser, so a clock-skewed tab can't file rows into next
+ *  week. No write_seq bump (see the section note). */
+export async function recordClientMetrics(rows: ClientMetricInput[]): Promise<void> {
+  if (rows.length === 0) return;
+  const client = await getClient();
+  const ts = new Date().toISOString();
+  await client.batch(
+    rows.map((r) => ({
+      sql: `INSERT INTO client_metrics (ts, session, page, event, value, meta)
+            VALUES (?, ?, ?, ?, ?, ?)`,
+      args: [ts, r.session, r.page, r.event, r.value ?? null, r.meta ?? null],
+    })),
+    "write",
+  );
+}
+
+/** Nearest-rank percentile over an unsorted sample (p as a fraction, e.g. 0.95). */
+function percentile(values: number[], p: number): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const i = Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1));
+  return sorted[i];
+}
+
+/** Per-page client timings over the last 7 days, busiest page first: how many views, the p50
+ *  and p95 of each summarised event, and the average time a visit stayed visible. */
+export async function getClientMetricsSummary(): Promise<ClientMetricsPage[]> {
+  const client = await getClient();
+  const cutoff = new Date(Date.now() - CLIENT_METRICS_WINDOW_MS).toISOString();
+  const res = await client.execute({
+    sql: `SELECT page, event, value FROM client_metrics WHERE ts >= :cutoff`,
+    args: { cutoff },
+  });
+
+  const pages = new Map<string, { views: number; visits: number[]; samples: Map<string, number[]> }>();
+  for (const row of res.rows) {
+    const page = String(row.page ?? "");
+    const event = String(row.event ?? "");
+    const entry =
+      pages.get(page) ?? { views: 0, visits: [], samples: new Map<string, number[]>() };
+    pages.set(page, entry);
+    if (event === "pageview") {
+      entry.views += 1;
+      continue;
+    }
+    if (row.value === null) continue;
+    const value = Number(row.value);
+    if (!Number.isFinite(value)) continue;
+    if (event === "visit-ms") entry.visits.push(value);
+    else {
+      const bucket = entry.samples.get(event) ?? [];
+      bucket.push(value);
+      entry.samples.set(event, bucket);
+    }
+  }
+
+  return [...pages.entries()]
+    .map(([page, e]) => {
+      const stats: Record<string, MetricStat> = {};
+      for (const event of SUMMARY_EVENTS) {
+        const values = e.samples.get(event);
+        if (!values?.length) continue;
+        stats[event] = {
+          n: values.length,
+          p50: percentile(values, 0.5),
+          p95: percentile(values, 0.95),
+        };
+      }
+      return {
+        page,
+        views: e.views,
+        avgVisitMs: e.visits.length
+          ? e.visits.reduce((n, v) => n + v, 0) / e.visits.length
+          : null,
+        stats,
+      };
+    })
+    .sort((a, b) => b.views - a.views || a.page.localeCompare(b.page));
 }

@@ -1,7 +1,14 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { auth } from "@/lib/auth";
-import { getAllTimeStats, getDailyStats, getPlaysByDay } from "@/lib/db";
+import {
+  getAllTimeStats,
+  getDailyStats,
+  getHomePayload,
+  getPlaysByDay,
+  rebuildHomePayload,
+  type HomePayload,
+} from "@/lib/db";
 import { tzOffsetMinutes } from "@/lib/tz";
 import { DenHome } from "./den-home";
 import { DockLoader } from "./dock-loader";
@@ -34,15 +41,35 @@ function loadGreetings(): string[] {
   }
 }
 
-export default async function HomePage() {
-  const [session, tz] = await Promise.all([auth(), tzOffsetMinutes()]);
-  const name = session?.user?.name ?? "You";
+type HomeData = Pick<HomePayload, "daily" | "allTime" | "initialDay" | "initialTracks">;
+
+/** The pre-payload data path, kept for the one case the payload can't cover: a store nothing
+ *  has ever synced into (fresh DB, first deploy). Three reads in two-to-three sequential waves
+ *  — the shape the payload exists to remove — so it also kicks off a rebuild, and the next
+ *  load is a single read again. The rebuild is not awaited: this request already has its
+ *  answer, and making the first visitor after a deploy wait on a write helps nobody. */
+async function readHomeInline(): Promise<HomeData> {
+  const tz = await tzOffsetMinutes();
   const [daily, allTime] = await Promise.all([getDailyStats(tz, 14), getAllTimeStats()]);
-  // eslint-disable-next-line react-hooks/purity -- Server Component: per-request time is intended
   const todayLocal = new Date(Date.now() + tz * 60_000).toISOString().slice(0, 10);
   // Serial by necessity: which day to open depends on which days have plays.
   const initialDay = daily[0]?.day ?? todayLocal;
   const initialTracks = await getPlaysByDay(initialDay, tz);
+  void rebuildHomePayload().catch((e) => {
+    console.error("[home-payload] rebuild from render failed", e);
+  });
+  return { daily, allTime, initialDay, initialTracks };
+}
+
+export default async function HomePage() {
+  // ONE read for everything below: the day strip, the all-time card and the opening day's
+  // rows are materialized into a single meta row by the sync that last changed them (db.ts,
+  // "The Home payload"). The page used to run those as two or three sequential query waves,
+  // each paying a full round trip to the funnel-reached primary before any work started, to
+  // recompute an answer that only moves when a sync writes.
+  const [session, payload] = await Promise.all([auth(), getHomePayload()]);
+  const name = session?.user?.name ?? "You";
+  const { daily, allTime, initialDay, initialTracks } = payload ?? (await readHomeInline());
   const first = name.split(" ")[0] || name;
 
   const greetings = loadGreetings();

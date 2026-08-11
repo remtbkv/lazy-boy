@@ -16,6 +16,11 @@ export type NowPlayingTrack = {
   title: string;
   artist: string;
   albumImage: string | null;
+  /** Album NAME. /api/now-playing returns normTrack's track whole (spotify/resources.ts), so
+   *  it has always been on the wire; Home's play handoff needs it to put a finished song in
+   *  today's list with its Album column already filled. Optional because playOptimistic builds
+   *  a track from a row that may not carry one. */
+  album?: string | null;
 };
 export type Playing = {
   track: NowPlayingTrack;

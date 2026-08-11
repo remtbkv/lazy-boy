@@ -1,0 +1,1 @@
+- [ ] Retire the embedded-replica machinery (openReplica/bootReplica/freshness gate in db.ts, LAZYBOY_NO_REPLICA) and reassess read-costs ledger + /api/cron/usage-check now that the store is self-hosted — home/day/search all serve from the materialized payload + client memory as of 2026-08-11; verify nothing else still routes through getReader first | self-startable

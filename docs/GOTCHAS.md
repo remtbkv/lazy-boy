@@ -100,17 +100,24 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
 - **Persistent playlist library (DB-backed):** the full library is stored in
   libSQL (`playlists` table in `src/lib/db.ts`, native order). `/home` and
   `/playlists` read it **on render — no Spotify call**, so pages are
-  instant and never block/rate-limit on a library scan. `playlists-sync.tsx`
-  (client) fires `POST /api/playlists/sync` when the store is empty or >15 min
-  stale; the sync does the one full scan off the render path, then `router.refresh()`
-  shows fresh data. `me_id` + `playlists_synced_at` live in the `meta` table. (The
+  instant and never block/rate-limit on a library scan. Freshness is the **cron
+  tick's** job: `/api/cron/sync` (every 2 min, no session) re-runs the full scan
+  whenever the store is >30 min old — that is the authoritative refresh.
+  `playlists-sync.tsx` (client) is only the fallback: it fires
+  `POST /api/playlists/sync` when the store is empty or >2 h stale, which in
+  practice means a cold start or a dead cron. That POST returns a task id
+  immediately and the scan runs off the request; the client polls it and
+  `router.refresh()`es **only on a cold start** (empty grid → fills as the
+  playlist list lands, settles when the scan ends). A routine stale kick stays
+  silent so the grid never shifts under you.
+  `me_id` + `playlists_synced_at` live in the `meta` table. (The
   old per-page `/api/playlists?offset=` waterfall and its `myPlaylistsPage` chain
   were deleted.) `playlists-grid.tsx` has fuzzy search; thumbnails are lazy.
   **Creating a playlist must also write the store** — the
   grid renders only from the DB, so merge / save-queue / clean / save-diff call
   `recordNewPlaylist()` (→ `db.upsertStoredPlaylist`, position −1 = sorts first) right
   after the Spotify create; without that the new playlist is invisible until the next
-  full sync (up to 15 min).
+  full sync (up to 30 min).
 - **Playlist detail pages serve cached tracks, revalidated by `snapshot_id`.** Paginating a
   playlist's tracks from Spotify on every visit was the main slowness. Tracks are cached per
   playlist in `playlist_tracks` (+ `tracks`), read on render via `getPlaylistTracks`. The

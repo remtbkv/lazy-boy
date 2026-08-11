@@ -6,12 +6,16 @@ import { syncLibrary } from "@/lib/sync/library";
 import { getLibrarySyncedAt, ledgerSyncCall, recomputeAllTimeStats } from "@/lib/db";
 import { ensureCronJobEnabled } from "@/lib/cronjob";
 
-// Rebuild the library index at most hourly (snapshot-diffing makes a run cheap, but no
-// need to do it every 5-minute tick). Takes a token getter — a cold full scan can
-// outlive the ~1h access token.
+// Rebuild the library index at most every 30 min (snapshot-diffing makes a run cheap, but no
+// need to do it every 2-minute tick). This tick is the AUTHORITATIVE refresh for the stored
+// library: the playlists page renders from the store and only kicks its own scan when the
+// store is empty or this tick has clearly stopped running. Takes a token getter — a cold full
+// scan can outlive the ~1h access token.
+const LIBRARY_MAX_AGE_MS = 30 * 60 * 1000;
+
 async function maybeSyncLibrary(token: () => Promise<string>): Promise<string> {
   const at = await getLibrarySyncedAt();
-  if (at && Date.now() - Date.parse(at) < 55 * 60 * 1000) return "fresh";
+  if (at && Date.now() - Date.parse(at) < LIBRARY_MAX_AGE_MS) return "fresh";
   await syncLibrary(spotifyClient(token, true));
   return "synced";
 }

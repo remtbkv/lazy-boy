@@ -40,7 +40,12 @@ const DEFAULT_DIR: Record<Sort, "asc" | "desc"> = {
   length: "desc",
   source: "asc",
 };
-function compareTracks(a: TrackStats, b: TrackStats, sort: Sort): number {
+function compareTracks(
+  a: TrackStats,
+  b: TrackStats,
+  sort: Sort,
+  from: (t: TrackStats) => string | null,
+): number {
   switch (sort) {
     case "recent":
       return a.lastPlayed.localeCompare(b.lastPlayed);
@@ -55,9 +60,23 @@ function compareTracks(a: TrackStats, b: TrackStats, sort: Sort): number {
     case "length":
       return (a.durationMs ?? 0) - (b.durationMs ?? 0);
     case "source":
-      // Unattributed plays ("(queued)") sort together at the end rather than under "".
-      return (a.source ?? "￿").localeCompare(b.source ?? "￿");
+      // On what the cell SHOWS, so the column still sorts by what you can read in it.
+      // Unattributed rows ("(queued)") sort together at the end rather than under "".
+      return (from(a) ?? "￿").localeCompare(from(b) ?? "￿");
   }
+}
+
+/** What a day row's "From" says. A song that is IN a playlist right now answers with the
+ *  playlists it lives in — that is the useful fact, where the play CONTEXT ("(queued)") is
+ *  mostly an accident of how the last play happened to start. Only when the song is in no
+ *  playlist does the context stand, and null (neither) renders as "(queued)".
+ *
+ *  Membership can only be known once the library payload lands, a second or two after paint,
+ *  so early rows answer with the context and upgrade in place. Nothing moves when they do:
+ *  the column is fixed-width and the cell clips (FromCell). */
+function fromText(t: TrackStats, inPlaylists: Map<string, string[]> | null): string | null {
+  const pls = inPlaylists?.get(`${t.artist.toLowerCase()}\n${t.name.toLowerCase()}`);
+  return pls?.length ? pls.join(", ") : t.source;
 }
 
 // ---- The searchable set ------------------------------------------------------------------
@@ -111,7 +130,8 @@ type HistoryPayload = {
   images: string[];
   albums: string[];
   sources: string[];
-  tracks: [string, string, number, number][];
+  /** [name, artist, image, album, durationMs] — durationMs is 0 when unknown. */
+  tracks: [string, string, number, number, number][];
   plays: [number, number, number][];
 };
 
@@ -194,6 +214,105 @@ function buildEntries(lib: LibraryPayload | null, hist: HistoryPayload | null): 
   return entries;
 }
 
+// ---- Days from memory --------------------------------------------------------------------
+// Every day slide used to be a server action (dayTracksAction → getPlaysByDay), cached per day
+// on the client. The read itself is small and indexed; what it costs is the trip. The store is
+// a self-hosted sqld reached over a Tailscale Funnel, so a query is ~70ms+ before it starts
+// running — paid AFTER the click, which is what made walking the strip feel like waiting.
+// The neighbour prefetch below hid that for the two adjacent days and nothing else.
+//
+// The history payload already holds the answer: every play, with the minute it happened, the
+// song it belongs to and where it was played from. Grouping those minutes into local days is
+// getPlaysByDay's whole job, and doing it here makes EVERY day — not just the two next to you —
+// switch inside one frame, with no request at all. The server path stays exactly as it was for
+// the seconds before the payload lands (and for the day the payload can't be complete for).
+//
+// Two things this has to reproduce, or the two paths would disagree on screen:
+//   • the DAY BUCKET. The server buckets with a fixed offset — the `tzoffset` cookie the
+//     browser publishes, applied to every historical play (db.ts localDay). So this uses the
+//     same fixed offset rather than per-instant local time: across a DST change the two agree
+//     with EACH OTHER, which is the only thing a user comparing a day card's count against its
+//     rows can see. (Per-instant local time would be the more "correct" bucket and would put a
+//     handful of plays on a different day than the strip counted them under.)
+//   • the ROW SHAPE and the initial ORDER: plays DESC then lastPlayed DESC, the order
+//     getPlaysByDay returns, so the list's default sort lands on the same sequence whichever
+//     path produced it.
+//
+// It groups by song IDENTITY (lower(artist)+lower(name)), where the server groups by track id.
+// That is the payload's join and it is the better answer — a song Spotify re-issued under a
+// second id is one row here and two there — but it IS a difference, and it is the one place a
+// derived day can legitimately not match the server's. Checked, not assumed: replaying this
+// against getPlaysByDay for all 69 days in data/replica.db (2026-08-11) agreed on every row's
+// play count, last-played minute, source, album and duration, except for the 18 of 3,025
+// played identities that exist under two track ids — and the first version of the source rule
+// disagreed on 66 of the 69 days, so the comparison can fail.
+type MemoryDays = {
+  rows: Map<string, TrackStats[]>;
+  /** The local day of the newest play in the payload. Days strictly older than this are fully
+   *  covered; that day itself may be missing the last few minutes (the payload rebuilds at
+   *  most every 10 min — db.ts's slow marker), so it is left to the server path. */
+  newest: string | null;
+};
+function buildDays(hist: HistoryPayload): MemoryDays {
+  // Minutes to ADD to UTC, i.e. the same number TimezoneCookie writes for the server to use.
+  const offMs = -new Date().getTimezoneOffset() * 60000;
+  const localDay = (minute: number) => new Date(minute * 60000 + offMs).toISOString().slice(0, 10);
+  // The "From" a day row shows is the song's most recent play OVERALL, not its last play that
+  // day: SELECT_TRACK's source subquery (db.ts) is not filtered to the day, and TrackStats
+  // says so in as many words. Reproduced rather than corrected, because the alternative is the
+  // same day reading differently depending on which path produced its rows — and the first
+  // seconds of every visit are still the server's. Plays arrive newest-first, so the first one
+  // seen for a song is its latest. (Checked against getPlaysByDay over all 69 days in the
+  // store, 2026-08-11: per-day source instead of this disagreed on 66 of them.)
+  const latestSource = new Map<number, number>();
+  for (const [t, , src] of hist.plays) if (!latestSource.has(t)) latestSource.set(t, src);
+  const days = new Map<string, Map<string, TrackStats>>();
+  for (const [t, minute] of hist.plays) {
+    const track = hist.tracks[t];
+    if (!track) continue;
+    const [name, artist, img, alb, durationMs] = track;
+    const day = localDay(minute);
+    let rows = days.get(day);
+    if (!rows) days.set(day, (rows = new Map()));
+    const key = `${artist.toLowerCase()}\n${name.toLowerCase()}`;
+    const played = iso(minute);
+    const hit = rows.get(key);
+    if (hit) {
+      // Plays arrive newest-first, so the row was created from the day's LAST play — its time
+      // is already right, and every later play can only push firstPlayed back.
+      hit.plays += 1;
+      hit.firstPlayed = played;
+      continue;
+    }
+    const src = latestSource.get(t) ?? -1;
+    rows.set(key, {
+      // The identity IS the id here: the payload carries no track ids (it is joined on
+      // identity — db.ts), and the only thing the day list uses `id` for is the React key.
+      id: key,
+      name,
+      artist,
+      uri: "",
+      album: alb >= 0 ? (hist.albums[alb] ?? null) : null,
+      albumImage: img >= 0 ? (hist.images[img] ?? null) : null,
+      durationMs: durationMs || null,
+      plays: 1,
+      lastPlayed: played,
+      firstPlayed: played,
+      source: src >= 0 ? (hist.sources[src] ?? null) : null,
+    });
+  }
+  const rows = new Map<string, TrackStats[]>();
+  for (const [day, byKey] of days) {
+    rows.set(
+      day,
+      [...byKey.values()].sort(
+        (a, b) => b.plays - a.plays || b.lastPlayed.localeCompare(a.lastPlayed),
+      ),
+    );
+  }
+  return { rows, newest: hist.plays.length ? localDay(hist.plays[0][1]) : null };
+}
+
 /** Match rank: an exact title beats a title that starts with the query, which beats one that
  *  merely contains it. The library is 5x the size of the history, so without this a typed-out
  *  title can sit below a hundred incidental substring hits — the old index was small enough
@@ -206,10 +325,11 @@ function tier(hay: string, q: string): number {
 // dock render in the page shell instead, OUTSIDE this component's Suspense boundary, so they
 // paint immediately while these (heavier) reads stream in behind a skeleton.
 //
-// Day switching fetches once per day through a server action and caches the result
-// client-side, so revisiting a day is instant and nothing else on the page re-renders.
-// Search hits the full history on the server (debounced), then groups per song or
-// artist — repeated plays collapse into one row you can expand for the exact times.
+// First paint comes from the server's materialized payload; then the full history payload
+// loads in the background, and from that moment BOTH halves of this page are answered out of
+// memory — a day slide is a regroup of plays already in the browser ("Days from memory"), and
+// a query is a substring match over the merged search set. The server action per day survives
+// as the fallback for the seconds before the payload lands, with its per-day cache.
 export function DenHome({
   daily: initialDaily,
   allTime: initialAllTime,
@@ -233,6 +353,34 @@ export function DenHome({
   const [dayMoreBelow, setDayMoreBelow] = useState(false);
   const cache = useRef(new Map<string, TrackStats[]>([[initialDay, initialTracks]]));
   const dayReq = useRef(0);
+
+  // The history payload once it has landed, and every local day derived from it (buildDays
+  // above). One fetch answers both halves of this page: the search box matches against it and
+  // the day list is grouped out of it, so after the first second on the page neither one is
+  // waiting on the store.
+  const [history, setHistory] = useState<HistoryPayload | null>(null);
+  const memoryDays = useMemo(() => (history ? buildDays(history) : null), [history]);
+  /** A day's rows out of memory, or null when the payload cannot answer for that day — it
+   *  hasn't loaded, it's the all-time view, or it's the payload's own newest day (which can be
+   *  short the last few minutes; that day is the one `cache` always holds anyway, because the
+   *  server rendered it and the refresh keeps it current). */
+  const fromMemory = (day: string): TrackStats[] | null => {
+    if (!memoryDays?.newest || day === "all" || day >= memoryDays.newest) return null;
+    return memoryDays.rows.get(day) ?? [];
+  };
+
+  // Two performance marks, and nothing else: when this component is on screen with the server's
+  // data, and when day slides + search stopped needing the server at all. They are read by a
+  // separate collector (anything marked "lb:"); nothing in here reads them back.
+  useEffect(() => {
+    performance.mark("lb:data-rendered");
+  }, []);
+  const markedReady = useRef(false);
+  useEffect(() => {
+    if (!memoryDays || markedReady.current) return;
+    markedReady.current = true;
+    performance.mark("lb:history-ready");
+  }, [memoryDays]);
 
   // A past day's plays can never change — once fetched it's frozen history. So persist those
   // to sessionStorage and they survive navigation entirely (no server round-trip on return).
@@ -301,6 +449,17 @@ export function DenHome({
       setTracks(hit);
       return;
     }
+    // Grouped out of the payload in memory: no request, no pending state, this frame. It is
+    // deliberately NOT written into `cache` — the payload is the source of truth for these
+    // days, and a copy taken now would not see the plays a refresh patches into it later.
+    // The counter still moves, so a slower server day already in flight can't land on top.
+    const mem = fromMemory(day);
+    if (mem) {
+      dayReq.current++;
+      setDayPending(false);
+      setTracks(mem);
+      return;
+    }
     const req = ++dayReq.current;
     setDayPending(true);
     fetchDay(day)
@@ -325,6 +484,10 @@ export function DenHome({
     if (i < 0) return; // "all", or a day the strip hasn't loaded — nothing adjacent to warm
     for (const day of [daily[i + 1]?.day, daily[i - 1]?.day]) {
       if (!day || cache.current.has(day) || warming.current.has(day)) continue;
+      // Once the payload is in, every day is already answered from memory — warming one would
+      // be a read of the store for rows nothing will ever look at. So this window closes on
+      // its own, and what survives is the fallback for the first seconds of a visit.
+      if (fromMemory(day)) continue;
       warming.current.add(day);
       void fetchDay(day)
         .catch(() => {
@@ -396,7 +559,8 @@ export function DenHome({
       (d) =>
         Array.isArray(d?.tracks) &&
         Array.isArray(d?.plays) &&
-        (!d.tracks.length || d.tracks[0]?.length >= 4),
+        // 5, not 4: a v1 body (no durationMs) would derive days with an empty Length column.
+        (!d.tracks.length || d.tracks[0]?.length >= 5),
     );
     const [lib, hist] = [libReq.current, histReq.current];
     void Promise.all([lib, hist]).then(([l, h]) => {
@@ -411,6 +575,9 @@ export function DenHome({
       }
       indexStatus.current = "memory";
       setEntries(buildEntries(l, h));
+      // The history half also feeds the day list (buildDays). Only set on success: a failed
+      // history fetch must leave an earlier payload — and the days derived from it — standing.
+      if (h) setHistory(h);
     });
   };
 
@@ -431,6 +598,11 @@ export function DenHome({
   // build entirely. requestIdleCallback so it can never compete with hydration or the first
   // paint; a plain timeout where that doesn't exist (Safari). Focus and the first keystroke
   // stay wired to loadIndex() as backstops — it is idempotent, so whichever fires first wins.
+  //
+  // It is no longer only the search box that waits on this: the day list derives from the
+  // history half too, so this fetch is what ends the page's dependence on the store, whether or
+  // not anyone types. Both halves start here — the day list needs one of them, and splitting
+  // the start would just move the library's build cost onto the first keystroke again.
   useEffect(() => {
     const w = window as Window & {
       requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number;
@@ -526,6 +698,9 @@ export function DenHome({
           histReq.current = Promise.resolve(patched);
           const lib = libReq.current ? await libReq.current : null;
           setEntries(buildEntries(lib, patched));
+          // Same delta, same object: the derived days re-group off the patched payload, so a
+          // play that just landed is in yesterday's rows too if that is where it belongs.
+          setHistory(patched);
         } else {
           // No payload in memory yet (still fetching or failed) — the old drop-and-refetch
           // is the right fallback; the ≤10-min-stale copy beats none.
@@ -584,6 +759,11 @@ export function DenHome({
     id: string;
     title: string;
     artist: string;
+    // The album NAME, not just its art. /api/now-playing passes normTrack's track through
+    // whole (spotify/resources.ts sets `album`), so the bar has always had it — the row built
+    // below just wasn't capturing it, and a song landed in today's list with a blank Album
+    // column until the next sync replaced the row with the server's.
+    album: string | null;
     albumImage: string | null;
     durationMs: number;
     source: string | null;
@@ -599,7 +779,7 @@ export function DenHome({
         name: p.title,
         artist: p.artist,
         uri: `spotify:track:${p.id}`,
-        album: null,
+        album: p.album,
         albumImage: p.albumImage,
         durationMs: p.durationMs || null,
         plays: 1,
@@ -641,6 +821,7 @@ export function DenHome({
           id: playing.track.id,
           title: playing.track.title,
           artist: playing.track.artist,
+          album: playing.track.album ?? null,
           albumImage: playing.track.albumImage,
           durationMs: playing.durationMs,
           source: playing.context?.name ?? null,
@@ -781,10 +962,23 @@ export function DenHome({
     }
   };
 
+  // Which playlists a song sits in, off the SAME entries the search rows read (an expanded
+  // result's "In …" line is `entry.playlists`) — the library payload is inverted once, when it
+  // lands, into identity → playlist names, and both surfaces answer from it. Songs in no
+  // playlist are left out, so a miss is the answer rather than an empty array to check.
+  const inPlaylists = useMemo(() => {
+    if (!entries) return null;
+    const m = new Map<string, string[]>();
+    for (const e of entries) if (e.playlists.length) m.set(e.key, e.playlists);
+    return m;
+  }, [entries]);
+
   const dayRows = useMemo(() => {
     const f = dir === "asc" ? 1 : -1;
-    return [...tracks].sort((a, b) => f * compareTracks(a, b, sort));
-  }, [tracks, sort, dir]);
+    return [...tracks].sort(
+      (a, b) => f * compareTracks(a, b, sort, (t) => fromText(t, inPlaylists)),
+    );
+  }, [tracks, sort, dir, inPlaylists]);
 
   // Recompute the bottom cue whenever the visible rows change (new day / re-sort).
   useEffect(() => {
@@ -936,48 +1130,53 @@ export function DenHome({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border/50">
-                    {dayRows.map((t) => (
-                      <tr
-                        key={`${t.id}-${t.lastPlayed}`}
-                        onContextMenu={openMenu(t.name, t.artist)}
-                        className={cn(
-                          freshKey === `${t.artist.toLowerCase()}\n${t.name.toLowerCase()}` &&
-                            "row-fresh",
-                        )}
-                      >
-                        <td className="py-2 pr-3">
-                          <div className="flex min-w-0 items-center gap-3">
-                            <Art image={t.albumImage} size={10} />
-                            <div className="min-w-0 flex-1">
-                              <p className="truncate select-text">{t.name}</p>
-                              <p className="truncate text-[13px] text-muted-foreground select-text">
-                                {t.artist}
-                              </p>
-                              {/* Phones hide the side columns — fold time + source here. */}
-                              <p className="mt-0.5 truncate text-[11px] text-muted-foreground/70 sm:hidden">
-                                {selected === "all" ? timeAgo(t.lastPlayed) : clockTime(t.lastPlayed)}
-                                {t.source ? ` · ${t.source}` : ""}
-                              </p>
+                    {dayRows.map((t) => {
+                      const from = fromText(t, inPlaylists);
+                      return (
+                        <tr
+                          key={`${t.id}-${t.lastPlayed}`}
+                          onContextMenu={openMenu(t.name, t.artist)}
+                          className={cn(
+                            freshKey === `${t.artist.toLowerCase()}\n${t.name.toLowerCase()}` &&
+                              "row-fresh",
+                          )}
+                        >
+                          <td className="py-2 pr-3">
+                            <div className="flex min-w-0 items-center gap-3">
+                              <Art image={t.albumImage} size={10} />
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate select-text">{t.name}</p>
+                                <p className="truncate text-[13px] text-muted-foreground select-text">
+                                  {t.artist}
+                                </p>
+                                {/* Phones hide the side columns — fold time + source here. */}
+                                <p className="mt-0.5 truncate text-[11px] text-muted-foreground/70 sm:hidden">
+                                  {selected === "all"
+                                    ? timeAgo(t.lastPlayed)
+                                    : clockTime(t.lastPlayed)}
+                                  {from ? ` · ${from}` : ""}
+                                </p>
+                              </div>
                             </div>
-                          </div>
-                        </td>
-                        <td className="hidden truncate py-2 pr-4 text-muted-foreground md:table-cell">
-                          {t.album ?? "—"}
-                        </td>
-                        <td className="hidden py-2 pr-6 text-right tabular-nums text-muted-foreground sm:table-cell">
-                          {formatDuration(t.durationMs)}
-                        </td>
-                        <td className="py-2 pr-6 text-right tabular-nums text-muted-foreground">
-                          {t.plays}
-                        </td>
-                        <td className="hidden py-2 pr-6 text-right tabular-nums text-muted-foreground sm:table-cell">
-                          {selected === "all" ? timeAgo(t.lastPlayed) : clockTime(t.lastPlayed)}
-                        </td>
-                        <td className="hidden truncate py-2 text-right text-muted-foreground lg:table-cell">
-                          {t.source ?? "(queued)"}
-                        </td>
-                      </tr>
-                    ))}
+                          </td>
+                          <td className="hidden truncate py-2 pr-4 text-muted-foreground md:table-cell">
+                            {t.album ?? "—"}
+                          </td>
+                          <td className="hidden py-2 pr-6 text-right tabular-nums text-muted-foreground sm:table-cell">
+                            {formatDuration(t.durationMs)}
+                          </td>
+                          <td className="py-2 pr-6 text-right tabular-nums text-muted-foreground">
+                            {t.plays}
+                          </td>
+                          <td className="hidden py-2 pr-6 text-right tabular-nums text-muted-foreground sm:table-cell">
+                            {selected === "all" ? timeAgo(t.lastPlayed) : clockTime(t.lastPlayed)}
+                          </td>
+                          <td className="hidden py-2 text-right text-muted-foreground lg:table-cell">
+                            <FromCell text={from ?? "(queued)"} />
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
                 </div>
@@ -1076,6 +1275,49 @@ function SortHead({
         )
       ) : null}
     </button>
+  );
+}
+
+// A day row's "From" text, in a column that must not grow: the playlists a song lives in are
+// routinely wider than it. At rest the cell clips to an ellipsis like every other column; while
+// the cursor is on THIS cell the string scrolls past and back so the rest of it can be read.
+//
+// The overflow is measured here, on enter — one layout read, on the one cell being looked at —
+// and handed to the animation as a distance and a duration (the keyframes live in den.css). It
+// has to be measured: an animation that can't know how far the text hides either stops short or
+// runs the text off the edge. Speed is constant, so a long list takes longer rather than moving
+// faster, and a cell whose text fits does nothing at all.
+const MARQUEE_PX_PER_S = 34;
+/** The share of the keyframes that moves; the rest is the pause at each end. */
+const MARQUEE_MOVING = 0.7;
+
+function FromCell({ text }: { text: string }) {
+  const box = useRef<HTMLSpanElement>(null);
+  const start = () => {
+    const el = box.current;
+    if (!el) return;
+    const over = el.scrollWidth - el.clientWidth;
+    if (over <= 1) return;
+    el.style.setProperty("--den-marquee-x", `${-over}px`);
+    el.style.setProperty(
+      "--den-marquee-dur",
+      `${(over / MARQUEE_PX_PER_S / MARQUEE_MOVING).toFixed(2)}s`,
+    );
+    el.dataset.run = "";
+  };
+  const stop = () => {
+    const el = box.current;
+    if (el) delete el.dataset.run;
+  };
+  return (
+    <span
+      ref={box}
+      onMouseEnter={start}
+      onMouseLeave={stop}
+      className="den-marquee inline-block max-w-full truncate align-middle text-left"
+    >
+      <span>{text}</span>
+    </span>
   );
 }
 

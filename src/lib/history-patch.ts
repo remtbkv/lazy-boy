@@ -14,7 +14,7 @@ export type HistoryPayloadShape = {
   images: string[];
   albums: string[];
   sources: string[];
-  tracks: [string, string, number, number][];
+  tracks: [string, string, number, number, number][];
   plays: [number, number, number][];
 };
 
@@ -23,6 +23,7 @@ export type NewPlayRow = {
   artist: string;
   album: string | null;
   albumImage: string | null;
+  durationMs: number | null;
   lastPlayed: string; // this play's ISO timestamp (searchHistory returns one row per play)
   source: string | null;
 };
@@ -66,6 +67,8 @@ export function patchHistoryPayload(
         p.artist,
         intern(out.images, p.albumImage),
         intern(out.albums, p.album),
+        // 0 = unknown, the same convention the server-built payload uses (db.ts HistoryTrack).
+        p.durationMs ?? 0,
       ]);
       trackAt.set(key, t);
     }

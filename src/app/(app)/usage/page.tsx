@@ -1,4 +1,4 @@
-import { readLedger, type LedgerRow } from "@/lib/db";
+import { getClientMetricsSummary, readLedger, type LedgerRow } from "@/lib/db";
 
 // The instrument panel for the rows-read quota — the ledger written by every named read path
 // (src/lib/read-costs.ts owns the model, db.ts "The read-cost ledger" owns the storage),
@@ -45,6 +45,13 @@ async function liveCounters(): Promise<Record<string, number> | null> {
   }
 }
 
+/** A duration as the eye reads it: sub-second in ms, longer in seconds. `—` when the event
+ *  has no samples on that page yet. */
+function ms(v: number | null | undefined): string {
+  if (v == null) return "—";
+  return v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${Math.round(v)}ms`;
+}
+
 function byDay(rows: LedgerRow[]): { day: string; rows: LedgerRow[] }[] {
   const days: { day: string; rows: LedgerRow[] }[] = [];
   for (const r of rows) {
@@ -56,7 +63,11 @@ function byDay(rows: LedgerRow[]): { day: string; rows: LedgerRow[] }[] {
 }
 
 export default async function UsagePage() {
-  const [ledger, counters] = await Promise.all([readLedger(DAYS), liveCounters()]);
+  const [ledger, counters, clientMetrics] = await Promise.all([
+    readLedger(DAYS),
+    liveCounters(),
+    getClientMetricsSummary(),
+  ]);
   const days = byDay(ledger);
 
   return (
@@ -137,6 +148,60 @@ export default async function UsagePage() {
           );
         })
       )}
+
+      {/* What the browser measured on real loads (src/lib/metrics-client.ts collects it,
+          db.ts's `client_metrics` stores it) — the other half of this page: the ledger above
+          is what the app spends, this is what the app feels like. */}
+      <section className="mt-12">
+        <div className="flex items-baseline justify-between border-b border-border/60 pb-1">
+          <h2 className="font-mono text-sm">client metrics</h2>
+          <p className="text-sm text-muted-foreground">last 7 days</p>
+        </div>
+        {clientMetrics.length === 0 ? (
+          <p className="mt-3 text-sm text-muted-foreground">
+            No client metrics yet — nothing has been reported from a browser.
+          </p>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-xs text-muted-foreground">
+                <th className="py-1 text-left font-normal">page</th>
+                <th className="w-16 py-1 text-right font-normal">views</th>
+                <th className="w-20 py-1 text-right font-normal">lcp p50</th>
+                <th className="w-20 py-1 text-right font-normal">lcp p95</th>
+                <th className="w-24 py-1 text-right font-normal">data p50</th>
+                <th className="w-24 py-1 text-right font-normal">data p95</th>
+                <th className="w-24 py-1 text-right font-normal">hist p50</th>
+                <th className="w-24 py-1 text-right font-normal">hist p95</th>
+                <th className="w-20 py-1 text-right font-normal">visit</th>
+              </tr>
+            </thead>
+            <tbody>
+              {clientMetrics.map((p) => (
+                <tr key={p.page}>
+                  <td className="py-1 font-mono text-xs">{p.page}</td>
+                  <td className="w-16 py-1 text-right tabular-nums">{nf.format(p.views)}</td>
+                  <td className="w-20 py-1 text-right tabular-nums">{ms(p.stats.lcp?.p50)}</td>
+                  <td className="w-20 py-1 text-right tabular-nums">{ms(p.stats.lcp?.p95)}</td>
+                  <td className="w-24 py-1 text-right tabular-nums">
+                    {ms(p.stats["data-rendered"]?.p50)}
+                  </td>
+                  <td className="w-24 py-1 text-right tabular-nums">
+                    {ms(p.stats["data-rendered"]?.p95)}
+                  </td>
+                  <td className="w-24 py-1 text-right tabular-nums">
+                    {ms(p.stats["history-ready"]?.p50)}
+                  </td>
+                  <td className="w-24 py-1 text-right tabular-nums">
+                    {ms(p.stats["history-ready"]?.p95)}
+                  </td>
+                  <td className="w-20 py-1 text-right tabular-nums">{ms(p.avgVisitMs)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
     </main>
   );
 }
