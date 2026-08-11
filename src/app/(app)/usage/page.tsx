@@ -189,7 +189,10 @@ function LoadStory({
         // A part that didn't report on a given open is `—`, never a zero — an in-app
         // navigation has no first paint of its own, and the player is already answered by the
         // time you arrive, so both legitimately have nothing to say on those rows.
-        <table className="mt-3 w-full text-xs">
+        // Phones: the table keeps its columns and scrolls sideways inside this box, so the
+        // PAGE never gains a horizontal scrollbar (390px viewport overflowed by ~33px).
+        <div className="overflow-x-auto">
+          <table className="mt-3 w-full min-w-[26rem] text-xs">
           <thead>
             <tr className="text-muted-foreground">
               <th className="py-1 text-left font-normal">open</th>
@@ -227,7 +230,8 @@ function LoadStory({
               </tr>
             ))}
           </tbody>
-        </table>
+          </table>
+        </div>
       )}
     </div>
   );
@@ -285,7 +289,8 @@ export default async function UsagePage() {
             <h2 className="font-mono text-sm">once it&rsquo;s open</h2>
             <p className="text-sm text-muted-foreground">last 7 days</p>
           </div>
-          <table className="mt-1 w-full text-sm">
+          <div className="overflow-x-auto">
+            <table className="mt-1 w-full min-w-[30rem] text-sm">
             <thead>
               <tr className="text-xs text-muted-foreground">
                 <th className="py-1 text-left font-normal">page</th>
@@ -318,7 +323,8 @@ export default async function UsagePage() {
                 </tr>
               ))}
             </tbody>
-          </table>
+            </table>
+          </div>
 
           {/* The error COUNT above says something threw; these say WHAT. Verbatim browser
               messages, newest first — without them the count is an anxiety, not a diagnosis. */}

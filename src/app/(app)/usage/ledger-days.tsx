@@ -180,7 +180,9 @@ export function LedgerDays({ ledger }: { ledger: LedgerRow[] }) {
         </p>
       )}
 
-      <table className="mt-1 w-full text-sm">
+      {/* Phones: sideways scroll stays inside this box, never on the page. */}
+      <div className="overflow-x-auto">
+        <table className="mt-1 w-full min-w-[24rem] text-sm">
         <thead>
           <tr className="text-xs text-muted-foreground">
             <th className="py-1 text-left font-normal">reader</th>
@@ -252,7 +254,8 @@ export function LedgerDays({ ledger }: { ledger: LedgerRow[] }) {
             );
           })}
         </tbody>
-      </table>
+        </table>
+      </div>
     </section>
   );
 }
