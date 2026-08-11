@@ -118,8 +118,11 @@ export function PlaylistsGrid({
         </ul>
       )}
 
-      {/* Bottom-centered search island (search moved out of the header row). */}
-      <SearchIsland query={query} onQuery={setQuery} placeholder="Search your playlists…" />
+      {/* Bottom-centered search island (search moved out of the header row). Under 20
+          playlists the page is too short to need searching — the island just covers tiles. */}
+      {playlists.length >= 20 && (
+        <SearchIsland query={query} onQuery={setQuery} placeholder="Search your playlists…" />
+      )}
     </div>
   );
 }

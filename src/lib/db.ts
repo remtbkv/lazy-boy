@@ -2556,7 +2556,11 @@ export type PageOpen = {
   parts: Record<string, number>;
 };
 
-export type ClientLoadSpeed = { pages: ClientMetricsPage[]; opens: PageOpen[] };
+/** One thrown error, verbatim: what the browser said, where, when. An error count alone is
+ *  not interpretable — the message is the whole diagnosis. */
+export type ClientError = { at: string; page: string; message: string };
+
+export type ClientLoadSpeed = { pages: ClientMetricsPage[]; opens: PageOpen[]; errors: ClientError[] };
 
 /** The timing events the usage page charts. Anything else (a new `lb:` mark) still lands in
  *  the table — it just isn't summarised until it is named here. `inp` and `cls` are the two
@@ -2637,10 +2641,14 @@ export async function getClientLoadSpeed(): Promise<ClientLoadSpeed> {
   // of that view. `seq` is the row id it was last seen at — the only reliable ordering, since
   // every row of one beacon shares a `ts`.
   const opens = new Map<string, PageOpen & { seq: number }>();
+  const errors: ClientError[] = [];
   for (const row of res.rows) {
     const page = String(row.page ?? "");
     const event = String(row.event ?? "");
-    const { pv } = splitMeta(row.meta === null ? null : String(row.meta));
+    const { pv, meta } = splitMeta(row.meta === null ? null : String(row.meta));
+    if (event === "js-error" && meta) {
+      errors.push({ at: String(row.ts ?? ""), page, message: meta });
+    }
     const value = row.value === null ? null : Number(row.value);
     const finite = value !== null && Number.isFinite(value);
 
@@ -2738,5 +2746,7 @@ export async function getClientLoadSpeed(): Promise<ClientLoadSpeed> {
     })
     .sort((a, b) => b.views - a.views || a.page.localeCompare(b.page));
 
-  return { pages: summary, opens: recent };
+  // Newest first, a handful — enough to read what broke without the page becoming a log
+  // viewer. The full history stays queryable in the table.
+  return { pages: summary, opens: recent, errors: errors.reverse().slice(0, 5) };
 }

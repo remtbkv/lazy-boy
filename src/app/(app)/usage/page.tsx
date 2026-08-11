@@ -319,6 +319,20 @@ export default async function UsagePage() {
               ))}
             </tbody>
           </table>
+
+          {/* The error COUNT above says something threw; these say WHAT. Verbatim browser
+              messages, newest first — without them the count is an anxiety, not a diagnosis. */}
+          {client.errors.length > 0 && (
+            <ul className="mt-3 space-y-1">
+              {client.errors.map((e, i) => (
+                <li key={i} className="text-xs leading-relaxed text-muted-foreground">
+                  <span className="tabular-nums">{openTime(e.at, tz)}</span>
+                  <span className="font-mono"> {e.page} </span>
+                  <span className="text-destructive/80">{e.message}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
       )}
 

@@ -1149,8 +1149,15 @@ export function DenHome({
                                 <p className="truncate text-[13px] text-muted-foreground select-text">
                                   {t.artist}
                                 </p>
-                                {/* Phones hide the side columns — fold time + source here. */}
-                                <p className="mt-0.5 truncate text-[11px] text-muted-foreground/70 sm:hidden">
+                                {/* Phones hide the side columns — fold time + source here.
+                                    suppressHydrationWarning: timeAgo() reads the clock, and a
+                                    minute boundary crossing between SSR and hydration flips
+                                    the text ("14h ago" → "15h ago") — a real #418 in the
+                                    metrics on 2026-08-11, not a code bug. */}
+                                <p
+                                  suppressHydrationWarning
+                                  className="mt-0.5 truncate text-[11px] text-muted-foreground/70 sm:hidden"
+                                >
                                   {selected === "all"
                                     ? timeAgo(t.lastPlayed)
                                     : clockTime(t.lastPlayed)}
@@ -1168,7 +1175,12 @@ export function DenHome({
                           <td className="py-2 pr-6 text-right tabular-nums text-muted-foreground">
                             {t.plays}
                           </td>
-                          <td className="hidden py-2 pr-6 text-right tabular-nums text-muted-foreground sm:table-cell">
+                          {/* suppressHydrationWarning: same clock-boundary flip as the phone
+                              fold above. */}
+                          <td
+                            suppressHydrationWarning
+                            className="hidden py-2 pr-6 text-right tabular-nums text-muted-foreground sm:table-cell"
+                          >
                             {selected === "all" ? timeAgo(t.lastPlayed) : clockTime(t.lastPlayed)}
                           </td>
                           <td className="hidden py-2 text-right text-muted-foreground lg:table-cell">
@@ -1341,7 +1353,10 @@ function PlayedAt({ last }: { last: number | null }) {
   return last == null ? (
     <p className="text-xs text-muted-foreground/50">Never played</p>
   ) : (
-    <p className="text-xs tabular-nums text-muted-foreground">{timeAgo(iso(last))}</p>
+    // suppressHydrationWarning: timeAgo() reads the clock (see the song-table cells).
+    <p suppressHydrationWarning className="text-xs tabular-nums text-muted-foreground">
+      {timeAgo(iso(last))}
+    </p>
   );
 }
 

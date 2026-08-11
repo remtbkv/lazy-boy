@@ -18,8 +18,9 @@ import { cn } from "@/lib/utils";
 //   • A PER-ROW ANCHOR. Each row carries the previous day's modeled rows as a delta, so a
 //     path that doubled overnight is legible without holding two screens in your head.
 //
-// Arrow keys page (left = older, right = newer) because that is how you actually read a
-// ledger — the chevrons are the same action for touch, and for anyone who doesn't guess.
+// Arrow keys page RIGHT = older, LEFT = newer (Rem's read direction, 2026-08-11): the newest
+// day opens first at 1/N, and paging "forward" walks back in time like flipping pages of a
+// log. The chevrons are the same action for touch, and for anyone who doesn't guess.
 
 const nf = new Intl.NumberFormat("en-US");
 
@@ -103,7 +104,7 @@ export function LedgerDays({ ledger }: { ledger: LedgerRow[] }) {
         return;
       }
       e.preventDefault();
-      move(e.key === "ArrowLeft" ? 1 : -1); // left goes back in time
+      move(e.key === "ArrowRight" ? 1 : -1); // right goes back in time
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -144,9 +145,9 @@ export function LedgerDays({ ledger }: { ledger: LedgerRow[] }) {
             <button
               type="button"
               className={chevron}
-              onClick={() => move(1)}
-              disabled={index >= days.length - 1}
-              aria-label="Previous day"
+              onClick={() => move(-1)}
+              disabled={index === 0}
+              aria-label="Newer day"
             >
               <ChevronLeft className="size-4" />
             </button>
@@ -156,9 +157,9 @@ export function LedgerDays({ ledger }: { ledger: LedgerRow[] }) {
             <button
               type="button"
               className={chevron}
-              onClick={() => move(-1)}
-              disabled={index === 0}
-              aria-label="Next day"
+              onClick={() => move(1)}
+              disabled={index >= days.length - 1}
+              aria-label="Older day"
             >
               <ChevronRight className="size-4" />
             </button>
