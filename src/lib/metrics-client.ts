@@ -1,4 +1,4 @@
-import { onFCP, onLCP, onTTFB } from "web-vitals";
+import { onCLS, onFCP, onINP, onLCP, onTTFB } from "web-vitals";
 
 // Self-hosted RUM: what the browser actually measured on this page load, posted to
 // /api/metrics and stored in `client_metrics` (db.ts, "Client performance metrics"). No
@@ -10,6 +10,15 @@ import { onFCP, onLCP, onTTFB } from "web-vitals";
 //   ttfb / fcp / lcp            web-vitals, attributed to the page the browser LOADED —
 //                               they resolve late, and a soft nav in the meantime must not
 //                               reassign them to a page that never paid for them
+//   inp / cls                   the two vitals LCP cannot see: how long the app took to
+//                               answer a tap, and how far the layout moved under the reader.
+//                               Both are final only when the view is hidden, so web-vitals
+//                               reports them on visibilitychange/pagehide — registered BEFORE
+//                               our own pagehide flush so the value is in the buffer when the
+//                               beacon goes out
+//   js-error                    an uncaught error or rejected promise, message (truncated) in
+//                               `meta`. Capped per view: a throw inside a render loop must
+//                               not become a beacon loop
 //   <name>                      any `performance.mark("lb:<name>")` the app makes, recorded
 //                               as event `<name>` with value = mark.startTime. Generic on
 //                               purpose: app code emits marks, this file never has to know
@@ -34,6 +43,8 @@ const SESSION_KEY = "lb:metrics-session";
 const FLUSH_AFTER_LOAD_MS = 10_000;
 const MAX_BATCH = 50; // the route rejects more than this in one body
 const MAX_BUFFER = 200; // a runaway mark loop must not grow the buffer without bound
+const MAX_ERRORS = 5; // per tab: the first few throws say what broke, the rest are the echo
+const MAX_ERROR_CHARS = 180; // the route truncates `meta` at 200 anyway
 
 type MetricEvent = { page: string; event: string; value?: number; meta?: string };
 
@@ -45,6 +56,7 @@ let loadPage = ""; // the view the browser loaded, which owns the vitals
 let visibleSince = 0; // performance.now() when this view last became visible; 0 while hidden
 let visibleMs = 0; // visible time accumulated for this view
 let pendingNav: { path: string; at: number } | null = null;
+let errorsRecorded = 0;
 
 /** Stable per-tab id. sessionStorage so a reload starts a new one — a "session" here means
  *  one sitting in one tab, which is the unit a slow page is experienced in. */
@@ -112,6 +124,21 @@ function onPageHide(): void {
   flush();
 }
 
+/** File one uncaught error against the view it happened on. The cap is the whole safety
+ *  story: an error thrown from a render or an interval would otherwise report on every
+ *  repetition, and the reporting path itself can throw — so this never runs its own work
+ *  outside the try. */
+function onError(message: unknown): void {
+  try {
+    if (errorsRecorded >= MAX_ERRORS) return;
+    errorsRecorded += 1;
+    const text = typeof message === "string" ? message : String(message ?? "unknown");
+    record("js-error", undefined, text.slice(0, MAX_ERROR_CHARS));
+  } catch {
+    /* an instrument that throws while reporting a throw is worse than the original error */
+  }
+}
+
 /** A capture-phase click on an in-app link starts the soft-navigation clock; setPage() stops
  *  it when the destination actually renders. Cheap and honest — it measures what the user
  *  waited through. A click that never lands (a new page, an aborted nav) just expires. */
@@ -158,6 +185,11 @@ export function startMetrics(): void {
     onTTFB((m) => record("ttfb", m.value, undefined, loadPage));
     onFCP((m) => record("fcp", m.value, undefined, loadPage));
     onLCP((m) => record("lcp", m.value, undefined, loadPage));
+    // INP and CLS accumulate across the whole visit, so they belong to the loaded page for
+    // the same reason the others do, and they arrive at hide time — before the pagehide
+    // flush below, which is registered after these.
+    onINP((m) => record("inp", m.value, undefined, loadPage));
+    onCLS((m) => record("cls", m.value, undefined, loadPage));
 
     // `buffered: true` replays marks made before this ran, so app code can mark during its
     // first render without caring when the collector mounted.
@@ -168,6 +200,8 @@ export function startMetrics(): void {
       }
     }).observe({ type: "mark", buffered: true });
 
+    window.addEventListener("error", (e) => onError(e.message));
+    window.addEventListener("unhandledrejection", (e) => onError(e.reason));
     document.addEventListener("click", onClick, true);
     document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener("pagehide", onPageHide);

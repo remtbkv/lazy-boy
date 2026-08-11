@@ -195,8 +195,12 @@ inflates the ledger and therefore *shrinks* the residual — the bias runs towar
 under-alarming, never toward a false alarm. And the ledger's own writes (~2 rows each, ~3K a
 day) are not ledgered: an instrument that measures itself does not terminate.
 
-**Where to look:** `/usage` — authed, no nav link, last 14 days as a per-day reader table with
-the platform total and residual called out. Known-answer tests:
+**Where to look:** `/usage` — authed, no nav link. The last 14 days, ONE day at a time (← / →
+or the chevrons; the whole window is fetched once and paged in the browser, so reading the
+ledger cannot move the counter it reports). Every reader draws on every day, zero-filled, in
+`LEDGER_READERS` order, with calls, modeled rows, rows per call and the change against the
+previous day — a fixed row order is what makes two days comparable. The platform total and the
+residual sit below the rule, with the alarm bar (`residualVerdict`) restated where it applies. Known-answer tests:
 `node scripts/test-ledger.mjs` (throwaway file DB; the reconciliation math is imported from
 the shipped source, the storage SQL is a copy that must match `db.ts`).
 

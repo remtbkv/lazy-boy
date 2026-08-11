@@ -2724,13 +2724,26 @@ export type ClientMetricsPage = {
   page: string;
   views: number;
   avgVisitMs: number | null;
+  /** `js-error` reports on this page in the window. A count, not a distribution: one throw is
+   *  already the whole signal, and the message rides along in the row's `meta`. */
+  errors: number;
   /** Keyed by event name; an event with no samples on this page is absent. */
   stats: Record<string, MetricStat>;
 };
 
 /** The timing events the usage page charts. Anything else (a new `lb:` mark) still lands in
- *  the table — it just isn't summarised until it is named here. */
-export const SUMMARY_EVENTS = ["ttfb", "fcp", "lcp", "data-rendered", "history-ready"] as const;
+ *  the table — it just isn't summarised until it is named here. `inp` and `cls` are the two
+ *  vitals that measure what LCP can't: how long the app took to answer a tap, and how much it
+ *  moved under the reader. */
+export const SUMMARY_EVENTS = [
+  "ttfb",
+  "fcp",
+  "lcp",
+  "inp",
+  "cls",
+  "data-rendered",
+  "history-ready",
+] as const;
 
 const CLIENT_METRICS_WINDOW_MS = 7 * 86_400_000;
 
@@ -2758,8 +2771,9 @@ function percentile(values: number[], p: number): number {
   return sorted[i];
 }
 
-/** Per-page client timings over the last 7 days, busiest page first: how many views, the p50
- *  and p95 of each summarised event, and the average time a visit stayed visible. */
+/** Per-page client timings over the last 7 days, busiest page first: how many views, how many
+ *  js-errors, the p50 and p95 of each summarised event, and the average time a visit stayed
+ *  visible. */
 export async function getClientMetricsSummary(): Promise<ClientMetricsPage[]> {
   const client = await getClient();
   const cutoff = new Date(Date.now() - CLIENT_METRICS_WINDOW_MS).toISOString();
@@ -2768,15 +2782,25 @@ export async function getClientMetricsSummary(): Promise<ClientMetricsPage[]> {
     args: { cutoff },
   });
 
-  const pages = new Map<string, { views: number; visits: number[]; samples: Map<string, number[]> }>();
+  const pages = new Map<
+    string,
+    { views: number; errors: number; visits: number[]; samples: Map<string, number[]> }
+  >();
   for (const row of res.rows) {
     const page = String(row.page ?? "");
     const event = String(row.event ?? "");
     const entry =
-      pages.get(page) ?? { views: 0, visits: [], samples: new Map<string, number[]>() };
+      pages.get(page) ??
+      { views: 0, errors: 0, visits: [], samples: new Map<string, number[]>() };
     pages.set(page, entry);
     if (event === "pageview") {
       entry.views += 1;
+      continue;
+    }
+    // Counted, not sampled — and counted before the value check, because a js-error row
+    // carries its message in `meta` and may have no numeric value at all.
+    if (event === "js-error") {
+      entry.errors += 1;
       continue;
     }
     if (row.value === null) continue;
@@ -2805,6 +2829,7 @@ export async function getClientMetricsSummary(): Promise<ClientMetricsPage[]> {
       return {
         page,
         views: e.views,
+        errors: e.errors,
         avgVisitMs: e.visits.length
           ? e.visits.reduce((n, v) => n + v, 0) / e.visits.length
           : null,

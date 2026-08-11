@@ -1,15 +1,21 @@
-import { getClientMetricsSummary, readLedger, type LedgerRow } from "@/lib/db";
+import { redirect } from "next/navigation";
+import { auth } from "@/lib/auth";
+import { getClientMetricsSummary, readLedger, type MetricStat } from "@/lib/db";
+import { LedgerDays } from "./ledger-days";
 
 // The instrument panel for the rows-read quota — the ledger written by every named read path
 // (src/lib/read-costs.ts owns the model, db.ts "The read-cost ledger" owns the storage),
 // with the platform counter and the unexplained residual the daily cron reconciles into it.
 //
-// Deliberately plain. This is not a product surface: it is the page you open when the number
-// on Turso's dashboard moves and you want to know which path moved it. No chart, no client
-// JS, no link in the nav — it costs nothing while nobody is looking at it.
+// Deliberately plain. This is not a product surface: it is the page you open when the metered
+// number moves and you want to know which path moved it. No chart, no link in the nav — it
+// costs nothing while nobody is looking at it. The one piece of client JS is the day pager
+// (ledger-days.tsx): the whole window is fetched HERE, once, and paged in the browser, so
+// walking back through a fortnight cannot spend a single billed row on the store it watches.
 //
-// Auth is the (app) layout's job (it redirects without a session), same as every other page
-// in the group.
+// Auth is gated HERE, not left to the (app) layout: Next renders layout and page in
+// parallel, so the layout's redirect alone still flushes the page's data into the 307
+// body (docs/SECURITY.md).
 export const dynamic = "force-dynamic";
 
 const DAYS = 14;
@@ -52,23 +58,30 @@ function ms(v: number | null | undefined): string {
   return v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${Math.round(v)}ms`;
 }
 
-function byDay(rows: LedgerRow[]): { day: string; rows: LedgerRow[] }[] {
-  const days: { day: string; rows: LedgerRow[] }[] = [];
-  for (const r of rows) {
-    const last = days[days.length - 1];
-    if (last && last.day === r.day) last.rows.push(r);
-    else days.push({ day: r.day, rows: [r] });
-  }
-  return days;
+/** Layout shift is unitless, and rounding it to a millisecond figure would read as zero. */
+function cls(v: number | null | undefined): string {
+  return v == null ? "—" : v.toFixed(2);
+}
+
+/** One event's typical value with its bad tail beside it, muted — the p95 is what a slow load
+ *  felt like, the p50 is what the page usually is. */
+function pair(stat: MetricStat | undefined, fmt: (v: number | null | undefined) => string) {
+  return (
+    <>
+      {fmt(stat?.p50)}
+      <span className="text-muted-foreground"> / {fmt(stat?.p95)}</span>
+    </>
+  );
 }
 
 export default async function UsagePage() {
+  const session = await auth();
+  if (!session || session.error) redirect("/login");
   const [ledger, counters, clientMetrics] = await Promise.all([
     readLedger(DAYS),
     liveCounters(),
     getClientMetricsSummary(),
   ]);
-  const days = byDay(ledger);
 
   return (
     <main className="mx-auto w-full max-w-3xl flex-1 px-4 pb-28 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
@@ -76,7 +89,9 @@ export default async function UsagePage() {
       <p className="mt-3 max-w-xl text-sm leading-relaxed text-muted-foreground">
         Modeled rows read per reader per UTC day, against what Turso actually billed.{" "}
         <span className="font-mono">_platform_total</span> is the meter,{" "}
-        <span className="font-mono">_residual</span> is what the model does not explain.
+        <span className="font-mono">_residual</span> is what the model does not explain. One day
+        at a time — <span className="font-mono">←</span> / <span className="font-mono">→</span> walk
+        the last {DAYS}.
       </p>
 
       {counters && (
@@ -98,56 +113,7 @@ export default async function UsagePage() {
         </ul>
       )}
 
-      {days.length === 0 ? (
-        <p className="mt-8 text-sm text-muted-foreground">
-          No ledger rows yet — nothing has been attributed on this database.
-        </p>
-      ) : (
-        days.map(({ day, rows }) => {
-          // The reserved rows are the reconciliation's own output, not spend, so they are
-          // called out separately and kept out of the day's modeled total.
-          const spend = rows.filter((r) => !r.reader.startsWith("_"));
-          const meta = rows.filter((r) => r.reader.startsWith("_"));
-          const total = spend.reduce((n, r) => n + r.modeledRows, 0);
-          return (
-            <section key={day} className="mt-8">
-              <div className="flex items-baseline justify-between border-b border-border/60 pb-1">
-                <h2 className="font-mono text-sm">{day}</h2>
-                <p className="text-sm tabular-nums text-muted-foreground">
-                  {nf.format(total)} modeled
-                </p>
-              </div>
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-xs text-muted-foreground">
-                    <th className="py-1 text-left font-normal">reader</th>
-                    <th className="w-20 py-1 text-right font-normal">calls</th>
-                    <th className="w-32 py-1 text-right font-normal">modeled rows</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {[...spend, ...meta].map((r) => (
-                    <tr
-                      key={r.reader}
-                      className={
-                        r.reader.startsWith("_")
-                          ? "border-t border-border/40 text-muted-foreground"
-                          : ""
-                      }
-                    >
-                      <td className="py-1 font-mono text-xs">{r.reader}</td>
-                      <td className="w-20 py-1 text-right tabular-nums">{nf.format(r.calls)}</td>
-                      <td className="w-32 py-1 text-right tabular-nums">
-                        {nf.format(r.modeledRows)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </section>
-          );
-        })
-      )}
+      <LedgerDays ledger={ledger} />
 
       {/* What the browser measured on real loads (src/lib/metrics-client.ts collects it,
           db.ts's `client_metrics` stores it) — the other half of this page: the ledger above
@@ -162,40 +128,47 @@ export default async function UsagePage() {
             No client metrics yet — nothing has been reported from a browser.
           </p>
         ) : (
+          // p50 and p95 share a cell: five timings at two percentiles each would be ten
+          // columns on a 3xl page, and the pair is read together anyway — typical, then the
+          // bad tail muted beside it.
           <table className="w-full text-sm">
             <thead>
               <tr className="text-xs text-muted-foreground">
                 <th className="py-1 text-left font-normal">page</th>
-                <th className="w-16 py-1 text-right font-normal">views</th>
-                <th className="w-20 py-1 text-right font-normal">lcp p50</th>
-                <th className="w-20 py-1 text-right font-normal">lcp p95</th>
-                <th className="w-24 py-1 text-right font-normal">data p50</th>
-                <th className="w-24 py-1 text-right font-normal">data p95</th>
-                <th className="w-24 py-1 text-right font-normal">hist p50</th>
-                <th className="w-24 py-1 text-right font-normal">hist p95</th>
-                <th className="w-20 py-1 text-right font-normal">visit</th>
+                <th className="w-14 py-1 text-right font-normal">views</th>
+                <th className="w-14 py-1 text-right font-normal">errors</th>
+                <th className="w-24 py-1 text-right font-normal">lcp</th>
+                <th className="w-24 py-1 text-right font-normal">inp</th>
+                <th className="w-20 py-1 text-right font-normal">cls</th>
+                <th className="w-24 py-1 text-right font-normal">data</th>
+                <th className="w-24 py-1 text-right font-normal">hist</th>
+                <th className="w-16 py-1 text-right font-normal">visit</th>
               </tr>
             </thead>
             <tbody>
               {clientMetrics.map((p) => (
                 <tr key={p.page}>
                   <td className="py-1 font-mono text-xs">{p.page}</td>
-                  <td className="w-16 py-1 text-right tabular-nums">{nf.format(p.views)}</td>
-                  <td className="w-20 py-1 text-right tabular-nums">{ms(p.stats.lcp?.p50)}</td>
-                  <td className="w-20 py-1 text-right tabular-nums">{ms(p.stats.lcp?.p95)}</td>
+                  <td className="w-14 py-1 text-right tabular-nums">{nf.format(p.views)}</td>
+                  {/* A js-error count is the one number here that is a defect, not a speed —
+                      it stays plain at zero and goes red the moment the page throws. */}
+                  <td
+                    className={`w-14 py-1 text-right tabular-nums ${
+                      p.errors > 0 ? "text-destructive" : "text-muted-foreground/50"
+                    }`}
+                  >
+                    {nf.format(p.errors)}
+                  </td>
+                  <td className="w-24 py-1 text-right tabular-nums">{pair(p.stats.lcp, ms)}</td>
+                  <td className="w-24 py-1 text-right tabular-nums">{pair(p.stats.inp, ms)}</td>
+                  <td className="w-20 py-1 text-right tabular-nums">{pair(p.stats.cls, cls)}</td>
                   <td className="w-24 py-1 text-right tabular-nums">
-                    {ms(p.stats["data-rendered"]?.p50)}
+                    {pair(p.stats["data-rendered"], ms)}
                   </td>
                   <td className="w-24 py-1 text-right tabular-nums">
-                    {ms(p.stats["data-rendered"]?.p95)}
+                    {pair(p.stats["history-ready"], ms)}
                   </td>
-                  <td className="w-24 py-1 text-right tabular-nums">
-                    {ms(p.stats["history-ready"]?.p50)}
-                  </td>
-                  <td className="w-24 py-1 text-right tabular-nums">
-                    {ms(p.stats["history-ready"]?.p95)}
-                  </td>
-                  <td className="w-20 py-1 text-right tabular-nums">{ms(p.avgVisitMs)}</td>
+                  <td className="w-16 py-1 text-right tabular-nums">{ms(p.avgVisitMs)}</td>
                 </tr>
               ))}
             </tbody>

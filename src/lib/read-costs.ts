@@ -227,6 +227,42 @@ export const LEDGER_WRITE_ROWS = 2;
  *  and cost no rows. */
 export const USAGE_CHECK_ROWS = 30;
 
+// ── The reader names, in the order /usage lists them ────────────────────────────────────
+
+/** Every reader instrumented above, ordered the way this file is ordered: the sync path, the
+ *  derived payloads, the library-sync write path, the render reads, then the instrument's own
+ *  cost. The ORDER IS THE POINT. /usage renders one day at a time and draws every name on
+ *  every day, zero-filled, so a reader keeps the same line whichever day is on screen and two
+ *  days can be compared by eye instead of by re-reading labels — which is impossible if the
+ *  rows follow whatever the ledger happened to record that day.
+ *
+ *  A name in the ledger that is missing here still renders; it just sorts after these,
+ *  alphabetically. So instrumenting a new path never hides it — it only shows up out of
+ *  order until it is added here, next to the cost it is charged. */
+export const LEDGER_READERS = [
+  "sync_tick_steady",
+  "sync_tick_landed",
+  "sync_onload",
+  "history_refresh",
+  "contexts_full_pass",
+  "history_payload",
+  "alltime_list",
+  "library_payload",
+  "unique_song_count",
+  "orphan_full_pass",
+  "playlist_rewrite",
+  "day_strip",
+  "day_plays",
+  "search_fallback",
+  "usage_check",
+] as const;
+
+/** Written by the reconciliation below, never by a read path: the meter for the day, the part
+ *  of it the model does not explain, and the marker for a day whose meter could not be read.
+ *  The leading underscore is what separates instrument output from spend everywhere this
+ *  table is summed (db.ts `ledgerDayModeledTotal`). */
+export const RESERVED_READERS = ["_platform_total", "_residual", "_platform_error"] as const;
+
 // ── Reconciliation ──────────────────────────────────────────────────────────────────────
 // The residual is the whole point: platform_rows_read − Σ(ledger) for a UTC day. A residual
 // near zero means the model explains the burn; a large one means a read path is spending

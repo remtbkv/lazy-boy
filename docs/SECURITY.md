@@ -9,8 +9,18 @@ the user-scoping item below is handled by row-level security instead.)
 - **Tokens never reach the browser.** The Spotify access/refresh tokens live in the DB
   (source of truth; the Auth.js JWT cookie is kept lean) and are only read server-side
   (Server Components, actions, route handlers). `src/lib/session.ts` is `server-only`.
-- **One auth gate.** The `(app)` layout calls `auth()` and redirects unauthenticated users;
-  every API route also checks `auth()` and returns 401.
+- **Every API route checks `auth()`** and returns 401 (verified against production
+  2026-08-11: `/api/sync`, `/api/metrics`, `/api/playlists/*`, `/api/search/*` all 401 without
+  a session; `/api/now-playing` answers `{playing:null}`; `/api/build` is deliberately public
+  and carries no personal data).
+- **Every page that reads personal data gates for ITSELF**, before its first read. The `(app)`
+  layout's `redirect()` is chrome, not the gate: Next renders a layout and its page in
+  parallel, so a page under a redirecting layout still runs its fetches and still flushes its
+  flight payload into the body of the 307. Measured 2026-08-11 — an unauthenticated
+  `curl https://lazy-spotify.vercel.app/playlists` returned 70KB carrying every playlist name
+  and cover URL next to `location: /login`; `/home` carried track names, artists and per-day
+  play counts; `/usage` carried the ledger. The gate must not sit in a `Promise.all` with the
+  reads either, or they run anyway.
 - **Centralized token refresh** in `src/lib/auth.ts` (no scattered token handling).
 - **No SQL injection.** All libSQL (`@libsql/client`) queries use bound params (`:name`/`?`).
 - **Cron auth (fail-closed).** `/api/cron/sync` is session-less; it requires

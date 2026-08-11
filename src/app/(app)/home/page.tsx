@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import {
   getAllTimeStats,
@@ -68,6 +69,9 @@ export default async function HomePage() {
   // each paying a full round trip to the funnel-reached primary before any work started, to
   // recompute an answer that only moves when a sync writes.
   const [session, payload] = await Promise.all([auth(), getHomePayload()]);
+  // Gate here, not just in the layout: Next renders layout and page in parallel, so the
+  // layout's redirect alone still flushes this page's data into the 307 body (SECURITY.md).
+  if (!session || session.error) redirect("/login");
   const name = session?.user?.name ?? "You";
   const { daily, allTime, initialDay, initialTracks } = payload ?? (await readHomeInline());
   const first = name.split(" ")[0] || name;

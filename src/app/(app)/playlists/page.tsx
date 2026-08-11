@@ -1,13 +1,25 @@
+import { redirect } from "next/navigation";
+import { auth } from "@/lib/auth";
 import { getStoredPlaylists, getMeId, getPlaylistsSyncedAt, getUniqueSongCount } from "@/lib/db";
 import { PlaylistsSync } from "@/components/playlists-sync";
 import { PlaylistsGrid } from "./playlists-grid";
 
 // Playlists — the library grid. Reads the local store
 // only; each tile links into the real playlist detail page (not redesigned yet).
-// Auth and the chrome are the layout's job now, so this page fetches only its own data.
+// The chrome is the layout's job; the auth gate below is this page's own (see the note on it).
 export const dynamic = "force-dynamic";
 
 export default async function DraftPlaylistsPage() {
+  // The (app) layout's redirect is NOT this page's gate. Next renders a layout and its page
+  // in PARALLEL, so the page's fetches run and its flight payload is flushed into the body
+  // of the layout's 307 — measured 2026-08-11: an unauthenticated
+  // `curl https://lazy-spotify.vercel.app/playlists` returned 70KB containing every playlist
+  // name and cover URL alongside `location: /login`. Every page that reads personal data
+  // gates for itself, BEFORE it reads any (never in a Promise.all with the reads — that
+  // fetches them anyway).
+  const session = await auth();
+  if (!session || session.error) redirect("/login");
+
   const [playlists, meId, uniqueSongs, syncedAt] = await Promise.all([
     getStoredPlaylists(),
     getMeId(),

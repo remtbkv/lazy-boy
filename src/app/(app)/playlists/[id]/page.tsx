@@ -1,7 +1,8 @@
 import { Suspense } from "react";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
+import { auth } from "@/lib/auth";
 import { getSpotify } from "@/lib/session";
 import {
   getMeId,
@@ -24,6 +25,13 @@ export default async function PlaylistDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+
+  // This page's own gate, not the (app) layout's: a layout and its page render in PARALLEL,
+  // so the layout's redirect does not stop this page from reading the store and flushing the
+  // result into the redirect's body (see the same note on ../page.tsx). The cached path below
+  // never calls getSpotify(), so without this there is no session check on it at all.
+  const session = await auth();
+  if (!session || session.error) redirect("/login");
 
   // Render entirely from the local store — no Spotify call on the critical path. A live
   // call here (even the single "get header" one) blocks the whole page for the full
