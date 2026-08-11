@@ -130,24 +130,25 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   cache streams a live fetch that fills it. `removeFromPlaylistAction` updates the cache so
   removes don't reappear. Do NOT bulk-refresh every playlist on a schedule (rate-limit
   trap) — revalidate per-playlist on visit via snapshot.
-- **Listen-history backend (`src/lib/db.ts`):** **libSQL/Turso** (`@libsql/client`),
-  so it persists on Vercel's serverless runtime. `TURSO_DATABASE_URL` +
-  `TURSO_AUTH_TOKEN` select the remote DB; with both unset (dev) it falls back to a
-  local file at `data/listens.db` (gitignored). **All `db.ts` functions are async**
+- **Listen-history backend (`src/lib/db.ts`):** **libSQL** (`@libsql/client`) against a
+  **self-hosted `sqld`** on the Zenbook (Tailscale Funnel), so it persists on Vercel's
+  serverless runtime. `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` select it — the names are
+  historical, they carried Turso Cloud until 2026-08-08; with both unset (dev) it falls back to
+  a local file at `data/listens.db` (gitignored). **All `db.ts` functions are async**
   (network DB) — `await` them. Synced from `/me/player/recently-played` in
   `sync/history.ts`. Tables: `tracks`, `plays` (deduped on `played_at`), `contexts`
   (resolved playlist/album names for the "From" column). The listen history lives on the
   home page (`/home`, streamed below the quick actions) — per-day cards + a searchable log.
-- **Dev and benchmarks bill the PRODUCTION Turso quota — point heavy local work at the
+- **Dev and benchmarks run against the LIVE production store — point heavy local work at the
   local file DB.** `.env.local` carries `TURSO_DATABASE_URL`, so `next dev`, every open
-  localhost tab, `npm run build` prerenders, and every `bench-reads.mjs` run read the real
-  primary, and Turso bills rows SCANNED against the free plan's 500M/month. Two dev-heavy
-  days (2026-08-01 and 08-04/05) each burned on the order of 100M rows this way and drove
-  a 75%-quota warning email. Rule: benchmark/verification/agent runs default to the local
-  file (`data/listens.db` — run with `TURSO_DATABASE_URL` unset) unless the point is to
-  measure the primary itself; a deliberate primary-measuring run should state its expected
-  row cost before it loops. Don't leave localhost tabs open on a dev server pointed at the
-  primary — the 2-min sync poll re-renders (and pre-caching, re-scanned) all day.
+  localhost tab, `npm run build` prerenders, and every `bench-reads.mjs` run hit the real
+  store. On Turso that was billed: two dev-heavy days (2026-08-01 and 08-04/05) each burned on
+  the order of 100M rows and drove a 75%-quota warning email. The self-hosted store meters
+  nothing, so the money reason is gone and the other two remain — a local dev server WRITES to
+  production data, and its load lands on a laptop in Rem's apartment that production depends on.
+  Rule: benchmark/verification/agent runs default to the local file (`data/listens.db` — run
+  with `TURSO_DATABASE_URL` unset) unless the point is to measure the real store. Don't leave
+  localhost tabs open on a dev server pointed at it — the 2-min sync poll re-renders all day.
 - **`recently-played` only returns the last 50 plays — this drives the whole sync
   design.** Spotify caps that endpoint at 50 and won't page back further, so any play
   that scrolls off before you poll is **gone forever**. Completeness therefore depends
@@ -183,40 +184,20 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   estimate available, since Spotify reports *when* a track played, never *how long*. Plays are
   always the real count; this only shapes the "listened" totals. Whole-table totals
   (`alltime_stats`) are cached in `meta` and recomputed on write; per-day totals compute live.
-- **Row-scanning reads go through a local replica, not the remote DB — and Turso's slowness
-  is not latency.** Medians over n=8, because single-shot timings against this primary are
-  worthless (`SELECT 1` alone ranged 37–440 ms in one run): round trip ~47 ms, but
-  `SELECT COUNT(*) FROM tracks` (15k rows, nothing returned) is ~312 ms against ~0.02 ms for
-  the same data in local SQLite. The cost is per row scanned, and no index tuning hides it
-  once a query touches thousands of rows. `getReader()` in `db.ts` therefore serves scanning
-  reads from a **libSQL embedded replica** (a local SQLite copy synced from the primary) —
-  same SQL, identical rows: history search 344 ms → 5.7 ms, the all-time list 705 ms →
-  8.9 ms, one day's plays 41 ms → 0.9 ms, the day-strip mount scan 105 ms → 13 ms.
-  **Treat any primary-side number here as an order of magnitude, not a constant** — the
-  same query measured 2.9 s earlier in the day and 344 ms later, unchanged. That is also a
-  correction of the record: the messages of commits `76e2c61` and `37af0ea` cite single-shot
-  figures (e.g. search 2933 ms, all-time list 2952 ms) that read 3–7× larger than the medians
-  here; the medians are the measurement, the commit messages are what one draw from a
-  high-variance backend looked like. Writes and everything touching `meta` stay on `getClient()` (the
-  primary): a write through a replica forwards-then-pulls (~5× slower), and the token/lock
-  rows must never be read from a copy another instance's refresh hasn't reached, which is the
-  `invalid_grant` race `acquireLock` exists to prevent. Every write ends with `syncReader()`
-  so the read after it is fresh. **Another process's write is never served stale**: there is no
-  background poll (a 30 s `syncInterval` was 2,880 pulls/day per instance whether or not
-  anything had been written, and still left a 30 s stale window). Instead every write that
-  touches a replica-served table bumps `meta.write_seq` in its own batch, and `getReader()`
-  gates on it once per request — replica when the primary's marker and the copy's match,
-  primary for that request plus one background catch-up pull when they don't. Idle instances
-  pull nothing; a cross-instance write is visible on the very next read.
-  A cold instance is never blocked on the copy — `getReader()` returns the primary until the
-  first sync lands — and if the replica can't be built at all, everything keeps working on
-  the primary. Kill switch: `LAZYBOY_NO_REPLICA=1`.
+- **There is ONE client and no replica — `getClient()` is every read, every write and all of
+  `meta`.** Row-scanning reads used to be served by a libSQL embedded replica behind a
+  per-request freshness gate; that machinery was switched off in production on 2026-08-03 and
+  deleted on 2026-08-11 (see "Retired: the embedded replica" below). What keeps reads cheap now
+  is that the render paths barely read: Home paints from a payload materialized into `meta` on
+  the write path, and the day list + search filter a payload the browser already holds. Writes
+  and everything touching `meta` were always on the primary — the token/lock rows must never be
+  read from a copy another instance's refresh hasn't reached, which is the `invalid_grant` race
+  `acquireLock` exists to prevent.
 - **The render-path reads are cached in Next's data cache, and `meta.write_seq` — not a
-  timer — is what keeps them fresh.** With the replica off in production (the kill switch is
-  set there, so the syncs quota stops burning) every day-strip / per-day / playlist-grid read
-  is a scan against the remote primary, and Turso bills rows SCANNED: revisiting a day re-read
-  the whole `plays` table to produce a byte-identical answer. Measured 2026-08-05 against the
-  primary, medians (min–max), n=7, 6,995 plays: one day's plays 722 ms (170–1,023), the 14-day
+  timer — is what keeps them fresh.** Every day-strip / per-day / playlist-grid read is a scan
+  against a remote store: revisiting a day re-read the whole `plays` table to produce a
+  byte-identical answer (and on Turso, which billed rows SCANNED, re-paid for every row).
+  Measured 2026-08-05 against Turso's primary, medians (min–max), n=7, 6,995 plays: one day's plays 722 ms (170–1,023), the 14-day
   strip 896 ms (235–3,008), the whole-history strip 1,405 ms (1,047–4,474) — the last of which
   fired on *every* Home mount. (A second session half an hour later put the same day read at
   136 ms; absolute figures are session weather, the shape isn't. `bench-reads.mjs day` re-runs it.) So `getPlaysByDay` / `getDailyStats` / `getAllTimePlays` /
@@ -225,8 +206,9 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   `meta.write_seq` as an argument purely so it lands in the cache KEY — any write that changes
   what they read bumps the marker, so the next read has a different key and recomputes. That is
   the whole freshness guarantee for TODAY, and it is why the ~2-min sync still surfaces new
-  plays immediately: `recordPlays` bumps the marker, and `syncReader()` drops the request's
-  shared copy of it, so the re-read that follows a sync cannot be served the pre-sync entry.
+  plays immediately: `recordPlays` bumps the marker, and `dropWriteSeqCache()` drops the
+  request's shared copy of it, so the re-read that follows a sync cannot be served the pre-sync
+  entry.
   The `revalidate` on those entries is a garbage bound on superseded keys, **not** the
   freshness mechanism — never reach for a shorter TTL to "make it fresher", the key already
   did it. **FROZEN** (a day older than **today−2 in the user's zone**) drops the marker from
@@ -269,42 +251,52 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   records the attempt under the same key a success would, or the UI waits forever. Verified by
   aborting the action in Playwright: before, "Searching…" at 9s and counting; after, a real
   message at 300ms.
-- **A bundled replica snapshot cannot speed up cold starts — the primary rotates its libSQL
-  replication generation periodically** (observed 2026-08-01: as often as every ~7–11 min —
-  gen 4470→4473 over ~25 min — but a later 19-min window sat on one generation; cadence is
-  variable and any rotation inside a deploy's lifetime kills a seed).
-  A same-generation seed boots in ~0.9s vs ~2–6s full sync, but one generation behind costs
-  ~6s and two behind ~14s — *worse than starting empty* — and a deploy-time seed is stale
-  within minutes. Measured and rejected; details above `REPLICA_SIDECARS` in `db.ts`. What
-  works instead: the replica boots lazily on the first scanning read (the eager instance-start
-  warm in `src/instrumentation.ts` was removed 2026-08-03 — every cold instance, including the
-  cron-only ones that never scan, pulled the full ~17MB and it burned 77% of the free plan's
-  3GB/mo syncs quota in 3 days), and a damaged inherited replica file is wiped and re-synced once (sync() succeeds on
-  a corrupt file; the failure only surfaces on the first query). Minimal correct sidecar set
-  when copying a replica: `.db` + `-info` + `-wal` — omitting `-wal` silently loses every row
-  still in the WAL.
-- **Turso meters four dimensions and blocks on ANY of them — optimizing one silently loads
-  another, twice now.** Rows read, rows written, syncs and storage each have their own cap,
-  and exceeding any single one blocks every query until the calendar month resets. Incident
+- **RETIRED: the embedded replica (2026-08-03 off, 2026-08-11 deleted).** Kept here as one
+  block because the findings cost real measurement and would be re-derived by anyone who
+  proposes a local copy again. It guards nothing in the current code — `db.ts` has no replica
+  code left; git history has it.
+  - **Serverless is the wrong host for it.** Every cold instance pulled the full ~17 MB copy,
+    and the cron tick every ~2 min means most instances exist only to write and exit: ~12–17
+    bootstraps/day of pure waste, 77% of Turso's free 3 GB/mo syncs quota burned in three days
+    (the eager warm in `src/instrumentation.ts` was removed 2026-08-03, then the whole replica
+    was switched off).
+  - **A bundled snapshot cannot fix that — the primary rotates its libSQL replication
+    generation periodically** (2026-08-01: as often as every ~7–11 min, gen 4470→4473 over ~25
+    min, but a later 19-min window sat on one generation; the cadence is variable and any
+    rotation inside a deploy's lifetime kills a seed). Same-generation seed ~0.9 s vs ~2–6 s for
+    a full sync, but one generation behind costs ~6 s and two behind ~14 s — *worse than
+    starting empty*.
+  - **`sync()` succeeds against a corrupt local file**; the failure only surfaces on the first
+    query, so the boot path proved the copy with two indexed counts before trusting it.
+  - **Minimal resumable file set when copying a replica: `.db` + `-info` + `-wal`** — `.db`
+    alone throws `InvalidLocalState`, and omitting `-wal` silently loses every row still in the
+    WAL (6,667 of 6,670 plays, measured). This one still applies to `data/replica.db`, which
+    survives on the Mac as a local data copy that `bench-reads.mjs` measures against.
+- **Metered stores block on ANY dimension — optimizing one silently loads another, twice
+  over.** Historical as of 2026-08-08 (the self-hosted store meters nothing) and the reason the
+  fallback to Turso is not a flip of one env var. Rows read, rows written, syncs and storage
+  each had their own cap, and exceeding any single one blocked every query until the calendar
+  month reset. Incident
   one (Aug 3): the eager replica warm was burning the 3 GB syncs quota → replica turned off
   in prod → every scanning read became billed primary rows. Incident two (Aug 6): the
   rows-read counter hit 86% — dominated by `unresolvedContextUris`, a full plays scan +
   per-row contexts probe (~14K billed rows) that ran on EVERY sync call (~1,000+/day across
   the cron tick, the second ~5-min pinger, and the open tab's 2-min refresh), replica-less.
   It was invisible because it is milliseconds on a local file and its cost lives on a
-  dashboard nobody re-visits. The rules this bought: (1) any change that moves traffic
-  between the replica, the primary, and the cache states its expected cost on *every*
-  metered dimension before it ships — the model and per-path costs live in
-  `docs/READ_QUOTA.md`; (2) a per-call read may not scan a table that grows with history —
-  bound it to the batch in hand (`unseenContexts()`: a new context can only arrive via the
-  incoming plays, so check those ≤50 URIs; the full scan survives as a once-a-day pass for
-  the 30-day negative-cache recheck); (3) the guard is `/api/cron/usage-check` + a daily
-  cron-job.org job with failure e-mail — the real counter, checked mechanically, not a
-  convention about benchmarks.
+  dashboard nobody re-visits. The rules this bought, of which only the first is now dormant:
+  (1) any change that moves traffic between the store and the cache states its expected cost on
+  *every* metered dimension before it ships — the model and per-path costs live in
+  `docs/READ_QUOTA.md`; (2) **still live and store-independent** — a per-call read may not scan
+  a table that grows with history; bound it to the batch in hand (`unseenContexts()`: a new
+  context can only arrive via the incoming plays, so check those ≤50 URIs; the full scan
+  survives as a once-a-day pass for the 30-day negative-cache recheck); (3) the guard is
+  `/api/cron/usage-check` + a daily cron-job.org job with failure e-mail, now dormant against a
+  database production no longer uses — the real counter, checked mechanically, not a convention
+  about benchmarks.
 - **If a query is slow, count the rows it SCANS, not the rows it returns.** Both bad ones
   returned little. `searchHistory` is `LIKE '%q%'`, unindexable by construction, so it scans
-  `tracks` — ~6 ms on the replica but 1,904 ms median (1,383–3,133, n=7, 2026-08-05) against the
-  primary, which is what production runs. It is no longer on the keystroke path: **library
+  `tracks` — ~6 ms against a local SQLite copy but 1,904 ms median (1,383–3,133, n=7,
+  2026-08-05) against Turso's primary. It is no longer on the keystroke path: **library
   search matches in the BROWSER** against `/api/search/{library,history}` (db.ts, "The
   client-side search payloads"), and `searchHistory` survives only as the fallback while those
   load.
@@ -329,11 +321,11 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   (`needsFullOrphanPass`: the playlist id set moved, or the purge deleted rows — the unscoped
   pass bills ~2.5M rows, so a rename or a reorder must not trigger it) — and writes only rows whose
   verdict actually flips, so a steady-state sync writes zero rows. Measured on the live DB
-  (medians, n=5): all-time list 63 ms → 8.9 ms and history search 36 ms → 5.7 ms on the
-  replica, rows identical, 0 mismatches against the old expression across all 6,644 plays.
-  On the **primary** the same change is only 903 ms → 705 ms and 546 ms → 344 ms, and one
-  day's plays does not improve at all (41 ms either way) — the win is real on the replica and
-  marginal-to-absent against remote Turso, whose variance swamps it.
+  (medians, n=5): all-time list 63 ms → 8.9 ms and history search 36 ms → 5.7 ms against a
+  local SQLite copy, rows identical, 0 mismatches against the old expression across all 6,644
+  plays. Against **Turso's primary** the same change was only 903 ms → 705 ms and 546 ms →
+  344 ms, and one day's plays did not improve at all (41 ms either way) — the win is real on
+  local-speed storage and marginal-to-absent where the backend's own variance swamps it.
   **If you add a way for playlist membership to change, call `recomputeOrphanFlags` from it**
   — that is the one thing that can now go stale. A `NULL` flag reads as non-orphan, which is
   the same answer the old expression gave for a playlist it couldn't verify, so a missed
@@ -346,16 +338,17 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   (`getPlaylistTracks`) + run in parallel with auth; the only network write is the Spotify
   play call.
 - **`db.ts` query conventions (follow them for new queries — they're in the file header).**
-  Every row-scanning read goes to `getReader()` (the replica): primary scans are seconds-scale
-  with unbounded session-to-session variance (the same plays scan measured ~105ms one morning
-  and 1.4-2.2s that afternoon), replica reads are single-digit ms. Keep `INNER JOIN` for
-  `lower(artist)`/`lower(name)` identity lookups so the planner uses `idx_tracks_artist_name`
-  (22-24ms vs 82-510ms on the primary) — but `LEFT` vs `INNER` on plays-driven joins is
-  measured indistinguishable, so it's a style default now, not a perf rule, and `LEAD`/`LAG`
-  are fine on the replica (~1.5× a plain fetch). Cache whole-table aggregates in `meta`
-  (covered by `scripts/verify-derived.mjs`); writes + all `meta` keys use `getClient()` and
-  serial primary reads stack ~20-30ms each, so dedupe or `Promise.all` them. Never turn a
-  single-session primary timing into a rule.
+  Everything goes through `getClient()`; there is no second client. Keep a scan off every
+  render path — Home reads its materialized `meta` payload and the browser filters the search
+  payloads, so a new render-path read should join one of those rather than add a scan. Keep
+  `INNER JOIN` for `lower(artist)`/`lower(name)` identity lookups so the planner uses
+  `idx_tracks_artist_name` (22-24ms vs 82-510ms measured remotely) — but `LEFT` vs `INNER` on
+  plays-driven joins is measured indistinguishable, so it's a style default, not a perf rule.
+  Cache whole-table aggregates in `meta` (covered by `scripts/verify-derived.mjs`); a write that
+  changed a table a cached read serves bumps `meta.write_seq` in the same batch and ends with
+  `dropWriteSeqCache()`. Serial reads stack (~20-30ms each against Turso, more over the
+  funnel), so dedupe or `Promise.all` them. Never turn a single-session timing against a remote
+  store into a rule.
 
 ## Measuring a search from the browser (`lb-perf`)
 

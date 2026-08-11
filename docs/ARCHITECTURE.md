@@ -114,10 +114,11 @@ that outlives the ~1 h token refreshes mid-flight instead of dying on a 401. See
 
 ## Listen-history store (`src/lib/db.ts`)
 
-A second data layer, independent of Spotify: **libSQL/Turso** (`@libsql/client`),
-which persists on Vercel's serverless runtime. `TURSO_DATABASE_URL` +
-`TURSO_AUTH_TOKEN` point at the remote DB; with both unset it falls back to a local
-SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
+A second data layer, independent of Spotify: **libSQL** (`@libsql/client`) against a
+**self-hosted `sqld`** on the Zenbook, reached from Vercel over a Tailscale Funnel.
+`TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` point at it (the names are historical — they
+carried Turso Cloud until 2026-08-08); with both unset it falls back to a local SQLite
+file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
 `played_at`), `contexts` (resolved playlist/album names), `meta`. Server-only
 (`import "server-only"`). **Every function is async** (the DB is over the network).
 
@@ -136,8 +137,11 @@ SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped 
   is the backstop. All scheduled hits share `/api/cron/sync` (`CRON_SECRET`-guarded).
   (A GitHub Actions cron drove this initially but was removed: GitHub schedules best-effort
   and stretched to multi-hour gaps, losing plays against the 50-play window.)
-- Reads: `searchHistory`, `getDailyStats`, `getLastSync`. The home page renders the listen
-  history — day cards + a searchable, scrollable log — streamed below the quick actions.
+- Reads: Home's first paint is `getHomePayload()` — one indexed `meta` row holding the day
+  strip, the all-time totals and the opening day's tracks, built on the write path. The day
+  cards and the search box then run in the browser against the history payload;
+  `getDailyStats` / `getPlaysByDay` / `searchHistory` remain as the server-side path for a
+  cold store, an extended strip, and the fallback while the payload loads.
 - **Derived stats, search & resume:** "listened" time is computed per play (the gap to the
   next play, capped at the song length; under 5 s counts as zero; an isolated play is assumed
   to have finished) — Spotify reports *when* a track played, never *how long*. Whole-table
@@ -151,39 +155,26 @@ SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped 
   source rows. `node --env-file=.env.local scripts/verify-derived.mjs` recomputes all three from
   source against the primary and exits 1 with the named diff when a stored value disagrees
   (read-only; `--demo` injects and restores a deliberate corruption to show it actually fails).
-- **Two clients, split by role.** Remote Turso costs ~1 s per few-thousand rows *scanned*
-  (not a latency problem — the round trip is ~20 ms), so `getReader()` serves row-scanning
-  reads from a libSQL **embedded replica**: a local SQLite copy of the same database, synced
-  in the background. `getClient()` — the primary — keeps every write plus all of `meta`, so
-  write latency and the cross-instance token/lock guarantees are unchanged. Writes call
-  `syncReader()` so the next read sees them. The replica is never on the critical path: reads
-  fall back to the primary until the first sync lands, and permanently if it fails. See
-  `docs/GOTCHAS.md`.
-- **In production the replica is OFF and Turso is the read architecture, deliberately.**
-  `LAZYBOY_NO_REPLICA=1` has been set in Vercel since 2026-08-03: the primary rotates its
-  replication generation on its own schedule, a behind-generation replica re-pulls the whole
-  ~17 MB file, and on serverless that burned 77% of the free plan's 3 GB/mo syncs quota in
-  three days. Replica-less, every scanning read is billed rows against the 500M/mo
-  rows-read quota instead — which is fine **only because** every recurring read path is
-  bounded (per-day costs, the model, and the pre-registered measurements:
-  `docs/READ_QUOTA.md`). A warm store off Vercel (a permanently-synced copy on the always-on
-  Zenbook serving reads) was considered and deferred: post-fix the modeled burn is ≤10% of
-  quota/month, serving adds an apartment-machine dependency the app otherwise doesn't have,
-  and the same generation-rotation behavior makes a long-lived libSQL replica's sync cost
-  unsafe to even measure this month (each full re-pull is ~17 MB against ~0.6 GB of
-  remaining syncs headroom). Reversal condition: if a post-fix measurement window shows the
-  closed-app burn above ~3M rows/day, or history growth pushes the bounded paths past ~30%
-  of quota, build the Zenbook read store (incremental `SELECT`-based pull, not the libSQL
-  sync protocol) and serve precomputed artifacts outward.
-- **Superseded 2026-08-10: the store IS on the Zenbook now, and stays there.** Not by the
-  reversal condition above — Turso's free org hard-blocked reads on Aug 8 at 102.8% of the
-  month's rows_read, production could render nothing, and the emergency bridge became the
-  architecture when Rem chose to keep it. `TURSO_DATABASE_URL` points at `sqld` on the
-  Zenbook through a Tailscale Funnel; rows are not metered there and every scanning read got
-  5–8× faster (`docs/quota-forensic/BRIDGE.md`). Turso is now a restore target, not a
-  dependency. The bullet above is kept because its reasoning about replica sync cost and the
-  apartment-machine dependency is still the live tradeoff — the second half of it is what we
-  accepted.
+- **One client, and no replica.** `getClient()` serves every read, every write and all of
+  `meta`. The libSQL **embedded replica** that used to serve row-scanning reads was switched
+  off in production on 2026-08-03 (each cold serverless instance bootstrapped the whole ~17 MB
+  copy, burning 77% of Turso's 3 GB/mo syncs quota in three days) and deleted from `db.ts` on
+  2026-08-11. What replaced it is not a second client but less reading: Home renders from a
+  payload materialized into `meta` on the write path (`rebuildHomePayload`), the day list and
+  search filter a payload the browser holds (`/api/search/{library,history}`), and what remains
+  are indexed, bounded hits. Scanning reads that survive — the two payload rebuilds, the
+  all-time list — run once per content version behind `unstable_cache`, keyed on
+  `meta.write_seq`.
+- **The store lives on the Zenbook, and stays there.** Turso's free org hard-blocked reads on
+  2026-08-08 at 102.8% of the month's rows_read; production could render nothing, and the
+  emergency bridge became the architecture when Rem chose to keep it. `sqld` holds the data at
+  `~/lazyboy-sqld/data`, listens on 127.0.0.1 only, authenticates an Ed25519-signed JWT, and is
+  published through a permanent Tailscale Funnel hostname (`docs/quota-forensic/BRIDGE.md`).
+  Nothing is metered, and every scanning read got 5–8× faster than it was on Turso. The price,
+  accepted deliberately: an apartment machine is now a production dependency — if the Zenbook
+  drops off the tailnet, production has no database (the backstop recorder means nothing is
+  lost, but the site is down for the duration). **Turso is a restore target, not a
+  dependency**; the revert procedure is written down in BRIDGE.md before it is needed.
 - **The history's loss floor is the Zenbook backstop recorder, not Turso.** Spotify hands
   back only the last ~50 plays, so any window where nothing can write (Turso quota-blocked —
   all four metered dimensions hard-block every query — or plain unreachable) is a permanent
@@ -192,11 +183,18 @@ SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped 
   never touches Turso; `scripts/backfill-from-backstop.mjs` replays what the primary missed
   (verified: byte-identical rows to sync-written ones, idempotent). Adopted the dev token
   chain 2026-08-06 — next local-dev session will hit one forced re-login and mint its own.
-- **The quota guard is `/api/cron/usage-check`**, hit daily by a cron-job.org job with
-  failure e-mail on: it reads the org's real usage from Turso's platform API and returns 500
-  when any metered dimension runs ahead of 1.5× the even month pace (or 90% absolute). Needs
-  `TURSO_PLATFORM_TOKEN` + `TURSO_ORG` in the environment; unconfigured is deliberately a
-  500 — a guard that silently skips is the failure mode it exists to kill.
+- **The quota guard `/api/cron/usage-check` is DORMANT**, and kept for the fallback. It reads
+  the org's real usage from Turso's platform API and returns 500 when any metered dimension
+  runs ahead of 1.5× the even month pace (or 90% absolute) — a check about a database
+  production no longer reads or writes. It stays wired (daily cron-job.org job, failure e-mail
+  on) because it is the guard that would have to exist on day one of a fallback to Turso, and
+  because its reconciliation half is what writes the platform total and the residual into the
+  ledger `/usage` renders. Needs `TURSO_PLATFORM_TOKEN` + `TURSO_ORG`; unconfigured is
+  deliberately a 500 — a guard that silently skips is the failure mode it exists to kill.
+- **The read-cost ledger outlives the quota it was built for.** `usage_ledger` + `read-costs.ts`
+  still charge every named read path its modeled cost on every call, and `/usage` still renders
+  it. The quota that made it urgent is gone; what it measures — which path a cost regression
+  came from — is not. See `docs/READ_QUOTA.md`.
 - **Token refresh coordination:** the `meta` table doubles as a cross-instance mutex
   (`acquireLock`/`releaseLock`, a TTL compare-and-set) so concurrent serverless instances
   don't race Spotify's rotating refresh token into `invalid_grant`. See `src/lib/auth.ts`.
@@ -214,9 +212,9 @@ SQLite file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped 
 - `cron/sync` (GET) — scheduled history sync. On-time trigger is an external pinger
   (cron-job.org, ~2 min); a daily Vercel Cron is the backstop. `CRON_SECRET`-guarded
   (fail-closed: an unset secret rejects all callers), session-less (uses the stored token).
-- `cron/usage-check` (GET) — the Turso quota guard (see the listen-history section);
-  `CRON_SECRET`-guarded, 500 on breach or misconfiguration so the calling cron job's
-  failure e-mail is the alarm.
+- `cron/usage-check` (GET) — the dormant Turso quota guard + the ledger reconciliation (see
+  the listen-history section); `CRON_SECRET`-guarded, 500 on breach or misconfiguration so the
+  calling cron job's failure e-mail is the alarm.
 
 All check `auth()` and 401 on no session, except `cron/sync` (cron secret, no session).
 

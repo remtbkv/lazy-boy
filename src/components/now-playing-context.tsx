@@ -68,6 +68,26 @@ const POLL_MS = 6000;
 const END_OF_TRACK_BUFFER_MS = 1000;
 const MAX_SCHEDULE_MS = 20 * 60 * 1000; // sanity cap — no real track runs this long
 
+// When the player first KNOWS what to show on this page load — the first live answer about
+// what's playing, whether that is a track or nothing. Idle counts: "there is nothing playing"
+// is the display being ready, not a missing measurement.
+//
+// Two deliberate exclusions. The instant paint from the localStorage cache does not count (it
+// is the last sitting's answer, not this load's), and a soft navigation does not re-mark: this
+// provider lives in the (app) layout and keeps polling across routes, so the player is already
+// ready when you arrive — a second mark would be measuring the 6s poll cadence, not a wait.
+// Module scope is exactly the right lifetime for that: one document load, one mark.
+let markedNowPlayingReady = false;
+function markNowPlayingReady(): void {
+  if (markedNowPlayingReady) return;
+  markedNowPlayingReady = true;
+  try {
+    performance.mark("lb:now-playing-ready");
+  } catch {
+    /* an unsupported API here must never break the player it measures */
+  }
+}
+
 // Single source of truth for "what's playing". Critically, it's polled by only ONE tab at
 // a time — the tab holding the `lb-nowplaying-leader` Web Lock — which broadcasts each
 // result to every other tab over a BroadcastChannel. This stops N open tabs from each
@@ -239,6 +259,9 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       const res = await fetch("/api/now-playing", { cache: "no-store" });
       if (!res.ok) return;
       const data = (await res.json()) as { playing: Playing; build?: string };
+      // The answer is here. Marked before the ordering/suppression guards below for the same
+      // reason checkSkew is: those decide whether to DISPLAY this reply, not whether it landed.
+      markNowPlayingReady();
       // Independent of the ordering/suppression guards below: the build id is about this
       // tab's code, not about what's playing, and a superseded reply reports it just as well.
       checkSkew(data.build, "poll");
@@ -330,6 +353,8 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       const msg = e.data;
       if (msg.type === "state") {
         applyShared(msg.playing, msg.at);
+        // A follower tab never fetches, so the leader's broadcast IS its first live answer.
+        markNowPlayingReady();
         // A follower never fetches, so the leader's broadcast is its only view of both build
         // ids. Authoritative goes LAST: it is the one reading allowed to clear the streak, so
         // it must land after the poll id it overrules.

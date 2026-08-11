@@ -45,6 +45,11 @@ function useActiveTab(): TabKey {
 
 export function DenChrome({ name, image }: { name: string; image: string | null }) {
   const active = useActiveTab();
+  const pathname = usePathname();
+  // useActiveTab() FALLS BACK to "home" for routes that aren't tabs (/usage), which is right
+  // for the highlight but wrong for the arrow-key handler — on those routes the arrows belong
+  // to the page (the ledger's day pager), so the tab switcher must stand down entirely.
+  const onTabRoute = TABS.some((t) => pathname.startsWith(t.href));
   const { playing } = useNowPlaying();
   const awake = !!playing?.isPlaying;
   const router = useRouter();
@@ -61,6 +66,7 @@ export function DenChrome({ name, image }: { name: string; image: string | null 
       const el = document.activeElement as HTMLElement | null;
       if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
       if (document.querySelector('[role="dialog"]')) return;
+      if (!onTabRoute) return;
       const next = e.key === "ArrowRight" ? idx + 1 : idx - 1;
       if (next < 0 || next >= TABS.length) return;
       e.preventDefault();
@@ -73,7 +79,7 @@ export function DenChrome({ name, image }: { name: string; image: string | null 
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, router]);
+  }, [active, onTabRoute, router]);
 
   return (
     // Translucent + blurred: on a scrolling page (Playlists) the artwork passes UNDER the header

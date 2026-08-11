@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { auth, spotifyAccessToken } from "@/lib/auth";
 import { spotifyClient, SpotifyError } from "@/lib/spotify";
 import { getLastSync, ledgerSyncCall } from "@/lib/db";
 import { syncRecentPlays } from "@/lib/sync/history";
@@ -12,7 +12,9 @@ const STALE_MS = 60 * 1000;
 
 export async function POST() {
   const session = await auth();
-  if (!session?.accessToken || session.error) {
+  // Short-circuited so an unauthenticated POST costs no tokens read.
+  const accessToken = session && !session.error ? await spotifyAccessToken() : undefined;
+  if (!accessToken) {
     return Response.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
   const last = await getLastSync();
@@ -20,7 +22,7 @@ export async function POST() {
     return Response.json({ ok: true, skipped: true });
   }
   try {
-    const { added, skipped } = await syncRecentPlays(spotifyClient(session.accessToken));
+    const { added, skipped } = await syncRecentPlays(spotifyClient(accessToken));
     // The open tab's share of the burn, kept separate from the cron's: the debounce above
     // already returned for the calls that did no work, so what reaches here really synced.
     if (!skipped) void ledgerSyncCall("sync_onload", added);

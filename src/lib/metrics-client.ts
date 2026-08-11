@@ -20,14 +20,28 @@ import { onCLS, onFCP, onINP, onLCP, onTTFB } from "web-vitals";
 //                               `meta`. Capped per view: a throw inside a render loop must
 //                               not become a beacon loop
 //   <name>                      any `performance.mark("lb:<name>")` the app makes, recorded
-//                               as event `<name>` with value = mark.startTime. Generic on
-//                               purpose: app code emits marks, this file never has to know
-//                               which ones exist (currently lb:data-rendered, lb:history-ready).
+//                               as event `<name>` with value = MS SINCE THIS VIEW BEGAN, not
+//                               since the document loaded. On a hard load the two are the same
+//                               number; on a soft navigation the raw mark carries however long
+//                               the tab had already been open, which made "how fast did the
+//                               song list render" unreadable the moment you arrived from
+//                               another page. Generic on purpose: app code emits marks, this
+//                               file never has to know which ones exist (currently
+//                               lb:data-rendered, lb:history-ready, lb:dock-ready,
+//                               lb:playlists-rendered, lb:now-playing-ready).
 //   visit-ms                    time the view spent VISIBLE, accumulated across
 //                               visibilitychange, closed out on navigation and on pagehide
 //   nav-ms                      soft navigation: click on an in-app link → the new route
 //                               rendering, filed against the page navigated FROM, with the
 //                               destination in `meta`
+//
+// GROUPING: every event carries the id of the VIEW it belongs to, as a `pv:<id>` prefix on
+// `meta` (a prefix rather than a column, so a row written before this existed still reads —
+// it just has no view to belong to). Session + page alone cannot group one page OPEN: a sitting
+// in one tab opens Home repeatedly, and the rows of one open reach the server in one or two
+// beacons mixed with the previous view's. The id is what lets the usage page show "this open,
+// at 3:41pm, took 210ms to paint and 900ms to have its history in memory" instead of only a
+// percentile over everything.
 //
 // DELIVERY: events buffer and go out via navigator.sendBeacon — on pagehide (the only
 // reliable "the tab is going away" hook) and once ~10s after load, so a visit that ends
@@ -39,6 +53,7 @@ import { onCLS, onFCP, onINP, onLCP, onTTFB } from "web-vitals";
 
 const ENDPOINT = "/api/metrics";
 const MARK_PREFIX = "lb:";
+const PV_TAG = "pv:"; // `meta` prefix that files a row under one page open (db.ts parses it)
 const SESSION_KEY = "lb:metrics-session";
 const FLUSH_AFTER_LOAD_MS = 10_000;
 const MAX_BATCH = 50; // the route rejects more than this in one body
@@ -53,6 +68,9 @@ let buffer: MetricEvent[] = [];
 let sessionMemo = "";
 let page = ""; // the view being measured now
 let loadPage = ""; // the view the browser loaded, which owns the vitals
+let pv = ""; // id of the view being measured now
+let loadPv = ""; // id of the loaded view, so the vitals group with the open that earned them
+let viewStart = 0; // performance.now() when the current view began; 0 for the loaded view
 let visibleSince = 0; // performance.now() when this view last became visible; 0 while hidden
 let visibleMs = 0; // visible time accumulated for this view
 let pendingNav: { path: string; at: number } | null = null;
@@ -80,9 +98,24 @@ function normalizePage(path: string): string {
   return path.replace(/\/[A-Za-z0-9]{16,}(?=\/|$)/g, "/[id]");
 }
 
-function record(event: string, value?: number, meta?: string, forPage?: string): void {
+/** Short, per-view, and only ever compared to itself — no need for a uuid's guarantees. */
+function newViewId(): string {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+/** `forPage`/`forPv` file a row against a view OTHER than the current one — the loaded view
+ *  for the vitals, the view being left for its visit time. */
+function record(
+  event: string,
+  value?: number,
+  meta?: string,
+  forPage?: string,
+  forPv?: string,
+): void {
   if (buffer.length >= MAX_BUFFER) return;
-  buffer.push({ page: forPage || page, event, value, meta });
+  const view = forPv || pv;
+  const tagged = view ? (meta ? `${PV_TAG}${view}|${meta}` : `${PV_TAG}${view}`) : meta;
+  buffer.push({ page: forPage || page, event, value, meta: tagged });
 }
 
 function flush(): void {
@@ -157,19 +190,27 @@ export function setPage(path: string): void {
   const next = normalizePage(path);
   if (next === page) return;
   const from = page;
+  const fromPv = pv;
+  pv = newViewId();
   if (from) {
     // Close out the view being left: its visible time is final now.
     stopVisible();
-    record("visit-ms", visibleMs, undefined, from);
+    record("visit-ms", visibleMs, undefined, from, fromPv);
     visibleMs = 0;
     startVisible();
+    // Marks from here on are measured against the arrival, not the document.
+    viewStart = performance.now();
   } else {
     loadPage = next;
+    loadPv = pv;
   }
   page = next;
   record("pageview");
   if (pendingNav && pendingNav.path === next) {
-    record("nav-ms", performance.now() - pendingNav.at, next, from || next);
+    // Filed against the page navigated FROM (that is whose link was slow to leave), but under
+    // the ARRIVING view's id — it is the one number that says how long this open waited before
+    // it began, so it belongs in that open's row on the usage page.
+    record("nav-ms", performance.now() - pendingNav.at, next, from || next, pv);
   }
   pendingNav = null;
 }
@@ -182,21 +223,24 @@ export function startMetrics(): void {
   try {
     startVisible();
     // The vitals belong to the loaded page, whatever is on screen when they resolve.
-    onTTFB((m) => record("ttfb", m.value, undefined, loadPage));
-    onFCP((m) => record("fcp", m.value, undefined, loadPage));
-    onLCP((m) => record("lcp", m.value, undefined, loadPage));
+    onTTFB((m) => record("ttfb", m.value, undefined, loadPage, loadPv));
+    onFCP((m) => record("fcp", m.value, undefined, loadPage, loadPv));
+    onLCP((m) => record("lcp", m.value, undefined, loadPage, loadPv));
     // INP and CLS accumulate across the whole visit, so they belong to the loaded page for
     // the same reason the others do, and they arrive at hide time — before the pagehide
     // flush below, which is registered after these.
-    onINP((m) => record("inp", m.value, undefined, loadPage));
-    onCLS((m) => record("cls", m.value, undefined, loadPage));
+    onINP((m) => record("inp", m.value, undefined, loadPage, loadPv));
+    onCLS((m) => record("cls", m.value, undefined, loadPage, loadPv));
 
     // `buffered: true` replays marks made before this ran, so app code can mark during its
     // first render without caring when the collector mounted.
     new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
         if (!entry.name.startsWith(MARK_PREFIX)) continue;
-        record(entry.name.slice(MARK_PREFIX.length), entry.startTime);
+        // Relative to the view, not the document (see the header note). A part that renders
+        // as the soft navigation lands marks a hair before setPage moves the origin, hence
+        // the clamp — it reads as 0ms, which is what it was: already there on arrival.
+        record(entry.name.slice(MARK_PREFIX.length), Math.max(0, entry.startTime - viewStart));
       }
     }).observe({ type: "mark", buffered: true });
 

@@ -1,4 +1,15 @@
-# The Turso rows-read quota: attribution, fixes, and the guard
+# The read-cost ledger, and the Turso rows-read quota it was built for
+
+**Status, 2026-08-11.** Two halves, and they have different lifespans. **The ledger lives on**:
+`usage_ledger` + `src/lib/read-costs.ts` still charge every named read path its modeled cost on
+every call, and `/usage` still renders it — it is the only instrument that says which path a
+cost regression came from, and it is what a fallback to Turso would need on day one. **The
+quota it guarded is gone**: the store moved to self-hosted `sqld` on 2026-08-08
+(`docs/quota-forensic/BRIDGE.md`) and meters nothing, so the pace check in
+`/api/cron/usage-check` now watches a database production neither reads nor writes. Everything
+below the next heading is the record of the August incident — accurate as history, and the
+reason the fallback is not a one-env-var flip. The per-path cost model in it is still the model
+the ledger uses.
 
 Measurement record started 2026-08-06; resolved 2026-08-08 (see "Where August
 actually went" at the bottom). Live pre-registrations and the full evidence chain:
@@ -14,11 +25,11 @@ the database until the month resets.
 
 ## State when this was written
 
-- Production has run **replica-less** since the first deploy after 2026-08-03
-  (`LAZYBOY_NO_REPLICA=1`, set in Vercel that day to stop the embedded replica's
-  bootstrap traffic from blowing the 3 GB syncs quota — see GOTCHAS "The replica and the
-  syncs quota"). With the replica off, **every scanning read is a primary scan and every
-  scanned row is billed.**
+- Production had run **replica-less** since the first deploy after 2026-08-03 (the embedded
+  replica was switched off in Vercel that day to stop its bootstrap traffic from blowing the
+  3 GB syncs quota, and deleted from the code on 2026-08-11 — see GOTCHAS "RETIRED: the
+  embedded replica"). With the replica off, **every scanning read was a primary scan and every
+  scanned row was billed.**
 - Counter readings (Turso dashboard, Rem's screenshots): Aug 3 12:20 PM 167.99M → Aug 5
   4:35 PM 391.89M → Aug 6 1:52 PM 428.51M / 500M (86%). The last 21.3 h = +36.6M ≈
   **41.3M/day**, with ~71.5M of headroom left — under two days at that pace.
@@ -114,10 +125,15 @@ the primary, ~1,000+ calls/day.
 
 What deliberately did NOT change: the pinger cadence (42 ticks/h is Rem's freshness
 choice; post-fix a tick costs ~160 rows so cadence stopped mattering), the render-path
-caching (already keyed on the write marker), and the replica (stays off — see
-ARCHITECTURE for the read-architecture decision).
+caching (already keyed on the write marker), and the replica (stayed off, and was deleted on
+2026-08-11 — see ARCHITECTURE for the read architecture).
 
-## The guard (a mechanism, not a convention)
+## The guard (a mechanism, not a convention) — DORMANT since 2026-08-08
+
+The pace check below now runs against Turso, which production no longer uses; it is kept armed
+because it is the guard the fallback would need immediately, and because its second half (the
+reconciliation, below) is what writes the platform total and the residual into the ledger that
+`/usage` renders. Read the rest of this section as the design, not as a live alarm.
 
 Two dashboard-at-86% surprises in one week establish that a doc rule is not a guard. The
 standing mechanism is `/api/cron/usage-check`: reads the org's usage from Turso's
@@ -129,7 +145,11 @@ in a dashboard nobody re-visits. Tripping it deliberately (allowance temporarily
 below current usage) is part of its acceptance test — a guard that has never fired is a
 guard that does not work.
 
-## Continuous attribution (the ledger)
+## Continuous attribution (the ledger) — LIVE
+
+This half survived the move off Turso unchanged, and is the part of this document that still
+describes running code. What it measures is modeled rows SCANNED per named read path, which is
+a cost whether or not anyone bills it.
 
 The guard above answers *am I burning too fast*. It cannot answer *on what* — and a month of
 this database's burn went unattributed for exactly that reason: Turso publishes one counter
@@ -225,7 +245,7 @@ returns; **linear-rare** = full scan but only on real change, cost named; **fixe
 | `playsWithListened` | full plays scan + probes | only called by `recomputeAllTimeStats`/`getDailyStats`-adjacent paths above |
 | `recordPlays` reads | indexed probes ~120 | bounded |
 | `storePlaylistTracks` cached-positions read | indexed per playlist | bounded |
-| `storePlaylists` change-probe | 180-row scan hourly | bounded, and always was — its READ cost was never the issue. Its **verdict** was: two-way (exact match → stamp, anything else → delete-all + reinsert + full orphan pass), so the rotating `mosaic.scdn.co` art on 156 of 180 rows failed the match nearly every hour and took the expensive branch with it. ~~"the change-probe is what keeps the full pass cold"~~ **FALSIFIED** by the same measurements. **Now three-way** (`diffPlaylistList`, src/lib/store-diff.ts): identical → stamp meta, no marker; **images only → per-row `UPDATE playlists SET image`**, `write_seq` bumped (the table is replica-served), no `library_seq` (the search payload reads only `id, name` from `playlists`), no purge, no orphan pass; anything else → the rewrite, ledgered as `playlist_rewrite`. When it does differ it logs one `storePlaylists-diff` line naming the first differing field, so the claim "it's the artwork" stays checkable in production. Known answers: `node scripts/test-playlist-sync.mjs` |
+| `storePlaylists` change-probe | 180-row scan hourly | bounded, and always was — its READ cost was never the issue. Its **verdict** was: two-way (exact match → stamp, anything else → delete-all + reinsert + full orphan pass), so the rotating `mosaic.scdn.co` art on 156 of 180 rows failed the match nearly every hour and took the expensive branch with it. ~~"the change-probe is what keeps the full pass cold"~~ **FALSIFIED** by the same measurements. **Now three-way** (`diffPlaylistList`, src/lib/store-diff.ts): identical → stamp meta, no marker; **images only → per-row `UPDATE playlists SET image`**, `write_seq` bumped (a cached read serves the table), no `library_seq` (the search payload reads only `id, name` from `playlists`), no purge, no orphan pass; anything else → the rewrite, ledgered as `playlist_rewrite`. When it does differ it logs one `storePlaylists-diff` line naming the first differing field, so the claim "it's the artwork" stays checkable in production. Known answers: `node scripts/test-playlist-sync.mjs` |
 | `recomputeUniqueSongCount` | DISTINCT over playlist_tracks + probes ≈ 30K | linear-rare: only when the library actually changed |
 | meta reads (tokens, locks, seq, stamps) | single-key indexed | bounded |
 | `api_log` writes/reads | indexed, 1 h TTL | bounded |

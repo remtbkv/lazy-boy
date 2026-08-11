@@ -1,12 +1,17 @@
 // The MODELED rows-read cost of every named read path, in one place.
 //
-// Why this file exists: Turso bills rows SCANNED and reports one counter per organization.
+// Why this file exists: Turso billed rows SCANNED and reported one counter per organization.
 // That counter cannot say which read path spent it, which is how August 2026 reached 86% of
 // the 500M monthly cap before anything was attributed (docs/READ_QUOTA.md). The ledger
 // (`usage_ledger`, src/lib/db.ts) closes that gap by having each path record what it models
 // itself to cost as it runs, and /api/cron/usage-check diffs a day's ledger against the
 // platform counter — so the UNEXPLAINED part of the burn is a number on /usage instead of a
 // surprise on a dashboard.
+//
+// The store moved to self-hosted sqld on 2026-08-08 and meters nothing, so nobody bills these
+// rows any more. The model stays because rows scanned is still what a read COSTS: this is the
+// instrument that names the path behind a regression, and the reconciliation against Turso's
+// counter is the half that goes dormant, not the accounting.
 //
 // EVERY FIGURE HERE IS A MODEL, not a measurement of the call that just ran. Each one states
 // what it was calibrated against and when. Two consequences, stated rather than buried:

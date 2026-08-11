@@ -16,7 +16,13 @@ export function DockLoader() {
   useEffect(() => {
     let alive = true;
     dockDataAction().then((d) => {
-      if (alive) setData(d);
+      if (!alive) return;
+      setData(d);
+      // The one part of Home that is genuinely a second round trip, so it gets its own mark
+      // (read by src/lib/metrics-client.ts, shown on /usage). Marked on arrival rather than
+      // on the next paint: nothing on screen changes until a panel is opened, so "arrived" is
+      // the whole readiness story here.
+      performance.mark("lb:dock-ready");
     });
     return () => {
       alive = false;

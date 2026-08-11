@@ -225,6 +225,26 @@ async function waitForFreshToken(timeoutMs: number): Promise<SpotifyTokens | nul
   return null;
 }
 
+/** The Spotify access token for THIS request — server-only, and deliberately NOT a field on
+ *  the session.
+ *
+ *  It used to be `session.accessToken`, which Auth.js serializes straight to the browser at
+ *  `GET /api/auth/session`: any authenticated request there — so any script running on the
+ *  origin — got back a live token carrying all 13 scopes, including the modify ones. Nothing
+ *  client-side ever read it (this app mounts no SessionProvider), so it now travels through
+ *  the request-scoped token box instead of through the session object.
+ *
+ *  CALL IT AFTER auth() IN THE SAME REQUEST. The jwt callback is what refreshes an expired
+ *  token and publishes the result into the box; on its own this returns whatever is stored,
+ *  fresh or not. That ordering is the reason this is a bare accessor and not another refresh
+ *  path — refresh stays centralized in the jwt callback and getValidAccessToken (rule 3).
+ *
+ *  Free: it reads the box the jwt callback already populated — the same read the session
+ *  callback used to make to fill the field in. */
+export async function spotifyAccessToken(): Promise<string | undefined> {
+  return (await readTokensShared().catch(() => null))?.accessToken;
+}
+
 // Server-side, session-less access token for background jobs (e.g. the daily cron
 // sync) that run without a request. Reuses the same stored tokens and shared
 // refresh lock as the request path, so background and request refreshes coordinate
@@ -385,11 +405,10 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     },
     async session({ session, token }) {
       const t = token as SpotifyToken;
-      // Shares the request's one tokens read with the jwt callback above (see the token box).
-      // Still guarded: a transient Turso error must degrade to "no access token this tick",
-      // never throw — an unguarded throw surfaces as the Auth.js `Configuration` error
-      // and breaks login entirely.
-      session.accessToken = (await readTokensShared().catch(() => null))?.accessToken;
+      // Whatever this callback puts on `session` is what Auth.js hands the browser at
+      // GET /api/auth/session. So: the refresh state, and nothing else. The Spotify access
+      // token used to be set here — server code now takes it from spotifyAccessToken()
+      // instead, which reads the same request-scoped box this callback used to read.
       session.error = t.error;
       return session;
     },

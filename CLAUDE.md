@@ -31,7 +31,8 @@ src/app/(auth)/          login page (unauthenticated shell)
 src/app/(app)/           authed shell: layout calls auth() + owns the chrome (chrome.tsx,
                          den.css skin, now-playing provider); pages bring their own <main>
                          home/ (greeting, action dock, day strip, song table), playlists/,
-                         playlists/[id]/, friends/, usage/ (the rows-read ledger, no nav link)
+                         playlists/[id]/, friends/, usage/ (per-page load speed, then the
+                         rows-read ledger below it; no nav link)
                          history-actions.ts  Home's listen-history reads + the Spotify sync
 src/app/api/auth/        Auth.js route handler (NextAuth catch-all)
 src/app/api/tasks/       background-task progress polling endpoint
@@ -48,15 +49,18 @@ src/app/api/build/       this deployment's build id, unauthenticated, no DB — 
 src/app/api/sync/        on-load listen-history sync (POST; debounced server-side)
 src/app/api/cron/sync/   scheduled history sync (external pinger e.g. cron-job.org; daily Vercel cron
                          backstop) + the library rescan, self-gated to every 30 min
-src/app/api/cron/usage-check/  Turso quota guard: real usage vs month pace, 500 on breach
-                         (daily cron-job.org job e-mails on failure). docs/READ_QUOTA.md
+src/app/api/cron/usage-check/  DORMANT Turso quota guard: real usage vs month pace, 500 on
+                         breach (daily cron-job.org job e-mails on failure). Only relevant if
+                         production ever falls back to Turso — the store is self-hosted and
+                         meters nothing. Its reconciliation still feeds /usage. docs/READ_QUOTA.md
 src/lib/auth.ts          Auth.js config + Spotify token refresh (centralized)
 src/lib/session.ts       getSpotify(): server-only authed Spotify client
 src/lib/spotify/         client.ts (fetch+pagination+429/403), resources.ts, domain.ts, types.ts
 src/lib/tasks/           in-memory task registry (clean-playlist progress); swappable iface
-src/lib/db.ts            libSQL/Turso store (listen-history + tokens); async; file: fallback in dev.
-                         Two clients: getClient() = primary (all writes + `meta`),
-                         getReader() = local embedded replica (row-scanning reads). GOTCHAS.md
+src/lib/db.ts            libSQL store (listen-history + tokens) — self-hosted sqld on the
+                         Zenbook over a Tailscale Funnel; async; file: fallback in dev. ONE
+                         client, getClient(): every read, every write, all of `meta`. The
+                         embedded replica is gone (2026-08-11). GOTCHAS.md
 src/lib/read-costs.ts    the MODELED rows-read cost of every named read path + the residual
                          alarm rule; what db.ts's usage_ledger records. docs/READ_QUOTA.md
 src/lib/build-skew.ts    when a tab running an old bundle reloads itself (debounce/throttle/
@@ -69,7 +73,7 @@ src/components/          app components + shared: album-thumb, sort-menu, floati
                          now-playing, track-context-menu, playlists-client, playlist-grid,
                          merge-panel, track-list, clean-panel
 docs/                    ARCHITECTURE, FEATURES, ROADMAP, CONVENTIONS, GOTCHAS, SECURITY,
-                         READ_QUOTA (Turso quota: attribution, fixes, pre-registered measurements)
+                         READ_QUOTA (the read-cost ledger + the retired Turso quota's forensics)
 scripts/backfill-from-backstop.mjs  replay the Zenbook backstop recorder's captured plays
                          into the primary (the loss-repair path; recorder lives on the
                          Zenbook at ~/lazyboy-recorder, lazyboy-recorder.timer, every 15 min)
@@ -89,7 +93,10 @@ art → `album-thumb`; sort dropdown → `sort-menu`; bottom search pill → `fl
 4. **Long-running work uses the task registry** (`src/lib/tasks/`), polled by the client.
    The interface is swappable for a DB/queue later (ROADMAP: persist tasks across refresh).
 5. **Mutations are server actions or route handlers.** The Spotify access token stays
-   server-side and is never sent to the browser.
+   server-side and is never sent to the browser: server code gets it from
+   `spotifyAccessToken()` (`src/lib/auth.ts`), called **after** `auth()` in the same request.
+   It is deliberately not a field on the session — anything on the `Session` interface is
+   serialized to the browser at `GET /api/auth/session`. See `docs/SECURITY.md`.
 
 ## Next.js 16 gotchas (differs from older training data — see AGENTS.md)
 
@@ -97,7 +104,10 @@ art → `album-thumb`; sort dropdown → `sort-menu`; bottom search pill → `fl
 - `cookies()` and `headers()` are **async** — `await cookies()`.
 - Route handler 2nd arg: `{ params }: { params: Promise<{ id: string }> }`.
 - Middleware is renamed **Proxy** (`src/proxy.ts`). We avoid it: route protection is done
-  server-side in the `(app)` layout via `auth()`. Host canonicalization (`localhost` →
+  server-side **in each page** via `auth()` + `redirect()`, before that page's first read. The
+  `(app)` layout also calls `auth()`, but a layout is NOT a gate — it renders in parallel with
+  its page, so the page's payload ships inside the layout's 307 (docs/SECURITY.md).
+  Host canonicalization (`localhost` →
   `127.0.0.1`, needed so the Spotify OAuth round-trip + cookies stay on one host) is done
   **client-side** by an inline script in the root layout — a server redirect can't do it
   because Next's dev server normalizes the two hosts to one origin and just loops.

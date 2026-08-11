@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 import { unstable_rethrow } from "next/navigation";
-import { auth, signIn, signOut, getValidAccessToken } from "@/lib/auth";
+import { auth, signIn, signOut, getValidAccessToken, spotifyAccessToken } from "@/lib/auth";
 import { getSpotify } from "@/lib/session";
 import { spotifyClient, SpotifyError, type Track } from "@/lib/spotify";
 import { intersect, keyOf, subtract } from "@/lib/spotify/domain";
@@ -107,7 +107,9 @@ export async function startCleanAction(
 > {
   try {
     const session = await auth();
-    if (!session?.accessToken || session.error) throw new Error("Not authenticated");
+    if (!session || session.error || !(await spotifyAccessToken())) {
+      throw new Error("Not authenticated");
+    }
     // Background bulk work can outlive the access token → refreshing getter, not a fixed
     // string (a 1h+ clean would otherwise 401 mid-run). Patient: ride out rate limits.
     const token = refreshingToken();
@@ -146,7 +148,9 @@ export async function deletePlaylistAction(
 ): Promise<ActionResult<{ alreadyGone?: boolean }>> {
   try {
     const session = await auth();
-    if (!session?.accessToken || session.error) throw new Error("Not authenticated");
+    if (!session || session.error || !(await spotifyAccessToken())) {
+      throw new Error("Not authenticated");
+    }
     // Getter, not a fixed string: the delete is quick, but the fire-and-forget resync
     // below can outlive the token.
     const token = refreshingToken();

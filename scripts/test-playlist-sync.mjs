@@ -29,8 +29,8 @@
 // reinserted rows the same 1, 2, 3 the delete-all just freed.)
 //
 // Runs against a THROWAWAY file DB in the OS temp dir, created and deleted per run. It never
-// opens data/listens.db or data/replica.db — the replica is live and the prod primary is
-// quota-blocked, so no test may touch either.
+// opens data/listens.db or data/replica.db (the retired replica copy) — both are real data, and
+// the prod store is live, so no test may touch either.
 import { createClient } from "@libsql/client";
 import fs from "node:fs";
 import os from "node:os";
@@ -76,7 +76,8 @@ const PLSNAP_PURGE_SQL = `DELETE FROM meta WHERE key LIKE 'plsnap:%'
 const PLTRACKS_AT_PURGE_SQL = `DELETE FROM meta WHERE key LIKE 'pltracks_at:%'
           AND substr(key, 13) NOT IN (SELECT id FROM playlists)`;
 
-// db.ts storePlaylists() — the stamps (meta only; not replica-served, so not marker-relevant).
+// db.ts storePlaylists() — the stamps (meta only; no cached read is derived from them, so not
+// marker-relevant).
 const SYNCED_AT_SQL = `INSERT INTO meta (key, value) VALUES ('playlists_synced_at', :v)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value`;
 const ME_ID_SQL = `INSERT INTO meta (key, value) VALUES ('me_id', :v)
@@ -279,7 +280,7 @@ try {
   ]);
   check("no delete-all + reinsert: the stored positions are not renumbered", after2.map((r) => r.position), SEED_POSITIONS);
   check("counts are untouched", after2.map((r) => r.trackCount), before2.map((r) => r.trackCount));
-  check("write_seq DOES move (playlists is replica-served)", await meta("write_seq"), "6");
+  check("write_seq DOES move (a cached read serves `playlists`)", await meta("write_seq"), "6");
   check("library_seq does NOT move (the payload has no playlist art)", await meta("library_seq"), "3");
   check("no purge: even the stale membership survives", (await memberships()).length, 3);
   check("no orphan pass: the stale flag survives", await orphanFlag(), 0);

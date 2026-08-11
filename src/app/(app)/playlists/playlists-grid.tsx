@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { SortMenu } from "@/components/sort-menu";
 import { PlaylistThumb } from "@/components/playlist-thumb";
@@ -60,6 +60,13 @@ export function PlaylistsGrid({
   // across playlists), falling back to the raw track-count sum until it's first computed.
   const totalSongs = playlists.reduce((n, p) => n + p.trackCount, 0);
   const songCount = uniqueSongs || totalSongs;
+
+  // One mark, matching Home's: the grid is on screen with the server's library. The whole page
+  // arrives in that one payload (tiles, counts, sort), so this is the page's load story — read
+  // by the collector in src/lib/metrics-client.ts, shown on /usage. Nothing here reads it back.
+  useEffect(() => {
+    performance.mark("lb:playlists-rendered");
+  }, []);
 
   return (
     <div className="space-y-6">

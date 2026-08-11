@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { auth, spotifyAccessToken } from "@/lib/auth";
 import { spotifyClient } from "@/lib/spotify";
 import { storePlaylistTracks } from "@/lib/db";
 
@@ -9,14 +9,16 @@ import { storePlaylistTracks } from "@/lib/db";
 // re-scan — which is what keeps detail pages fast and off Spotify's rate limiter.
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const session = await auth();
-  if (!session?.accessToken || session.error) {
+  // Short-circuited so an unauthenticated POST costs no tokens read.
+  const accessToken = session && !session.error ? await spotifyAccessToken() : undefined;
+  if (!accessToken) {
     return Response.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
   try {
     const { id } = await params;
     const body = (await req.json().catch(() => ({}))) as { snapshot?: unknown };
     const cachedSnapshot = typeof body.snapshot === "string" ? body.snapshot : undefined;
-    const sp = spotifyClient(session.accessToken);
+    const sp = spotifyClient(accessToken);
 
     const playlist = await sp.playlist(id);
     if (cachedSnapshot && playlist.snapshot && playlist.snapshot === cachedSnapshot) {

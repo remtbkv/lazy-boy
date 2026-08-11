@@ -1,5 +1,5 @@
 // Public entry to the Spotify service layer.
-//   const sp = spotifyClient(session.accessToken)
+//   const sp = spotifyClient(await spotifyAccessToken())   // server-only; see lib/auth.ts
 //   const playlists = await sp.myPlaylists()
 import { Service } from "./service";
 import type { TokenSource } from "./client";

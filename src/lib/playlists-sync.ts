@@ -8,7 +8,7 @@
 // up the rest next time. The client polls the task for progress and refreshes periodically
 // so newly-cached data appears as it lands.
 import "server-only";
-import { auth, getValidAccessToken } from "@/lib/auth";
+import { auth, getValidAccessToken, spotifyAccessToken } from "@/lib/auth";
 import { spotifyClient } from "@/lib/spotify";
 import { syncLibrary } from "@/lib/sync/library";
 import { getTask, runTask, type Task } from "@/lib/tasks/registry";
@@ -22,7 +22,7 @@ let currentSyncId: string | null = null;
 
 export async function startLibrarySync(): Promise<{ taskId: string }> {
   const session = await auth();
-  if (!session?.accessToken || session.error) throw new Error("unauthorized");
+  if (!session || session.error || !(await spotifyAccessToken())) throw new Error("unauthorized");
 
   if (currentSyncId) {
     const t = getTask(currentSyncId);

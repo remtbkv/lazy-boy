@@ -9,6 +9,26 @@ the user-scoping item below is handled by row-level security instead.)
 - **Tokens never reach the browser.** The Spotify access/refresh tokens live in the DB
   (source of truth; the Auth.js JWT cookie is kept lean) and are only read server-side
   (Server Components, actions, route handlers). `src/lib/session.ts` is `server-only`.
+
+  This bullet was aspirational until 2026-08-11 and the audit that day caught it. The session
+  callback set `session.accessToken`, and **everything on the `Session` object is serialized to
+  the browser by Auth.js at `GET /api/auth/session`** — so any authenticated request to that
+  endpoint, i.e. any script running on the origin, got back a live Spotify token with all 13
+  scopes, the modify ones included. With no CSP shipped yet, that turned any XSS from session
+  theft into Spotify account takeover. Nothing client-side ever used it (the app mounts no
+  `SessionProvider`).
+
+  The token now travels server-side only, via `spotifyAccessToken()` in `src/lib/auth.ts`: it
+  reads the request-scoped token box that the jwt callback already populated — the same read
+  the session callback used to make — so there is no extra DB round trip. **Call it after
+  `auth()` in the same request**, never in parallel: the jwt callback is what refreshes an
+  expired token and publishes it. Refresh itself stays centralized (rule 3) — this is a bare
+  accessor, not a third token path.
+
+  The invariant is enforced by the type, not by discipline: `accessToken` is gone from the
+  `Session` interface in `src/types/next-auth.d.ts`, so `session.accessToken` is now
+  `TS2339: Property 'accessToken' does not exist on type 'Session'` (verified). Adding any
+  field to that interface publishes it to the browser — treat it as a public API.
 - **Every API route checks `auth()`** and returns 401 (verified against production
   2026-08-11: `/api/sync`, `/api/metrics`, `/api/playlists/*`, `/api/search/*` all 401 without
   a session; `/api/now-playing` answers `{playing:null}`; `/api/build` is deliberately public

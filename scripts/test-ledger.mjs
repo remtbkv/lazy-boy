@@ -14,8 +14,8 @@
 //     divergence here is not caught by anything, which is why the copies are kept literal.
 //
 // Runs against a THROWAWAY file DB in the OS temp dir, created and deleted per run. It never
-// opens data/listens.db or data/replica.db — the replica is live and the prod primary is
-// quota-blocked, so no test may touch either.
+// opens data/listens.db or data/replica.db (the retired replica copy) — both are real data, and
+// the prod store is live, so no test may touch either.
 import { createClient } from "@libsql/client";
 import fs from "node:fs";
 import os from "node:os";

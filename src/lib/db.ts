@@ -1,7 +1,10 @@
 // Listen-history store. A personal record of which tracks were played, how often,
 // when, and from where. Data comes from Spotify /me/player/recently-played, synced
-// on demand. Backed by libSQL (Turso) so it persists on Vercel's serverless
-// runtime; falls back to a local SQLite file in dev when TURSO_DATABASE_URL is unset.
+// on demand. Backed by libSQL so it persists on Vercel's serverless runtime: the store is a
+// self-hosted `sqld` on the Zenbook, reached over a Tailscale Funnel (docs/quota-forensic/
+// BRIDGE.md), and falls back to a local SQLite file in dev when TURSO_DATABASE_URL is unset.
+// Turso Cloud is a restore target now, not the live store — the metered-quota defences that
+// shaped this file are history unless production ever falls back to it.
 import "server-only";
 import { cache } from "react";
 import { unstable_cache } from "next/cache";
@@ -37,38 +40,41 @@ import {
   type TrackFields,
 } from "@/lib/store-diff";
 
-// ── Query conventions (a remote primary + a local replica — round trips and plan choice
-// both matter) ──
-// All figures below: medians (min–max), n=15×2 interleaved runs primary / n=9 local,
-// 2026-08-01, scripts/bench-reads.mjs. Follow these when adding queries:
-//  • Anything that SCANS rows reads from getReader() (the replica). Primary-side scans are
-//    seconds-scale AND unstable session to session: the full plays scan (~6,660 rows)
-//    measured ~105ms one morning and 1,369-2,243ms (216-7,854ms) that afternoon, same query,
-//    same data. The replica does it in ~10ms, stably.
+// ── Query conventions (ONE client against a remote store — round trips and plan choice both
+// matter) ──
+// Every read and every write goes through getClient(). There is no second reader: the libSQL
+// embedded replica that used to serve scanning reads was switched off in production on
+// 2026-08-03 and deleted on 2026-08-11 (git history holds the code; docs/GOTCHAS.md keeps the
+// post-mortem of why it could not work on serverless).
+// The figures below are medians (min–max), n=15×2 interleaved / n=9 local, 2026-08-01,
+// scripts/bench-reads.mjs — measured against TURSO CLOUD, which this store no longer runs on.
+// The self-hosted sqld it moved to on 2026-08-08 answers the same scanning reads 5-8× faster
+// and meters nothing (docs/quota-forensic/BRIDGE.md), so read them as the SHAPE of the cost,
+// not as current constants. Follow these when adding queries:
+//  • A scan is still the expensive kind of read, so no render path does one. Home reads a
+//    materialized payload out of `meta` ("The Home payload"), and the day list + search filter
+//    a payload the browser already holds ("The client-side search payloads"). A new render-path
+//    read should join one of those rather than add a scan.
 //  • Song-identity equality lookups — `WHERE lower(t.artist) = ?` (optionally `AND
 //    lower(t.name) = ?`) — keep an INNER JOIN so the planner uses idx_tracks_artist_name:
-//    INNER 22-24ms vs LEFT 82-510ms (max 3,475ms) on the primary, 0.045ms vs 5.6ms local.
+//    INNER 22-24ms vs LEFT 82-510ms (max 3,475ms) remote, 0.045ms vs 5.6ms local.
 //    Reproduced in both replicates; this one is a real rule.
 //  • LEFT vs INNER on the plays-driven joins is measured INDISTINGUISHABLE, rows identical:
 //    dailyStats window 66/104ms LEFT vs 68/47ms INNER; history search 71/57 vs 70/56.
 //    LEFT stays the default style here — but it is no longer a performance rule.
-//  • Window functions are fine on the replica (LEAD over the full plays scan is ~1.5× a plain
-//    fetch: 15.0 vs 10.4ms). The rule that actually holds: NO full-table scan against the
-//    PRIMARY on any render path.
 //  • Cache whole-table aggregates in `meta` and recompute on write, not on read
-//    (`unique_song_count`, `alltime_stats`; per-day stats fetch only their window). The
-//    justification is the replica-less path — on a cold instance a live recompute costs
-//    0.2-3.4s against the primary vs a ~20ms meta read. Every cached derived value must be
-//    covered by scripts/verify-derived.mjs.
-//  • Writes, and ALL meta coordination keys (tokens, locks), use getClient() (the primary);
-//    a new write must end with `await syncReader()`, and — if it changed a table getReader()
-//    serves — must BUMP THE WRITE MARKER in the same batch (writeSeqStmt(); see the marker
-//    note below, which owns the bump-or-not rule). Serial primary reads stack linearly —
-//    ~20ms each (a single-key meta read costs the same as `SELECT 1`), 3 serial meta reads
-//    65-72ms vs 23-26ms for the same 3 via Promise.all — so dedupe or parallelize them.
-//  • NEVER encode a single-session primary timing as a rule. State median (min–max), n and
-//    date, and re-measure before trusting it. This file's own history is the cautionary
-//    tale: three of the rules it used to state did not reproduce.
+//    (`unique_song_count`, `alltime_stats`; per-day stats fetch only their window): a live
+//    recompute costs 0.2-3.4s against a remote store vs a ~20ms meta read. Every cached
+//    derived value must be covered by scripts/verify-derived.mjs.
+//  • A write that changed a table any cached read serves must BUMP THE WRITE MARKER in the
+//    same batch (writeSeqStmt(); the marker note below owns the bump-or-not rule) and end with
+//    dropWriteSeqCache(). Serial reads stack linearly — ~20ms each against Turso (a single-key
+//    meta read cost the same as `SELECT 1`), 3 serial meta reads 65-72ms vs 23-26ms for the
+//    same 3 via Promise.all, and the funnel's round trip is larger still — so dedupe or
+//    parallelize them.
+//  • NEVER encode a single-session timing against the remote store as a rule. State median
+//    (min–max), n and date, and re-measure before trusting it. This file's own history is the
+//    cautionary tale: three of the rules it used to state did not reproduce.
 
 export type PlayRecord = {
   trackId: string;
@@ -108,7 +114,7 @@ export type DayStats = {
   durationMs: number;
 };
 
-// Local-file fallback for dev; production points at Turso via env.
+// Local-file fallback for dev; production points at the self-hosted store via env.
 const FILE_URL = `file:${path.join(process.cwd(), "data", "listens.db")}`;
 const url = process.env.TURSO_DATABASE_URL || FILE_URL;
 const authToken = process.env.TURSO_AUTH_TOKEN;
@@ -121,7 +127,7 @@ function getClient(): Promise<Client> {
   if (g.__listenDbReady) return g.__listenDbReady;
   const ready = init();
   g.__listenDbReady = ready;
-  // If init fails (a transient Turso/network blip on first use), drop the cached
+  // If init fails (a transient network blip on first use), drop the cached
   // rejection so the next call retries — otherwise every DB call in this process
   // fails forever until a restart.
   ready.catch(() => {
@@ -180,7 +186,7 @@ async function init(): Promise<Client> {
     -- Find "where does this song/artist live" looks up playlist_tracks BY track_id; without
     -- this the plan degrades from SEARCH-by-index to a full SCAN (local copy, same rows:
     -- 0.032ms indexed vs 0.683ms with the index dropped, n=9, 2026-08-01) — and a scan is
-    -- far worse against the remote primary, where scans are seconds-scale.
+    -- far worse against a remote store, where it was seconds-scale on Turso.
     CREATE INDEX IF NOT EXISTS idx_pltracks_track ON playlist_tracks (track_id);
     CREATE TABLE IF NOT EXISTS saved_tracks (
       track_id TEXT PRIMARY KEY,
@@ -246,180 +252,61 @@ async function init(): Promise<Client> {
     "CREATE INDEX IF NOT EXISTS idx_plays_context ON plays (context_uri)",
   );
   // recomputeOrphanFlags({newOnly}) filters on `ctx_orphan IS NULL`. Without this partial
-  // index that is a full plays scan on every sync tick that lands a play — ~7.2K billed
-  // rows against a replica-less primary to find the handful of new rows. The index holds
-  // only the unverdicted rows (normally ≈0), so the same UPDATE scans just those.
+  // index that is a full plays scan on every sync tick that lands a play — ~7.2K rows
+  // scanned to find the handful of new ones. The index holds only the unverdicted rows
+  // (normally ≈0), so the same UPDATE scans just those.
   await client.execute(
     "CREATE INDEX IF NOT EXISTS idx_plays_orphan_null ON plays (id) WHERE ctx_orphan IS NULL",
   );
   return client;
 }
 
-// ── Read replica ────────────────────────────────────────────────────────────────────────
-// Turso's remote instance is slow at anything that SCANS rows, and it is not the network:
-// the round trip to the primary is ~47ms (median, n=8; 20-29ms in later sessions — the bare
-// round trip itself drifts 20-47ms across sessions), but `SELECT COUNT(*) FROM tracks`
-// (15k rows, nothing returned) is ~312ms there and ~0.02ms against the same data in local
-// SQLite. The cost is per row scanned, so every scanning read paid for the whole table.
+// ── One client, no replica ──────────────────────────────────────────────────────────────
+// Scanning reads used to be served by a libSQL EMBEDDED REPLICA — a local SQLite copy of the
+// store, pulled from the primary and handed out behind a per-request freshness gate. It is
+// gone. Production ran with it switched off from 2026-08-03 (each cold serverless instance
+// bootstrapped the whole ~17MB copy, which burned 77% of Turso's 3GB/mo syncs quota in three
+// days), and on 2026-08-08 the store itself moved to self-hosted sqld, where reads are neither
+// metered nor slow enough to be worth a copy. The code, its measurements, and the
+// build-time-seed post-mortem (a bundled snapshot goes stale-generation at the primary's first
+// replication rotation, which made the normal cold start 2-3× SLOWER) are in git history and
+// summarised in docs/GOTCHAS.md.
 //
-// NUMBERS HERE ARE MEDIANS OVER REPEATED RUNS, and they have to be: this primary's timings
-// swing wildly (`SELECT 1` alone measured 37–440ms within one run, and the same history
-// search measured 2.9s early in a session and 344ms later, unchanged). A single-shot timing
-// against it is not a measurement. Re-measure with repetition before trusting any figure in
-// this file, including these.
-//
-// So scanning reads run against a libSQL EMBEDDED REPLICA: a local SQLite copy of the same
-// database that the client keeps current by pulling frames from the primary. Same SQL, same
-// rows (medians, n=5): history search 344ms → 5.7ms, all-time list 705ms → 8.9ms, one day's
-// plays 41ms → 0.9ms, the day-strip mount scan 105ms → 13ms.
-//
-// Writes deliberately do NOT go through it. A write via a replica forwards to the primary
-// and then pulls back, which is ~5× slower than writing to the primary directly, and the
-// token/lock rows in `meta` must never be read from a copy that another instance's refresh
-// hasn't reached yet (that's the invalid_grant race the token code exists to avoid). So:
-// getClient() = the primary, for every write plus all of meta; getReader() = the replica,
-// for the row-scanning reads.
-//
-// The replica is never on the critical path: getReader() hands back the primary until the
-// first sync has landed, so a cold serverless instance is exactly as fast as it is today and
-// gets fast the moment the copy is there. If the replica can't be built at all, everything
-// silently keeps using the primary.
-const REPLICA_ENABLED =
-  !!process.env.TURSO_DATABASE_URL && process.env.LAZYBOY_NO_REPLICA !== "1";
-// Vercel's only writable directory is /tmp (per warm instance). Locally it sits beside the
-// dev DB so it survives dev-server restarts and re-syncs incrementally, not from scratch.
-const REPLICA_PATH = process.env.VERCEL
-  ? "/tmp/lazyboy-replica.db"
-  : path.join(process.cwd(), "data", "replica.db");
-// There is deliberately NO syncInterval. A background poll every 30s was 2,880 pulls/day per
-// instance whether or not anything had been written, and it still left a 30s window where
-// another process's write was invisible. The freshness gate in getReader() replaces both
-// halves: it pulls only when the marker says there is something to pull, and never serves a
-// copy that is behind. Our own writes stay synchronous via syncReader().
-
-// A BUILD-TIME SEED DOES NOT WORK — measured 2026-08-01, don't rebuild it. The idea: ship a
-// synced replica snapshot in the deployment and copy it to REPLICA_PATH so a cold instance
-// resumes incrementally instead of pulling ~18MB. Mechanically it works, and when the snapshot
-// is minutes old it is a big win (medians, interleaved n=4: 934ms seeded vs 5,944ms full).
-// It collapses because THIS PRIMARY ROTATES ITS REPLICATION GENERATION on a schedule we don't
-// control, at a VARIABLE cadence — 2026-08-01, one sample/min: 4470 → 4471 → 4472 → 4473 in 25
-// minutes (~7min apart) in the morning, then a single generation held for 32+ minutes later
-// the same day. So "every N minutes" is not a property to lean on; what holds is that a
-// rotation lands somewhere inside a normal deploy's lifetime. A snapshot from an older
-// generation doesn't resume — it costs MORE than starting empty:
-//   same generation, <1min old   934ms   (785-1,000, n=4)   vs full 5,944ms (5,469-7,465)
-//   1 generation behind        6,114ms   (6,077-6,115, n=3) vs full 2,150ms (1,978-6,578)
-//   2 generations behind      13,700ms   (13,383-15,644, n=3) vs full 4,845ms (4,317-5,008)
-// A deploy-time snapshot is stale-generation from the first rotation onward — unpredictable
-// when, certain to happen inside the deploy's lifetime — i.e. for every cold start except the
-// ones shortly after a deploy, so the bundled seed makes the normal case 2-3× SLOWER.
-// There is no cheap way to check the primary's current generation before opening the replica,
-// so it can't be gated either. (For the record, the minimal resumable file set is
-// `.db` + `-info` + `-wal`: `.db` alone makes createClient throw InvalidLocalState, and
-// `.db` + `-info` without the WAL silently drops the rows still in it — 6,667 of 6,670 plays.)
-const REPLICA_SIDECARS = ["-info", "-wal", "-shm"];
-
-const gr = globalThis as unknown as {
-  __listenReader?: Client;
-  __listenReplicaBoot?: Promise<void>;
-  __listenReplicaSyncing?: boolean;
-};
-
-function removeReplicaFiles(): void {
-  for (const suffix of ["", ...REPLICA_SIDECARS]) {
-    fs.rmSync(REPLICA_PATH + suffix, { force: true });
-  }
-}
-
-/** Open the replica at REPLICA_PATH, sync it, and prove it can answer a query. Throws (after
- *  closing the client) if any of that fails, so the caller can wipe and retry. */
-async function openReplica(): Promise<Client> {
-  // createClient itself throws on an inconsistent local state, so it belongs inside the try.
-  let replica: Client | undefined;
-  try {
-    replica = createClient({
-      url: `file:${REPLICA_PATH}`,
-      syncUrl: process.env.TURSO_DATABASE_URL,
-      authToken,
-      intMode: "number",
-      // No syncInterval on purpose — see the note where it used to live. Every pull is
-      // deliberate: this boot sync, syncReader() after our own writes, and the gate's
-      // catch-up pull when the marker says another process wrote.
-    });
-    await replica.sync();
-    // sync() SUCCEEDS against a corrupt local file — measured: a truncated replica synced in
-    // 461ms and only failed on the FIRST QUERY (SQLITE_CORRUPT). Without a read here, an
-    // instance that inherited a damaged file (a sync killed mid-write, a half-written /tmp)
-    // would hand that client to every scanning read for the life of the instance. Two indexed
-    // counts, 0.3ms together, catch it. `PRAGMA quick_check` catches more but costs 57ms and
-    // scales with the DB, so it stays off the boot path.
-    await replica.execute("SELECT count(*) AS n FROM plays");
-    await replica.execute("SELECT count(*) AS n FROM tracks");
-    return replica;
-  } catch (err) {
-    replica?.close();
-    throw err;
-  }
-}
-
-function bootReplica(): void {
-  if (gr.__listenReplicaBoot) return;
-  gr.__listenReplicaBoot = (async () => {
-    // The primary owns the schema; make sure init() has run before copying it down.
-    await getClient();
-    fs.mkdirSync(path.dirname(REPLICA_PATH), { recursive: true });
-    // A file already there is one this process didn't write: the dev copy from an earlier run,
-    // or a warm Vercel instance's /tmp. It's the only thing that can be damaged, so it's the
-    // only case worth retrying — throw it away and build from scratch, once.
-    const inherited = fs.existsSync(REPLICA_PATH);
-    try {
-      gr.__listenReader = await openReplica();
-    } catch (err) {
-      if (!inherited) throw err;
-      removeReplicaFiles();
-      gr.__listenReader = await openReplica();
-    }
-  })().catch(() => {
-    // A replica is an optimisation, never a requirement — drop the cached failure so a
-    // later call retries, and keep serving from the primary in the meantime.
-    gr.__listenReplicaBoot = undefined;
-  });
-}
-
-// There is deliberately NO eager instance-start warm (src/instrumentation.ts used to call
-// one). Every cold instance pulled the full ~17MB replica whether or not it would ever scan —
-// and the cron tick every ~2 min means most instances exist only to write and exit. Against
-// Turso's free-plan 3GB/mo syncs quota that was ~12-17 bootstraps/day of pure waste (77% of
-// the August quota burned in 3 days, 2026-08-03). The replica now boots lazily from
-// getReader() on the first scanning read; until it lands those reads use the primary, which
-// was always the designed fallback.
+// So getClient() is the whole story: one client, every read, every write, all of `meta`.
 
 // ── The write marker (`meta.write_seq`) ─────────────────────────────────────────────────
-// A counter the primary bumps on every write THE REPLICA SERVES. It exists so a read can
-// tell, cheaply, whether the local copy is complete: the gate below compares the primary's
-// value with the replica's own copy of the same row. Equal → the copy holds every committed
-// write and can be trusted. Different → it is behind, and this request reads the primary.
-// (libSQL gives nothing usable for this: sync() reports frames_synced: 1 whether or not it
-// pulled anything, and PRAGMAs on a replica handle forward to the primary and error.)
+// A counter bumped by every write that changes what a CACHED read serves. It is a content
+// version, and two mechanisms are built on it:
+//   • the LIVE cache keys ("Read caching" below) — the day strip, a day's plays, the all-time
+//     list, the playlist grid all take it as an argument purely so it lands in the key, so a
+//     write that changed their data produces a different key and the next read recomputes;
+//   • the client-side history payload, via the slow marker (`meta.slow_seq_pub`, published at
+//     most every 10 min) that getHistoryIndexVersion() serves as the payload's version and its
+//     route's ETag.
+// It is also how a write made OUTSIDE the app announces itself — scripts/backfill-from-
+// backstop.mjs bumps it after replaying captured plays, and that bump is the only thing that
+// stops every cached entry and every browser's payload from serving the pre-backfill answer.
+// (It formerly gated an embedded replica's freshness; that job is gone with the replica.)
 //
 // WHICH WRITES BUMP IT — the rule, in one place:
-//   BUMP when the write changes a table getReader() hands out: plays (including ctx_orphan),
+//   BUMP when the write changes a table a cached read serves: plays (including ctx_orphan),
 //   tracks, contexts, playlists, playlist_tracks, saved_tracks.
-//   DO NOT BUMP for a write that only touches `meta` or `api_log`. Nothing reads either from
-//   the replica — every meta read goes through getMeta() → getClient(), which is the
-//   token/lock rule at the top of this section, and getApiLogSummary() reads the primary too.
-//   That covers tokens, locks, the cooldown, the *_synced_at stamps, and the derived caches
-//   (`alltime_stats`, `unique_song_count`). api_log matters most: it is written on essentially
-//   every outgoing Spotify call (~6s apart while the app is open), so bumping on it would put
-//   the gate permanently in the "behind" state and route everything to the primary — the exact
-//   thing this replaces.
-// An unnecessary bump is not a correctness bug, it just costs other instances a primary-routed
-// request plus a catch-up pull. A MISSING bump is a correctness bug: it serves stale rows.
+//   DO NOT BUMP for a write that only touches `meta`, `api_log`, `usage_ledger` or
+//   `client_metrics`. Nothing cached is derived from them — every meta read goes through
+//   getMeta() straight to the store, and the other three are read only by their own
+//   diagnostics. That covers tokens, locks, the cooldown, the *_synced_at stamps, the Home
+//   payload, and the derived caches (`alltime_stats`, `unique_song_count`). api_log matters
+//   most: it is written on essentially every outgoing Spotify call (~6s apart while the app is
+//   open), so bumping on it would invalidate every cached read continuously — the exact cost
+//   the caching exists to avoid.
+// An unnecessary bump is not a correctness bug, it just throws away cache entries and makes
+// every browser re-download the history payload. A MISSING bump is a correctness bug: it
+// serves rows that the write already replaced.
 //
 // The bump must be ATOMIC WITH (same batch as) or AFTER the data it announces, never before.
-// Announcing late is safe — a reader that syncs in the gap simply gets the rows early and
-// re-checks next request. Announcing early is not: a reader could mark itself fresh against a
-// copy that doesn't have the write yet.
+// Announcing late is safe — a reader in the gap simply recomputes one read early. Announcing
+// early is not: a read could be cached under a key that claims to include a write the store
+// does not have yet.
 const WRITE_SEQ_KEY = "write_seq";
 
 /** The bump, as a statement to append to a write batch. Starts the counter at 1 if absent. */
@@ -443,8 +330,8 @@ async function bumpWriteSeq(): Promise<void> {
 // search payload ("The client-side search payloads" below), which is the largest body this app
 // serves and must therefore survive a listening session in the browser cache. write_seq cannot
 // do that job: it bumps on every play, so the payload would be re-downloaded whole after every
-// listen. It rides ALONGSIDE write_seq (never instead of it) — the replica gate still needs
-// the write announced.
+// listen. It rides ALONGSIDE write_seq (never instead of it) — the same write still has to
+// move the LIVE cache keys.
 //
 // Same discipline as write_seq: bump in the same batch as the data, and only when the batch
 // actually changed something. A missing bump serves a stale library; an extra one costs a
@@ -461,8 +348,8 @@ function librarySeqStmt(): InStatement {
 }
 
 /** The marker as stored (a TEXT column, so compare as strings), or null before the first
- *  bump. Cheap on both sides: an indexed single-key lookup — ~20-30ms on the primary (a
- *  round trip; the same cost as `SELECT 1`), ~0.01ms on the replica's local file. */
+ *  bump. Cheap: an indexed single-key lookup — ~20-30ms against Turso (a round trip; the same
+ *  cost as `SELECT 1`), and one round trip against the store it runs on now. */
 async function readWriteSeq(client: Client): Promise<string | null> {
   const res = await client.execute({
     sql: "SELECT value FROM meta WHERE key = ?",
@@ -471,10 +358,12 @@ async function readWriteSeq(client: Client): Promise<string | null> {
   return res.rows[0] ? String(res.rows[0].value) : null;
 }
 
-// The primary's marker, read ONCE per request and shared: the freshness gate below and every
-// cached read (see "Read caching") both key off it, and three serial single-key primary reads
-// cost 65-72ms against 23-26ms for one (the round-trip note at the top of the file). Same
-// per-request box as readerBox/tokenBox; outside a request it's a plain read.
+// The store's marker, read ONCE per request and shared: every cached read (see "Read
+// caching") keys off it, and three serial single-key reads cost 65-72ms against 23-26ms for
+// one (the round-trip note at the top of the file). Same per-request box as playsWithListened
+// below and the token box in auth.ts — React cache() gives a per-request box; outside a
+// request (the cron path) cache() has no dispatcher and is a pass-through, so each call reads
+// again instead, which is correct, just not deduped.
 const seqBox = cache(() => ({ p: null as Promise<string | null> | null }));
 function primaryWriteSeq(): Promise<string | null> {
   const box = seqBox();
@@ -482,95 +371,13 @@ function primaryWriteSeq(): Promise<string | null> {
   return box.p;
 }
 
-// One freshness verdict per REQUEST, not per query: a page runs several scanning reads and
-// they must not each pay a primary round trip. Same shape as playsWithListened below and the
-// token box in auth.ts — React cache() gives a per-request box; outside a request (the cron
-// path) cache() has no dispatcher and is a pass-through, so each call re-checks instead,
-// which is correct, just not deduped.
-const readerBox = cache(() => ({ p: null as Promise<Client> | null }));
-
-/** Decide, once per request, whether the replica may answer: it may exactly when it has
- *  every write the primary has committed. When it doesn't, this request reads the PRIMARY —
- *  slower for scans, but never stale — and the copy is pulled up in the background so the
- *  next request is local again. */
-async function chooseReader(replica: Client): Promise<Client> {
-  const primary = await getClient();
-  let primarySeq: string | null;
-  try {
-    primarySeq = await primaryWriteSeq();
-  } catch {
-    // The marker read is the ONE thing standing between a read and its data, so it must not
-    // be able to take reads down. If the primary is unreachable, serve the local copy and say
-    // nothing: during a primary outage the replica is the only thing that can answer at all,
-    // and the staleness is bounded by the outage. Availability wins here, freshness elsewhere.
-    return replica;
-  }
-  try {
-    if ((await readWriteSeq(replica)) === primarySeq) return replica;
-  } catch {
-    // A copy that can't answer a single-key lookup is not a copy worth reading from.
-    return primary;
-  }
-  backgroundSync(replica);
-  return primary;
-}
-
-/** Client for reads that scan rows: the local replica when the gate says it is current, the
- *  primary otherwise (not yet built, behind, or broken). Never blocks on a sync. Not for
- *  `meta` — see the note above. */
-function getReader(): Promise<Client> {
-  if (!REPLICA_ENABLED) return getClient();
-  const replica = gr.__listenReader;
-  if (!replica) {
-    bootReplica();
-    return getClient();
-  }
-  const box = readerBox();
-  box.p ??= chooseReader(replica);
-  return box.p;
-}
-
-/** Catch the copy up without making this request wait for it — the request it belongs to is
- *  already being served from the primary. Fire-and-forget, one at a time: concurrent requests
- *  all see the same stale marker, and N parallel pulls of the same frames is pure egress. */
-function backgroundSync(replica: Client): void {
-  if (gr.__listenReplicaSyncing) return;
-  gr.__listenReplicaSyncing = true;
-  void replica
-    .sync()
-    .catch(() => {
-      /* the next request's gate sees the marker still behind and retries the pull */
-    })
-    .finally(() => {
-      gr.__listenReplicaSyncing = false;
-    });
-}
-
-/** Pull the replica up to date. Called at the end of every write so the read that follows
- *  sees what was just written — the gate would route that read to the primary otherwise, and
- *  read-after-own-write shouldn't have to pay for a scan against it. */
-async function syncReader(): Promise<void> {
-  // Every caller of this just bumped the marker, so this request's shared copy of it is now
-  // one behind — and the cached reads below key off that copy, so leaving it in place would
-  // serve the PRE-write entry to the read that follows the write (exactly what
-  // refreshHistoryAction does: sync, then re-read the day). Dropped before the replica check
-  // on purpose: with LAZYBOY_NO_REPLICA=1 there is no replica and the rest of this is a no-op,
-  // but the cache keys still have to move.
+/** Drop this request's shared copy of the marker. Called at the end of every write that bumped
+ *  it: the cached reads below key off that copy, so leaving it in place would serve the
+ *  PRE-write entry to the read that follows the write — exactly what refreshHistoryAction does
+ *  (sync, then re-read the day). Same shape as publishTokens() in auth.ts: a write republishes
+ *  what it just made true instead of leaving the request's snapshot stale. */
+function dropWriteSeqCache(): void {
   seqBox().p = null;
-  const r = gr.__listenReader;
-  if (!r) return;
-  try {
-    await r.sync();
-    // The copy is current as of this pull, so a "behind" verdict this request formed earlier
-    // — the cron writes every ~2 min, so a request can easily start behind — is now wrong in
-    // the slow direction: it would keep the rest of the request on the primary, including
-    // recomputeUniqueSongCount's multi-second DISTINCT scan. Drop it and let the next read
-    // re-gate (one marker round trip). Same shape as publishTokens() in auth.ts: a write
-    // republishes what it just made true instead of leaving the request's snapshot stale.
-    readerBox().p = null;
-  } catch {
-    /* the next read's gate catches the copy up; a failed sync must not fail its write */
-  }
 }
 
 // libSQL Row objects aren't plain objects (they carry a prototype + indexed access), so
@@ -597,8 +404,8 @@ async function readCachedTracks(client: Client, ids: string[]): Promise<Map<stri
 }
 
 // The unconditional-upsert statement for a track row (used only for rows the diff says
-// actually changed — Turso counts every ON CONFLICT UPDATE as a billed row write, even
-// when the values are identical).
+// actually changed — an ON CONFLICT UPDATE writes a row even when the values are identical,
+// which Turso billed and which is wasted work on any store).
 function trackUpsertStmt(t: TrackFields): InStatement {
   return {
     sql: `INSERT INTO tracks (id, name, artist, uri, album, album_image, duration_ms)
@@ -667,9 +474,9 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
     });
   }
   // Only announce a change if there IS one. A tick that found nothing new writes just the
-  // last_sync stamp below — a meta key, never read from the replica — and the sync runs every
-  // couple of minutes, so bumping unconditionally would leave every other instance gate-failed
-  // around the clock.
+  // last_sync stamp below — a meta key, which nothing cached is derived from — and the sync
+  // runs every couple of minutes, so bumping unconditionally would throw away every cached
+  // read around the clock.
   const changed = stmts.length > 0;
   if (changed) stmts.push(writeSeqStmt());
   // Stamp last_sync atomically with the plays.
@@ -680,19 +487,19 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
   });
   const results = await client.batch(stmts, "write");
   // A no-change tick (the steady-state cron every couple of minutes) wrote only last_sync —
-  // nothing the reader serves — so skip the orphan recompute (~0.2s primary UPDATE over zero
-  // rows) and the replica pull (~0.13s no-op sync) it would otherwise pay each tick.
+  // nothing a cached read serves — so skip the orphan recompute (~0.2s UPDATE over zero rows)
+  // it would otherwise pay each tick.
   if (insertResultIdx.length > 0) {
     // Give the plays we just inserted their membership verdict before anything reads them.
     await recomputeOrphanFlags({ newOnly: true });
   }
-  // Pull the replica up to the write we just made, so the read that follows is fresh.
-  if (changed) await syncReader();
+  // The write moved the marker; drop this request's copy so the read that follows re-keys.
+  if (changed) dropWriteSeqCache();
   let added = 0;
   for (const i of insertResultIdx) added += Number(results[i].rowsAffected);
   // New plays landed → refresh the cached all-time totals so Home reads them instantly
   // (instead of running the expensive gap scan on render). Only on a real change, and at
-  // most every 10 min: the recompute is a full plays scan (~14K billed rows replica-less),
+  // most every 10 min: the recompute is a full plays scan (~14K rows),
   // and during a listening session plays land on many consecutive ticks. The card can lag
   // the newest plays by ≤10 min mid-session; the end-of-session tail is healed by the
   // daily cron's unconditional recompute (cron/sync route).
@@ -725,8 +532,8 @@ export async function recordContexts(contexts: ContextRecord[]): Promise<void> {
     ],
     "write",
   );
-  // Pull the replica up to the write we just made, so the read that follows is fresh.
-  await syncReader();
+  // The write moved the marker; drop this request's copy so the read that follows re-keys.
+  dropWriteSeqCache();
 }
 
 // Negative-cached (name IS NULL) contexts get re-checked this often. Keeps the cache
@@ -746,7 +553,7 @@ export async function unseenContexts(
   cands: { uri: string; type: string }[],
 ): Promise<{ uri: string; type: string }[]> {
   if (cands.length === 0) return [];
-  const client = await getReader();
+  const client = await getClient();
   const uris = [...new Set(cands.map((c) => c.uri))];
   const res = await client.execute({
     sql: `SELECT uri FROM contexts WHERE uri IN (${uris.map(() => "?").join(",")})`,
@@ -767,10 +574,10 @@ export async function unseenContexts(
  *  re-check window has lapsed. Callers cap the batch, so the ordering keeps stale
  *  re-checks from starving genuinely new contexts.
  *
- *  A full plays scan (~14K billed rows replica-less) — the once-a-day pass only.
+ *  A full plays scan (~14K rows) — the once-a-day pass only.
  *  Per-sync resolution goes through unseenContexts() above. */
 export async function unresolvedContextUris(): Promise<{ uri: string; type: string }[]> {
-  const client = await getReader();
+  const client = await getClient();
   const cutoff = new Date(Date.now() - NEGATIVE_RECHECK_MS).toISOString();
   const res = await client.execute({
     sql: `SELECT DISTINCT p.context_uri AS uri, p.context_type AS type,
@@ -804,9 +611,10 @@ export async function unresolvedContextUris(): Promise<{ uri: string; type: stri
 //
 // That verdict is STORED, in `plays.ctx_orphan`, not recomputed per row. As a live expression
 // it was two correlated `playlist_tracks` subqueries per OUTPUT row — the dominant cost of the
-// all-time list on the replica (medians, n=5: 63ms → 8.9ms; history search 36ms → 5.7ms).
-// Against the remote primary the same change is marginal (903ms → 705ms) and for one day's
-// plays it is nothing (41ms either way) — that backend's variance swamps it.
+// all-time list when it was measured against a local SQLite copy (medians, n=5: 63ms →
+// 8.9ms; history search 36ms → 5.7ms). Against Turso the same change was marginal (903ms →
+// 705ms) and for one day's plays nothing (41ms either way) — that backend's variance swamped
+// it.
 // It is also a poor fit for live evaluation: the answer depends on playlist membership, which
 // changes only when a playlist is synced, while the expression re-derived it on every render.
 // recomputeOrphanFlags() refreshes it exactly when membership can have changed.
@@ -844,11 +652,8 @@ const ORPHAN_PREDICATE = `
  *                     many playlists at once (the library list being rewritten).
  *
  *  Only rows whose verdict actually flips are written, so a steady-state sync that re-stores
- *  an unchanged playlist writes zero rows — Turso bills every row write, including a
- *  no-op UPDATE. Measured on the live DB: 0 rows and ~0.2-0.4s for the two scoped modes.
- *
- *  Writes to the primary only; the caller is responsible for the syncReader() that follows
- *  (all four call sites already make one for their own write, so there is no second pull). */
+ *  an unchanged playlist writes zero rows — a no-op UPDATE is still a written row (which Turso
+ *  billed). Measured on the live DB: 0 rows and ~0.2-0.4s for the two scoped modes. */
 async function recomputeOrphanFlags(
   opts: { playlistId?: string; newOnly?: boolean } = {},
 ): Promise<number> {
@@ -869,10 +674,10 @@ async function recomputeOrphanFlags(
     args: opts.playlistId && !opts.newOnly ? { uri: `spotify:playlist:${opts.playlistId}` } : {},
   });
   const changed = Number(res.rowsAffected);
-  // `plays` is replica-served and this ran AFTER its caller's batch already bumped, so the
-  // flags need their own announcement or a copy synced in between serves rows whose verdict
-  // is stale. Only when rows actually flipped: the common case is 0, and a bump there would
-  // re-route every other instance on every sync tick for nothing. The extra round trip is
+  // `plays` is served by cached reads and this ran AFTER its caller's batch already bumped,
+  // so the flags need their own announcement or an entry cached in between holds rows whose
+  // verdict is stale. Only when rows actually flipped: the common case is 0, and a bump there
+  // would discard every cached read on every sync tick for nothing. The extra round trip is
   // paid only on a real change, and this is a background write path either way.
   if (changed > 0) await bumpWriteSeq();
   return changed;
@@ -897,12 +702,12 @@ const SELECT_TRACK = `
 // zero (so flicking through tracks never inflates listened time). 10-min fallback when a
 // track's duration is unknown.
 //
-// Computed in JS, not SQL, as a style choice plus one hard constraint. The equivalent
-// `LEAD() OVER (ORDER BY played_at)` is NOT pathological — on the replica it is ~1.5× a plain
-// ordered fetch (15.0 vs 10.4ms median, n=9, 2026-08-01); an earlier "~3s" figure here was a
-// single-shot primary timing and did not reproduce. What matters is that this read is a full
-// plays scan, so it must stay on the replica: the same scan against the PRIMARY is
-// seconds-scale and unpredictable (1.4-2.2s median, up to 7.9s, n=15×2).
+// Computed in JS, not SQL, as a style choice: the equivalent `LEAD() OVER (ORDER BY
+// played_at)` is NOT pathological — against a local SQLite copy it was ~1.5× a plain ordered
+// fetch (15.0 vs 10.4ms median, n=9, 2026-08-01), and an earlier "~3s" figure here was a
+// single-shot timing that did not reproduce. What matters is that this read is a FULL PLAYS
+// SCAN, so nothing on a render path may call it: it is reached only from
+// recomputeAllTimeStats, on the write path.
 const LISTEN_FALLBACK_MS = 600000;
 // A play whose actual run time (gap to the next play) is under this counts as a skip, not a
 // listen, and adds 0 to listened-time totals. Plays are still counted as plays.
@@ -913,7 +718,7 @@ type ListenRow = { playedAt: string; trackId: string; listenedMs: number };
 // together (Home's history boundary, the history refresh action) — cache() dedupes the
 // fetch to once per request instead of paying the plays scan twice.
 const playsWithListened = cache(async (): Promise<ListenRow[]> => {
-  const client = await getReader();
+  const client = await getClient();
   const res = await client.execute(
     `SELECT p.played_at AS playedAt, p.track_id AS trackId, t.duration_ms AS durationMs
      FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
@@ -951,7 +756,7 @@ const SELECT_PLAY = `
  *  play as its own row (not collapsed into a per-song count), newest first, so you see the
  *  actual time of every listen. */
 export async function searchHistory(query: string, limit = 300): Promise<TrackStats[]> {
-  const client = await getReader();
+  const client = await getClient();
   const q = query.trim();
   if (!q) {
     const res = await client.execute({
@@ -974,11 +779,11 @@ export async function searchHistory(query: string, limit = 300): Promise<TrackSt
 
 // ── Read caching (Next's data cache, keyed on the write marker) ─────────────────────────────
 // The render-path reads below answer the same question over and over — the day strip, one
-// day's plays, the playlist grid — against a store that only ever grows at "now". With the
-// replica off (LAZYBOY_NO_REPLICA=1, the note above) every one of them is a scan against the
-// primary, and Turso bills rows SCANNED, not returned, so a second visit to the same day
-// re-read the whole plays table to produce a byte-identical answer. Medians (min-max), n=7,
-// 2026-08-05, 6,995 plays, straight at the primary (`bench-reads.mjs day` re-runs the first two):
+// day's plays, the playlist grid — against a store that only ever grows at "now". Each one is a
+// scan against a remote store, so a second visit to the same day re-ran the whole thing to
+// produce a byte-identical answer (and on Turso, which billed rows SCANNED, re-paid for every
+// row). Medians (min-max), n=7, 2026-08-05, 6,995 plays, straight at Turso's primary
+// (`bench-reads.mjs day` re-runs the first two):
 //   one day's plays, unbounded scan   722ms (170-1,023)      ~6,995 rows scanned
 //   the same day, range-bounded       498ms (88-693)         ~90 rows scanned
 //   the 14-day strip                  896ms (235-3,008)
@@ -998,12 +803,12 @@ export async function searchHistory(query: string, limit = 300): Promise<TrackSt
 //     Keyed on (day, offset) only, so every later visit — any tab, any instance, any day —
 //     is a cache hit and costs ZERO DB reads.
 //   • LIVE — today, yesterday, the strip, the all-time list, the playlist grid. Keyed on
-//     `meta.write_seq` (the same marker the replica gate uses), so ANY write that changes what
-//     they read produces a different cache key and the next read recomputes. That is what
-//     keeps TODAY honest on the existing ~2-min cadence: recordPlays bumps the marker exactly
-//     when new plays land, and syncReader() drops this request's copy of it, so the re-read
-//     that follows a sync cannot be served a pre-sync entry. The TTL on these entries is a
-//     garbage bound on superseded keys, NOT the freshness mechanism — the key is.
+//     `meta.write_seq`, so ANY write that changes what they read produces a different cache key
+//     and the next read recomputes. That is what keeps TODAY honest on the existing ~2-min
+//     cadence: recordPlays bumps the marker exactly when new plays land, and dropWriteSeqCache()
+//     drops this request's copy of it, so the re-read that follows a sync cannot be served a
+//     pre-sync entry. The TTL on these entries is a garbage bound on superseded keys, NOT the
+//     freshness mechanism — the key is.
 // A frozen entry still expires daily rather than taking `revalidate: false`, even though its
 // plays are immutable: two of its columns are derived and can still be rewritten later — `source` resolves from `contexts`
 // (a name that 403'd at play time can resolve a month on) and from `plays.ctx_orphan`, which
@@ -1063,7 +868,7 @@ export async function getAllTimePlays(limit: number): Promise<TrackStats[]> {
 }
 
 async function readAllTimePlays(limit: number): Promise<TrackStats[]> {
-  const client = await getReader();
+  const client = await getClient();
   const res = await client.execute({
     sql: `${SELECT_TRACK} GROUP BY t.id
           ORDER BY plays DESC, lastPlayed DESC, t.name ASC LIMIT ?`,
@@ -1083,7 +888,7 @@ export async function getAllTimeStats(): Promise<{
   since: string | null; // earliest recorded play (ISO), null if none
 }> {
   // Read the cached value: the all-time listened total needs a gap scan over EVERY play,
-  // which is multi-second on Turso and shouldn't run on render. It's refreshed on write
+  // which is multi-second against a remote store and shouldn't run on render. It's refreshed on write
   // (recordPlays, when new plays land). Cold (never cached) → compute once and cache.
   const v = await getMeta("alltime_stats");
   if (v) {
@@ -1125,7 +930,7 @@ export async function recomputeAllTimeStats(): Promise<AllTimeStats> {
 /** Per-day plays / unique songs / listening time, most recent first. */
 // SQLite date() modifier that shifts UTC timestamps into the *user's* local day.
 // `offsetMin` = minutes to ADD to UTC for the user's zone (+120 = UTC+2, −240 = UTC−4),
-// sent from the browser (Turso itself runs in UTC, so 'localtime' would mean UTC). It's
+// sent from the browser (the store runs in UTC, so 'localtime' would mean UTC). It's
 // client-supplied, so it's clamped to a valid tz range and integer-ized before inlining.
 // One current offset is applied to all rows, so a play within ~1h of a *past* DST change
 // can land a day off — acceptable for personal history.
@@ -1147,11 +952,8 @@ export async function getDailyStats(offsetMin = 0, days = 14): Promise<DayStats[
   return seq === null ? readDailyStats(offsetMin, days) : dailyStatsCached(offsetMin, days, seq);
 }
 
-// `source` overrides the reader for callers that must not read a copy — the Home payload
-// rebuild passes the primary (see "The Home payload"). Everyone else omits it and gets the
-// replica gate.
-async function readDailyStats(offsetMin = 0, days = 14, source?: Client): Promise<DayStats[]> {
-  const client = source ?? (await getReader());
+async function readDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
+  const client = await getClient();
   // Only fetch the recent window we actually display (a couple extra days of buffer for the
   // tz day-edge), so this stays cheap as total history grows — not a full-table scan. Uses
   // idx_plays_played_at. Listened ms = gap to the next play, capped at song length, computed
@@ -1203,7 +1005,7 @@ async function readDailyStats(offsetMin = 0, days = 14, source?: Client): Promis
 /** Whether any play exists strictly before the start of the given local day — lets the day
  *  strip decide if it can expand to show older days. Cheap existence check (idx_plays_played_at). */
 export async function hasPlaysBeforeDay(day: string, offsetMin = 0): Promise<boolean> {
-  const client = await getReader();
+  const client = await getClient();
   const offMs = Math.max(-720, Math.min(840, Math.round(offsetMin) || 0)) * 60000;
   // Start of `day` in the user's local zone, as a UTC instant.
   const cutoff = new Date(Date.parse(day + "T00:00:00.000Z") - offMs).toISOString();
@@ -1234,9 +1036,8 @@ export async function getPlaysByDay(day: string, offsetMin = 0): Promise<TrackSt
   return seq === null ? readPlaysByDay(day, offsetMin) : playsByDayLive(day, offsetMin, seq);
 }
 
-// `source`: same override as readDailyStats — the Home payload rebuild reads the primary.
-async function readPlaysByDay(day: string, offsetMin = 0, source?: Client): Promise<TrackStats[]> {
-  const client = source ?? (await getReader());
+async function readPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]> {
+  const client = await getClient();
   // The date() equality is the AUTHORITY on which local day a play belongs to — it stays.
   // What it can't do is drive an index (a function of the column), so on its own this read
   // SCANNED THE WHOLE plays TABLE for the ~90 rows of one day: `SCAN p USING COVERING INDEX
@@ -1281,19 +1082,15 @@ async function readPlaysByDay(day: string, offsetMin = 0, source?: Client): Prom
 // pinger on /api/cron/sync, the open tab's POST /api/sync), so the write is the only moment
 // the answer moves: build it there, read it here.
 //
-// Reads inside the rebuild go to getClient() (the PRIMARY), not getReader(). Everywhere else
-// a scanning read may be served by the replica because a stale answer lives exactly as long
-// as one request; here it would be written into a row that every later page load serves until
-// something else writes. The gate would usually say the copy is current — "usually" is not the
-// bar for something persisted. The rebuild also calls readDailyStats/readPlaysByDay directly
-// rather than their unstable_cache wrappers: those exist to keep a RENDER fresh against
-// write_seq, and the write path has no use for a cache entry it is in the middle of making
-// redundant.
+// The rebuild calls readDailyStats/readPlaysByDay directly rather than their unstable_cache
+// wrappers: those exist to keep a RENDER fresh against write_seq, and the write path has no use
+// for a cache entry it is in the middle of making redundant. What it writes is persisted and
+// served to every later page load until something writes again, so it must read the store
+// itself, never a cache.
 //
 // It does NOT bump write_seq. Per the write-marker rule above, a write that only touches
-// `meta` must not bump: nothing reads `meta` from the replica (getMeta() → getClient()), so
-// there is no copy to announce this to, and an extra bump would gate-fail every other
-// instance's replica for a write it will never serve.
+// `meta` must not bump: nothing cached is derived from `meta`, so there is nothing to announce
+// this to, and an extra bump would discard every cached read for a write none of them serve.
 //
 // The row OUTLIVES A DEPLOY — the same hazard the Data Cache has — so it carries a shape
 // token. A deploy that changes what the payload holds would otherwise hand new code the old
@@ -1352,10 +1149,9 @@ function zoneOffsetMinutes(zone: string, at: Date = new Date()): number {
 /** Recompute Home's whole first paint and store it. Called from the sync (see
  *  `syncRecentPlays`) whenever plays land, and by Home itself when the row is missing. */
 export async function rebuildHomePayload(): Promise<HomePayload> {
-  const client = await getClient();
   const tzOffsetMinutes = zoneOffsetMinutes(HOME_TZ);
   const [daily, allTime] = await Promise.all([
-    readDailyStats(tzOffsetMinutes, HOME_DAILY_DAYS, client),
+    readDailyStats(tzOffsetMinutes, HOME_DAILY_DAYS),
     // Already a single meta read off the primary, refreshed on write by recordPlays.
     getAllTimeStats(),
   ]);
@@ -1364,7 +1160,7 @@ export async function rebuildHomePayload(): Promise<HomePayload> {
   // Serial by necessity: which day Home opens on depends on which days have plays. It costs
   // one extra round trip HERE, once per sync that landed something, instead of on every load.
   const initialDay = daily[0]?.day ?? todayLocal;
-  const initialTracks = await readPlaysByDay(initialDay, tzOffsetMinutes, client);
+  const initialTracks = await readPlaysByDay(initialDay, tzOffsetMinutes);
   const payload: HomePayload = {
     shape: HOME_PAYLOAD_SHAPE,
     builtAt: new Date().toISOString(),
@@ -1622,10 +1418,10 @@ export async function getHistoryIndex(version: string): Promise<HistoryIndex> {
 }
 
 async function readLibraryIndex(): Promise<LibraryIndex> {
-  const client = await getReader();
+  const client = await getClient();
   // Driven from playlist_tracks (15k index entries, one seek per member) rather than from
   // `tracks` with an EXISTS filter, which makes the planner scan all 15,000 track rows and
-  // then probe membership per row. Rows scanned is what Turso bills.
+  // then probe membership per row. Rows scanned is the cost — and was what Turso billed.
   const [memberRes, savedRes, listRes] = await Promise.all([
     client.execute(
       `SELECT pt.playlist_id AS pid, t.name AS name, t.artist AS artist,
@@ -1683,9 +1479,9 @@ async function readLibraryIndex(): Promise<LibraryIndex> {
 }
 
 async function readHistoryIndex(): Promise<HistoryIndex> {
-  const client = await getReader();
-  // A full plays scan, so it must stay on the replica — the same scan against the PRIMARY is
-  // seconds-scale (the note on playsWithListened).
+  const client = await getClient();
+  // A full plays scan, so it is deliberately off every render path: it runs once per version
+  // of the history payload and the browser filters that payload from then on.
   const res = await client.execute(
     `SELECT t.name AS name, t.artist AS artist, t.album AS album, t.album_image AS image,
             t.duration_ms AS durationMs,
@@ -1790,14 +1586,14 @@ export async function storePlaylists(rows: StoredPlaylist[], meId: string | null
   }
 
   if (diff.tier === "unchanged") {
-    // Meta only, so no marker bump (and, as before, no sync): nothing the replica serves moved.
+    // Meta only, so no marker bump: nothing a cached read serves moved.
     await setMeta("playlists_synced_at", now);
     if (meId) await setMeta("me_id", meId);
     return;
   }
 
   // The synced-at / me_id stamps, as batchable statements — both write tiers below end with
-  // them, and neither is replica-served, so neither is what decides a marker bump.
+  // them, and no cached read is derived from either, so neither decides a marker bump.
   const stampStmts: InStatement[] = [
     {
       sql: `INSERT INTO meta (key, value) VALUES ('playlists_synced_at', :v)
@@ -1821,18 +1617,18 @@ export async function storePlaylists(rows: StoredPlaylist[], meId: string | null
     //     and takes its art from `tracks` — playlist artwork is not in it — so this cannot
     //     make it stale, and its ETag carries a daily date bucket that bounds an in-place
     //     re-tag to ~24h regardless (src/app/api/search/library/route.ts).
-    //   • YES write_seq. `playlists` IS replica-served — readStoredPlaylists/getStoredPlaylist
-    //     go through getReader(), and the grid's cache entry is keyed on the marker — and the
-    //     rule at the top of this file is that any write to a replica-served table announces
-    //     itself. An unannounced image update serves the old art off a stale copy.
+    //   • YES write_seq. The grid's cache entry (getStoredPlaylists) is keyed on the marker,
+    //     and the rule at the top of this file is that any write to a table a cached read
+    //     serves announces itself. An unannounced image update serves the old art until the
+    //     entry's TTL expires.
     const stmts: InStatement[] = diff.imageChanges.map((c) => ({
       sql: "UPDATE playlists SET image = :image WHERE id = :id",
       args: { image: c.image, id: c.id },
     }));
     stmts.push(...stampStmts, writeSeqStmt());
     await client.batch(stmts, "write");
-    // Pull the replica up to the write we just made, so the read that follows is fresh.
-    await syncReader();
+    // The write moved the marker; drop this request's copy so the read that follows re-keys.
+    dropWriteSeqCache();
     return;
   }
 
@@ -1886,8 +1682,8 @@ export async function storePlaylists(rows: StoredPlaylist[], meId: string | null
   // rewrites the list and skips it.
   const purged = Number(results[purgeAt]?.rowsAffected ?? 0);
   if (needsFullOrphanPass(diff.idSetChanged, purged)) await recomputeOrphanFlags();
-  // Pull the replica up to the write we just made, so the read that follows is fresh.
-  await syncReader();
+  // The write moved the marker; drop this request's copy so the read that follows re-keys.
+  dropWriteSeqCache();
 }
 
 // LIVE-keyed (see "Read caching"): the grid and the dock's panels both read this on every
@@ -1905,7 +1701,7 @@ export async function getStoredPlaylists(): Promise<StoredPlaylist[]> {
 }
 
 async function readStoredPlaylists(): Promise<StoredPlaylist[]> {
-  const client = await getReader();
+  const client = await getClient();
   const res = await client.execute(
     `SELECT id, name, owner_id AS ownerId, image, track_count AS trackCount
      FROM playlists ORDER BY position`,
@@ -1918,7 +1714,7 @@ async function readStoredPlaylists(): Promise<StoredPlaylist[]> {
  *  (or a playlist accidentally duplicated).
  *
  *  Read from a cached meta value: computing it live is a multi-second DISTINCT scan over
- *  playlist_tracks on remote Turso, and it was blocking every Home render. It's refreshed
+ *  playlist_tracks against the remote store, and it was blocking every Home render. It's refreshed
  *  by recomputeUniqueSongCount() at the end of each library sync (when the underlying data
  *  actually changes). 0 until first cached — Home falls back to the raw track-count sum. */
 export async function getUniqueSongCount(): Promise<number> {
@@ -1929,8 +1725,10 @@ export async function getUniqueSongCount(): Promise<number> {
 /** Run the expensive distinct-song scan once and cache it in meta. Called at the end of a
  *  library sync, not on render. Returns the fresh count. */
 export async function recomputeUniqueSongCount(): Promise<number> {
-  await syncReader();
-  const client = await getReader();
+  // The library sync that calls this has just written, so this request's copy of the marker is
+  // stale before the scan below even runs.
+  dropWriteSeqCache();
+  const client = await getClient();
   const res = await client.execute(
     `SELECT COUNT(*) AS n FROM (
        SELECT DISTINCT lower(t.artist) AS a, lower(t.name) AS m
@@ -1948,7 +1746,7 @@ export async function recomputeUniqueSongCount(): Promise<number> {
 /** One playlist's cached header row (name/owner/image/count) — used by the detail page so
  *  it doesn't load the entire library just to read a single row. */
 export async function getStoredPlaylist(id: string): Promise<StoredPlaylist | null> {
-  const client = await getReader();
+  const client = await getClient();
   const res = await client.execute({
     sql: `SELECT id, name, owner_id AS ownerId, image, track_count AS trackCount
           FROM playlists WHERE id = :id`,
@@ -1979,8 +1777,8 @@ export async function upsertStoredPlaylist(p: StoredPlaylist): Promise<void> {
     ],
     "write",
   );
-  // Pull the replica up to the write we just made, so the read that follows is fresh.
-  await syncReader();
+  // The write moved the marker; drop this request's copy so the read that follows re-keys.
+  dropWriteSeqCache();
 }
 
 export async function getPlaylistsSyncedAt(): Promise<string | null> {
@@ -2045,8 +1843,8 @@ export async function storePlaylistTracks(
       args: { pid: playlistId, from: deleteFrom },
     });
   }
-  // Everything queued so far is playlist_tracks/tracks; the two meta stamps below are not
-  // replica-served, so a call that diffed to no changes announces nothing.
+  // Everything queued so far is playlist_tracks/tracks; nothing cached is derived from the two
+  // meta stamps below, so a call that diffed to no changes announces nothing.
   if (stmts.length > 0) stmts.push(writeSeqStmt(), librarySeqStmt());
   stmts.push({
     sql: `INSERT INTO meta (key, value) VALUES (:k, :v)
@@ -2063,8 +1861,8 @@ export async function storePlaylistTracks(
   await client.batch(stmts, "write");
   // Membership for THIS playlist changed, so plays from it may flip orphan either way.
   await recomputeOrphanFlags({ playlistId });
-  // Pull the replica up to the write we just made, so the read that follows is fresh.
-  await syncReader();
+  // The write moved the marker; drop this request's copy so the read that follows re-keys.
+  dropWriteSeqCache();
 }
 
 /** The Spotify snapshot_id of the cached tracks, if known. */
@@ -2074,7 +1872,7 @@ export async function getPlaylistSnapshot(playlistId: string): Promise<string | 
 
 /** A playlist's cached tracks in playlist order (empty if never cached). */
 export async function getPlaylistTracks(playlistId: string): Promise<Track[]> {
-  const client = await getReader();
+  const client = await getClient();
   const res = await client.execute({
     sql: `SELECT t.id, t.name AS title, t.artist, t.uri, t.album,
             t.album_image AS albumImage, t.duration_ms AS durationMs, pt.added_at AS addedAt
@@ -2091,7 +1889,7 @@ export async function getPlaylistTracks(playlistId: string): Promise<Track[]> {
 // critical path, right before the play command).
 export type PlaylistTrackRef = { id: string; uri: string; title: string; artist: string };
 export async function getPlaylistTrackOrder(playlistId: string): Promise<PlaylistTrackRef[]> {
-  const client = await getReader();
+  const client = await getClient();
   const res = await client.execute({
     sql: `SELECT t.id, t.uri, t.name AS title, t.artist
           FROM playlist_tracks pt LEFT JOIN tracks t ON t.id = pt.track_id
@@ -2117,8 +1915,8 @@ export async function removeCachedPlaylistTrack(playlistId: string, uri: string)
     ],
     "write",
   );
-  // Pull the replica up to the write we just made, so the read that follows is fresh.
-  await syncReader();
+  // The write moved the marker; drop this request's copy so the read that follows re-keys.
+  dropWriteSeqCache();
 }
 
 /** Remove a playlist and all its cached tracks/snapshot from the store (after the
@@ -2138,8 +1936,8 @@ export async function deletePlaylistFromDb(playlistId: string): Promise<void> {
   // Its cached tracks are gone, so plays from it are no longer verifiable and stop being
   // blanked — the same fallback an unsynced playlist gets.
   await recomputeOrphanFlags({ playlistId });
-  // Pull the replica up to the write we just made, so the read that follows is fresh.
-  await syncReader();
+  // The write moved the marker; drop this request's copy so the read that follows re-keys.
+  dropWriteSeqCache();
 }
 
 // ---- saved tracks (Liked Songs index; the other half of "the library") ----
@@ -2188,15 +1986,15 @@ export async function storeSavedTracks(tracks: Track[]): Promise<void> {
       args: chunk,
     });
   }
-  // As in storePlaylistTracks: only the saved_tracks/tracks writes above are replica-served,
+  // As in storePlaylistTracks: only the saved_tracks/tracks writes above feed a cached read,
   // so a diff that came back empty writes the three stamps below and announces nothing.
   if (stmts.length > 0) stmts.push(writeSeqStmt(), librarySeqStmt());
   stmts.push(metaStmt("liked_total", String(tracks.length)));
   stmts.push(metaStmt("liked_top_added_at", tracks[0]?.addedAt ?? ""));
   stmts.push(metaStmt("saved_synced_at", new Date().toISOString()));
   await client.batch(stmts, "write");
-  // Pull the replica up to the write we just made, so the read that follows is fresh.
-  await syncReader();
+  // The write moved the marker; drop this request's copy so the read that follows re-keys.
+  dropWriteSeqCache();
 }
 
 /** The cheap Liked-Songs change-signals (count + newest added_at). */
@@ -2225,7 +2023,7 @@ export async function getLibraryTracks(
   exceptPlaylistId?: string,
   exceptName?: string,
 ): Promise<Track[]> {
-  const client = await getReader();
+  const client = await getClient();
   const meId = await getMeId();
   const res = await client.execute({
     sql: `
@@ -2285,7 +2083,7 @@ export async function getCleanBackupPref(): Promise<boolean> {
 export async function playedTracksInContext(
   contextUri: string,
 ): Promise<{ trackId: string; name: string | null; artist: string | null; playedAt: string }[]> {
-  const client = await getReader();
+  const client = await getClient();
   // Also return name/artist so callers can fall back to a name+artist match when the play's
   // track id doesn't line up with the playlist's stored id — Spotify hands the same song
   // different ids across a playlist vs. recently-played (track relinking / duplicate
@@ -2324,7 +2122,7 @@ export async function findTrackWithPlaylists(
   } | null;
   playlists: { id: string; name: string }[];
 }> {
-  const client = await getReader();
+  const client = await getClient();
   // INNER JOIN convention from the file header: equality on the identity index.
   const trackRes = await client.execute({
     sql: `SELECT id, name AS title, artist, uri, album, album_image AS albumImage,
@@ -2364,7 +2162,7 @@ export async function findTrackWithPlaylists(
  *  the name. The distinction matters: collapsing NULL rows into a string made this return the
  *  literal "null" (String(null)), which the now-playing chip then displayed as a name. */
 export async function getContextName(uri: string): Promise<string | null | undefined> {
-  const client = await getReader();
+  const client = await getClient();
   const res = await client.execute({
     sql: "SELECT name FROM contexts WHERE uri = ?",
     args: [uri],
@@ -2382,7 +2180,7 @@ export async function getContextName(uri: string): Promise<string | null | undef
 export type SpotifyTokens = { accessToken: string; refreshToken: string; expiresAt: number };
 
 // The Spotify OAuth token is a SINGLE global row, but local dev and the deployed prod app
-// (plus the every-2-min cron) share ONE Turso database. Spotify rotates the refresh token
+// (plus the every-2-min cron) share ONE database. Spotify rotates the refresh token
 // on every refresh, so if dev and prod use the same row they keep rotating each other's
 // token out from under one another → `invalid_grant` → forced re-login (and the occasional
 // Configuration error when it happens mid-callback). Namespacing the key by environment
@@ -2448,7 +2246,7 @@ function metaStmt(key: string, value: string): InStatement {
   };
 }
 
-// No write marker here: `meta` is read from the primary, never the replica (write-marker note).
+// No write marker here: nothing cached is derived from `meta` (write-marker note).
 async function setMeta(key: string, value: string): Promise<void> {
   const client = await getClient();
   await client.execute({
@@ -2487,8 +2285,8 @@ export async function logSpotifyRequest(entry: {
     /* keep the raw path */
   }
   // Don't log successful now-playing polls: they fire every few seconds while the app is
-  // open and each log row costs 2 billed Turso row writes (insert + prune delete) for no
-  // diagnostic value. Failures (429s, errors) on this endpoint still always log, and the
+  // open and each log row costs 2 row writes (insert + prune delete, both billed on Turso) for
+  // no diagnostic value. Failures (429s, errors) on this endpoint still always log, and the
   // getApiLogSummary windows correspondingly exclude successful now-playing traffic.
   if (entry.status >= 200 && entry.status < 300 && p.endsWith("/me/player/currently-playing")) {
     return;
@@ -2534,18 +2332,20 @@ export async function getApiLogSummary(): Promise<{
 }
 
 // ── The read-cost ledger (`usage_ledger`) ───────────────────────────────────────────────
-// Continuous attribution for the rows-read quota. Turso reports ONE counter per
-// organization; it cannot say which read path spent it, which is how a month of burn went
-// unattributed (docs/READ_QUOTA.md). So every named read path records what it MODELS itself
+// Continuous attribution for read cost. It was built against a metered quota — Turso reports
+// ONE counter per organization and cannot say which read path spent it, which is how a month of
+// burn went unattributed (docs/READ_QUOTA.md). The self-hosted store meters nothing, so the
+// ledger is now an efficiency instrument rather than a quota defence: it is the only thing that
+// says which path a regression came from, and it is what the Turso fallback would need on day
+// one. So every named read path records what it MODELS itself
 // to cost as it runs — src/lib/read-costs.ts owns the model — and /api/cron/usage-check
 // diffs a day's total against the platform counter, writing the platform number and the
 // unexplained residual back into this same table.
 //
 // META-CLASS DATA, so the marker rules at the top of the file apply the way they do to
-// api_log: written via getClient() (the primary), read via getClient(), and it MUST NOT bump
-// write_seq. Nothing serves usage_ledger from the replica, and this is written on
-// essentially every request — a bump here would pin the freshness gate in the "behind" state
-// permanently, which is the exact failure the marker exists to prevent.
+// api_log: it MUST NOT bump write_seq. Nothing cached is derived from usage_ledger, and this is
+// written on essentially every request — a bump here would discard every cached read
+// continuously, which is the exact cost the marker exists to avoid.
 //
 // IT MUST NEVER BREAK OR SLOW THE THING IT MEASURES. ledgerAdd swallows every error and
 // every call site fires it with `void`, off the awaited path (the same contract as
@@ -2563,7 +2363,7 @@ export async function getApiLogSummary(): Promise<{
 
 export type LedgerRow = { day: string; reader: string; calls: number; modeledRows: number };
 
-/** The UTC calendar day, which is the day Turso's quota accounting uses. */
+/** The UTC calendar day — the ledger's bucket, and the day Turso's quota accounting used. */
 function utcDay(at: number = Date.now()): string {
   return new Date(at).toISOString().slice(0, 10);
 }
@@ -2701,13 +2501,20 @@ export async function ledgerSyncCall(
 // row per timing, posted in batches by /api/metrics (src/lib/metrics-client.ts collects
 // them). It exists so "the home page feels slow" becomes a query instead of a memory.
 //
-// FENCED EXACTLY LIKE api_log: written via getClient() (the primary), read via getClient(),
-// and it MUST NOT bump write_seq. getReader() never serves this table, so a bump would only
-// push the replica's freshness gate into the "behind" state on every page load — the exact
-// failure the marker rule at the top of the file exists to prevent.
+// FENCED EXACTLY LIKE api_log: it MUST NOT bump write_seq. Nothing user-facing is versioned
+// by this table, so a bump would only churn the LIVE cache keys and the history payload's
+// ETag on every page view — the exact failure the marker rule at the top of the file exists
+// to prevent.
 //
-// Volume is a handful of rows per page view on a single-user app, so the 7-day summary below
-// pulls its window and does the percentiles in JS rather than carrying window functions.
+// Volume is a handful of rows per page view on a single-user app, so the 7-day read below
+// pulls its window ONCE and does everything in JS rather than carrying window functions — and
+// one scan answers both shapes the usage page needs, which is the point: the page that watches
+// the read budget must not scan this table twice to draw itself.
+//
+// TWO SHAPES, ONE SCAN. Per page: the p50/p95 of each timing, which says what the page usually
+// is. Per OPEN: one row per time a page was opened, with each part's ms across the columns,
+// which says whether THAT open at 3:41pm was slow. The percentile hides the bad one; the open
+// list is where you see it.
 
 export type ClientMetricInput = {
   session: string;
@@ -2731,10 +2538,31 @@ export type ClientMetricsPage = {
   stats: Record<string, MetricStat>;
 };
 
+/** One page open: every part of it that reported, keyed by event name. This is the shape the
+ *  usage page reads across — a row per open, a column per part. */
+export type PageOpen = {
+  page: string;
+  /** The beacon's arrival, so within ~10s of the open itself (metrics-client.ts flushes on a
+   *  timer and on pagehide). Exact enough to find "the slow one at 3:41pm", which is its job. */
+  at: string;
+  /** `load` = the browser fetched the document; `nav` = an in-app link. Decided by whether the
+   *  web vitals filed against it, which only happens for the view the document loaded. */
+  kind: "load" | "nav";
+  /** The page a `nav` open came FROM, when the click was seen. */
+  from: string | null;
+  errors: number;
+  /** Event name → ms (unitless for `cls`). A part that didn't report is simply absent, which
+   *  the page draws as `—` rather than as a zero. */
+  parts: Record<string, number>;
+};
+
+export type ClientLoadSpeed = { pages: ClientMetricsPage[]; opens: PageOpen[] };
+
 /** The timing events the usage page charts. Anything else (a new `lb:` mark) still lands in
  *  the table — it just isn't summarised until it is named here. `inp` and `cls` are the two
  *  vitals that measure what LCP can't: how long the app took to answer a tap, and how much it
- *  moved under the reader. */
+ *  moved under the reader; the rest are the app's own marks, one per visible part that has a
+ *  timing of its own (src/lib/metrics-client.ts lists where each is made). */
 export const SUMMARY_EVENTS = [
   "ttfb",
   "fcp",
@@ -2743,9 +2571,26 @@ export const SUMMARY_EVENTS = [
   "cls",
   "data-rendered",
   "history-ready",
+  "dock-ready",
+  "playlists-rendered",
+  "now-playing-ready",
 ] as const;
 
 const CLIENT_METRICS_WINDOW_MS = 7 * 86_400_000;
+/** Per page, in the open list. Ten is what fits on screen and covers a sitting. */
+const OPENS_PER_PAGE = 10;
+/** How metrics-client.ts stamps the view an event belongs to, on the front of `meta`. */
+const PV_TAG = "pv:";
+
+/** Split a stored `meta` into the view id that owns the row and whatever the event itself put
+ *  there. Rows written before the tag existed have no view — they still count in the
+ *  percentiles, they just can't be grouped into an open. */
+function splitMeta(raw: string | null): { pv: string; meta: string | null } {
+  if (!raw || !raw.startsWith(PV_TAG)) return { pv: "", meta: raw };
+  const bar = raw.indexOf("|");
+  if (bar === -1) return { pv: raw.slice(PV_TAG.length), meta: null };
+  return { pv: raw.slice(PV_TAG.length, bar), meta: raw.slice(bar + 1) };
+}
 
 /** Append a batch of reported timings. One statement batch, on the primary; `ts` is stamped
  *  HERE rather than trusted from the browser, so a clock-skewed tab can't file rows into next
@@ -2771,14 +2616,16 @@ function percentile(values: number[], p: number): number {
   return sorted[i];
 }
 
-/** Per-page client timings over the last 7 days, busiest page first: how many views, how many
- *  js-errors, the p50 and p95 of each summarised event, and the average time a visit stayed
- *  visible. */
-export async function getClientMetricsSummary(): Promise<ClientMetricsPage[]> {
+/** The last 7 days of what the browser measured, in the two shapes the usage page draws (see
+ *  the section note): `pages` = per-page percentiles, busiest first; `opens` = the most recent
+ *  OPENS_PER_PAGE opens of each page, newest first, each with the ms of every part that
+ *  reported. One scan of the window serves both. */
+export async function getClientLoadSpeed(): Promise<ClientLoadSpeed> {
   const client = await getClient();
   const cutoff = new Date(Date.now() - CLIENT_METRICS_WINDOW_MS).toISOString();
   const res = await client.execute({
-    sql: `SELECT page, event, value FROM client_metrics WHERE ts >= :cutoff`,
+    sql: `SELECT id, ts, session, page, event, value, meta FROM client_metrics
+          WHERE ts >= :cutoff ORDER BY id`,
     args: { cutoff },
   });
 
@@ -2786,13 +2633,49 @@ export async function getClientMetricsSummary(): Promise<ClientMetricsPage[]> {
     string,
     { views: number; errors: number; visits: number[]; samples: Map<string, number[]> }
   >();
+  // One entry per view, keyed by session + the view id metrics-client.ts stamped on every row
+  // of that view. `seq` is the row id it was last seen at — the only reliable ordering, since
+  // every row of one beacon shares a `ts`.
+  const opens = new Map<string, PageOpen & { seq: number }>();
   for (const row of res.rows) {
     const page = String(row.page ?? "");
     const event = String(row.event ?? "");
+    const { pv } = splitMeta(row.meta === null ? null : String(row.meta));
+    const value = row.value === null ? null : Number(row.value);
+    const finite = value !== null && Number.isFinite(value);
+
     const entry =
       pages.get(page) ??
       { views: 0, errors: 0, visits: [], samples: new Map<string, number[]>() };
     pages.set(page, entry);
+
+    // ---- the open this row belongs to ----
+    if (pv) {
+      const key = `${String(row.session ?? "")}|${pv}`;
+      const open = opens.get(key) ?? {
+        // Filled in by the view's own `pageview` row; a group that never gets one is dropped
+        // below, because without it nothing says which page was opened.
+        page: "",
+        at: String(row.ts ?? ""),
+        kind: "nav" as const,
+        from: null,
+        errors: 0,
+        parts: {} as Record<string, number>,
+        seq: 0,
+      };
+      opens.set(key, open);
+      open.seq = Number(row.id) || open.seq;
+      if (event === "pageview") open.page = page;
+      // The vitals are filed only against the view the DOCUMENT loaded, so their presence is
+      // what distinguishes a real load from an in-app navigation.
+      else if (event === "ttfb" || event === "fcp" || event === "lcp") open.kind = "load";
+      // nav-ms rides in the arriving view's group but carries the page it was clicked ON.
+      if (event === "nav-ms") open.from = page;
+      if (event === "js-error") open.errors += 1;
+      else if (finite) open.parts[event] = value;
+    }
+
+    // ---- the page's 7-day distribution ----
     if (event === "pageview") {
       entry.views += 1;
       continue;
@@ -2803,9 +2686,7 @@ export async function getClientMetricsSummary(): Promise<ClientMetricsPage[]> {
       entry.errors += 1;
       continue;
     }
-    if (row.value === null) continue;
-    const value = Number(row.value);
-    if (!Number.isFinite(value)) continue;
+    if (!finite) continue;
     if (event === "visit-ms") entry.visits.push(value);
     else {
       const bucket = entry.samples.get(event) ?? [];
@@ -2814,7 +2695,26 @@ export async function getClientMetricsSummary(): Promise<ClientMetricsPage[]> {
     }
   }
 
-  return [...pages.entries()]
+  // Newest first, then capped per page rather than globally: ten Home opens must not push
+  // Playlists off the list entirely on a day spent on Home.
+  const perPage = new Map<string, number>();
+  const recent: PageOpen[] = [];
+  for (const open of [...opens.values()].sort((a, b) => b.seq - a.seq)) {
+    if (!open.page) continue;
+    const n = perPage.get(open.page) ?? 0;
+    if (n >= OPENS_PER_PAGE) continue;
+    perPage.set(open.page, n + 1);
+    recent.push({
+      page: open.page,
+      at: open.at,
+      kind: open.kind,
+      from: open.from,
+      errors: open.errors,
+      parts: open.parts,
+    });
+  }
+
+  const summary = [...pages.entries()]
     .map(([page, e]) => {
       const stats: Record<string, MetricStat> = {};
       for (const event of SUMMARY_EVENTS) {
@@ -2837,4 +2737,6 @@ export async function getClientMetricsSummary(): Promise<ClientMetricsPage[]> {
       };
     })
     .sort((a, b) => b.views - a.views || a.page.localeCompare(b.page));
+
+  return { pages: summary, opens: recent };
 }

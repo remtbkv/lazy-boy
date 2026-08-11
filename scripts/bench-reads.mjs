@@ -1,6 +1,9 @@
 // Read-benchmark harness for the src/lib/db.ts query-conventions block.
-// READ-ONLY against the primary and the live replica file (local file measurements run on a
-// COPY of data/replica.db in os.tmpdir()). Modes: main | cold | sync | idx | day | search
+// READ-ONLY against the store and against data/replica.db (local file measurements run on a
+// COPY of it in os.tmpdir()). That file is the retired embedded replica — the app no longer
+// builds or reads one (db.ts, "One client, no replica"); it survives here only as a full local
+// copy of the data to measure plan shapes against. Modes: main | cold | sync | idx | day |
+// search — and `sync` measures replica bootstrap, i.e. machinery production no longer runs.
 import { createClient } from "@libsql/client";
 import fs from "node:fs";
 import os from "node:os";
@@ -196,6 +199,8 @@ async function modeCold() {
   client.close();
 }
 
+// RETIRED MACHINERY: times a fresh embedded-replica bootstrap. Kept because the numbers are
+// the evidence behind db.ts's "no replica" note; nothing in the app does this any more.
 async function modeSync() {
   const p = path.join(SCRATCH_DIR, `sync-${process.pid}-${Date.now()}.db`);
   const c = createClient({
@@ -387,7 +392,7 @@ async function modeMain() {
     save();
   }
 
-  // 12. Three fresh replica syncs to a NEW scratch path each.
+  // 12. Three fresh replica syncs to a NEW scratch path each (retired machinery — see modeSync).
   out.replicaSync = [];
   for (let i = 0; i < 3; i++) {
     const s = execFileSync(process.execPath, [self, "sync"], { encoding: "utf8" });
@@ -401,8 +406,8 @@ async function modeMain() {
   console.log("WROTE scripts/bench-reads-results.json");
 }
 
-/** `day` — getPlaysByDay's two formulations, against the PRIMARY (the shape production runs
- *  with LAZYBOY_NO_REPLICA=1). Both halves matter and both print:
+/** `day` — getPlaysByDay's two formulations, straight at the store (the shape production
+ *  runs). Both halves matter and both print:
  *    TIMING    the `date()` equality alone (no index can serve it → full plays scan) vs the
  *              same query with the redundant raw-UTC range bound that idx_plays_played_at can
  *              seek. Interleaved round-robin, so a session-wide slowdown hits both equally.
@@ -468,7 +473,7 @@ async function modeDay() {
 }
 
 /** `search` — the two client-side search payloads, and the per-keystroke query they replaced.
- *  Against the PRIMARY (the shape production runs with LAZYBOY_NO_REPLICA=1). Three halves:
+ *  Straight at the store (the shape production runs). Three halves:
  *    TIMING    the old per-keystroke query (searchHistory's `LIKE '%q%'`, unindexable → scans
  *              `tracks`) against what the new path costs: each payload's build (once per
  *              version change, then cached) and the version reads (one indexed meta key each,

@@ -2,6 +2,13 @@ import { timingSafeEqual } from "node:crypto";
 import { ledgerAdd, ledgerDayModeledTotal, ledgerSet } from "@/lib/db";
 import { USAGE_CHECK_ROWS, residualVerdict } from "@/lib/read-costs";
 
+// DORMANT since 2026-08-08, and deliberately still wired. Production's store is a self-hosted
+// sqld on the Zenbook (docs/quota-forensic/BRIDGE.md) which meters nothing, so the pace check
+// below watches a Turso database the app no longer reads or writes. It stays because it is the
+// guard a fallback to Turso would need on its first day, and because its second half — the
+// reconciliation — is what writes the platform total and the residual into the read-cost ledger
+// that /usage renders. Only the pace half is dormant; the ledger is live (docs/READ_QUOTA.md).
+//
 // The quota guard. Twice in one week a metered Turso dimension was discovered at 86% by
 // accident (syncs on Aug 3, rows read on Aug 6, both from a dashboard visit) — this route
 // is the standing mechanism that replaces that luck. It reads the org's real usage from

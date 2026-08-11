@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { auth, spotifyAccessToken } from "@/lib/auth";
 import { spotifyClient } from "@/lib/spotify";
 import { getContextName, recordContexts } from "@/lib/db";
 
@@ -16,14 +16,17 @@ const reply = (playing: unknown) =>
 
 export async function GET() {
   const session = await auth();
+  // Short-circuited: this route is public and polled every 6s, so a signed-out caller must
+  // cost zero DB reads (it did before the token moved off the session — keep it that way).
+  const accessToken = session && !session.error ? await spotifyAccessToken() : undefined;
   // Deliberately 200 {playing:null}, not 401: the poll runs every 6s, and a just-expired
   // session would otherwise error-spam the console until re-login. Nothing leaks — the
   // signed-out answer is indistinguishable from "nothing playing".
-  if (!session?.accessToken || session.error) {
+  if (!accessToken) {
     return reply(null);
   }
   try {
-    const sp = spotifyClient(session.accessToken);
+    const sp = spotifyClient(accessToken);
     const playing = await sp.currentlyPlaying();
     if (!playing) return reply(null);
 

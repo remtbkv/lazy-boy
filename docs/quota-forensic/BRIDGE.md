@@ -12,6 +12,13 @@ procedure is written down below *before* it is needed.
 > hostname, `https://ubuntu.tail026729.ts.net`. Read "The tunnel and the rotation updater"
 > and "Latency" as history; the live setup is under **"Funnel cutover"** near the end.
 
+> **2026-08-11: the embedded replica is gone from the code.** Where this document says
+> `LAZYBOY_NO_REPLICA=1` "stays set in production", read it as history: the flag and the whole
+> replica path were deleted from `src/lib/db.ts` (the configuration it described is now the
+> only behaviour, so setting or unsetting the variable does nothing). The measurements taken
+> "with `LAZYBOY_NO_REPLICA=1`" below are still measurements of what production runs. Nothing
+> else in this document changed.
+
 ## Architecture
 
 ```
