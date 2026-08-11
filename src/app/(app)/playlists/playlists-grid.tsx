@@ -74,13 +74,21 @@ export function PlaylistsGrid({
           the header (numbers foreground, labels muted); the sort sits inline at its right.
           Search moved to the bottom island. */}
       <div className="flex items-center justify-between gap-3">
+        {/* Locale pinned, not the runtime default: this line is server-rendered and then
+            hydrated, and a bare toLocaleString() groups by whatever locale the runtime is in
+            (en-US "13,464" on Vercel's Node vs de-DE "13.464" in the browser) — a hydration
+            mismatch for anyone outside en-US. */}
         <h1 className="text-[15px] text-muted-foreground">
-          <span className="font-medium text-foreground">{playlists.length.toLocaleString()}</span>{" "}
+          <span className="font-medium text-foreground">
+            {playlists.length.toLocaleString("en-US")}
+          </span>{" "}
           playlists
           {" · "}
-          <span className="font-medium text-foreground">{owned.toLocaleString()}</span> created by you
+          <span className="font-medium text-foreground">{owned.toLocaleString("en-US")}</span>{" "}
+          created by you
           {" · "}
-          <span className="font-medium text-foreground">{songCount.toLocaleString()}</span> unique songs
+          <span className="font-medium text-foreground">{songCount.toLocaleString("en-US")}</span>{" "}
+          unique songs
         </h1>
         <div className="shrink-0">
           <SortMenu

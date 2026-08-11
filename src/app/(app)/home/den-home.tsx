@@ -1150,10 +1150,15 @@ export function DenHome({
                                   {t.artist}
                                 </p>
                                 {/* Phones hide the side columns — fold time + source here.
-                                    suppressHydrationWarning: timeAgo() reads the clock, and a
-                                    minute boundary crossing between SSR and hydration flips
-                                    the text ("14h ago" → "15h ago") — a real #418 in the
-                                    metrics on 2026-08-11, not a code bug. */}
+                                    suppressHydrationWarning, for BOTH branches:
+                                    • timeAgo() reads the clock, and a minute boundary crossing
+                                      between SSR and hydration flips the text ("14h ago" →
+                                      "15h ago") — a real #418 in the metrics on 2026-08-11,
+                                      not a code bug.
+                                    • clockTime() formats in the RENDERING zone, and the server
+                                      renders in UTC (Vercel) while the browser renders local —
+                                      so outside UTC the two differ on every load, not just at
+                                      a boundary. The refresh on mount repaints it local. */}
                                 <p
                                   suppressHydrationWarning
                                   className="mt-0.5 truncate text-[11px] text-muted-foreground/70 sm:hidden"
@@ -1175,8 +1180,9 @@ export function DenHome({
                           <td className="py-2 pr-6 text-right tabular-nums text-muted-foreground">
                             {t.plays}
                           </td>
-                          {/* suppressHydrationWarning: same clock-boundary flip as the phone
-                              fold above. */}
+                          {/* suppressHydrationWarning: same two mechanisms as the phone fold
+                              above — timeAgo()'s clock boundary, clockTime()'s server-UTC vs
+                              browser-local zone. */}
                           <td
                             suppressHydrationWarning
                             className="hidden py-2 pr-6 text-right tabular-nums text-muted-foreground sm:table-cell"

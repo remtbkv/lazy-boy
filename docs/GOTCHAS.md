@@ -47,6 +47,43 @@ instead of re-investigating. (Pairs with `CLAUDE.md`, `AGENTS.md`, and the other
   (`invalid_grant`). Older cookie-stored tokens are migrated into the DB on first
   request. If you ever wipe `data/listens.db` you'll need to reconnect once.
 
+## Hydration mismatches (React #418/#423/#425)
+
+Every `"use client"` component is **also rendered on the server**, so its FIRST render runs
+twice — once in Vercel's Node (UTC, no `window`) and once in the browser — and any difference
+in the markup is a hydration error. React recovers by throwing away the server HTML and
+re-rendering the whole root on the client, which is why one stray timestamp can read as "the
+page flickered". Three sources, all of them live in this repo:
+
+- **Clock reads.** `timeAgo()` / `dayLabel()` (`lib/format.ts`) compare against `Date.now()`,
+  so a minute (or midnight) crossing between SSR and hydration flips the text. This is the
+  real #418 the client metrics caught on `/home`, 2026-08-11.
+- **Timezone.** `exactTime`/`exactTimeShort`/`clockTime`/`shortDate` format in the *rendering*
+  runtime's zone. The server is UTC and the browser is not, so these differ on **every** load
+  outside UTC — not just at a boundary. The server-side compensation, where the value is
+  rendered by a server component, is `openTime()` in `app/(app)/usage/page.tsx`: shift by the
+  `tzoffset` cookie (`lib/tz.ts`, published by `components/timezone-cookie.tsx`) and format
+  with `timeZone: "UTC"` and a pinned locale, so nothing depends on the runtime's zone.
+- **Locale.** A bare `n.toLocaleString()` groups by the runtime's default locale (`13,464` on
+  Vercel vs `13.464` in a de-DE browser). Pin the locale — `toLocaleString("en-US")`, or a
+  module-level `new Intl.NumberFormat("en-US")` as `usage/ledger-days.tsx` does.
+- **Browser-only state.** `localStorage`/`sessionStorage`/`matchMedia`/`window` must not be
+  read in a `useState` initializer or in a render branch. Read them in a `useEffect` (the
+  now-playing localStorage instant paint, `now-playing-context.tsx`) or through
+  `useSyncExternalStore` with a server snapshot (the `(hover: hover)` query in
+  `now-playing.tsx`).
+
+**House fix policy, in order:**
+1. Make the first render deterministic — compute from props or a fixed anchor, move the
+   browser-only read into an effect.
+2. If the text is genuinely time-relative and a mounted gate would just trade the mismatch for
+   a flash of blank, put `suppressHydrationWarning` on the **smallest element that contains
+   the text**, with a one-line comment naming the mechanism (see the three in
+   `home/den-home.tsx` and the two in `home/day-cards.tsx`). Note what it actually does: React
+   keeps the SERVER string in the DOM until something re-renders that subtree, so it silences
+   the error but does not correct the value.
+3. Never blanket-suppress a container. It would hide every future mismatch inside it.
+
 ## Base UI primitives — NOT Radix
 
 The `src/components/ui/*` components are generated against **`@base-ui/react`**

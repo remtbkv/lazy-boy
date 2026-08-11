@@ -67,7 +67,14 @@ export function DayCards({
               aria-pressed={selected === d.day}
               className={card(selected === d.day)}
             >
-              <div className="text-sm font-semibold">{dayLabel(d.day)}</div>
+              {/* suppressHydrationWarning: dayLabel() pivots on the clock — "Today"/
+                  "Yesterday" are decided against `new Date()` in the RENDERING zone, and the
+                  server renders in UTC (Vercel) while the browser renders local. Between the
+                  local evening and midnight the two disagree by a calendar day, so the same
+                  card is "Yesterday" on the server and "Today" in the browser. */}
+              <div suppressHydrationWarning className="text-sm font-semibold">
+                {dayLabel(d.day)}
+              </div>
               {/* Flex gap, not a text space: a literal " " here renders at the parent's
                   text-xl size, so the gap was both oversized and optically inconsistent
                   between numbers (a trailing 7 opens up more whitespace than a 2). */}
@@ -112,7 +119,10 @@ export function DayCards({
           {formatListenTime(allTime.durationMs)}
         </div>
         {allTime.since ? (
-          <div className="text-xs tabular-nums text-muted-foreground/70">
+          // suppressHydrationWarning: shortDate() reads the LOCAL calendar date of a UTC
+          // instant, so a first play recorded in the local evening lands on one date in the
+          // server's UTC render and the previous one in the browser's.
+          <div suppressHydrationWarning className="text-xs tabular-nums text-muted-foreground/70">
             since {shortDate(allTime.since)}
           </div>
         ) : null}

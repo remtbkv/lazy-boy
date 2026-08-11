@@ -1,4 +1,13 @@
 // Small, dependency-free formatting helpers shared by the track and history UIs.
+//
+// HYDRATION: everything below `formatListenTime` reads either the clock (`timeAgo`,
+// `dayLabel`) or the rendering runtime's zone (`exactTime`, `exactTimeShort`, `shortDate`,
+// `dayLabel`). A client component that calls one of these renders it TWICE — once on the
+// server, in UTC, and once in the browser, in the user's zone — so the two strings can
+// differ on every load, not just across a minute boundary. Call sites that are in the first
+// render carry `suppressHydrationWarning` on the smallest element that holds the text; see
+// docs/GOTCHAS.md "Hydration mismatches". `formatDuration`/`formatListenTime` take a plain
+// number and are safe anywhere.
 
 /** Track length, e.g. 5:29. */
 export function formatDuration(ms?: number | null): string {
