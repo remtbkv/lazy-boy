@@ -95,12 +95,12 @@ html:has(#den-root) body {
    the flex shell (#den-root), which lives in the SHARED (app) layout, so it is toggled
    per-page by <LockViewport /> instead: Playlists is a long grid and must scroll normally.
    (Putting `height/overflow` on Home's <main> doesn't work — it's `flex-1`, and
-   flex-basis:0% wins over `height` on the flex main axis.) Desktop only. */
-@media (min-width: 640px) {
-  #den-root.den-locked {
-    height: 100dvh;
-    overflow: hidden;
-  }
+   flex-basis:0% wins over `height` on the flex main axis.) All widths since 2026-08-12:
+   the phone runs the iMessage shape — a stable frame, the song box scrolling inside it,
+   the search pill always sitting underneath (Rem's reference screenshot). */
+#den-root.den-locked {
+  height: 100dvh;
+  overflow: hidden;
 }
 
 /* ---- Panda mark ----------------------------------------------------------------

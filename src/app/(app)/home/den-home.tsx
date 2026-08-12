@@ -986,7 +986,9 @@ export function DenHome({
             // this is "1" from the first frame.
             data-hydrated={searchPending ? "0" : searchFailed ? "x" : "1"}
             className={cn(
-              "thin-scroll min-h-0 flex-1 overflow-y-auto",
+              // Phone: results live in the same framed box as the day list (below), so the
+              // page keeps one silhouette whether or not a query is typed.
+              "thin-scroll min-h-0 flex-1 overflow-y-auto rounded-xl border border-border/60 bg-white/[0.015] px-2.5 sm:rounded-none sm:border-0 sm:bg-transparent sm:px-0",
               searchPending && "opacity-60 transition-opacity",
             )}
           >
@@ -1043,7 +1045,15 @@ export function DenHome({
             )}
           </div>
         ) : (
-          <div className={cn("min-h-0 flex-1", dayPending && "opacity-60 transition-opacity")}>
+          // Phone: the song list is BOUNDED — a framed box (the day tray's surface) that
+          // scrolls inside itself, with the search pill always visible under it (Rem's
+          // iMessage reference, 2026-08-12). Desktop keeps the open, borderless list.
+          <div
+            className={cn(
+              "min-h-0 flex-1 rounded-xl border border-border/60 bg-white/[0.015] p-1.5 sm:rounded-none sm:border-0 sm:bg-transparent sm:p-0",
+              dayPending && "opacity-60 transition-opacity",
+            )}
+          >
             {dayRows.length === 0 ? (
               <p className="py-10 text-center text-sm text-muted-foreground">
                 No plays recorded here.
@@ -1067,7 +1077,8 @@ export function DenHome({
                   // --day-text-inset in den.css). Right edge is unchanged, so From stays
                   // flush with the All-time card.
                   // pr keeps the right-aligned FROM/PLAYED text off the scrollbar.
-                  className="thin-scroll h-full overflow-y-auto pl-[var(--day-text-inset)] pr-2"
+                  // Phone: the box's own p-1.5 is the gutter, so the desktop inset is off.
+                  className="thin-scroll h-full overflow-y-auto pl-1 pr-1 sm:pl-[var(--day-text-inset)] sm:pr-2"
                 >
                 <table className="w-full table-fixed text-[15px]">
                   {/* Phone: no header row at all — column-header sorting is a pointer
@@ -1179,7 +1190,7 @@ export function DenHome({
                     the bottom of the list is unmistakable. */}
                 <div
                   className={cn(
-                    "pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-background to-transparent transition-opacity duration-200",
+                    "pointer-events-none absolute inset-x-0 bottom-0 h-16 rounded-b-xl bg-gradient-to-t from-background to-transparent transition-opacity duration-200 sm:rounded-b-none",
                     dayMoreBelow ? "opacity-100" : "opacity-0",
                   )}
                 />

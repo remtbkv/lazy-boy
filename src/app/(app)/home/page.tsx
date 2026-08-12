@@ -83,16 +83,16 @@ export default async function HomePage() {
 
   return (
     <>
-      {/* Desktop: this page never scrolls — the song list inside absorbs the leftover height
-          and scrolls on its own. The viewport lock lives on #den-root (see den.css) and is
-          applied by <LockViewport /> only while Home is mounted, so the shared (app) layout
-          stays scrollable for the Playlists grid. */}
+      {/* This page never scrolls, at any width — the song list inside absorbs the leftover
+          height and scrolls on its own, with the search pill always visible beneath it
+          (phone shape per Rem's iMessage reference, 2026-08-12). The viewport lock lives on
+          #den-root (see den.css) and is applied by <LockViewport /> only while Home is
+          mounted, so the shared (app) layout stays scrollable for the Playlists grid. */}
       <LockViewport />
-      <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-24 pt-7 sm:overflow-hidden sm:px-6 sm:pb-[4.75rem] sm:pt-6">
-        {/* Flex column that fills the available height on desktop so the whole page fits the
-            viewport (no body scroll) and only the song list scrolls inside; on mobile it's a
-            normal stacked column and the page scrolls. */}
-        <div className="flex flex-col gap-6 sm:h-full sm:min-h-0">
+      <main className="mx-auto w-full max-w-5xl flex-1 overflow-hidden px-4 pb-[calc(env(safe-area-inset-bottom)+4.25rem)] pt-5 sm:px-6 sm:pb-[4.75rem] sm:pt-6">
+        {/* Flex column that fills the available height so the whole page fits the viewport
+            (no body scroll) and only the song list scrolls inside. */}
+        <div className="flex h-full min-h-0 flex-col gap-4 sm:gap-6">
           {/* Just the greeting — today's numbers already live on the Today card below,
               repeating them here said the same thing twice within an inch. */}
           <header className="shrink-0">

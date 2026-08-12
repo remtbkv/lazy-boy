@@ -161,6 +161,18 @@ function TrayScrubber({
   // Thumb geometry in % of the track, derived from the scroller's real proportions.
   const [thumb, setThumb] = useState<{ left: number; width: number } | null>(null);
   const drag = useRef<{ startX: number; startLeft: number } | null>(null);
+  // Overlay-scrollbar manners (Rem, 2026-08-12 — the always-on bar was intrusive): near
+  // invisible at rest, brightening while the strip moves or a finger is on it, fading
+  // back ~0.7s after the last movement. The hit area never fades — only the ink does.
+  const [live, setLive] = useState(false);
+  const fade = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const poke = () => {
+    setLive(true);
+    if (fade.current) clearTimeout(fade.current);
+    fade.current = setTimeout(() => {
+      if (!drag.current) setLive(false);
+    }, 700);
+  };
 
   useEffect(() => {
     const el = scrollerRef.current;
@@ -176,14 +188,22 @@ function TrayScrubber({
       const left = (el.scrollLeft / over) * (100 - width);
       setThumb({ left, width });
     };
+    const onScroll = () => {
+      update();
+      poke();
+    };
     update();
-    el.addEventListener("scroll", update, { passive: true });
+    el.addEventListener("scroll", onScroll, { passive: true });
     const ro = new ResizeObserver(update);
     ro.observe(el);
     return () => {
-      el.removeEventListener("scroll", update);
+      el.removeEventListener("scroll", onScroll);
       ro.disconnect();
+      if (fade.current) clearTimeout(fade.current);
     };
+    // poke is stable enough (closes over refs/setState only); listing it would re-bind
+    // the listeners every render for nothing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scrollerRef]);
 
   if (!thumb) return null;
@@ -208,6 +228,7 @@ function TrayScrubber({
       el.scrollLeft = startLeft;
     }
     drag.current = { startX: e.clientX, startLeft };
+    poke();
   };
   const move = (e: React.PointerEvent) => {
     const d = drag.current;
@@ -222,6 +243,7 @@ function TrayScrubber({
   };
   const up = () => {
     drag.current = null;
+    poke();
   };
 
   return (
@@ -231,13 +253,15 @@ function TrayScrubber({
       onPointerMove={move}
       onPointerUp={up}
       onPointerCancel={up}
-      // h-3 is the touch target; the visible track is the slim inner bars.
+      // h-3 is the touch target; the visible ink is the hairline thumb below.
       className="relative mx-1 h-3 touch-none select-none sm:hidden"
       aria-hidden
     >
-      <div className="absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 rounded-full bg-white/[0.06]" />
       <div
-        className="absolute top-1/2 h-1.5 -translate-y-1/2 rounded-full bg-white/25"
+        className={cn(
+          "absolute top-1/2 h-1 -translate-y-1/2 rounded-full transition-colors duration-300",
+          live ? "bg-white/35" : "bg-white/[0.09]",
+        )}
         style={{ left: `${thumb.left}%`, width: `${thumb.width}%` }}
       />
     </div>
