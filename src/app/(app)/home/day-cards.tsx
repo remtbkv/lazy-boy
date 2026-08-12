@@ -201,9 +201,6 @@ function TrayScrubber({
       ro.disconnect();
       if (fade.current) clearTimeout(fade.current);
     };
-    // poke is stable enough (closes over refs/setState only); listing it would re-bind
-    // the listeners every render for nothing.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scrollerRef]);
 
   if (!thumb) return null;
