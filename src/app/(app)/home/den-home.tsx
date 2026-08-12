@@ -40,12 +40,7 @@ const DEFAULT_DIR: Record<Sort, "asc" | "desc"> = {
   length: "desc",
   source: "asc",
 };
-function compareTracks(
-  a: TrackStats,
-  b: TrackStats,
-  sort: Sort,
-  from: (t: TrackStats) => string | null,
-): number {
+function compareTracks(a: TrackStats, b: TrackStats, sort: Sort): number {
   switch (sort) {
     case "recent":
       return a.lastPlayed.localeCompare(b.lastPlayed);
@@ -60,24 +55,16 @@ function compareTracks(
     case "length":
       return (a.durationMs ?? 0) - (b.durationMs ?? 0);
     case "source":
-      // On what the cell SHOWS, so the column still sorts by what you can read in it.
       // Unattributed rows ("(queued)") sort together at the end rather than under "".
-      return (from(a) ?? "￿").localeCompare(from(b) ?? "￿");
+      return (a.source ?? "￿").localeCompare(b.source ?? "￿");
   }
 }
 
-/** What a day row's "From" says. A song that is IN a playlist right now answers with the
- *  playlists it lives in — that is the useful fact, where the play CONTEXT ("(queued)") is
- *  mostly an accident of how the last play happened to start. Only when the song is in no
- *  playlist does the context stand, and null (neither) renders as "(queued)".
- *
- *  Membership can only be known once the library payload lands, a second or two after paint,
- *  so early rows answer with the context and upgrade in place. Nothing moves when they do:
- *  the column is fixed-width and the cell clips (FromCell). */
-function fromText(t: TrackStats, inPlaylists: Map<string, string[]> | null): string | null {
-  const pls = inPlaylists?.get(`${t.artist.toLowerCase()}\n${t.name.toLowerCase()}`);
-  return pls?.length ? pls.join(", ") : t.source;
-}
+// A day row's "From" is the play CONTEXT — where the listen actually started (playlist,
+// album, "(queued)") — NOT the playlists the song happens to live in. Rem, 2026-08-12:
+// membership answers a different question, and the place that asks it is search (an
+// expanded result's "In …" line, off entry.playlists). A membership list here also made
+// every row read as a wall of playlist names.
 
 // ---- The searchable set ------------------------------------------------------------------
 // One song, merged from the two search payloads (db.ts, "The client-side search payloads").
@@ -962,23 +949,10 @@ export function DenHome({
     }
   };
 
-  // Which playlists a song sits in, off the SAME entries the search rows read (an expanded
-  // result's "In …" line is `entry.playlists`) — the library payload is inverted once, when it
-  // lands, into identity → playlist names, and both surfaces answer from it. Songs in no
-  // playlist are left out, so a miss is the answer rather than an empty array to check.
-  const inPlaylists = useMemo(() => {
-    if (!entries) return null;
-    const m = new Map<string, string[]>();
-    for (const e of entries) if (e.playlists.length) m.set(e.key, e.playlists);
-    return m;
-  }, [entries]);
-
   const dayRows = useMemo(() => {
     const f = dir === "asc" ? 1 : -1;
-    return [...tracks].sort(
-      (a, b) => f * compareTracks(a, b, sort, (t) => fromText(t, inPlaylists)),
-    );
-  }, [tracks, sort, dir, inPlaylists]);
+    return [...tracks].sort((a, b) => f * compareTracks(a, b, sort));
+  }, [tracks, sort, dir]);
 
   // Recompute the bottom cue whenever the visible rows change (new day / re-sort).
   useEffect(() => {
@@ -1096,7 +1070,10 @@ export function DenHome({
                   className="thin-scroll h-full overflow-y-auto pl-[var(--day-text-inset)] pr-2"
                 >
                 <table className="w-full table-fixed text-[15px]">
-                  <thead className="sticky top-0 z-10 bg-background">
+                  {/* Phone: no header row at all — column-header sorting is a pointer
+                      affordance, and a caps SONG·ARTIST/PLAYS line over a two-column list
+                      was desktop furniture adding noise. The default order stands there. */}
+                  <thead className="sticky top-0 z-10 hidden bg-background sm:table-header-group">
                     {/* The header row IS the sort control — the sort keys were always just the
                         columns, so a dropdown restating them (in its own full-width row) was
                         redundant. The Song column holds title + artist, so it offers both. */}
@@ -1131,7 +1108,7 @@ export function DenHome({
                   </thead>
                   <tbody className="divide-y divide-border/50">
                     {dayRows.map((t) => {
-                      const from = fromText(t, inPlaylists);
+                      const from = t.source;
                       return (
                         <tr
                           key={`${t.id}-${t.lastPlayed}`}

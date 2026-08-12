@@ -3,15 +3,22 @@
    alive/now (played today, syncing, live). */
 
 /* ---- Phone density -----------------------------------------------------------------
-   On a phone the whole skin runs at 75% scale (Rem, 2026-08-12: "all the text at 75% of
-   its size" — vertical space is the scarce thing there). Root font-size is the one knob
-   that scales every rem-derived value together — type, paddings, control heights — so the
-   layout compresses uniformly instead of text shrinking inside full-size boxes. Values
-   set in raw px (arbitrary widths, borders) don't move and are sized per-breakpoint where
-   they matter. Desktop is untouched. */
+   On a phone the whole skin runs at 85% scale (Rem, 2026-08-12: 75% read as too small on
+   the device — "slightly bigger text" — but vertical space is still the scarce thing
+   there). Root font-size is the one knob that scales every rem-derived value together —
+   type, paddings, control heights — so the layout compresses uniformly instead of text
+   shrinking inside full-size boxes. Values set in raw px (arbitrary widths, borders)
+   don't move and are sized per-breakpoint where they matter. Desktop is untouched. */
 @media (max-width: 639.98px) {
   html {
-    font-size: 75%;
+    font-size: 85%;
+  }
+
+  /* Phones scroll by touch and the day tray draws its own grabbable scrubber — the
+     styled webkit bar rendering NEXT to it made two bars (Rem's screenshot). Native
+     bars off entirely under 640px; desktop keeps the thin hover-revealed ones. */
+  .thin-scroll::-webkit-scrollbar {
+    display: none;
   }
 }
 

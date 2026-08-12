@@ -90,8 +90,9 @@ export function SearchIsland({
       {/* h-10 to match the quick-action buttons exactly. Fixed (not padding-derived) so the
           pill is the same height on both pages — Home's trailing switch would otherwise make
           it taller than the Playlists one. Phones: full width (minus the page gutter), since
-          a fixed-width input would overflow a 390px screen once the trailing switch is in. */}
-      <div className="pointer-events-auto flex h-10 w-full items-center gap-2 rounded-full border border-border bg-popover/95 pl-4 pr-1.5 shadow-2xl shadow-black/50 ring-1 ring-white/5 backdrop-blur sm:w-auto">
+          a fixed-width input would overflow a 390px screen once the trailing switch is in —
+          and h-12 there: at the phone's 85% scale h-10 landed a too-thin ~34px bar. */}
+      <div className="pointer-events-auto flex h-12 w-full items-center gap-2 rounded-full border border-border bg-popover/95 pl-4 pr-1.5 shadow-2xl shadow-black/50 ring-1 ring-white/5 backdrop-blur sm:h-10 sm:w-auto">
         {/* Full-strength ink: the one thing in the pill that should read at a glance as
             "this is the search". Everything else stays muted. */}
         <SearchIcon className="size-4 shrink-0 text-foreground" />

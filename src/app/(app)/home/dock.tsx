@@ -55,19 +55,19 @@ export function ActionDock({ playlists, backupPref, syncedAt }: DockData) {
 
   return (
     <>
-      {/* Mobile tiles — all five on ONE row (Rem, 2026-08-12: two rows spent too much of
-          the phone's vertical space). Five equal columns, so nothing scrolls or wraps;
-          the labels are the width constraint and set the 10px size. */}
-      <div className="grid grid-cols-5 gap-1.5 sm:hidden">
+      {/* Mobile: ONE swipeable row, ~3 pills in view at a time (Rem, 2026-08-12 — five
+          crammed columns read as desktop-squeezed). Each pill is the desktop button at
+          phone scale; the fourth peeking past the edge fade is what says "swipe". */}
+      <div className="-mx-4 flex snap-x gap-2 overflow-x-auto px-4 [-webkit-mask-image:linear-gradient(to_right,#000_calc(100%-1.5rem),transparent)] [mask-image:linear-gradient(to_right,#000_calc(100%-1.5rem),transparent)] sm:hidden">
         {ACTIONS.map((a) => (
           <button
             key={a.key}
             type="button"
             onClick={() => activate(a.key)}
-            className="flex h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-lg border border-border/70 bg-card px-1 text-[10px] font-medium text-foreground/90 transition-colors active:bg-accent"
+            className="flex h-10 w-[30%] min-w-[30%] snap-start items-center justify-center gap-1.5 rounded-full border border-border bg-card text-xs font-medium text-foreground/90 transition-colors active:bg-accent"
           >
-            <a.icon className="size-4 text-muted-foreground" strokeWidth={1.9} />
-            <span className="max-w-full truncate">{a.label}</span>
+            <a.icon className="size-3.5 shrink-0 text-muted-foreground" strokeWidth={1.9} />
+            <span className="truncate">{a.label}</span>
           </button>
         ))}
       </div>

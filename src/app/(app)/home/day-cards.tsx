@@ -52,7 +52,7 @@ export function DayCards({
       // Desktop: sized so exactly 5 days stand full and the 6th is mostly cut by the edge
       // fade — enough to read the date and the first digit, not the whole figure. Phone:
       // a fixed portrait column (see the component note), content spread top-to-bottom.
-      "flex w-[84px] min-w-[84px] shrink-0 snap-start flex-col justify-between rounded-xl border px-2.5 py-3 text-left transition-colors sm:w-auto sm:min-w-[143px] sm:justify-start sm:p-3.5",
+      "flex w-[92px] min-w-[92px] shrink-0 snap-start flex-col justify-between rounded-xl border px-2.5 py-3 text-left transition-colors sm:w-auto sm:min-w-[143px] sm:justify-start sm:p-3.5",
       active
         ? "border-[color-mix(in_srgb,var(--bamboo)_55%,var(--border))] bg-white/[0.05]"
         : "border-border bg-card hover:border-[color-mix(in_srgb,var(--border)_55%,var(--muted-foreground))]",
