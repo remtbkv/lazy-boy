@@ -95,7 +95,7 @@ export default async function PlaylistDetailPage({
   // The (app) layout no longer wraps children in a <main> — each page owns its own, because
   // Home needs a viewport lock and the others don't. This is the standard page container.
   return (
-    <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-28 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
+    <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-24 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
       <div className="space-y-6">
         <Link
           href="/playlists"

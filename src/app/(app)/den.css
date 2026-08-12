@@ -2,6 +2,28 @@
    untouched. Cool-neutral "ink" palette (Rem's pick). Green stays semantic: green =
    alive/now (played today, syncing, live). */
 
+/* ---- Phone density -----------------------------------------------------------------
+   On a phone the whole skin runs at 75% scale (Rem, 2026-08-12: "all the text at 75% of
+   its size" — vertical space is the scarce thing there). Root font-size is the one knob
+   that scales every rem-derived value together — type, paddings, control heights — so the
+   layout compresses uniformly instead of text shrinking inside full-size boxes. Values
+   set in raw px (arbitrary widths, borders) don't move and are sized per-breakpoint where
+   they matter. Desktop is untouched. */
+@media (max-width: 639.98px) {
+  html {
+    font-size: 75%;
+  }
+}
+
+/* iOS paints the status-bar / Dynamic Island area (and rubber-band overscroll) with the
+   html/body background, which is the MAIN app's palette (#0a0a0c) — two shades off this
+   skin's #0b0b0e, so the strip above the header read as a disjoint band on the phone.
+   Match the canvas to the skin whenever the skin is on screen. */
+html:has(#den-root),
+html:has(#den-root) body {
+  background-color: #0b0b0e;
+}
+
 #den-root {
   --background: #0b0b0e;
   --foreground: #ececf1;
@@ -88,6 +110,25 @@
 .den-panda-asleep { animation: den-breathe 4.5s ease-in-out infinite; transform-origin: 50% 80%; }
 .den-panda-awake  { animation: den-sway 3.2s ease-in-out infinite; transform-origin: 50% 85%; }
 
+/* ---- Now-playing ring (phone) ----------------------------------------------------
+   The playing state on the header chip's art: a thin green ring that stands OFF the
+   cover (the art span carries 2.5px of padding, so the ring never overlaps the art the
+   way the old 2px box-shadow on the img did), breathing slowly while the song runs.
+   Phone only — the desktop chip carries the title + progress bar instead. */
+@keyframes lb-np-pulse {
+  0%, 100% { box-shadow: 0 0 0 1.5px rgba(29, 185, 84, 0.9); }
+  50%      { box-shadow: 0 0 0 1.5px rgba(29, 185, 84, 0.35); }
+}
+.np-live {
+  animation: lb-np-pulse 2.6s ease-in-out infinite;
+}
+@media (min-width: 640px) {
+  .np-live {
+    animation: none;
+    box-shadow: none;
+  }
+}
+
 /* ---- Bottom sheet (mobile action panels) ---------------------------------------- */
 @keyframes den-sheet-up {
   from { transform: translateY(100%); }
@@ -123,6 +164,7 @@
   .den-panda-awake,
   .den-sheet,
   .den-scrim,
+  .np-live,
   .den-marquee[data-run] > span {
     animation: none;
   }

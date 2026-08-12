@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Disc3, Home, LibraryBig, LogOut } from "lucide-react";
+import { LogOut } from "lucide-react";
 import { logout } from "./actions";
 import { NowPlaying } from "@/components/now-playing";
 import { useNowPlaying } from "@/components/now-playing-context";
@@ -18,16 +18,17 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-// App chrome. Desktop: one slim top bar — mark, wordmark, quiet nav, skin toggle,
-// account avatar. Mobile: the top bar shrinks to mark + wordmark, and navigation moves
-// to a bottom tab bar (thumb reach), padded past the iOS home indicator. Solid
-// backgrounds throughout — no translucency, no blur.
-//
+// App chrome: ONE top bar, both sizes (the mobile bottom tab bar is gone — two bars ate
+// too much of a phone screen; Rem, 2026-08-12). Desktop: mark, quiet nav, now-playing,
+// avatar. Phone: the same bar at 75% scale, with the Home text link dropped — the panda
+// mark IS home there — and the bar slides away as you scroll down (direction-tracked,
+// back the moment you scroll up), because the header is the least useful thing on screen
+// mid-list.
 
 const TABS = [
-  { key: "home", href: "/home", label: "Home", icon: Home },
-  { key: "playlists", href: "/playlists", label: "Playlists", icon: LibraryBig },
-  { key: "friends", href: "/friends", label: "Friends", icon: Disc3 },
+  { key: "home", href: "/home", label: "Home" },
+  { key: "playlists", href: "/playlists", label: "Playlists" },
+  { key: "friends", href: "/friends", label: "Friends" },
 ] as const;
 
 type TabKey = (typeof TABS)[number]["key"];
@@ -81,13 +82,53 @@ export function DenChrome({ name, image }: { name: string; image: string | null 
     return () => window.removeEventListener("keydown", onKey);
   }, [active, onTabRoute, router]);
 
+  // Phone: the bar slides up as you scroll down and back the moment you scroll up —
+  // DIRECTION-tracked (an accumulator over scroll deltas), not distance-from-top, so it
+  // returns anywhere in the page, not only near the top. Desktop never hides: Home is
+  // viewport-locked there (scrollY stays 0) and the header isn't crowding anything.
+  const headerRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const el = headerRef.current;
+    if (!el) return;
+    let last = window.scrollY;
+    let p = 0; // 0 = shown, 1 = fully off-screen
+    let raf = 0;
+    const apply = () => {
+      raf = 0;
+      if (window.innerWidth >= 640) {
+        el.style.transform = "";
+        p = 0;
+        return;
+      }
+      const y = Math.max(0, window.scrollY);
+      p = Math.min(1, Math.max(0, p + (y - last) / 120));
+      last = y;
+      if (y <= 8) p = 0; // at the very top the bar is always home
+      el.style.transform = `translate3d(0, ${(-p * 100).toFixed(1)}%, 0)`;
+    };
+    const onScroll = () => {
+      if (!raf) raf = requestAnimationFrame(apply);
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll);
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+    };
+  }, []);
+
   return (
     // Translucent + blurred: on a scrolling page (Playlists) the artwork passes UNDER the header
     // rather than hitting an opaque wall, so it reads as one continuous surface.
-    <header className="sticky top-0 z-40 border-b border-border/70 bg-background/70 backdrop-blur-xl">
-      <div className="mx-auto flex h-16 w-full max-w-5xl items-center gap-6 px-4 sm:px-6">
+    <header
+      ref={headerRef}
+      className="sticky top-0 z-40 border-b border-border/70 bg-background/70 backdrop-blur-xl"
+    >
+      <div className="mx-auto flex h-16 w-full max-w-5xl items-center gap-4 px-4 sm:gap-6 sm:px-6">
         {/* Just the mark — the tab title already says the name. Gentle idle motion:
-            a slow breathe while nothing plays, the slight sway while something does. */}
+            a slow breathe while nothing plays, the slight sway while something does.
+            On the phone this IS the Home control (the nav below drops its Home link). */}
         <Link href="/home" className="flex items-center" aria-label="Lazy Boy">
           <img
             src="/icon.svg"
@@ -96,12 +137,16 @@ export function DenChrome({ name, image }: { name: string; image: string | null 
           />
         </Link>
 
-        {/* Desktop nav — quiet text, active = full-strength foreground, no boxes. */}
-        <nav className="hidden items-center gap-1 sm:flex">
+        {/* Nav — quiet text, active = full-strength foreground, no boxes. prefetch(true)
+            pulls the FULL route (a dynamic route's default prefetch stops at its loading
+            boundary), so a tab tap paints from cache instead of waiting out a server
+            render — the Friends page is constant text and still took a round trip. */}
+        <nav className="flex items-center gap-0.5 sm:gap-1">
           {TABS.map((t) => (
             <Link
               key={t.key}
               href={t.href}
+              prefetch={true}
               ref={(el) => {
                 tabRefs.current[t.key] = el ?? undefined;
               }}
@@ -109,7 +154,8 @@ export function DenChrome({ name, image }: { name: string; image: string | null 
                 // No focus ring on the tabs: arrow-key nav moves DOM focus with the
                 // selection, and the ring hopping tab to tab reads as a stray box.
                 // Active state is already carried by the text weight/colour.
-                "rounded-md px-3 py-1.5 text-[15px] font-medium transition-colors outline-none focus-visible:outline-none",
+                "rounded-md px-2 py-1.5 text-[13px] font-medium transition-colors outline-none focus-visible:outline-none sm:px-3 sm:text-[15px]",
+                t.key === "home" && "hidden sm:block", // the panda is Home on the phone
                 t.key === active
                   ? "text-foreground"
                   : "text-muted-foreground/70 hover:text-foreground",
@@ -120,7 +166,7 @@ export function DenChrome({ name, image }: { name: string; image: string | null 
           ))}
         </nav>
 
-        <div className="ml-auto flex items-center gap-4">
+        <div className="ml-auto flex items-center gap-3 sm:gap-4">
           {/* Current song, same chip as the live header. Wrapped in `den-np` so the
               title/artist box is pinned to a fixed width (den.css) — otherwise it
               measures each song and animates its width, shifting everything right of it.
@@ -128,9 +174,7 @@ export function DenChrome({ name, image }: { name: string; image: string | null 
           <div className="den-np">
             <NowPlaying />
           </div>
-          <div className="hidden sm:block">
-            <AccountMenu name={name} image={image} />
-          </div>
+          <AccountMenu name={name} image={image} />
         </div>
       </div>
     </header>
@@ -287,71 +331,4 @@ function AccountMenu({ name, image }: { name: string; image: string | null }) {
   );
 }
 
-export function DenBottomNav({ name, image }: { name: string; image: string | null }) {
-  const active = useActiveTab();
-  // Account tab: first tap reveals a small Log out panel above the bar (never a
-  // one-tap sign-out — too easy to hit by accident); tapping elsewhere dismisses it.
-  const [accountOpen, setAccountOpen] = useState(false);
-  return (
-    <nav
-      className="fixed inset-x-0 bottom-0 z-40 border-t border-border/70 bg-background pb-[env(safe-area-inset-bottom)] sm:hidden"
-      aria-label="Primary"
-    >
-      {accountOpen ? (
-        <>
-          <button
-            type="button"
-            aria-label="Close"
-            onClick={() => setAccountOpen(false)}
-            className="fixed inset-0 -z-10"
-          />
-          <div className="absolute bottom-full right-3 mb-2 w-52 rounded-xl border border-border bg-popover p-1.5 shadow-xl shadow-black/40">
-            <p className="truncate px-2 py-1.5 text-sm font-medium">{name}</p>
-            <div className="my-1 h-px bg-border/60" />
-            <form action={logout}>
-              <button
-                type="submit"
-                className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-sm text-foreground active:bg-accent"
-              >
-                <LogOut className="size-4" />
-                Log out
-              </button>
-            </form>
-          </div>
-        </>
-      ) : null}
-      <div className="mx-auto flex h-16 max-w-md items-stretch">
-        {TABS.map((t) => {
-          const Icon = t.icon;
-          const on = t.key === active;
-          return (
-            <Link
-              key={t.key}
-              href={t.href}
-              className={cn(
-                "flex flex-1 flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors",
-                on ? "text-foreground" : "text-muted-foreground/70",
-              )}
-            >
-              <Icon className="size-[22px]" strokeWidth={on ? 2.2 : 1.8} />
-              {t.label}
-            </Link>
-          );
-        })}
-        <button
-          type="button"
-          onClick={() => setAccountOpen((o) => !o)}
-          aria-expanded={accountOpen}
-          className="flex flex-1 flex-col items-center justify-center gap-1 text-[11px] font-medium text-muted-foreground/70"
-        >
-          <Avatar className="size-6">
-            {image ? <AvatarImage src={image} alt="" className="object-cover" /> : null}
-            <AvatarFallback className="text-[10px]">{name.charAt(0).toUpperCase()}</AvatarFallback>
-          </Avatar>
-          {name.split(" ")[0] || "You"}
-        </button>
-      </div>
-    </nav>
-  );
-}
 

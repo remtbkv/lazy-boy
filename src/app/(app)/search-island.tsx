@@ -7,20 +7,20 @@ import { SearchIcon, X } from "lucide-react";
 // live app, restyled. It sits below the content (the page reserves room
 // so it never overlaps the list/grid), which also signals you've reached the bottom.
 // `children` is an optional trailing control tucked inside the pill (Home passes the
-// songs/artists switch). On phones the bottom tab bar owns the bottom edge, so the
-// island docks just above it (full-width, since thumbs don't hover) instead of at
-// bottom-5, where the bar would cover it.
+// songs/artists switch). On phones it owns the bottom edge (full-width, since thumbs
+// don't hover), padded past the iOS home indicator.
 //
-// On a scrolling page it retreats DOWNWARD off-screen as you leave the top — the mirror of a
-// sticky header sliding up. The travel is driven straight off scrollY (not a binary toggle),
-// so it tracks the scroll 1:1 and comes back as you approach the top again. Home never
-// scrolls, so scrollY stays 0 there and the island simply stays put.
+// On a scrolling page it retreats DOWNWARD off-screen as you scroll down and returns as
+// you scroll UP — direction-tracked (an accumulator over scroll deltas), not
+// distance-from-top, so it comes back anywhere in the page, not only near the top (Rem,
+// 2026-08-12: "it should show up as soon as you start scrolling up"). The travel is
+// still driven 1:1 off the deltas, so it glides with the scroll instead of toggling.
+// Home never scrolls on desktop, so scrollY stays 0 there and the island stays put.
 //
-// HIDE_START gives it a dead-zone: a nudge of the wheel shouldn't make it twitch. Past that it
-// glides away over HIDE_END-HIDE_START px, which is a long enough runway to read as deliberate
-// rather than snapping off-screen.
-const HIDE_START = 48;
-const HIDE_END = 360;
+// TOP_LOCK keeps it pinned within the first few px (no twitching at rest at the top);
+// SLIDE is the scroll distance that walks it fully off / fully back.
+const TOP_LOCK = 48;
+const SLIDE = 200;
 
 export function SearchIsland({
   query,
@@ -42,11 +42,13 @@ export function SearchIsland({
 
   useEffect(() => {
     let raf = 0;
+    let last = window.scrollY || document.documentElement.scrollTop || 0;
     const read = () => {
       raf = 0;
-      const y = window.scrollY || document.documentElement.scrollTop || 0;
-      const p = (y - HIDE_START) / (HIDE_END - HIDE_START);
-      setProgress(Math.min(1, Math.max(0, p)));
+      const y = Math.max(0, window.scrollY || document.documentElement.scrollTop || 0);
+      const dy = y - last;
+      last = y;
+      setProgress((p) => (y <= TOP_LOCK ? 0 : Math.min(1, Math.max(0, p + dy / SLIDE))));
     };
     const onScroll = () => {
       // Coalesce to one read per frame so the transform lands with the paint — this is what
@@ -83,7 +85,7 @@ export function SearchIsland({
         transform: `translate3d(0, ${progress * travel}px, 0)`,
         willChange: "transform",
       }}
-      className="pointer-events-none fixed inset-x-0 bottom-[calc(4rem+env(safe-area-inset-bottom)+0.75rem)] z-30 flex justify-center px-4 sm:bottom-5"
+      className="pointer-events-none fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+0.75rem)] z-30 flex justify-center px-4 sm:bottom-5"
     >
       {/* h-10 to match the quick-action buttons exactly. Fixed (not padding-derived) so the
           pill is the same height on both pages — Home's trailing switch would otherwise make

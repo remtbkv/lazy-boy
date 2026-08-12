@@ -36,7 +36,7 @@ export default async function DraftPlaylistsPage() {
           Headless and off the render path either way — the page never waits on a scan, and
           playlists change on the order of days, so there's no live poll and no on-page churn. */}
       <PlaylistsSync syncedAt={syncedAt} />
-      <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-36 pt-7 sm:px-6 sm:pb-24 sm:pt-9">
+      <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-24 pt-7 sm:px-6 sm:pb-24 sm:pt-9">
         <PlaylistsGrid playlists={playlists} owned={owned} uniqueSongs={uniqueSongs} />
       </main>
     </>

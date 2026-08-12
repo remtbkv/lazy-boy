@@ -6,7 +6,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 // link, cover + title, track rows) so the swap to real content doesn't jump.
 export default function Loading() {
   return (
-    <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-28 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
+    <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-24 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
       <div className="space-y-6">
         <span className="inline-flex w-fit items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1.5 text-sm text-muted-foreground">
           <ArrowLeft className="size-4" />

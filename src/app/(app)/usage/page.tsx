@@ -249,7 +249,7 @@ export default async function UsagePage() {
   const summaryByPage = new Map(client.pages.map((p) => [p.page, p]));
 
   return (
-    <main className="mx-auto w-full max-w-3xl flex-1 px-4 pb-28 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
+    <main className="mx-auto w-full max-w-3xl flex-1 px-4 pb-16 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
       <h1 className="den-display text-4xl leading-tight tracking-tight sm:text-5xl">Usage</h1>
       <p className="mt-3 max-w-xl text-sm leading-relaxed text-muted-foreground">
         What each page costs to open, measured in the browser that opened it — then what each

@@ -5,7 +5,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 // heading, a lead line, then ruled rows — not the header, which the layout already renders.
 export default function FriendsLoading() {
   return (
-    <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-28 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
+    <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-16 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
       <Skeleton className="h-11 w-64 max-w-full rounded-lg" />
       <Skeleton className="mt-4 h-4 w-72 max-w-full rounded" />
 

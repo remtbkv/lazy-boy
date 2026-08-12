@@ -55,17 +55,19 @@ export function ActionDock({ playlists, backupPref, syncedAt }: DockData) {
 
   return (
     <>
-      {/* Mobile tiles */}
-      <div className="grid grid-cols-3 gap-2 sm:hidden">
+      {/* Mobile tiles — all five on ONE row (Rem, 2026-08-12: two rows spent too much of
+          the phone's vertical space). Five equal columns, so nothing scrolls or wraps;
+          the labels are the width constraint and set the 10px size. */}
+      <div className="grid grid-cols-5 gap-1.5 sm:hidden">
         {ACTIONS.map((a) => (
           <button
             key={a.key}
             type="button"
             onClick={() => activate(a.key)}
-            className="flex h-[64px] flex-col items-center justify-center gap-1.5 rounded-xl border border-border/70 bg-card text-[12px] font-medium text-foreground/90 transition-colors active:bg-accent"
+            className="flex h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-lg border border-border/70 bg-card px-1 text-[10px] font-medium text-foreground/90 transition-colors active:bg-accent"
           >
-            <a.icon className="size-[18px] text-muted-foreground" strokeWidth={1.9} />
-            {a.label}
+            <a.icon className="size-4 text-muted-foreground" strokeWidth={1.9} />
+            <span className="max-w-full truncate">{a.label}</span>
           </button>
         ))}
       </div>

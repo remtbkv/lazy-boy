@@ -27,7 +27,7 @@ export default function AppError({
 
   if (isStaleAction) {
     return (
-      <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-28 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
+      <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-24 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
         <div className="mx-auto max-w-md space-y-2 py-16 text-center">
           <h2 className="text-xl font-semibold">Updating…</h2>
           <p className="text-sm text-muted-foreground">
@@ -39,7 +39,7 @@ export default function AppError({
   }
 
   return (
-    <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-28 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
+    <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-24 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
       <div className="mx-auto max-w-md space-y-4 py-16 text-center">
         <h2 className="text-xl font-semibold">Something went wrong</h2>
         <p className="text-sm text-muted-foreground">

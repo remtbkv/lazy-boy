@@ -8,11 +8,12 @@ import { TimezoneCookie } from "@/components/timezone-cookie";
 import { NowPlayingProvider } from "@/components/now-playing-context";
 import { ScrollbarHover } from "@/components/scrollbar-hover";
 import { MetricsCollector } from "@/components/metrics-collector";
-import { DenBottomNav, DenChrome } from "./chrome";
+import { DenChrome } from "./chrome";
 import "./den.css";
 
-// viewport-fit=cover so the mobile bottom nav can pad itself with
-// env(safe-area-inset-bottom) instead of sitting under the iOS home indicator.
+// viewport-fit=cover so the fixed bottom pieces (search island, action sheets) can pad
+// themselves with env(safe-area-inset-bottom) instead of sitting under the iOS home
+// indicator.
 export const viewport: Viewport = {
   themeColor: "#0b0b0e",
   viewportFit: "cover",
@@ -50,7 +51,6 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       <NowPlayingProvider>
         <DenChrome name={name} image={image} />
         {children}
-        <DenBottomNav name={name} image={image} />
         <CleanProgressWatcher />
         <SyncOnLoad />
         <TimezoneCookie />

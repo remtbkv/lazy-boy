@@ -143,12 +143,20 @@ export function NowPlaying() {
         }}
         className="flex cursor-default items-center gap-2.5 rounded-xl px-1 py-1 text-left sm:gap-3 sm:px-2.5 sm:py-2"
       >
-        <span key={`art-${track.id}`} className="np-swap flex shrink-0">
+        {/* Phone playing state: a thin green ring on the WRAPPER, held off the art by the
+            wrapper's own padding (the old 2px shadow sat directly on the img and read as
+            part of the cover), breathing while the song runs — den.css .np-live. The
+            padding is constant so play/pause never shifts the layout. */}
+        <span
+          key={`art-${track.id}`}
+          className={
+            "np-swap flex shrink-0 rounded-[9px] p-[2.5px] sm:rounded-none sm:p-0" +
+            (isPlaying ? " np-live" : "")
+          }
+        >
           {art(
             "size-8 rounded-md object-cover sm:size-9" +
-              (isPlaying
-                ? " shadow-[0_0_0_2px_#1db954] sm:shadow-none"
-                : " opacity-60 sm:opacity-100"),
+              (isPlaying ? "" : " opacity-60 sm:opacity-100"),
           )}
         </span>
         <span

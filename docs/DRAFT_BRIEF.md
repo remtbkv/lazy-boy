@@ -46,9 +46,10 @@ feel like a warm, dim room where music data is ambient, not a dashboard.
 - **Rem's standing taste** (from memory, binding): minimal green, neutral outlines, no
   chip-pills, never obscure album art, hover-to-reveal on desktop but everything
   reachable on touch.
-- **Mobile chrome**: bottom tab bar (Home / Playlists / Search / account), action panels
-  open as bottom sheets, day strip snap-scrolls with edge fade, history rows become
-  compact cards under 640px, safe-area insets respected.
+- **Mobile chrome**: ~~bottom tab bar~~ (built, then removed 2026-08-12 — one top bar
+  carries everything on phones now), action panels open as bottom sheets, day strip
+  snap-scrolls with edge fade, history rows become compact cards under 640px, safe-area
+  insets respected.
 
 ## Verification bar (per deliverable)
 

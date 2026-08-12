@@ -24,7 +24,7 @@ const COMING = [
 
 export default function FriendsPage() {
   return (
-    <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-28 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
+    <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-16 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
       <h1 className="den-display text-4xl leading-tight tracking-tight sm:text-5xl">
         Later stuff
       </h1>

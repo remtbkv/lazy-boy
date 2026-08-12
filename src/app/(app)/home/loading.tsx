@@ -7,7 +7,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 // here stacked a second faded bar under the real header.
 export default function HomeLoading() {
   return (
-    <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-28 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
+    <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-24 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
       <div className="flex flex-col gap-6">
         <Skeleton className="h-11 w-96 max-w-full rounded-lg" />
 

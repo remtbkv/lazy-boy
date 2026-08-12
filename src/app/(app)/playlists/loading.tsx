@@ -6,7 +6,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 // already renders (a header skeleton here would stack under the real one).
 export default function PlaylistsLoading() {
   return (
-    <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-28 pt-7 sm:px-6 sm:pb-24 sm:pt-9">
+    <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-24 pt-7 sm:px-6 sm:pb-24 sm:pt-9">
       <div className="space-y-6">
         {/* Stats line with the sort control inline at its right. */}
         <div className="flex items-center justify-between gap-3">

@@ -2,26 +2,14 @@
 
 Parked items for the `/draft` redesign. Desktop is the active surface; these are not started.
 
-## 1. Mobile pass (NOT STARTED — do this before the draft ships)
+## 1. Mobile pass (DONE 2026-08-12 — landed differently than sketched)
 
-Rem, early in the redesign: *"on mobile… everything looks horrible… including the search
-playlist functionality button… and the recent section… whether Brave or Safari… super
-important that we fix it all."* Later deferred: *"once we confirm it looks good on desktop,
-we will make it more robust on mobile."*
-
-Everything in the draft so far has been built and verified at **desktop width only** (every
-screenshot/measurement taken at 1280px). Known things to work through at phone widths:
-
-- **Search island vs. bottom nav.** `SearchIsland` is `fixed bottom-6` and `DenBottomNav` is
-  a fixed bottom tab bar — on phones they occupy the same space and will collide.
-- **Day strip.** Card widths are tuned for desktop (`min-w-[143px]`, 5 full + a cut 6th); on a
-  phone that ratio is meaningless.
-- **Song table.** Most columns are hidden below `sm`/`md`/`lg`, with time + source folded into
-  the song cell. Needs a real look, not just "it doesn't overflow".
-- **Action sheets** (dock) — sized for touch already, but unverified on a real viewport.
-- **The viewport lock** (`#den-root.den-locked`, `den.css`) is desktop-only by media query;
-  confirm mobile keeps natural page scroll.
-- Test in **Brave and Safari**, not just Chromium.
+Shipped as its own round, per Rem's phone feedback rather than this list: the bottom tab
+bar was **removed** (one top bar, panda = Home, avatar in the corner) instead of
+reconciled with the island; the whole skin runs at 75% root scale on phones (den.css);
+the day strip became fixed portrait cards with All-time inline and a grabbable scrubber;
+the dock is one row of five; the header and island hide on scroll-down / return on
+scroll-up. Verified at 390×844 in Playwright (overflow 0 on every page).
 
 ## 2. Row windowing (declined, on purpose — revisit only if it actually costs)
 
