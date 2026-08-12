@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { Diff, Eraser, GitMerge, ListPlus, Play, X } from "lucide-react";
+import { TouchScrubber } from "@/components/touch-scrubber";
 import {
   mergeAction,
   resumePlaylistAction,
@@ -49,27 +50,35 @@ const ACTIONS: {
 // a bottom sheet with the action's description readable on touch.
 export function ActionDock({ playlists, backupPref, syncedAt }: DockData) {
   const [open, setOpen] = useState<ActionKey | null>(null);
+  const rowRef = useRef<HTMLDivElement>(null);
   const action = ACTIONS.find((a) => a.key === open) ?? null;
 
   const activate = (key: ActionKey) => setOpen(key);
 
   return (
     <>
-      {/* Mobile: ONE swipeable row, ~3 pills in view at a time (Rem, 2026-08-12 — five
-          crammed columns read as desktop-squeezed). Each pill is the desktop button at
-          phone scale; the fourth peeking past the edge fade is what says "swipe". */}
-      <div className="-mx-4 flex snap-x gap-2 overflow-x-auto px-4 [-webkit-mask-image:linear-gradient(to_right,#000_calc(100%-1.5rem),transparent)] [mask-image:linear-gradient(to_right,#000_calc(100%-1.5rem),transparent)] sm:hidden">
-        {ACTIONS.map((a) => (
-          <button
-            key={a.key}
-            type="button"
-            onClick={() => activate(a.key)}
-            className="flex h-10 w-[30%] min-w-[30%] snap-start items-center justify-center gap-1.5 rounded-full border border-border bg-card text-xs font-medium text-foreground/90 transition-colors active:bg-accent"
-          >
-            <a.icon className="size-3.5 shrink-0 text-muted-foreground" strokeWidth={1.9} />
-            <span className="truncate">{a.label}</span>
-          </button>
-        ))}
+      {/* Mobile: ONE swipeable row of content-width pills (Rem, 2026-08-12 — equal-width
+          thirds made them "way too wide" with tiny text; each pill hugs its label at a
+          readable size instead). thin-scroll so den.css kills the native bar under 640px;
+          the grabbable indicator is the hairline TouchScrubber tucked right beneath. */}
+      <div className="sm:hidden">
+        <div
+          ref={rowRef}
+          className="thin-scroll -mx-4 flex snap-x gap-2 overflow-x-auto px-4 [-webkit-mask-image:linear-gradient(to_right,#000_calc(100%-1.5rem),transparent)] [mask-image:linear-gradient(to_right,#000_calc(100%-1.5rem),transparent)]"
+        >
+          {ACTIONS.map((a) => (
+            <button
+              key={a.key}
+              type="button"
+              onClick={() => activate(a.key)}
+              className="flex h-11 shrink-0 snap-start items-center gap-1.5 rounded-full border border-border bg-card px-4 text-[13px] font-medium text-foreground/90 transition-colors active:bg-accent"
+            >
+              <a.icon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.9} />
+              {a.label}
+            </button>
+          ))}
+        </div>
+        <TouchScrubber scrollerRef={rowRef} className="mt-1" />
       </div>
 
       {/* Desktop row */}

@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { ChevronRight } from "lucide-react";
 import type { DayStats } from "@/lib/db";
 import { dayLabel, formatListenTime, shortDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { TouchScrubber } from "@/components/touch-scrubber";
 
 // Day-strip spans, same ladder as the live app: two weeks → four weeks → everything.
 const SPANS = [14, 28, 100000];
@@ -110,7 +111,7 @@ export function DayCards({
             </button>
           ) : null}
         </div>
-        <TrayScrubber scrollerRef={scrollerRef} />
+        <TouchScrubber scrollerRef={scrollerRef} className="mx-1" />
       </div>
 
       {/* All-time — fixed reference outside the scroll */}
@@ -142,125 +143,6 @@ export function DayCards({
           </div>
         ) : null}
       </button>
-    </div>
-  );
-}
-
-// A REAL scrollbar for the tray on touch screens, where the native one is an auto-hiding
-// overlay you can't grab (iOS ignores the ::-webkit-scrollbar styling desktop uses). A
-// slim track under the cards with a draggable thumb: drag it right and the strip scrolls
-// toward older days — native scrollbar semantics, the mirror of swiping the cards
-// themselves, and deliberately so (Rem, 2026-08-12). Tapping the track jumps there.
-// Renders nothing when the days all fit, and nothing at all from sm up.
-function TrayScrubber({
-  scrollerRef,
-}: {
-  scrollerRef: React.RefObject<HTMLDivElement | null>;
-}) {
-  const trackRef = useRef<HTMLDivElement>(null);
-  // Thumb geometry in % of the track, derived from the scroller's real proportions.
-  const [thumb, setThumb] = useState<{ left: number; width: number } | null>(null);
-  const drag = useRef<{ startX: number; startLeft: number } | null>(null);
-  // Overlay-scrollbar manners (Rem, 2026-08-12 — the always-on bar was intrusive): near
-  // invisible at rest, brightening while the strip moves or a finger is on it, fading
-  // back ~0.7s after the last movement. The hit area never fades — only the ink does.
-  const [live, setLive] = useState(false);
-  const fade = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const poke = () => {
-    setLive(true);
-    if (fade.current) clearTimeout(fade.current);
-    fade.current = setTimeout(() => {
-      if (!drag.current) setLive(false);
-    }, 700);
-  };
-
-  useEffect(() => {
-    const el = scrollerRef.current;
-    if (!el) return;
-    const update = () => {
-      const over = el.scrollWidth - el.clientWidth;
-      if (over <= 1) {
-        setThumb(null);
-        return;
-      }
-      // Floor the thumb at 16% so a long history still leaves something grabbable.
-      const width = Math.max(16, (el.clientWidth / el.scrollWidth) * 100);
-      const left = (el.scrollLeft / over) * (100 - width);
-      setThumb({ left, width });
-    };
-    const onScroll = () => {
-      update();
-      poke();
-    };
-    update();
-    el.addEventListener("scroll", onScroll, { passive: true });
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => {
-      el.removeEventListener("scroll", onScroll);
-      ro.disconnect();
-      if (fade.current) clearTimeout(fade.current);
-    };
-  }, [scrollerRef]);
-
-  if (!thumb) return null;
-
-  const down = (e: React.PointerEvent) => {
-    const el = scrollerRef.current;
-    const track = trackRef.current;
-    if (!el || !track) return;
-    e.preventDefault();
-    track.setPointerCapture(e.pointerId);
-    const rect = track.getBoundingClientRect();
-    const thumbPx = (thumb.width / 100) * rect.width;
-    const usable = rect.width - thumbPx;
-    const over = el.scrollWidth - el.clientWidth;
-    const thumbLeft = (thumb.left / 100) * rect.width;
-    const x = e.clientX - rect.left;
-    let startLeft = el.scrollLeft;
-    if (x < thumbLeft || x > thumbLeft + thumbPx) {
-      // Tapped the track: centre the thumb under the finger, then drag from there.
-      startLeft =
-        usable > 0 ? Math.min(1, Math.max(0, (x - thumbPx / 2) / usable)) * over : 0;
-      el.scrollLeft = startLeft;
-    }
-    drag.current = { startX: e.clientX, startLeft };
-    poke();
-  };
-  const move = (e: React.PointerEvent) => {
-    const d = drag.current;
-    const el = scrollerRef.current;
-    const track = trackRef.current;
-    if (!d || !el || !track) return;
-    const rect = track.getBoundingClientRect();
-    const usable = rect.width - (thumb.width / 100) * rect.width;
-    if (usable <= 0) return;
-    const over = el.scrollWidth - el.clientWidth;
-    el.scrollLeft = d.startLeft + ((e.clientX - d.startX) / usable) * over;
-  };
-  const up = () => {
-    drag.current = null;
-    poke();
-  };
-
-  return (
-    <div
-      ref={trackRef}
-      onPointerDown={down}
-      onPointerMove={move}
-      onPointerUp={up}
-      onPointerCancel={up}
-      // h-3 is the touch target; the visible ink is the hairline thumb below.
-      className="relative mx-1 h-3 touch-none select-none sm:hidden"
-      aria-hidden
-    >
-      <div
-        className={cn(
-          "absolute top-1/2 h-1 -translate-y-1/2 rounded-full transition-colors duration-300",
-          live ? "bg-white/35" : "bg-white/[0.09]",
-        )}
-        style={{ left: `${thumb.left}%`, width: `${thumb.width}%` }}
-      />
     </div>
   );
 }
