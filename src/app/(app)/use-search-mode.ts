@@ -26,6 +26,14 @@ export function usePhone(): boolean {
  *  one coalesced to a frame here, so the content's bottom edge rides the keyboard's top
  *  edge and never shows more or less than fits. Shared by DenHome and the /kbtest
  *  fixture, so the Simulator exercises the real wiring. */
+/** The keyboard's height from the last time it was up (module-level: survives re-mounts
+ *  and navigations within the tab). Lets the SHRINK be driven like the expansion is —
+ *  without it the box chases the 2-3 sparse visualViewport events through the keyboard's
+ *  rise, restarting its transition at each step, which reads as a lower frame rate
+ *  (Rem: "45fps vs 80fps"). First-ever open still follows events; every open after
+ *  glides straight to the remembered target and lets the events correct the tail. */
+let lastKbHeight: number | null = null;
+
 export function useSearchMode(active: boolean, keyboardUp: boolean): void {
   useEffect(() => {
     if (!active) return;
@@ -36,7 +44,11 @@ export function useSearchMode(active: boolean, keyboardUp: boolean): void {
     let raf = 0;
     const set = () => {
       raf = 0;
-      root.style.setProperty("--lb-vvh", `${Math.round(vv?.height ?? window.innerHeight)}px`);
+      const h = Math.round(vv?.height ?? window.innerHeight);
+      // A reading meaningfully below the layout height means the keyboard owns the rest —
+      // remember it so the next open's shrink can be driven instead of event-chased.
+      if (h < document.documentElement.clientHeight - 150) lastKbHeight = h;
+      root.style.setProperty("--lb-vvh", `${h}px`);
     };
     const on = () => {
       if (!raf) raf = requestAnimationFrame(set);
@@ -65,6 +77,16 @@ export function useSearchMode(active: boolean, keyboardUp: boolean): void {
     if (!active || keyboardUp) return;
     const root = document.getElementById("den-root");
     root?.style.setProperty("--lb-vvh", `${Math.round(window.innerHeight)}px`);
+  }, [active, keyboardUp]);
+
+  // …and the SHRINK, driven the same way once the keyboard's height is known from a
+  // previous open: one continuous glide to the remembered target the moment focus lands,
+  // with the real events correcting the tail if this keyboard differs (QuickType row,
+  // orientation). Without a remembered height the events remain the only source.
+  useEffect(() => {
+    if (!active || !keyboardUp || lastKbHeight === null) return;
+    const root = document.getElementById("den-root");
+    root?.style.setProperty("--lb-vvh", `${lastKbHeight}px`);
   }, [active, keyboardUp]);
 
   // The reveal treatment for rows the expansion uncovers — without it they "just spawn

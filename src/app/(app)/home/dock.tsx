@@ -1,8 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { Diff, Eraser, GitMerge, ListPlus, Play, X } from "lucide-react";
-import { TouchScrubber } from "@/components/touch-scrubber";
 import {
   mergeAction,
   resumePlaylistAction,
@@ -50,7 +49,6 @@ const ACTIONS: {
 // a bottom sheet with the action's description readable on touch.
 export function ActionDock({ playlists, backupPref, syncedAt }: DockData) {
   const [open, setOpen] = useState<ActionKey | null>(null);
-  const rowRef = useRef<HTMLDivElement>(null);
   const action = ACTIONS.find((a) => a.key === open) ?? null;
 
   const activate = (key: ActionKey) => setOpen(key);
@@ -59,13 +57,13 @@ export function ActionDock({ playlists, backupPref, syncedAt }: DockData) {
     <>
       {/* Mobile: ONE swipeable row of content-width pills (Rem, 2026-08-12 — equal-width
           thirds made them "way too wide" with tiny text; each pill hugs its label at a
-          readable size instead). thin-scroll so den.css kills the native bar under 640px;
-          the grabbable indicator is the hairline TouchScrubber tucked right beneath. */}
+          readable size instead). thin-scroll so den.css kills the native bar under 640px.
+          No standing scrollbar here (Rem, 2026-08-13): the cut-off pill dissolving into
+          the edge fade IS the "it scrolls" signal — a bar under a five-item row was
+          furniture. (The day tray keeps its grabbable hairline; that strip is long.)
+          No edge bleed: the row lives inside the page gutters like every other band. */}
       <div className="sm:hidden">
-        {/* No edge bleed: the row lives inside the page gutters like every other band,
-            so a scrolled pill clips at the gutter instead of hugging the screen edge. */}
         <div
-          ref={rowRef}
           className="thin-scroll flex snap-x gap-2 overflow-x-auto [-webkit-mask-image:linear-gradient(to_right,#000_calc(100%-1.5rem),transparent)] [mask-image:linear-gradient(to_right,#000_calc(100%-1.5rem),transparent)]"
         >
           {ACTIONS.map((a) => (
@@ -80,7 +78,6 @@ export function ActionDock({ playlists, backupPref, syncedAt }: DockData) {
             </button>
           ))}
         </div>
-        <TouchScrubber scrollerRef={rowRef} className="mt-1" />
       </div>
 
       {/* Desktop row */}
