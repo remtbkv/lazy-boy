@@ -78,11 +78,15 @@ export function SearchIsland({
     if (h) setTravel(h + bottom + 28); // + shadow slack
   }, []);
 
-  // The iOS keyboard. `position: fixed` pins to the LAYOUT viewport, which does not shrink
-  // when the keyboard rises — Safari just pans the visual viewport, so the pill ended up
-  // behind the keyboard and the page looked like it "moved around" while typing (Rem,
-  // 2026-08-13). The visualViewport API reports the true visible box; the difference to the
-  // layout viewport is the keyboard, and the pill lifts by exactly that (iMessage manners).
+  // The iOS keyboard. `position: fixed` pins to the LAYOUT viewport, which (pre
+  // interactive-widget support) does not shrink when the keyboard rises — Safari just pans
+  // the visual viewport, so the pill ended up behind the keyboard and the page looked like
+  // it "moved around" while typing (Rem, 2026-08-13). The pill lifts by the part of the
+  // layout viewport the keyboard hides. Layout height MUST be documentElement.clientHeight:
+  // on iOS window.innerHeight tracks the VISUAL viewport, so innerHeight − vv.height reads
+  // ~0 with the keyboard up and the first version of this lift never moved (Rem's second
+  // screenshot). Where the interactive-widget hint applies, the layout viewport itself
+  // shrinks, this difference stays ~0, and the lift correctly does nothing.
   const [kb, setKb] = useState(0);
   useEffect(() => {
     const vv = window.visualViewport;
@@ -90,7 +94,8 @@ export function SearchIsland({
     let raf = 0;
     const read = () => {
       raf = 0;
-      setKb(Math.max(0, window.innerHeight - vv.height - vv.offsetTop));
+      const layoutH = document.documentElement.clientHeight;
+      setKb(Math.max(0, layoutH - vv.height - vv.offsetTop));
     };
     const on = () => {
       if (!raf) raf = requestAnimationFrame(read);

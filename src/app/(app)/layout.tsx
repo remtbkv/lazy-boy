@@ -13,10 +13,15 @@ import "./den.css";
 
 // viewport-fit=cover so the fixed bottom pieces (search island, action sheets) can pad
 // themselves with env(safe-area-inset-bottom) instead of sitting under the iOS home
-// indicator.
+// indicator. interactive-widget: the iOS keyboard historically only PANS the page (the
+// layout viewport keeps its height and fixed-bottom elements end up behind the keys);
+// resizes-content makes supporting Safaris (18.4+) shrink the layout viewport instead, so
+// 100dvh, the locked Home frame and the search pill all land above the keyboard natively.
+// Older Safaris ignore it and fall back to the search island's visualViewport lift.
 export const viewport: Viewport = {
   themeColor: "#0b0b0e",
   viewportFit: "cover",
+  interactiveWidget: "resizes-content",
 };
 
 // The chrome lives HERE, not in the pages. A layout persists across navigation between its
