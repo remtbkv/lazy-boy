@@ -1169,7 +1169,12 @@ export function DenHome({
                           <td className="hidden py-2 pr-6 text-right tabular-nums text-muted-foreground sm:table-cell">
                             {formatDuration(t.durationMs)}
                           </td>
-                          <td className="py-2 pr-6 text-right tabular-nums text-muted-foreground">
+                          {/* Explicit width on the phone: table-fixed takes its column
+                              widths from the FIRST rendered row, and with the header row
+                              display:none under sm that first row is this one — no width
+                              hint meant a 50/50 split with the Song column, truncating
+                              titles at half the screen. Desktop still sizes off the th. */}
+                          <td className="w-10 py-2 pr-1 text-right tabular-nums text-muted-foreground sm:w-14 sm:pr-6">
                             {t.plays}
                           </td>
                           {/* suppressHydrationWarning: same two mechanisms as the phone fold
