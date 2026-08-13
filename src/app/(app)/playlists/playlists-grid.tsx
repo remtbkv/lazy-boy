@@ -73,22 +73,35 @@ export function PlaylistsGrid({
       {/* No "Playlists" title — the active nav tab already names the page. The stats line is
           the header (numbers foreground, labels muted); the sort sits inline at its right.
           Search moved to the bottom island. */}
-      <div className="flex items-center justify-between gap-3">
+      {/* items-end on the phone: the stats wrap to two lines there, and a top-hung sort
+          control next to a two-line block read as floating (Rem, 2026-08-13). */}
+      <div className="flex items-end justify-between gap-3 sm:items-center">
         {/* Locale pinned, not the runtime default: this line is server-rendered and then
             hydrated, and a bare toLocaleString() groups by whatever locale the runtime is in
             (en-US "13,464" on Vercel's Node vs de-DE "13.464" in the browser) — a hydration
             mismatch for anyone outside en-US. */}
-        <h1 className="text-[15px] text-muted-foreground">
-          <span className="font-medium text-foreground">
-            {playlists.length.toLocaleString("en-US")}
-          </span>{" "}
-          playlists
+        {/* Phone: the line breaks BEFORE "unique songs" (block span) — deliberate split, no
+            separator dot left hanging at the end of the first line — and at 17px: the page
+            header can carry more size than desktop's inline 15px. */}
+        <h1 className="text-[17px] text-muted-foreground sm:text-[15px]">
+          <span className="whitespace-nowrap">
+            <span className="font-medium text-foreground">
+              {playlists.length.toLocaleString("en-US")}
+            </span>{" "}
+            playlists
+          </span>
           {" · "}
-          <span className="font-medium text-foreground">{owned.toLocaleString("en-US")}</span>{" "}
-          created by you
-          {" · "}
-          <span className="font-medium text-foreground">{songCount.toLocaleString("en-US")}</span>{" "}
-          unique songs
+          <span className="whitespace-nowrap">
+            <span className="font-medium text-foreground">{owned.toLocaleString("en-US")}</span>{" "}
+            created by you
+          </span>
+          <span className="hidden sm:inline">{" · "}</span>
+          <span className="block whitespace-nowrap sm:inline">
+            <span className="font-medium text-foreground">
+              {songCount.toLocaleString("en-US")}
+            </span>{" "}
+            unique songs
+          </span>
         </h1>
         <div className="shrink-0">
           <SortMenu

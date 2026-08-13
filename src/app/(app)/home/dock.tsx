@@ -62,9 +62,11 @@ export function ActionDock({ playlists, backupPref, syncedAt }: DockData) {
           readable size instead). thin-scroll so den.css kills the native bar under 640px;
           the grabbable indicator is the hairline TouchScrubber tucked right beneath. */}
       <div className="sm:hidden">
+        {/* No edge bleed: the row lives inside the page gutters like every other band,
+            so a scrolled pill clips at the gutter instead of hugging the screen edge. */}
         <div
           ref={rowRef}
-          className="thin-scroll -mx-4 flex snap-x gap-2 overflow-x-auto px-4 [-webkit-mask-image:linear-gradient(to_right,#000_calc(100%-1.5rem),transparent)] [mask-image:linear-gradient(to_right,#000_calc(100%-1.5rem),transparent)]"
+          className="thin-scroll flex snap-x gap-2 overflow-x-auto [-webkit-mask-image:linear-gradient(to_right,#000_calc(100%-1.5rem),transparent)] [mask-image:linear-gradient(to_right,#000_calc(100%-1.5rem),transparent)]"
         >
           {ACTIONS.map((a) => (
             <button

@@ -1,14 +1,17 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronRight } from "lucide-react";
 import type { DayStats } from "@/lib/db";
 import { dayLabel, formatListenTime, shortDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { TouchScrubber } from "@/components/touch-scrubber";
 
-// Day-strip spans, same ladder as the live app: two weeks → four weeks → everything.
+// Day-strip spans: two weeks → four weeks → everything on desktop; the phone opens one
+// rung lower (one week → …) so the chevron appears after ~a week of cards instead of a
+// long swipe away (Rem, 2026-08-13).
 const SPANS = [14, 28, 100000];
+const PHONE_SPANS = [7, 14, 28, 100000];
 
 // The day strip: cards newest-first (Today leads), each carrying plays and time
 // listened. The days scroll horizontally inside a framed tray and extend further
@@ -34,14 +37,23 @@ export function DayCards({
 }) {
   const [level, setLevel] = useState(0);
   const [extending, setExtending] = useState(false);
-  const canExtend = level < SPANS.length - 1;
+  // Effect, not render-time matchMedia: the server render has no viewport, so the first
+  // client render must match it (14 cards) and narrow to 7 after hydration — invisible,
+  // since cards past the fourth sit beyond the tray's scroll edge anyway.
+  const [phone, setPhone] = useState(false);
+  useEffect(() => {
+    setPhone(window.matchMedia("(max-width: 639.98px)").matches);
+  }, []);
+  const spans = phone ? PHONE_SPANS : SPANS;
+  const canExtend = level < spans.length - 1;
+  const shownDaily = daily.slice(0, spans[level]);
   const scrollerRef = useRef<HTMLDivElement>(null);
 
   const extend = async () => {
     if (extending || !canExtend) return;
     setExtending(true);
     try {
-      await onExtend(SPANS[level + 1]);
+      await onExtend(spans[level + 1]);
       setLevel(level + 1);
     } finally {
       setExtending(false);
@@ -69,7 +81,7 @@ export function DayCards({
           ref={scrollerRef}
           className="thin-scroll flex snap-x gap-2 overflow-x-auto overscroll-x-contain pb-1 sm:pb-2 [touch-action:pan-x] [-webkit-mask-image:linear-gradient(to_right,#000_calc(100%-2rem),transparent)] [mask-image:linear-gradient(to_right,#000_calc(100%-2rem),transparent)]"
         >
-          {daily.map((d) => (
+          {shownDaily.map((d) => (
             <button
               key={d.day}
               type="button"
@@ -102,11 +114,11 @@ export function DayCards({
               type="button"
               onClick={extend}
               disabled={extending}
-              aria-label={level === 0 ? "Show two more weeks" : "Show all days"}
-              title={level === 0 ? "Show two more weeks" : "Show all days"}
+              aria-label={spans[level + 1] >= 100000 ? "Show all days" : "Show more days"}
+              title={spans[level + 1] >= 100000 ? "Show all days" : "Show more days"}
               className="flex shrink-0 items-center gap-1 self-stretch px-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
             >
-              {level >= 1 ? <span>See all</span> : null}
+              {spans[level + 1] >= 100000 ? <span>See all</span> : null}
               <ChevronRight className={cn("size-5", extending && "animate-pulse")} />
             </button>
           ) : null}

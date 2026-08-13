@@ -19,11 +19,10 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 // App chrome: ONE top bar, both sizes (the mobile bottom tab bar is gone — two bars ate
-// too much of a phone screen; Rem, 2026-08-12). Desktop: mark, quiet nav, now-playing,
-// avatar. Phone: the same bar at 75% scale, with the Home text link dropped — the panda
-// mark IS home there — and the bar slides away as you scroll down (direction-tracked,
-// back the moment you scroll up), because the header is the least useful thing on screen
-// mid-list.
+// too much of a phone screen; Rem, 2026-08-12). Mark, quiet nav (Home / Playlists /
+// Friends on every width), now-playing, avatar. On the phone the bar slides away as you
+// scroll down (direction-tracked, back the moment you scroll up), because the header is
+// the least useful thing on screen mid-list.
 
 const TABS = [
   { key: "home", href: "/home", label: "Home" },
@@ -127,8 +126,7 @@ export function DenChrome({ name, image }: { name: string; image: string | null 
     >
       <div className="mx-auto flex h-16 w-full max-w-5xl items-center gap-4 px-4 sm:gap-6 sm:px-6">
         {/* Just the mark — the tab title already says the name. Gentle idle motion:
-            a slow breathe while nothing plays, the slight sway while something does.
-            On the phone this IS the Home control (the nav below drops its Home link). */}
+            a slow breathe while nothing plays, the slight sway while something does. */}
         <Link href="/home" className="flex items-center" aria-label="Lazy Boy">
           <img
             src="/icon.svg"
@@ -154,8 +152,10 @@ export function DenChrome({ name, image }: { name: string; image: string | null 
                 // No focus ring on the tabs: arrow-key nav moves DOM focus with the
                 // selection, and the ring hopping tab to tab reads as a stray box.
                 // Active state is already carried by the text weight/colour.
-                "rounded-md px-2 py-1.5 text-[13px] font-medium transition-colors outline-none focus-visible:outline-none sm:px-3 sm:text-[15px]",
-                t.key === "home" && "hidden sm:block", // the panda is Home on the phone
+                // Full 15px on the phone too (Rem, 2026-08-13): the single bar has the
+                // room, and 13px read as desktop-shrunk. Home is a real tab everywhere —
+                // panda-as-home was too implicit.
+                "rounded-md px-2.5 py-1.5 text-[15px] font-medium transition-colors outline-none focus-visible:outline-none sm:px-3",
                 t.key === active
                   ? "text-foreground"
                   : "text-muted-foreground/70 hover:text-foreground",

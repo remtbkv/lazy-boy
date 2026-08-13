@@ -78,11 +78,40 @@ export function SearchIsland({
     if (h) setTravel(h + bottom + 28); // + shadow slack
   }, []);
 
+  // The iOS keyboard. `position: fixed` pins to the LAYOUT viewport, which does not shrink
+  // when the keyboard rises — Safari just pans the visual viewport, so the pill ended up
+  // behind the keyboard and the page looked like it "moved around" while typing (Rem,
+  // 2026-08-13). The visualViewport API reports the true visible box; the difference to the
+  // layout viewport is the keyboard, and the pill lifts by exactly that (iMessage manners).
+  const [kb, setKb] = useState(0);
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    let raf = 0;
+    const read = () => {
+      raf = 0;
+      setKb(Math.max(0, window.innerHeight - vv.height - vv.offsetTop));
+    };
+    const on = () => {
+      if (!raf) raf = requestAnimationFrame(read);
+    };
+    vv.addEventListener("resize", on);
+    vv.addEventListener("scroll", on);
+    read();
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      vv.removeEventListener("resize", on);
+      vv.removeEventListener("scroll", on);
+    };
+  }, []);
+
   return (
     <div
       ref={wrapRef}
       style={{
-        transform: `translate3d(0, ${progress * travel}px, 0)`,
+        // Keyboard open ⇒ pinned just above it, whatever the scroll deltas said — Safari's
+        // focus pan fires scroll events that would otherwise walk the pill off-screen.
+        transform: `translate3d(0, ${kb > 0 ? -kb : progress * travel}px, 0)`,
         willChange: "transform",
       }}
       className="pointer-events-none fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+0.75rem)] z-30 flex justify-center px-4 sm:bottom-5"
