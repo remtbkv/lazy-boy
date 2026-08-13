@@ -78,45 +78,19 @@ export function SearchIsland({
     if (h) setTravel(h + bottom + 28); // + shadow slack
   }, []);
 
-  // The iOS keyboard. `position: fixed` pins to the LAYOUT viewport, which (pre
-  // interactive-widget support) does not shrink when the keyboard rises — Safari just pans
-  // the visual viewport, so the pill ended up behind the keyboard and the page looked like
-  // it "moved around" while typing (Rem, 2026-08-13). The pill lifts by the part of the
-  // layout viewport the keyboard hides. Layout height MUST be documentElement.clientHeight:
-  // on iOS window.innerHeight tracks the VISUAL viewport, so innerHeight − vv.height reads
-  // ~0 with the keyboard up and the first version of this lift never moved (Rem's second
-  // screenshot). Where the interactive-widget hint applies, the layout viewport itself
-  // shrinks, this difference stays ~0, and the lift correctly does nothing.
-  const [kb, setKb] = useState(0);
-  useEffect(() => {
-    const vv = window.visualViewport;
-    if (!vv) return;
-    let raf = 0;
-    const read = () => {
-      raf = 0;
-      const layoutH = document.documentElement.clientHeight;
-      setKb(Math.max(0, layoutH - vv.height - vv.offsetTop));
-    };
-    const on = () => {
-      if (!raf) raf = requestAnimationFrame(read);
-    };
-    vv.addEventListener("resize", on);
-    vv.addEventListener("scroll", on);
-    read();
-    return () => {
-      if (raf) cancelAnimationFrame(raf);
-      vv.removeEventListener("resize", on);
-      vv.removeEventListener("scroll", on);
-    };
-  }, []);
+  // The iOS keyboard is handled by the viewport meta, NOT here: the (app) layout declares
+  // interactive-widget=resizes-content, so the layout viewport itself shrinks when the
+  // keyboard rises and this fixed pill lands above the keys natively. A JS visualViewport
+  // lift used to run alongside — during the keyboard's resize animation the two applied
+  // TOGETHER (the lift measured the shrinking visual viewport against the not-yet-shrunk
+  // layout), which threw the pill to the top of the screen and blanked it while typing —
+  // Rem's screen recording, 2026-08-13. Removed: one mechanism, the declarative one.
 
   return (
     <div
       ref={wrapRef}
       style={{
-        // Keyboard open ⇒ pinned just above it, whatever the scroll deltas said — Safari's
-        // focus pan fires scroll events that would otherwise walk the pill off-screen.
-        transform: `translate3d(0, ${kb > 0 ? -kb : progress * travel}px, 0)`,
+        transform: `translate3d(0, ${progress * travel}px, 0)`,
         willChange: "transform",
       }}
       className="pointer-events-none fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+0.75rem)] z-30 flex justify-center px-4 sm:bottom-5"
