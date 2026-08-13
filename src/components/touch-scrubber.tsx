@@ -44,7 +44,9 @@ export function TouchScrubber({
       }
       // Floor the thumb at 16% so a long strip still leaves something grabbable.
       const width = Math.max(16, (el.clientWidth / el.scrollWidth) * 100);
-      const left = (el.scrollLeft / over) * (100 - width);
+      // Clamped: iOS rubber-band overscroll reports scrollLeft outside [0, over], and an
+      // unclamped thumb rode it right out of the tray (Rem's screenshots, 2026-08-13).
+      const left = Math.min(100 - width, Math.max(0, (el.scrollLeft / over) * (100 - width)));
       setThumb({ left, width });
     };
     const onScroll = () => {
@@ -76,13 +78,15 @@ export function TouchScrubber({
     const over = el.scrollWidth - el.clientWidth;
     const thumbLeft = (thumb.left / 100) * rect.width;
     const x = e.clientX - rect.left;
-    let startLeft = el.scrollLeft;
+    // The current position can itself sit outside [0, over] mid rubber-band — clamp it
+    // so the drag can't START from an overscrolled anchor.
+    let startLeft = Math.min(over, Math.max(0, el.scrollLeft));
     if (x < thumbLeft || x > thumbLeft + thumbPx) {
       // Tapped the track: centre the thumb under the finger, then drag from there.
       startLeft =
         usable > 0 ? Math.min(1, Math.max(0, (x - thumbPx / 2) / usable)) * over : 0;
-      el.scrollLeft = startLeft;
     }
+    el.scrollLeft = startLeft;
     drag.current = { startX: e.clientX, startLeft };
     poke();
   };
@@ -95,7 +99,12 @@ export function TouchScrubber({
     const usable = rect.width - (thumb.width / 100) * rect.width;
     if (usable <= 0) return;
     const over = el.scrollWidth - el.clientWidth;
-    el.scrollLeft = d.startLeft + ((e.clientX - d.startX) / usable) * over;
+    // Clamped: an unbounded write lets iOS rubber-band the strip past its ends, dragging
+    // blank tray into view (and the thumb out of the track).
+    el.scrollLeft = Math.min(
+      over,
+      Math.max(0, d.startLeft + ((e.clientX - d.startX) / usable) * over),
+    );
   };
   const up = () => {
     drag.current = null;
