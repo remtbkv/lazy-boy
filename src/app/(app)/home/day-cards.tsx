@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState, useSyncExternalStore } from "react";
 import { ChevronRight } from "lucide-react";
 import type { DayStats } from "@/lib/db";
 import { dayLabel, formatListenTime, shortDate } from "@/lib/format";
@@ -37,13 +37,19 @@ export function DayCards({
 }) {
   const [level, setLevel] = useState(0);
   const [extending, setExtending] = useState(false);
-  // Effect, not render-time matchMedia: the server render has no viewport, so the first
-  // client render must match it (14 cards) and narrow to 7 after hydration — invisible,
-  // since cards past the fourth sit beyond the tray's scroll edge anyway.
-  const [phone, setPhone] = useState(false);
-  useEffect(() => {
-    setPhone(window.matchMedia("(max-width: 639.98px)").matches);
-  }, []);
+  // useSyncExternalStore (same pattern as the now-playing chip's hover probe): the server
+  // render has no viewport, so its snapshot says desktop (14 cards) and the phone narrows
+  // to 7 right after hydration — invisible, since cards past the fourth sit beyond the
+  // tray's scroll edge anyway.
+  const phone = useSyncExternalStore(
+    (cb) => {
+      const mq = window.matchMedia("(max-width: 639.98px)");
+      mq.addEventListener("change", cb);
+      return () => mq.removeEventListener("change", cb);
+    },
+    () => window.matchMedia("(max-width: 639.98px)").matches,
+    () => false,
+  );
   const spans = phone ? PHONE_SPANS : SPANS;
   const canExtend = level < spans.length - 1;
   const shownDaily = daily.slice(0, spans[level]);
