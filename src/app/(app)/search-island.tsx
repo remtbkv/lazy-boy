@@ -153,7 +153,12 @@ export function SearchIsland({
           onBlur={focusOut}
           placeholder={placeholder}
           aria-label={placeholder}
-          className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/70 sm:w-[15.25rem] sm:flex-none"
+          // 16px on the phone, non-negotiable: iOS ZOOMS the whole page when a focused
+          // input's font-size is under 16px, and that zoom is what kept throwing the pill
+          // out of view no matter where it was docked (Rem, 2026-08-13 — "based on how the
+          // zoom works"). At the phone's 85% root scale text-sm is ~12px, so this must be
+          // a raw px size, not a rem class.
+          className="min-w-0 flex-1 bg-transparent text-[16px] outline-none placeholder:text-muted-foreground/70 sm:w-[15.25rem] sm:flex-none sm:text-sm"
         />
         {query ? (
           <button
