@@ -532,7 +532,7 @@ export function DenHome({
   const phone = usePhone();
   const [searchFocused, setSearchFocused] = useState(false);
   const searchMode = phone && (searchFocused || searching);
-  useSearchMode(searchMode);
+  useSearchMode(searchMode, searchFocused);
   const prevSel = useRef<string | null>(null);
   useEffect(() => {
     if (searchMode) {

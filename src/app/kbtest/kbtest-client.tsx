@@ -47,7 +47,7 @@ export function KbTest() {
   // the root (header + bands fold, main pinned to --lb-vvh) while focused or querying.
   const phone = usePhone();
   const [focused, setFocused] = useState(false);
-  useSearchMode(phone && (focused || q.trim().length > 0));
+  useSearchMode(phone && (focused || q.trim().length > 0), focused);
 
   useEffect(() => {
     const log: KbSample[] = [];

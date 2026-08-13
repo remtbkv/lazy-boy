@@ -26,7 +26,7 @@ export function usePhone(): boolean {
  *  one coalesced to a frame here, so the content's bottom edge rides the keyboard's top
  *  edge and never shows more or less than fits. Shared by DenHome and the /kbtest
  *  fixture, so the Simulator exercises the real wiring. */
-export function useSearchMode(active: boolean): void {
+export function useSearchMode(active: boolean, keyboardUp: boolean): void {
   useEffect(() => {
     if (!active) return;
     const root = document.getElementById("den-root");
@@ -52,4 +52,18 @@ export function useSearchMode(active: boolean): void {
       root.style.removeProperty("--lb-vvh");
     };
   }, [active]);
+
+  // The DISMISS expansion, driven, not observed: iOS reports the shrinking/growing
+  // visual viewport in a couple of sparse events, so a box that only follows the events
+  // both lags the dismissal and jumps in steps (Rem: "choppy... a little late"). The
+  // moment the input blurs, the target height is already known — the full viewport — so
+  // it is set immediately and den.css's height transition glides the box there in
+  // parallel with the keyboard's own slide. The rise keeps following real events (the
+  // final keyboard height isn't knowable up front); the same transition smooths those
+  // steps too.
+  useEffect(() => {
+    if (!active || keyboardUp) return;
+    const root = document.getElementById("den-root");
+    root?.style.setProperty("--lb-vvh", `${Math.round(window.innerHeight)}px`);
+  }, [active, keyboardUp]);
 }

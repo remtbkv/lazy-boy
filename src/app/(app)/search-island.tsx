@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { SearchIcon, X } from "lucide-react";
+import { SearchIcon, Undo2, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // A centered search "island" pinned to the bottom of the screen — brought back from the
@@ -179,8 +179,12 @@ export function SearchIsland({
           pill is the same height on both pages — Home's trailing switch would otherwise make
           it taller than the Playlists one. Phones: full width (minus the page gutter), since
           a fixed-width input would overflow a 390px screen once the trailing switch is in —
-          and h-12 there: at the phone's 85% scale h-10 landed a too-thin ~34px bar. */}
-      <div className="pointer-events-auto flex h-12 w-full items-center gap-2 rounded-full border border-border bg-popover/95 pl-4 pr-1.5 shadow-2xl shadow-black/50 ring-1 ring-white/5 backdrop-blur sm:h-10 sm:w-auto">
+          and h-12 there: at the phone's 85% scale h-10 landed a too-thin ~34px bar.
+          min-w-0 is load-bearing: without it the pill's content minimum overflowed the
+          gutter and ran the pill into the screen edges (Rem's screenshot, 2026-08-13) —
+          with it the pill's edges sit exactly on the page gutters, aligned with the boxes
+          below. */}
+      <div className="pointer-events-auto flex h-12 w-full min-w-0 items-center gap-2 rounded-full border border-border bg-popover/95 pl-4 pr-1.5 shadow-2xl shadow-black/50 ring-1 ring-white/5 backdrop-blur sm:h-10 sm:w-auto">
         {/* Full-strength ink: the one thing in the pill that should read at a glance as
             "this is the search". Everything else stays muted. */}
         <SearchIcon className="size-4 shrink-0 text-foreground" />
@@ -210,23 +214,35 @@ export function SearchIsland({
           <button
             type="button"
             aria-label="Clear search"
-            onClick={() => onQuery("")}
+            // Clear the TEXT, stay in the search: without the refocus, emptying the query
+            // with the keyboard already dismissed ended the whole search mode — a mistype
+            // eraser was acting as an exit (Rem, 2026-08-13). The exit is the return
+            // arrow; this just resets the field and brings the keyboard back to retype.
+            onClick={() => {
+              onQuery("");
+              inputRef.current?.focus();
+            }}
             className="flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           >
             <X className="size-3.5" />
           </button>
         ) : null}
         {children}
+        {topDocked ? (
+          // The exit — INSIDE the pill at its right end (the pill spans the content
+          // gutters, so an outside control would misalign it), bare icon, no box of its
+          // own. A return arrow: "put this back, we're done here." Quiet gray like the
+          // other pill furniture.
+          <button
+            type="button"
+            aria-label="Leave search"
+            onClick={cancel}
+            className="flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors active:text-foreground"
+          >
+            <Undo2 className="size-4" />
+          </button>
+        ) : null}
       </div>
-      {topDocked ? (
-        <button
-          type="button"
-          onClick={cancel}
-          className="pointer-events-auto ml-2 shrink-0 self-center text-[15px] font-medium text-muted-foreground transition-colors active:text-foreground"
-        >
-          Cancel
-        </button>
-      ) : null}
     </div>
   );
 }

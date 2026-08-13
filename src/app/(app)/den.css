@@ -124,6 +124,11 @@ html:has(#den-root) body {
     height: var(--lb-vvh, 100dvh);
     padding-top: 4.25rem; /* clears the top-docked search pill */
     padding-bottom: 0.5rem;
+    /* Glide between keyboard states instead of stepping: iOS reports the viewport in a
+       few discrete events, and use-search-mode.ts sets the full-height target the moment
+       the keyboard starts leaving — this is what turns both into one smooth move. Short
+       enough to read as snappy, long enough to not pop. */
+    transition: height 180ms cubic-bezier(0.2, 0.8, 0.25, 1);
   }
 }
 
