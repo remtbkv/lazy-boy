@@ -168,8 +168,12 @@ export function KbTest() {
               </p>
             ) : (
               <ul className="divide-y divide-border/50">
-                {shown.map((s) => (
-                  <li key={s.title} className="flex items-center gap-3 py-2">
+                {shown.map((s, i) => (
+                  <li
+                    key={s.title}
+                    className="den-row flex items-center gap-3 py-2"
+                    style={{ "--i": i } as React.CSSProperties}
+                  >
                     <span className="size-10 shrink-0 rounded-md bg-secondary" />
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-[15px]">{s.title}</span>

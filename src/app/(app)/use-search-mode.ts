@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 
 /** Phone-width probe, SSR-safe: the server snapshot says desktop, and the phone value
  *  lands right after hydration (useSyncExternalStore re-renders with the client
@@ -65,5 +65,39 @@ export function useSearchMode(active: boolean, keyboardUp: boolean): void {
     if (!active || keyboardUp) return;
     const root = document.getElementById("den-root");
     root?.style.setProperty("--lb-vvh", `${Math.round(window.innerHeight)}px`);
+  }, [active, keyboardUp]);
+
+  // The reveal treatment for rows the expansion uncovers — without it they "just spawn
+  // in" (Rem, 2026-08-13). Three variants, all in den.css, selected by a root class:
+  // stagger (default — rows slot in one by one), fade (all together), curtain (no row
+  // animation; the slowed height glide + edge fade do the unravel). `?reveal=fade` /
+  // `?reveal=curtain` on the URL switches variant live, so comparing needs no rebuild.
+  // A `den-reveal` pulse arms the animation for ~750ms on the two uncover moments —
+  // entering the mode, and the keyboard leaving — and never while merely typing.
+  useEffect(() => {
+    const root = document.getElementById("den-root");
+    if (!root) return;
+    const v = new URLSearchParams(window.location.search).get("reveal");
+    const variant = v === "fade" || v === "curtain" ? v : "stagger";
+    root.classList.add(`den-reveal-${variant}`);
+    return () => {
+      root.classList.remove("den-reveal-stagger", "den-reveal-fade", "den-reveal-curtain");
+    };
+  }, []);
+  const prevActive = useRef(false);
+  const prevKb = useRef(false);
+  useEffect(() => {
+    const entered = active && !prevActive.current;
+    const expanded = active && prevKb.current && !keyboardUp;
+    prevActive.current = active;
+    prevKb.current = keyboardUp;
+    const root = document.getElementById("den-root");
+    if (!root || (!entered && !expanded)) return;
+    root.classList.add("den-reveal");
+    const t = setTimeout(() => root.classList.remove("den-reveal"), 750);
+    return () => {
+      clearTimeout(t);
+      root.classList.remove("den-reveal");
+    };
   }, [active, keyboardUp]);
 }

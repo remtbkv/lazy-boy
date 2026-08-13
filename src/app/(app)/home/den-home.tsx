@@ -339,6 +339,9 @@ export function DenHome({
   // signals "there's more"; its absence at the end reads clearly as "you're at the bottom".
   const dayScrollRef = useRef<HTMLDivElement>(null);
   const [dayMoreBelow, setDayMoreBelow] = useState(false);
+  // Same cue for the search-results box (phone) — its bottom edge sliced rows without it.
+  const resScrollRef = useRef<HTMLDivElement>(null);
+  const [resMoreBelow, setResMoreBelow] = useState(false);
   const cache = useRef(new Map<string, TrackStats[]>([[initialDay, initialTracks]]));
   const dayReq = useRef(0);
 
@@ -1008,11 +1011,25 @@ export function DenHome({
     return [...tracks].sort((a, b) => f * compareTracks(a, b, sort));
   }, [tracks, sort, dir]);
 
-  // Recompute the bottom cue whenever the visible rows change (new day / re-sort).
+  // Recompute the bottom cues whenever the visible rows change (new day / re-sort /
+  // new query) — and, for the results box, when the mode's height animation lands.
   useEffect(() => {
     const el = dayScrollRef.current;
     setDayMoreBelow(!!el && el.scrollHeight - el.clientHeight - el.scrollTop > 2);
   }, [dayRows]);
+  useEffect(() => {
+    const check = () => {
+      const el = resScrollRef.current;
+      setResMoreBelow(!!el && el.scrollHeight - el.clientHeight - el.scrollTop > 2);
+    };
+    const raf = requestAnimationFrame(check);
+    // The box height glides for ~450ms after keyboard moves; re-check once it settles.
+    const t = setTimeout(check, 500);
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(t);
+    };
+  }, [groups, searchFocused]);
 
   return (
     <>
@@ -1028,82 +1045,110 @@ export function DenHome({
         </div>
 
         {searching ? (
+          // Same boxed shell as the day list below: clipping wrapper + inner scroller +
+          // a modest bottom fade, so the box's bottom edge never SLICES through a row
+          // with the keyboard up (Rem's screenshot, 2026-08-13) — the fade says
+          // "continues" the same way the day view's does.
           <div
-            // Read by the opt-in perf probe (lib/search-perf.ts) and by nothing else. `query`
-            // is what makes a mark attributable: without it a probe cannot tell its own rows
-            // from the ones still on screen from the previous keystroke.
-            data-search-results=""
-            data-query={query.trim()}
-            data-rows={groups.length}
-            // "1" the rows are complete · "x" the attempt failed, nothing is coming · "0"
-            // waiting on the server fallback. On the payload path a row is never partial, so
-            // this is "1" from the first frame.
-            data-hydrated={searchPending ? "0" : searchFailed ? "x" : "1"}
-            // Scrolling the results with the keyboard up dismisses it (the iOS-native
-            // gesture); the viewport-tracking mode then grows the box into the freed
-            // space. Blur only the search input — not, say, a focused button.
-            onTouchMove={() => {
-              const el = document.activeElement;
-              if (searchMode && el instanceof HTMLInputElement) el.blur();
-            }}
             className={cn(
-              // Phone: results live in the same framed box as the day list (below), so the
-              // page keeps one silhouette whether or not a query is typed.
-              "thin-scroll min-h-0 flex-1 overflow-y-auto rounded-xl border border-border/60 px-2.5 sm:rounded-none sm:border-0 sm:px-0",
+              "relative min-h-0 flex-1 overflow-hidden rounded-xl border border-border/60 sm:overflow-visible sm:rounded-none sm:border-0",
               searchPending && "opacity-60 transition-opacity",
             )}
           >
-            {groups.length === 0 ? (
-              <p className="py-10 text-center text-sm text-muted-foreground">
-                {searchPending
-                  ? "Searching…"
-                  : searchFailed
-                    ? "Couldn’t reach the server. Edit the search to try again."
-                    : `No ${mode === "songs" ? "songs" : "artists"} match “${query.trim()}”${scopeDay ? " that day" : ""}.`}
-              </p>
-            ) : (
-              <>
-                <ul className="divide-y divide-border/50">
-                  {groups.map((g) =>
-                    g.kind === "song" ? (
-                      <SongResult
-                        key={g.entry.key}
-                        entry={g.entry}
-                        expanded={expanded === g.entry.key}
-                        onToggle={() =>
-                          setExpanded((e) => (e === g.entry.key ? null : g.entry.key))
-                        }
-                        onMenu={openMenu(g.entry.name, g.entry.artist)}
-                      />
-                    ) : (
-                      <li key={g.artist}>
-                        <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 py-2 sm:gap-4">
-                          <Art image={g.image} />
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-medium select-text">{g.artist}</p>
-                            {/* Library first, listening second: how much of them you HAVE is
-                                the fact that survives an artist you've never got to. */}
-                            <p className="text-[13px] text-muted-foreground">
-                              {plural(g.songs, "song")}
-                              {g.plays > 0 ? ` · ${plural(g.plays, "play")}` : ""}
-                            </p>
+            <div
+              // Read by the opt-in perf probe (lib/search-perf.ts) and by nothing else. `query`
+              // is what makes a mark attributable: without it a probe cannot tell its own rows
+              // from the ones still on screen from the previous keystroke.
+              data-search-results=""
+              data-query={query.trim()}
+              data-rows={groups.length}
+              // "1" the rows are complete · "x" the attempt failed, nothing is coming · "0"
+              // waiting on the server fallback. On the payload path a row is never partial, so
+              // this is "1" from the first frame.
+              data-hydrated={searchPending ? "0" : searchFailed ? "x" : "1"}
+              // Scrolling the results with the keyboard up dismisses it (the iOS-native
+              // gesture); the viewport-tracking mode then grows the box into the freed
+              // space. Blur only the search input — not, say, a focused button.
+              onTouchMove={() => {
+                const el = document.activeElement;
+                if (searchMode && el instanceof HTMLInputElement) el.blur();
+              }}
+              onScroll={(e) => {
+                const el = e.currentTarget;
+                setResMoreBelow(el.scrollHeight - el.clientHeight - el.scrollTop > 2);
+              }}
+              ref={resScrollRef}
+              className="thin-scroll h-full overflow-y-auto px-2.5 sm:px-0"
+            >
+              {groups.length === 0 ? (
+                <p className="py-10 text-center text-sm text-muted-foreground">
+                  {searchPending
+                    ? "Searching…"
+                    : searchFailed
+                      ? "Couldn’t reach the server. Edit the search to try again."
+                      : `No ${mode === "songs" ? "songs" : "artists"} match “${query.trim()}”${scopeDay ? " that day" : ""}.`}
+                </p>
+              ) : (
+                <>
+                  <ul className="divide-y divide-border/50">
+                    {groups.map((g, i) =>
+                      g.kind === "song" ? (
+                        <SongResult
+                          key={g.entry.key}
+                          entry={g.entry}
+                          index={i}
+                          expanded={expanded === g.entry.key}
+                          onToggle={() =>
+                            setExpanded((e) => (e === g.entry.key ? null : g.entry.key))
+                          }
+                          onMenu={openMenu(g.entry.name, g.entry.artist)}
+                        />
+                      ) : (
+                        <li
+                          key={g.artist}
+                          className="den-row"
+                          style={{ "--i": i } as React.CSSProperties}
+                        >
+                          <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 py-2 sm:gap-4">
+                            <Art image={g.image} />
+                            <div className="min-w-0">
+                              {/* Same 15px as the day table's titles — the results rows
+                                  read as one system with the browsing view (Rem). */}
+                              <p className="truncate text-[15px] font-medium select-text">
+                                {g.artist}
+                              </p>
+                              {/* Library first, listening second: how much of them you HAVE is
+                                  the fact that survives an artist you've never got to. */}
+                              <p className="text-[13px] text-muted-foreground">
+                                {plural(g.songs, "song")}
+                                {g.plays > 0 ? ` · ${plural(g.plays, "play")}` : ""}
+                              </p>
+                            </div>
+                            <PlayedAt last={g.last} />
                           </div>
-                          <PlayedAt last={g.last} />
-                        </div>
-                      </li>
-                    ),
-                  )}
-                </ul>
-                {total > groups.length ? (
-                  // Never truncate silently: a capped list that says nothing reads as the whole
-                  // answer. Typing one more character is the fix, and the count says so.
-                  <p className="py-3 text-center text-xs text-muted-foreground/70">
-                    Showing the first {groups.length.toLocaleString()} of{" "}
-                    {total.toLocaleString()} matches.
-                  </p>
-                ) : null}
-              </>
-            )}
+                        </li>
+                      ),
+                    )}
+                  </ul>
+                  {total > groups.length ? (
+                    // Never truncate silently: a capped list that says nothing reads as the whole
+                    // answer. Typing one more character is the fix, and the count says so.
+                    <p className="py-3 text-center text-xs text-muted-foreground/70">
+                      Showing the first {groups.length.toLocaleString()} of{" "}
+                      {total.toLocaleString()} matches.
+                    </p>
+                  ) : null}
+                </>
+              )}
+            </div>
+            {/* Kept small — real estate matters here — and phone-only: desktop results
+                never sat under a keyboard. */}
+            <div
+              className={cn(
+                "pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-background to-transparent transition-opacity duration-200 sm:hidden",
+                resMoreBelow ? "opacity-100" : "opacity-0",
+              )}
+            />
           </div>
         ) : (
           // Phone: the song list is BOUNDED — a framed box that scrolls inside itself,
@@ -1183,13 +1228,15 @@ export function DenHome({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border/50">
-                    {dayRows.map((t) => {
+                    {dayRows.map((t, i) => {
                       const from = t.source;
                       return (
                         <tr
                           key={`${t.id}-${t.lastPlayed}`}
                           onContextMenu={openMenu(t.name, t.artist)}
+                          style={{ "--i": i } as React.CSSProperties}
                           className={cn(
+                            "den-row",
                             freshKey === `${t.artist.toLowerCase()}\n${t.name.toLowerCase()}` &&
                               "row-fresh",
                           )}
@@ -1432,11 +1479,14 @@ function PlayedAt({ last }: { last: number | null }) {
 // the row is complete in its first frame and nothing reflows behind it.
 function SongResult({
   entry,
+  index,
   expanded,
   onToggle,
   onMenu,
 }: {
   entry: Entry;
+  /** Position in the result list — drives the staggered reveal's per-row delay. */
+  index: number;
   expanded: boolean;
   onToggle: () => void;
   onMenu?: (e: React.MouseEvent) => void;
@@ -1450,7 +1500,7 @@ function SongResult({
   // the question that put it on screen.
   const detail = plays.length > 0 || playlists.length > 0;
   return (
-    <li>
+    <li className="den-row" style={{ "--i": index } as React.CSSProperties}>
       <button
         type="button"
         onClick={onToggle}
@@ -1460,7 +1510,9 @@ function SongResult({
       >
         <Art image={image} />
         <div className="min-w-0">
-          <p className="truncate text-sm font-medium select-text">{name}</p>
+          {/* 15px, matching the day table's titles — results were a step smaller than the
+              browsing view and read as a different, cramped surface (Rem, 2026-08-13). */}
+          <p className="truncate text-[15px] font-medium select-text">{name}</p>
           <p className="truncate text-[13px] text-muted-foreground select-text">{artist}</p>
         </div>
         <p className="hidden truncate text-[13px] text-muted-foreground md:block">{album}</p>

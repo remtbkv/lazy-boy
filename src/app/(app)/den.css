@@ -126,10 +126,33 @@ html:has(#den-root) body {
     padding-bottom: 0.5rem;
     /* Glide between keyboard states instead of stepping: iOS reports the viewport in a
        few discrete events, and use-search-mode.ts sets the full-height target the moment
-       the keyboard starts leaving — this is what turns both into one smooth move. Short
-       enough to read as snappy, long enough to not pop. */
-    transition: height 180ms cubic-bezier(0.2, 0.8, 0.25, 1);
+       the keyboard starts leaving — this is what turns both into one smooth move.
+       Slowed from the first 180ms cut (Rem: still read as a teleport). */
+    transition: height 320ms cubic-bezier(0.25, 0.9, 0.3, 1);
   }
+  /* Curtain variant: the unravel IS the height glide, so it gets more time. */
+  #den-root.den-reveal-curtain.den-searching main {
+    transition-duration: 450ms;
+  }
+}
+
+/* ---- Search reveal: how uncovered rows arrive -------------------------------------
+   Armed (.den-reveal, ~750ms) by use-search-mode.ts on the two uncover moments —
+   entering search, and the keyboard leaving — never while typing. Variant picked by a
+   root class (URL ?reveal= switches it live):
+     stagger — rows slot in one by one, top down (delay capped past the 14th row);
+     fade    — everything below arrives together, soft;
+     curtain — no row animation; the slowed height glide + bottom fade do the work. */
+@keyframes den-slot-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: none; }
+}
+#den-root.den-reveal.den-reveal-stagger .den-row {
+  animation: den-slot-in 260ms cubic-bezier(0.2, 0.8, 0.25, 1) both;
+  animation-delay: calc(min(var(--i, 0), 14) * 26ms);
+}
+#den-root.den-reveal.den-reveal-fade .den-row {
+  animation: den-fade-in 340ms ease-out both;
 }
 
 /* ---- Panda mark ----------------------------------------------------------------
@@ -201,6 +224,7 @@ html:has(#den-root) body {
   .den-sheet,
   .den-scrim,
   .np-live,
+  #den-root.den-reveal .den-row,
   .den-marquee[data-run] > span {
     animation: none;
   }
