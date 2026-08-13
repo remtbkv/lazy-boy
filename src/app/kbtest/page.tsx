@@ -1,6 +1,7 @@
 import type { Viewport } from "next";
 import { notFound } from "next/navigation";
 import { KbTest } from "./kbtest-client";
+import "../(app)/den.css";
 
 // DEV-ONLY iOS-keyboard test fixture — 404s in production. The real phone bugs of
 // 2026-08-13 (focus zoom, keyboard pan, pill placement) only reproduce in a real iOS

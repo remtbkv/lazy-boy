@@ -96,6 +96,20 @@ export function SearchIsland({
   const focusIn = () => {
     if (blurTimer.current) clearTimeout(blurTimer.current);
     setFocused(true);
+    // Cancel Safari's focus pan. iOS decides how far to scroll the page to "reveal" the
+    // focused input around the moment the keyboard rises; even with the pill already
+    // docked top, it can still pan to the input's previous bottom position (seen on the
+    // iOS 26.5 Simulator, 2026-08-13) — which shoves the top of the page, pill included,
+    // out of view. Repeatedly re-pinning scroll through the keyboard's rise window keeps
+    // the page anchored; the loop is ~700ms of no-op rAF calls, then gone.
+    if (window.matchMedia("(max-width: 639.98px)").matches) {
+      const until = performance.now() + 700;
+      const pin = () => {
+        window.scrollTo(0, 0);
+        if (performance.now() < until) requestAnimationFrame(pin);
+      };
+      requestAnimationFrame(pin);
+    }
   };
   const focusOut = () => {
     if (blurTimer.current) clearTimeout(blurTimer.current);
@@ -146,6 +160,10 @@ export function SearchIsland({
         <input
           value={query}
           onChange={(e) => onQuery(e.target.value)}
+          // NOT docked on pointerdown: moving the input out from under the finger before
+          // touchend makes iOS drop the click, so focus never lands and the keyboard
+          // never rises (iOS 26.5 Simulator, 2026-08-13). The dock happens at focus; the
+          // scroll-pin loop in focusIn is what cancels Safari's pan to the old spot.
           onFocus={() => {
             focusIn();
             onFocus?.();
