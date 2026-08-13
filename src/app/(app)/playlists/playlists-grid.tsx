@@ -81,9 +81,9 @@ export function PlaylistsGrid({
             (en-US "13,464" on Vercel's Node vs de-DE "13.464" in the browser) — a hydration
             mismatch for anyone outside en-US. */}
         {/* Phone: the line breaks BEFORE "unique songs" (block span) — deliberate split, no
-            separator dot left hanging at the end of the first line — and at 17px: the page
-            header can carry more size than desktop's inline 15px. */}
-        <h1 className="text-[17px] text-muted-foreground sm:text-[15px]">
+            separator dot left hanging at the end of the first line. Same 15px as desktop:
+            17px here read oversized against Home's text (Rem, 2026-08-13). */}
+        <h1 className="text-[15px] text-muted-foreground">
           <span className="whitespace-nowrap">
             <span className="font-medium text-foreground">
               {playlists.length.toLocaleString("en-US")}
