@@ -534,8 +534,12 @@ export function DenHome({
   // instantly), and leaving search restores whatever day was selected before.
   const phone = usePhone();
   const [searchFocused, setSearchFocused] = useState(false);
+  // The immediate twin of searchFocused: flips false the instant the input blurs, while
+  // searchFocused waits out the island's 180ms tap grace — the height driver must move
+  // with the keyboard, not with the grace (the checkmark pause, Rem 2026-08-13).
+  const [searchKbUp, setSearchKbUp] = useState(false);
   const searchMode = phone && (searchFocused || searching);
-  useSearchMode(searchMode, searchFocused);
+  useSearchMode(searchMode, searchKbUp);
   const prevSel = useRef<string | null>(null);
   useEffect(() => {
     if (searchMode) {
@@ -1029,7 +1033,7 @@ export function DenHome({
       cancelAnimationFrame(raf);
       clearTimeout(t);
     };
-  }, [groups, searchFocused]);
+  }, [groups, searchKbUp]);
 
   return (
     <>
@@ -1326,6 +1330,7 @@ export function DenHome({
         // hand by the first character. Idempotent — the first call is the only one that fetches.
         onFocus={loadIndex}
         onFocusChange={setSearchFocused}
+        onKeyboardChange={setSearchKbUp}
         stayDocked={searchMode}
         placeholder={mode === "songs" ? "Search your songs…" : "Search artists…"}
       >

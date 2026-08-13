@@ -47,7 +47,8 @@ export function KbTest() {
   // the root (header + bands fold, main pinned to --lb-vvh) while focused or querying.
   const phone = usePhone();
   const [focused, setFocused] = useState(false);
-  useSearchMode(phone && (focused || q.trim().length > 0), focused);
+  const [kbUp, setKbUp] = useState(false);
+  useSearchMode(phone && (focused || q.trim().length > 0), kbUp);
 
   useEffect(() => {
     const log: KbSample[] = [];
@@ -197,6 +198,7 @@ export function KbTest() {
         query={q}
         onQuery={setQ}
         onFocusChange={setFocused}
+        onKeyboardChange={setKbUp}
         stayDocked={phone && (focused || q.trim().length > 0)}
         placeholder="Search your songs…"
       />

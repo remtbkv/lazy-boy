@@ -28,6 +28,7 @@ export function SearchIsland({
   onQuery,
   onFocus,
   onFocusChange,
+  onKeyboardChange,
   stayDocked,
   placeholder,
   children,
@@ -38,8 +39,13 @@ export function SearchIsland({
    *  before the first character is typed. */
   onFocus?: () => void;
   /** Focus state, debounced past the blur grace window — Home derives its phone
-   *  search MODE (bands hidden, viewport-sized results) from this. */
+   *  search MODE (bands hidden, un-docking, exit) from this. Deliberately laggy:
+   *  a tap on the pill's own controls must not shift the layout mid-tap. */
   onFocusChange?: (focused: boolean) => void;
+  /** Focus state, IMMEDIATE — the keyboard-height driver. The box expansion must start
+   *  the same frame the keyboard starts leaving; riding the 180ms blur grace put a dead
+   *  pause between the checkmark and the songs arriving (Rem's recording, 2026-08-13). */
+  onKeyboardChange?: (up: boolean) => void;
   /** Keep the pill top-docked beyond focus (Home passes its search-mode flag): after a
    *  scroll-dismissed keyboard the pill and Cancel must stay at the top while a query
    *  stands. Pages without a search mode (Playlists) leave this unset — focus-only. */
@@ -107,6 +113,7 @@ export function SearchIsland({
     if (blurTimer.current) clearTimeout(blurTimer.current);
     setFocused(true);
     onFocusChange?.(true);
+    onKeyboardChange?.(true);
     // Cancel Safari's focus pan. iOS decides how far to scroll the page to "reveal" the
     // focused input around the moment the keyboard rises; even with the pill already
     // docked top, it can still pan to the input's previous bottom position (seen on the
@@ -124,6 +131,8 @@ export function SearchIsland({
   };
   const focusOut = () => {
     if (blurTimer.current) clearTimeout(blurTimer.current);
+    // The keyboard is leaving NOW — the height driver must know now.
+    onKeyboardChange?.(false);
     blurTimer.current = setTimeout(() => {
       setFocused(false);
       onFocusChange?.(false);
@@ -136,6 +145,7 @@ export function SearchIsland({
     inputRef.current?.blur();
     setFocused(false);
     onFocusChange?.(false);
+    onKeyboardChange?.(false);
     onQuery("");
   };
   useEffect(
