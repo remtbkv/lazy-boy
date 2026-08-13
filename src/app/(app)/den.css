@@ -103,6 +103,30 @@ html:has(#den-root) body {
   overflow: hidden;
 }
 
+/* ---- Phone search mode -----------------------------------------------------------
+   While searching on a phone (#den-root.den-searching, set by use-search-mode.ts), the
+   screen belongs to search: the app header and the home bands (greeting, action dock —
+   tagged .den-home-band in home/page.tsx) fold away, the day strip stays as the scope
+   filter, and <main> is pinned to the visual viewport's live height (--lb-vvh, updated
+   per-frame by the same hook) so the results box bottom rides the keyboard's top edge —
+   through the rise, the interactive half-dismiss, and the full dismiss alike.
+   `flex: none` matters: main is a flex-1 child of the locked shell, and flex-grow would
+   otherwise override the height. */
+@media (max-width: 639.98px) {
+  #den-root.den-searching > header {
+    display: none;
+  }
+  #den-root.den-searching .den-home-band {
+    display: none;
+  }
+  #den-root.den-searching main {
+    flex: none;
+    height: var(--lb-vvh, 100dvh);
+    padding-top: 4.25rem; /* clears the top-docked search pill */
+    padding-bottom: 0.5rem;
+  }
+}
+
 /* ---- Panda mark ----------------------------------------------------------------
    Sleeping: slow breathing scale + a drifting z. Awake: a gentle head sway.
    Both idle animations are long-period so the mark reads as calm, not busy. */

@@ -10,6 +10,7 @@ import { patchHistoryPayload } from "@/lib/history-patch";
 import { addPlay, reconcilePlays, type Provisional } from "@/lib/optimistic-play";
 import { IdentityTrackMenu } from "@/components/identity-track-menu";
 import { useNowPlaying } from "@/components/now-playing-context";
+import { usePhone, useSearchMode } from "../use-search-mode";
 import {
   allTimePlaysAction,
   dailyStatsAction,
@@ -520,6 +521,38 @@ export function DenHome({
   const [expanded, setExpanded] = useState<string | null>(null);
   const searching = query.trim().length > 0;
 
+  // ---- Phone search MODE (Rem's spec, 2026-08-13) ----------------------------------------
+  // While the search input is focused OR a query stands, on a phone, search owns the
+  // screen: the greeting/dock bands and the app header fold away (den.css) and <main> is
+  // pinned to the live visual-viewport height so the results box bottom rides the
+  // keyboard's top edge. The day strip STAYS — in this mode it is the scope filter: the
+  // strip flips to All-time on entry (a search is global by default), tapping a day
+  // narrows the results to songs played that day (answered from the in-memory payload,
+  // instantly), and leaving search restores whatever day was selected before.
+  const phone = usePhone();
+  const [searchFocused, setSearchFocused] = useState(false);
+  const searchMode = phone && (searchFocused || searching);
+  useSearchMode(searchMode);
+  const prevSel = useRef<string | null>(null);
+  useEffect(() => {
+    if (searchMode) {
+      if (prevSel.current === null) {
+        prevSel.current = selected;
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- one transition, one flip
+        if (selected !== "all") select("all");
+      }
+    } else if (prevSel.current !== null) {
+      const prev = prevSel.current;
+      prevSel.current = null;
+      // Only restore if the user didn't pick a different scope while searching — a day
+      // chosen in search mode is a deliberate place to land.
+      if (selected === "all" && prev !== "all") select(prev);
+    }
+    // select/selected are read at transition time only; re-running on their changes
+    // would re-trigger the entry branch mid-mode.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchMode]);
+
   // The payloads are fetched off the render path and then held in memory for the rest of the
   // visit. Persistence across visits is the browser's HTTP cache plus each route's ETag: the
   // library half revalidates in one 304 with no body unless a playlist changed.
@@ -874,6 +907,11 @@ export function DenHome({
     return [...by.values()];
   }, [entries, fallback, answered]);
 
+  // The search-mode day scope: when a day is picked on the strip while searching, results
+  // narrow to plays from that LOCAL day. Same fixed-offset day bucket as buildDays, so the
+  // scoped counts agree with the day cards.
+  const scopeDay = searchMode && selected !== "all" ? selected : null;
+
   // Matching, ranking and grouping, all in memory. `total` is what matched before the display
   // cap, so the list can say what it dropped instead of silently truncating.
   const { groups, total } = useMemo<{ groups: (SongGroup | ArtistGroup)[]; total: number }>(() => {
@@ -882,8 +920,22 @@ export function DenHome({
     const source = entries ?? fallbackEntries;
     if (!q || !source) return none;
 
+    // Scope an entry's plays to the picked day; an entry with none left drops out. The
+    // copy keeps `entries` itself untouched — the scope is a view, not a mutation.
+    let scope: ((e: Entry) => Entry | null) | null = null;
+    if (scopeDay) {
+      const offMin = -new Date().getTimezoneOffset();
+      const m0 = Date.parse(`${scopeDay}T00:00:00Z`) / 60000 - offMin;
+      const m1 = m0 + 1440;
+      scope = (e) => {
+        const plays = e.plays.filter((p) => p.minute >= m0 && p.minute < m1);
+        return plays.length ? { ...e, plays } : null;
+      };
+    }
+
     if (mode === "songs") {
-      const hits = source.filter((e) => e.ln.includes(q));
+      let hits = source.filter((e) => e.ln.includes(q));
+      if (scope) hits = hits.map(scope).filter((e): e is Entry => e !== null);
       hits.sort(
         (a, b) =>
           tier(a.ln, q) - tier(b.ln, q) ||
@@ -900,8 +952,10 @@ export function DenHome({
     // Artists: every song by a matching artist folded into one row, so the totals are over the
     // whole artist, not over the songs whose titles happened to match.
     const byArtist = new Map<string, ArtistGroup>();
-    for (const e of source) {
-      if (!e.la.includes(q)) continue;
+    for (const raw of source) {
+      if (!raw.la.includes(q)) continue;
+      const e = scope ? scope(raw) : raw;
+      if (!e) continue; // nothing played that day — out of a day-scoped answer
       let g = byArtist.get(e.la);
       if (!g) {
         g = { kind: "artist", artist: e.artist, image: null, songs: 0, plays: 0, last: null };
@@ -921,7 +975,7 @@ export function DenHome({
         a.artist.localeCompare(b.artist),
     );
     return { groups: artists.slice(0, MAX_RESULTS), total: artists.length };
-  }, [entries, fallbackEntries, mode, query]);
+  }, [entries, fallbackEntries, mode, query, scopeDay]);
 
   // ---- Right-click menu (search rows + day rows — identity-resolved) ----
   const [ctxMenu, setCtxMenu] = useState<{
@@ -985,6 +1039,13 @@ export function DenHome({
             // waiting on the server fallback. On the payload path a row is never partial, so
             // this is "1" from the first frame.
             data-hydrated={searchPending ? "0" : searchFailed ? "x" : "1"}
+            // Scrolling the results with the keyboard up dismisses it (the iOS-native
+            // gesture); the viewport-tracking mode then grows the box into the freed
+            // space. Blur only the search input — not, say, a focused button.
+            onTouchMove={() => {
+              const el = document.activeElement;
+              if (searchMode && el instanceof HTMLInputElement) el.blur();
+            }}
             className={cn(
               // Phone: results live in the same framed box as the day list (below), so the
               // page keeps one silhouette whether or not a query is typed.
@@ -998,7 +1059,7 @@ export function DenHome({
                   ? "Searching…"
                   : searchFailed
                     ? "Couldn’t reach the server. Edit the search to try again."
-                    : `No ${mode === "songs" ? "songs" : "artists"} match “${query.trim()}”.`}
+                    : `No ${mode === "songs" ? "songs" : "artists"} match “${query.trim()}”${scopeDay ? " that day" : ""}.`}
               </p>
             ) : (
               <>
@@ -1217,6 +1278,8 @@ export function DenHome({
         // Start pulling the index the moment the box is focused, so it is usually already in
         // hand by the first character. Idempotent — the first call is the only one that fetches.
         onFocus={loadIndex}
+        onFocusChange={setSearchFocused}
+        stayDocked={searchMode}
         placeholder={mode === "songs" ? "Search your songs…" : "Search artists…"}
       >
         <div className="flex h-8 shrink-0 items-center gap-0.5 rounded-full bg-muted/60 p-0.5">

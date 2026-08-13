@@ -94,14 +94,15 @@ export default async function HomePage() {
             (no body scroll) and only the song list scrolls inside. */}
         <div className="flex h-full min-h-0 flex-col gap-4 sm:gap-6">
           {/* Just the greeting — today's numbers already live on the Today card below,
-              repeating them here said the same thing twice within an inch. */}
-          <header className="shrink-0">
+              repeating them here said the same thing twice within an inch.
+              den-home-band: folds away in the phone search mode (den.css). */}
+          <header className="den-home-band shrink-0">
             <h1 className="den-display text-4xl leading-tight tracking-tight sm:text-5xl">
               {greeting}
             </h1>
           </header>
 
-          <div className="shrink-0">
+          <div className="den-home-band shrink-0">
             <DockLoader />
           </div>
 

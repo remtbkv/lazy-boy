@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { SearchIsland } from "../(app)/search-island";
+import { usePhone, useSearchMode } from "../(app)/use-search-mode";
 
 // A HOME-PAGE LOOKALIKE, not a bare list: same locked viewport, same bands (header /
 // greeting / action pills / day tray / framed song box / search island), same classes —
@@ -41,6 +42,12 @@ export function KbTest() {
   const [q, setQ] = useState("");
   const [sample, setSample] = useState<KbSample | null>(null);
   const shown = SONGS.filter((s) => s.title.toLowerCase().includes(q.trim().toLowerCase()));
+
+  // The REAL search-mode wiring under test — same hook DenHome uses: .den-searching on
+  // the root (header + bands fold, main pinned to --lb-vvh) while focused or querying.
+  const phone = usePhone();
+  const [focused, setFocused] = useState(false);
+  useSearchMode(phone && (focused || q.trim().length > 0));
 
   useEffect(() => {
     const log: KbSample[] = [];
@@ -98,12 +105,12 @@ export function KbTest() {
       </header>
 
       <main className="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col gap-4 overflow-hidden px-4 pb-[calc(env(safe-area-inset-bottom)+4.25rem)] pt-5">
-        <h1 className="den-display shrink-0 text-4xl leading-tight tracking-tight">
+        <h1 className="den-display den-home-band shrink-0 text-4xl leading-tight tracking-tight">
           Keyboard test.
         </h1>
 
         {/* Action pills band. */}
-        <div className="flex shrink-0 snap-x gap-2 overflow-x-auto">
+        <div className="den-home-band flex shrink-0 snap-x gap-2 overflow-x-auto">
           {["Resume", "Clean", "Save queue", "Merge", "Subtract"].map((a) => (
             <span
               key={a}
@@ -146,9 +153,15 @@ export function KbTest() {
           </span>
         </div>
 
-        {/* The framed song box. */}
+        {/* The framed song box — same scroll-to-dismiss as DenHome's results. */}
         <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-border/60">
-          <div className="h-full overflow-y-auto px-2.5">
+          <div
+            className="h-full overflow-y-auto px-2.5"
+            onTouchMove={() => {
+              const el = document.activeElement;
+              if (el instanceof HTMLInputElement) el.blur();
+            }}
+          >
             {shown.length === 0 ? (
               <p className="py-10 text-center text-sm text-muted-foreground">
                 No songs match “{q.trim()}”.
@@ -176,7 +189,13 @@ export function KbTest() {
         </div>
       </main>
 
-      <SearchIsland query={q} onQuery={setQ} placeholder="Search your songs…" />
+      <SearchIsland
+        query={q}
+        onQuery={setQ}
+        onFocusChange={setFocused}
+        stayDocked={phone && (focused || q.trim().length > 0)}
+        placeholder="Search your songs…"
+      />
     </div>
   );
 }

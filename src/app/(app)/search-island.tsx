@@ -27,6 +27,8 @@ export function SearchIsland({
   query,
   onQuery,
   onFocus,
+  onFocusChange,
+  stayDocked,
   placeholder,
   children,
 }: {
@@ -35,10 +37,18 @@ export function SearchIsland({
   /** Fired when the input takes focus — Home uses it to start fetching its search index
    *  before the first character is typed. */
   onFocus?: () => void;
+  /** Focus state, debounced past the blur grace window — Home derives its phone
+   *  search MODE (bands hidden, viewport-sized results) from this. */
+  onFocusChange?: (focused: boolean) => void;
+  /** Keep the pill top-docked beyond focus (Home passes its search-mode flag): after a
+   *  scroll-dismissed keyboard the pill and Cancel must stay at the top while a query
+   *  stands. Pages without a search mode (Playlists) leave this unset — focus-only. */
+  stayDocked?: boolean;
   placeholder: string;
   children?: React.ReactNode;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const [progress, setProgress] = useState(0); // 0 = docked, 1 = fully off-screen
 
   useEffect(() => {
@@ -96,6 +106,7 @@ export function SearchIsland({
   const focusIn = () => {
     if (blurTimer.current) clearTimeout(blurTimer.current);
     setFocused(true);
+    onFocusChange?.(true);
     // Cancel Safari's focus pan. iOS decides how far to scroll the page to "reveal" the
     // focused input around the moment the keyboard rises; even with the pill already
     // docked top, it can still pan to the input's previous bottom position (seen on the
@@ -113,7 +124,19 @@ export function SearchIsland({
   };
   const focusOut = () => {
     if (blurTimer.current) clearTimeout(blurTimer.current);
-    blurTimer.current = setTimeout(() => setFocused(false), 180);
+    blurTimer.current = setTimeout(() => {
+      setFocused(false);
+      onFocusChange?.(false);
+    }, 180);
+  };
+  // Cancel (phone, while docked top): out of search entirely, in one tap — clear the
+  // query, drop the keyboard, un-dock. Immediate, no blur grace: this IS the exit.
+  const cancel = () => {
+    if (blurTimer.current) clearTimeout(blurTimer.current);
+    inputRef.current?.blur();
+    setFocused(false);
+    onFocusChange?.(false);
+    onQuery("");
   };
   useEffect(
     () => () => {
@@ -130,7 +153,11 @@ export function SearchIsland({
     () => window.matchMedia("(max-width: 639.98px)").matches,
     () => false,
   );
-  const topDocked = focused && phone;
+  // Docked while focused, and — where the page runs a search mode — for the whole mode:
+  // scroll-dismissing the keyboard to browse results must leave the pill (and Cancel) at
+  // the top, or the exit affordance vanishes mid-search (seen in the Simulator run,
+  // 2026-08-13).
+  const topDocked = phone && (focused || !!stayDocked);
 
   return (
     <div
@@ -158,6 +185,7 @@ export function SearchIsland({
             "this is the search". Everything else stays muted. */}
         <SearchIcon className="size-4 shrink-0 text-foreground" />
         <input
+          ref={inputRef}
           value={query}
           onChange={(e) => onQuery(e.target.value)}
           // NOT docked on pointerdown: moving the input out from under the finger before
@@ -190,6 +218,15 @@ export function SearchIsland({
         ) : null}
         {children}
       </div>
+      {topDocked ? (
+        <button
+          type="button"
+          onClick={cancel}
+          className="pointer-events-auto ml-2 shrink-0 self-center text-[15px] font-medium text-muted-foreground transition-colors active:text-foreground"
+        >
+          Cancel
+        </button>
+      ) : null}
     </div>
   );
 }
