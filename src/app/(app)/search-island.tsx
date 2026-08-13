@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { SearchIcon, X } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 // A centered search "island" pinned to the bottom of the screen — brought back from the
 // live app, restyled. It sits below the content (the page reserves room
@@ -78,22 +79,60 @@ export function SearchIsland({
     if (h) setTravel(h + bottom + 28); // + shadow slack
   }, []);
 
-  // The iOS keyboard is handled by the viewport meta, NOT here: the (app) layout declares
-  // interactive-widget=resizes-content, so the layout viewport itself shrinks when the
-  // keyboard rises and this fixed pill lands above the keys natively. A JS visualViewport
-  // lift used to run alongside — during the keyboard's resize animation the two applied
-  // TOGETHER (the lift measured the shrinking visual viewport against the not-yet-shrunk
-  // layout), which threw the pill to the top of the screen and blanked it while typing —
-  // Rem's screen recording, 2026-08-13. Removed: one mechanism, the declarative one.
+  // The phone keyboard. A bottom-anchored input under a rising keyboard proved unfixable
+  // across browsers (Rem's recordings, 2026-08-13): Safari honours the layout's
+  // interactive-widget=resizes-content hint and shrinks the page; Brave iOS ignores it and
+  // just pans, leaving the pill behind the keys and the typing invisible; a JS
+  // visualViewport lift double-applied wherever the hint DID work. So the pill stops
+  // fighting the keyboard: while the input is FOCUSED on a phone it docks to the TOP of
+  // the screen — the one edge no keyboard covers — over the header (z-50), and drops back
+  // to the bottom on blur. Same element, CSS-only move, so focus never breaks. Desktop
+  // never moves.
+  const [focused, setFocused] = useState(false);
+  // Blur drops the pill back down only after a beat: a tap on the pill's own trailing
+  // control (Home's songs/artists switch) blurs the input first, and an instant
+  // relocation would move the button out from under the finger before the tap lands.
+  const blurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const focusIn = () => {
+    if (blurTimer.current) clearTimeout(blurTimer.current);
+    setFocused(true);
+  };
+  const focusOut = () => {
+    if (blurTimer.current) clearTimeout(blurTimer.current);
+    blurTimer.current = setTimeout(() => setFocused(false), 180);
+  };
+  useEffect(
+    () => () => {
+      if (blurTimer.current) clearTimeout(blurTimer.current);
+    },
+    [],
+  );
+  const phone = useSyncExternalStore(
+    (cb) => {
+      const mq = window.matchMedia("(max-width: 639.98px)");
+      mq.addEventListener("change", cb);
+      return () => mq.removeEventListener("change", cb);
+    },
+    () => window.matchMedia("(max-width: 639.98px)").matches,
+    () => false,
+  );
+  const topDocked = focused && phone;
 
   return (
     <div
       ref={wrapRef}
       style={{
-        transform: `translate3d(0, ${progress * travel}px, 0)`,
+        // Top-docked: no hide-travel either — the scroll deltas Safari's focus pan fires
+        // must not walk the pill around while someone is typing in it.
+        transform: topDocked ? undefined : `translate3d(0, ${progress * travel}px, 0)`,
         willChange: "transform",
       }}
-      className="pointer-events-none fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+0.75rem)] z-30 flex justify-center px-4 sm:bottom-5"
+      className={cn(
+        "pointer-events-none fixed inset-x-0 flex justify-center px-4",
+        topDocked
+          ? "top-2 z-50"
+          : "bottom-[calc(env(safe-area-inset-bottom)+0.75rem)] z-30 sm:bottom-5",
+      )}
     >
       {/* h-10 to match the quick-action buttons exactly. Fixed (not padding-derived) so the
           pill is the same height on both pages — Home's trailing switch would otherwise make
@@ -107,7 +146,11 @@ export function SearchIsland({
         <input
           value={query}
           onChange={(e) => onQuery(e.target.value)}
-          onFocus={onFocus}
+          onFocus={() => {
+            focusIn();
+            onFocus?.();
+          }}
+          onBlur={focusOut}
           placeholder={placeholder}
           aria-label={placeholder}
           className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/70 sm:w-[15.25rem] sm:flex-none"
