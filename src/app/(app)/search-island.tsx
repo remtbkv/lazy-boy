@@ -194,7 +194,7 @@ export function SearchIsland({
           gutter and ran the pill into the screen edges (Rem's screenshot, 2026-08-13) —
           with it the pill's edges sit exactly on the page gutters, aligned with the boxes
           below. */}
-      <div className="pointer-events-auto flex h-12 w-full min-w-0 items-center gap-2 rounded-full border border-border bg-popover/95 pl-4 pr-1.5 shadow-2xl shadow-black/50 ring-1 ring-white/5 backdrop-blur sm:h-10 sm:w-auto">
+      <div className="pointer-events-auto flex h-[48px] w-full min-w-0 items-center gap-2 rounded-full border border-border bg-popover/95 pl-4 pr-2 shadow-2xl shadow-black/50 ring-1 ring-white/5 backdrop-blur sm:h-10 sm:w-auto sm:pr-1.5">
         {/* Full-strength ink: the one thing in the pill that should read at a glance as
             "this is the search". Everything else stays muted. */}
         <SearchIcon className="size-4 shrink-0 text-foreground" />

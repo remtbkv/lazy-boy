@@ -71,7 +71,10 @@ export function DayCards({
       // Desktop: sized so exactly 5 days stand full and the 6th is mostly cut by the edge
       // fade — enough to read the date and the first digit, not the whole figure. Phone:
       // a fixed portrait column (see the component note), content spread top-to-bottom.
-      "flex w-[92px] min-w-[92px] shrink-0 snap-start flex-col justify-between rounded-xl border px-2.5 py-3 text-left transition-colors sm:w-auto sm:min-w-[143px] sm:justify-start sm:p-3.5",
+      // Phone: "184 plays" inline (digits + label share the line), listen time below —
+      // one line fewer, so the card is shorter and a touch wider; sized to the 3-digit
+      // maximum so every card matches (Rem, 2026-08-13).
+      "flex w-[104px] min-w-[104px] shrink-0 snap-start flex-col justify-between rounded-xl border px-3 py-2.5 text-left transition-colors sm:w-auto sm:min-w-[143px] sm:justify-start sm:p-3.5",
       active
         ? "border-[color-mix(in_srgb,var(--bamboo)_55%,var(--border))] bg-white/[0.05]"
         : "border-border bg-card hover:border-[color-mix(in_srgb,var(--border)_55%,var(--muted-foreground))]",
@@ -106,11 +109,11 @@ export function DayCards({
               {/* Flex gap, not a text space: a literal " " here renders at the parent's
                   text-xl size, so the gap was both oversized and optically inconsistent
                   between numbers (a trailing 7 opens up more whitespace than a 2). */}
-              <div className="mt-2 flex flex-col font-semibold tabular-nums sm:flex-row sm:items-baseline sm:gap-1.5">
-                <span className="text-2xl sm:text-xl">{d.plays}</span>
+              <div className="mt-1.5 flex items-baseline gap-1 font-semibold tabular-nums sm:mt-2 sm:gap-1.5">
+                <span className="text-xl">{d.plays}</span>
                 <span className="text-xs font-normal text-muted-foreground">plays</span>
               </div>
-              <div className="mt-1 text-xs tabular-nums text-muted-foreground">
+              <div className="mt-0.5 text-xs tabular-nums text-muted-foreground sm:mt-1">
                 {formatListenTime(d.durationMs)}
               </div>
             </button>
@@ -140,11 +143,11 @@ export function DayCards({
         className={cn(card(selected === "all"), "sm:min-w-[150px]")}
       >
         <div className="text-sm font-semibold">All time</div>
-        <div className="mt-2 flex flex-col font-semibold tabular-nums sm:flex-row sm:items-baseline sm:gap-1.5">
-          <span className="text-2xl sm:text-xl">{allTime.plays}</span>
+        <div className="mt-1.5 flex items-baseline gap-1 font-semibold tabular-nums sm:mt-2 sm:gap-1.5">
+          <span className="text-xl">{allTime.plays}</span>
           <span className="text-xs font-normal text-muted-foreground">plays</span>
         </div>
-        <div className="mt-1 text-xs tabular-nums text-muted-foreground">
+        <div className="mt-0.5 text-xs tabular-nums text-muted-foreground sm:mt-1">
           {formatListenTime(allTime.durationMs)}
         </div>
         {allTime.since ? (

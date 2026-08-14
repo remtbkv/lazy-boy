@@ -89,7 +89,7 @@ export default async function HomePage() {
           #den-root (see den.css) and is applied by <LockViewport /> only while Home is
           mounted, so the shared (app) layout stays scrollable for the Playlists grid. */}
       <LockViewport />
-      <main className="mx-auto w-full max-w-5xl flex-1 overflow-hidden px-4 pb-[calc(env(safe-area-inset-bottom)+4.25rem)] pt-5 sm:px-6 sm:pb-[4.75rem] sm:pt-6">
+      <main className="mx-auto w-full max-w-5xl flex-1 overflow-hidden px-4 pb-[calc(env(safe-area-inset-bottom)+4.75rem)] pt-5 sm:px-6 sm:pb-[4.75rem] sm:pt-6">
         {/* Flex column that fills the available height so the whole page fits the viewport
             (no body scroll) and only the song list scrolls inside. */}
         <div className="flex h-full min-h-0 flex-col gap-4 sm:gap-6">

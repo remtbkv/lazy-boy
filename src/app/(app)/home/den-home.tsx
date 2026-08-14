@@ -236,6 +236,10 @@ function buildEntries(lib: LibraryPayload | null, hist: HistoryPayload | null): 
 // disagreed on 66 of the 69 days, so the comparison can fail.
 type MemoryDays = {
   rows: Map<string, TrackStats[]>;
+  /** One row PER PLAY, newest first, per-play source — the phone's day list shows a song
+   *  again for each play instead of a count (Rem, 2026-08-13). Includes the newest day:
+   *  the refresh patches new plays into the payload, so it stays current. */
+  playRows: Map<string, TrackStats[]>;
   /** The local day of the newest play in the payload. Days strictly older than this are fully
    *  covered; that day itself may be missing the last few minutes (the payload rebuilds at
    *  most every 10 min — db.ts's slow marker), so it is left to the server path. */
@@ -255,11 +259,31 @@ function buildDays(hist: HistoryPayload): MemoryDays {
   const latestSource = new Map<number, number>();
   for (const [t, , src] of hist.plays) if (!latestSource.has(t)) latestSource.set(t, src);
   const days = new Map<string, Map<string, TrackStats>>();
-  for (const [t, minute] of hist.plays) {
+  const playRows = new Map<string, TrackStats[]>();
+  for (const [t, minute, playSrc] of hist.plays) {
     const track = hist.tracks[t];
     if (!track) continue;
     const [name, artist, img, alb, durationMs] = track;
     const day = localDay(minute);
+    {
+      // The per-play row: this play's own time and its own context.
+      let list = playRows.get(day);
+      if (!list) playRows.set(day, (list = []));
+      const played = iso(minute);
+      list.push({
+        id: `${artist.toLowerCase()}\n${name.toLowerCase()}@${minute}`,
+        name,
+        artist,
+        uri: "",
+        album: alb >= 0 ? (hist.albums[alb] ?? null) : null,
+        albumImage: img >= 0 ? (hist.images[img] ?? null) : null,
+        durationMs: durationMs || null,
+        plays: 1,
+        lastPlayed: played,
+        firstPlayed: played,
+        source: playSrc >= 0 ? (hist.sources[playSrc] ?? null) : null,
+      });
+    }
     let rows = days.get(day);
     if (!rows) days.set(day, (rows = new Map()));
     const key = `${artist.toLowerCase()}\n${name.toLowerCase()}`;
@@ -298,7 +322,8 @@ function buildDays(hist: HistoryPayload): MemoryDays {
       ),
     );
   }
-  return { rows, newest: hist.plays.length ? localDay(hist.plays[0][1]) : null };
+  // Plays arrive newest-first, so each day's per-play list is already newest-first.
+  return { rows, playRows, newest: hist.plays.length ? localDay(hist.plays[0][1]) : null };
 }
 
 /** Match rank: an exact title beats a title that starts with the query, which beats one that
@@ -1015,6 +1040,15 @@ export function DenHome({
     return [...tracks].sort((a, b) => f * compareTracks(a, b, sort));
   }, [tracks, sort, dir]);
 
+  // Phone day view: one row PER PLAY (newest first), not per song with a count — a song
+  // played twice appears twice, in its actual slots (Rem, 2026-08-13). Desktop (sortable
+  // aggregated table) and the all-time view keep the counted rows; before the payload
+  // lands the aggregated server rows stand in.
+  const displayRows = useMemo(() => {
+    if (!phone || selected === "all") return dayRows;
+    return memoryDays?.playRows.get(selected) ?? dayRows;
+  }, [phone, selected, memoryDays, dayRows]);
+
   // Recompute the bottom cues whenever the visible rows change (new day / re-sort /
   // new query) — and, for the results box, when the mode's height animation lands.
   useEffect(() => {
@@ -1232,11 +1266,11 @@ export function DenHome({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border/50">
-                    {dayRows.map((t, i) => {
+                    {displayRows.map((t, i) => {
                       const from = t.source;
                       return (
                         <tr
-                          key={`${t.id}-${t.lastPlayed}`}
+                          key={`${t.id}-${t.lastPlayed}-${i}`}
                           onContextMenu={openMenu(t.name, t.artist)}
                           style={{ "--i": i } as React.CSSProperties}
                           className={cn(
@@ -1253,31 +1287,30 @@ export function DenHome({
                               {/* Phone: art fills the row's actual height (the three text
                                   lines) instead of floating small inside it — same row
                                   height, text shifted right (Rem). */}
-                              <Art image={t.albumImage} sizeCls="size-14 sm:size-10" />
+                              <Art image={t.albumImage} sizeCls="size-12 sm:size-10" />
                               <div className="min-w-0 flex-1">
                                 <HoldTitle text={t.name} />
-                                <p className="truncate text-[13px] text-muted-foreground select-none sm:select-text">
-                                  {t.artist}
-                                </p>
-                                {/* Phones hide the side columns — fold time + source here.
-                                    suppressHydrationWarning, for BOTH branches:
-                                    • timeAgo() reads the clock, and a minute boundary crossing
-                                      between SSR and hydration flips the text ("14h ago" →
-                                      "15h ago") — a real #418 in the metrics on 2026-08-11,
-                                      not a code bug.
-                                    • clockTime() formats in the RENDERING zone, and the server
-                                      renders in UTC (Vercel) while the browser renders local —
-                                      so outside UTC the two differ on every load, not just at
-                                      a boundary. The refresh on mount repaints it local. */}
-                                <p
-                                  suppressHydrationWarning
-                                  className="mt-0.5 truncate text-[11px] text-muted-foreground/70 sm:hidden"
-                                >
-                                  {selected === "all"
-                                    ? timeAgo(t.lastPlayed)
-                                    : clockTime(t.lastPlayed)}
-                                  {from ? ` · ${from}` : ""}
-                                </p>
+                                {/* Phone line 2: artist left; playlist · time right-flush
+                                    where the plays count used to sit (the count is gone —
+                                    a repeat play is its own row). suppressHydrationWarning
+                                    on the time: same clock/zone mechanisms as the cells
+                                    below. */}
+                                <div className="flex min-w-0 items-baseline gap-2">
+                                  <p className="truncate text-[13px] text-muted-foreground select-none sm:select-text">
+                                    {t.artist}
+                                  </p>
+                                  <p
+                                    suppressHydrationWarning
+                                    className="ml-auto flex min-w-0 max-w-[55%] shrink-0 items-baseline text-[12px] tabular-nums text-muted-foreground/70 sm:hidden"
+                                  >
+                                    {from ? (
+                                      <span className="truncate">{from}&nbsp;·&nbsp;</span>
+                                    ) : null}
+                                    <span className="whitespace-nowrap">
+                                      {selected === "all" ? timeAgo(t.lastPlayed) : clockTime(t.lastPlayed)}
+                                    </span>
+                                  </p>
+                                </div>
                               </div>
                             </div>
                           </td>
@@ -1292,7 +1325,7 @@ export function DenHome({
                               display:none under sm that first row is this one — no width
                               hint meant a 50/50 split with the Song column, truncating
                               titles at half the screen. Desktop still sizes off the th. */}
-                          <td className="w-10 py-2 pr-1 text-right tabular-nums text-muted-foreground sm:w-14 sm:pr-6">
+                          <td className="hidden py-2 text-right tabular-nums text-muted-foreground sm:table-cell sm:w-14 sm:pr-6">
                             {t.plays}
                           </td>
                           {/* suppressHydrationWarning: same two mechanisms as the phone fold
@@ -1340,7 +1373,7 @@ export function DenHome({
         stayDocked={searchMode}
         placeholder={mode === "songs" ? "Search your songs…" : "Search artists…"}
       >
-        <div className="flex h-8 shrink-0 items-center gap-0.5 rounded-full bg-muted/60 p-0.5">
+        <div className="flex h-9 shrink-0 items-center gap-0.5 rounded-full bg-muted/60 p-0.5 sm:h-8">
           {(["songs", "artists"] as const).map((m) => (
             <button
               key={m}
@@ -1351,7 +1384,7 @@ export function DenHome({
               }}
               aria-pressed={mode === m}
               className={cn(
-                "h-7 rounded-full px-3 text-[12px] font-medium capitalize transition-colors",
+                "h-8 rounded-full px-3.5 text-[13px] font-medium capitalize transition-colors sm:h-7 sm:px-3 sm:text-[12px]",
                 mode === m
                   ? "bg-secondary text-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground",
