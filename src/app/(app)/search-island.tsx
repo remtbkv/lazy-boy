@@ -218,7 +218,9 @@ export function SearchIsland({
           // out of view no matter where it was docked (Rem, 2026-08-13 — "based on how the
           // zoom works"). At the phone's 85% root scale text-sm is ~12px, so this must be
           // a raw px size, not a rem class.
-          className="min-w-0 flex-1 bg-transparent text-[16px] outline-none placeholder:text-muted-foreground/70 sm:w-[15.25rem] sm:flex-none sm:text-sm"
+          // h-full so WebKit centres the text in the pill's height — as a bare line box
+          // the placeholder sat visibly low in the h-12 pill (Rem, 2026-08-13).
+          className="h-full min-w-0 flex-1 bg-transparent text-[16px] outline-none placeholder:text-muted-foreground/70 sm:w-[15.25rem] sm:flex-none sm:text-sm"
         />
         {query ? (
           <button

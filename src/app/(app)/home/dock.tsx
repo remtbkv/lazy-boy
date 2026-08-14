@@ -49,9 +49,27 @@ const ACTIONS: {
 // a bottom sheet with the action's description readable on touch.
 export function ActionDock({ playlists, backupPref, syncedAt }: DockData) {
   const [open, setOpen] = useState<ActionKey | null>(null);
+  // Once the pill row is scrolled, the LEFT edge also clips a pill mid-letter — without a
+  // fade there it read as the page itself being chopped (Rem, 2026-08-13). The left fade
+  // appears only when there is actually content hidden behind that edge.
+  const [rowScrolled, setRowScrolled] = useState(false);
+  // Save queue never opens a sheet: it has nothing to pick, so a full-height panel was
+  // three restatements of "Save queue" over empty space (Rem, 2026-08-13). It gets a
+  // small confirm bubble anchored to the button that was just tapped instead.
+  const [queueAnchor, setQueueAnchor] = useState<{ left: number; top: number } | null>(null);
   const action = ACTIONS.find((a) => a.key === open) ?? null;
 
-  const activate = (key: ActionKey) => setOpen(key);
+  const activate = (key: ActionKey, e: React.MouseEvent) => {
+    if (key === "queue") {
+      const r = e.currentTarget.getBoundingClientRect();
+      setQueueAnchor({
+        left: Math.max(8, Math.min(r.left, window.innerWidth - 218)),
+        top: r.bottom + 8,
+      });
+      return;
+    }
+    setOpen(key);
+  };
 
   return (
     <>
@@ -64,13 +82,19 @@ export function ActionDock({ playlists, backupPref, syncedAt }: DockData) {
           No edge bleed: the row lives inside the page gutters like every other band. */}
       <div className="sm:hidden">
         <div
-          className="thin-scroll flex snap-x gap-2 overflow-x-auto [-webkit-mask-image:linear-gradient(to_right,#000_calc(100%-1.5rem),transparent)] [mask-image:linear-gradient(to_right,#000_calc(100%-1.5rem),transparent)]"
+          onScroll={(e) => setRowScrolled(e.currentTarget.scrollLeft > 4)}
+          className={cn(
+            "thin-scroll flex snap-x gap-2 overflow-x-auto",
+            rowScrolled
+              ? "[-webkit-mask-image:linear-gradient(to_right,transparent,#000_1.5rem,#000_calc(100%-1.5rem),transparent)] [mask-image:linear-gradient(to_right,transparent,#000_1.5rem,#000_calc(100%-1.5rem),transparent)]"
+              : "[-webkit-mask-image:linear-gradient(to_right,#000_calc(100%-1.5rem),transparent)] [mask-image:linear-gradient(to_right,#000_calc(100%-1.5rem),transparent)]",
+          )}
         >
           {ACTIONS.map((a) => (
             <button
               key={a.key}
               type="button"
-              onClick={() => activate(a.key)}
+              onClick={(e) => activate(a.key, e)}
               className="flex h-11 shrink-0 snap-start items-center gap-1.5 rounded-full border border-border bg-card px-4 text-[13px] font-medium text-foreground/90 transition-colors active:bg-accent"
             >
               <a.icon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.9} />
@@ -87,7 +111,7 @@ export function ActionDock({ playlists, backupPref, syncedAt }: DockData) {
           <button
             key={a.key}
             type="button"
-            onClick={() => activate(a.key)}
+            onClick={(e) => activate(a.key, e)}
             className="flex h-10 items-center gap-2 rounded-full border border-border bg-card px-4 text-sm font-medium text-foreground/90 transition-colors hover:border-[color-mix(in_srgb,var(--border)_55%,var(--muted-foreground))] hover:bg-accent"
           >
             <a.icon className="size-4" strokeWidth={1.9} />
@@ -99,6 +123,10 @@ export function ActionDock({ playlists, backupPref, syncedAt }: DockData) {
       {/* Headless: kicks the background library scan when the cache is stale, renders nothing. */}
       <PlaylistsSync syncedAt={syncedAt} />
 
+      {queueAnchor ? (
+        <QueuePopover anchor={queueAnchor} onClose={() => setQueueAnchor(null)} />
+      ) : null}
+
       {action ? (
         <ActionSheet
           action={action}
@@ -107,6 +135,68 @@ export function ActionDock({ playlists, backupPref, syncedAt }: DockData) {
           onClose={() => setOpen(null)}
         />
       ) : null}
+    </>
+  );
+}
+
+// Save queue's confirm: a compact bubble AT the button (no sheet, no scrim, no repeated
+// copy — the pill already said what it does). One tap to run, X or outside tap to leave.
+// Enters with a quick pop, leaves with the same fade-down the sheet uses.
+function QueuePopover({
+  anchor,
+  onClose,
+}: {
+  anchor: { left: number; top: number };
+  onClose: () => void;
+}) {
+  const [pending, start] = useTransition();
+  const [closing, setClosing] = useState(false);
+  const dismiss = () => {
+    if (closing) return;
+    setClosing(true);
+    setTimeout(onClose, 180);
+  };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") dismiss();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const save = () => {
+    start(async () => {
+      const r = await saveQueueAction();
+      if (r.ok) toast.success(`Saved to "${r.name}"`);
+      else toast.error(r.error);
+      dismiss();
+    });
+  };
+  return (
+    <>
+      {/* Transparent outside-tap catcher — a toast-like bubble earns no dimmed scrim. */}
+      <button type="button" aria-label="Close" onClick={dismiss} className="fixed inset-0 z-50" />
+      <div
+        className={cn("den-pop fixed z-50 flex items-center gap-1 rounded-2xl border border-border bg-popover p-1.5 shadow-xl shadow-black/40", closing && "den-closing")}
+        style={{ left: anchor.left, top: anchor.top }}
+      >
+        <button
+          type="button"
+          onClick={save}
+          disabled={pending}
+          className="h-[44px] rounded-xl bg-foreground px-4 text-[15px] font-semibold text-background transition-opacity disabled:opacity-50 sm:h-9 sm:text-sm"
+        >
+          {pending ? "Saving…" : "Save queue"}
+        </button>
+        <button
+          type="button"
+          aria-label="Close"
+          onClick={dismiss}
+          className="flex size-[44px] shrink-0 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted hover:text-foreground sm:size-9"
+        >
+          <X className="size-6 sm:size-4" />
+        </button>
+      </div>
     </>
   );
 }
@@ -135,9 +225,20 @@ function ActionSheet({
     null,
   );
 
+  // Animated exit: every close path plays the roll-down (transform+opacity only, so it
+  // runs on the compositor — no layout per frame) and unmounts when it lands. Rem,
+  // 2026-08-13: closing must glide down like the search reveal, never blink out.
+  const [closing, setClosing] = useState(false);
+  const requestClose = () => {
+    setClosing((already) => {
+      if (!already) setTimeout(onClose, 230);
+      return true;
+    });
+  };
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") requestClose();
     };
     window.addEventListener("keydown", onKey);
     const prev = document.body.style.overflow;
@@ -146,7 +247,9 @@ function ActionSheet({
       window.removeEventListener("keydown", onKey);
       document.body.style.overflow = prev;
     };
-  }, [onClose]);
+    // requestClose closes over setState + onClose only; re-binding per render is noise.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const tap = (id: string) => {
     if (action.select === "single") {
@@ -234,7 +337,7 @@ function ActionSheet({
           break;
         }
       }
-      onClose();
+      requestClose();
     });
   };
 
@@ -245,7 +348,7 @@ function ActionSheet({
       const r = await saveCompareDiffAction(name, preview.kept.map((t) => t.uri));
       if (r.ok) toast.success(`Saved ${r.count} songs to "${name}"`);
       else toast.error(r.error);
-      onClose();
+      requestClose();
     });
   };
 
@@ -254,33 +357,35 @@ function ActionSheet({
       <button
         type="button"
         aria-label="Close"
-        onClick={onClose}
-        className="den-scrim absolute inset-0 bg-black/55"
+        onClick={requestClose}
+        className={cn("den-scrim absolute inset-0 bg-black/55", closing && "den-closing")}
       />
       <div
         role="dialog"
         aria-modal
         aria-label={action.label}
-        className="den-sheet relative flex max-h-[78dvh] w-full flex-col rounded-t-2xl border border-border bg-popover pb-[env(safe-area-inset-bottom)] sm:max-h-[70vh] sm:max-w-md sm:rounded-2xl"
+        className={cn(
+          "den-sheet relative flex max-h-[78dvh] w-full flex-col rounded-t-2xl border border-border bg-popover pb-[env(safe-area-inset-bottom)] sm:max-h-[70vh] sm:max-w-md sm:rounded-2xl",
+          closing && "den-closing",
+        )}
       >
-        {/* Grab handle (mobile affordance) */}
-        <div className="mx-auto mt-2.5 h-1 w-9 rounded-full bg-border sm:hidden" />
-        <div className="flex items-start justify-between gap-4 px-5 pt-4">
-          <div>
-            <h2 className="den-display text-lg">{action.label}</h2>
-            <p className="mt-1 text-[13px] leading-snug text-muted-foreground">
-              {preview
-                ? `${preview.kept.length} only in "${nameOf(picked[0])}" · ${preview.overlap.length} shared`
-                : action.blurb}
-            </p>
-          </div>
+        {/* No title row — the button just tapped already named the action, so the
+            description IS the header. No grab handle either: it read as draggable (it
+            wasn't) and echoed the iOS home indicator. The X spans the description's two
+            lines at finger size (Rem, 2026-08-13). */}
+        <div className="flex items-start justify-between gap-3 px-5 pt-5 sm:pt-4">
+          <p className="text-[16px] leading-snug text-muted-foreground sm:text-[13px]">
+            {preview
+              ? `${preview.kept.length} only in "${nameOf(picked[0])}" · ${preview.overlap.length} shared`
+              : action.blurb}
+          </p>
           <button
             type="button"
             aria-label="Close"
-            onClick={onClose}
-            className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            onClick={requestClose}
+            className="-mr-2 -mt-1 flex size-[44px] shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground sm:mt-0.5 sm:size-8"
           >
-            <X className="size-4" />
+            <X className="size-6 sm:size-4" />
           </button>
         </div>
 
@@ -299,7 +404,7 @@ function ActionSheet({
                 onClick={() => setGroup(key)}
                 aria-pressed={group === key}
                 className={cn(
-                  "h-8 rounded-lg px-3 text-[13px] font-medium transition-colors",
+                  "h-10 rounded-lg px-4 text-[15px] font-medium transition-colors sm:h-8 sm:px-3 sm:text-[13px]",
                   group === key ? "bg-secondary text-foreground" : "text-muted-foreground",
                 )}
               >
@@ -318,15 +423,15 @@ function ActionSheet({
               </p>
             ) : null}
             {preview.kept.map((t) => (
-              <div key={t.id} className="flex w-full items-center gap-3 px-5 py-2.5 text-left">
+              <div key={t.id} className="flex w-full items-center gap-3 px-5 py-3 text-left sm:py-2.5">
                 {t.albumImage ? (
-                  <img src={t.albumImage} alt="" className="size-10 shrink-0 rounded-md object-cover" />
+                  <img src={t.albumImage} alt="" className="size-12 shrink-0 rounded-md object-cover sm:size-10" />
                 ) : (
-                  <span className="size-10 shrink-0 rounded-md bg-secondary" />
+                  <span className="size-12 shrink-0 rounded-md bg-secondary sm:size-10" />
                 )}
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-medium">{t.title}</span>
-                  <span className="block truncate text-xs text-muted-foreground">{t.artist}</span>
+                  <span className="block truncate text-[16px] font-medium sm:text-sm">{t.title}</span>
+                  <span className="block truncate text-[13px] text-muted-foreground sm:text-xs">{t.artist}</span>
                 </span>
               </div>
             ))}
@@ -350,18 +455,18 @@ function ActionSheet({
                   onClick={() => tap(p.id)}
                   aria-pressed={on}
                   className={cn(
-                    "flex w-full items-center gap-3 px-5 py-2.5 text-left transition-colors",
+                    "flex w-full items-center gap-3 px-5 py-3 text-left transition-colors sm:py-2.5",
                     on ? "bg-white/[0.06]" : "hover:bg-white/[0.03]",
                   )}
                 >
                   {p.image ? (
-                    <img src={p.image} alt="" className="size-10 shrink-0 rounded-md object-cover" />
+                    <img src={p.image} alt="" className="size-12 shrink-0 rounded-md object-cover sm:size-10" />
                   ) : (
-                    <span className="size-10 shrink-0 rounded-md bg-secondary" />
+                    <span className="size-12 shrink-0 rounded-md bg-secondary sm:size-10" />
                   )}
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium">{p.name}</span>
-                    <span className="block text-xs tabular-nums text-muted-foreground">
+                    <span className="block truncate text-[16px] font-medium sm:text-sm">{p.name}</span>
+                    <span className="block text-[13px] tabular-nums text-muted-foreground sm:text-xs">
                       {p.trackCount} songs
                     </span>
                   </span>
@@ -385,7 +490,7 @@ function ActionSheet({
                 setOthers([]);
                 setGroup("base");
               }}
-              className="text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+              className="text-[15px] font-medium text-muted-foreground transition-colors hover:text-foreground sm:text-sm"
             >
               Clear
             </button>
@@ -396,7 +501,7 @@ function ActionSheet({
             type="button"
             onClick={preview ? saveDiff : confirm}
             disabled={pending || (!preview && !ready) || (!!preview && preview.kept.length === 0)}
-            className="h-10 rounded-lg bg-foreground px-5 text-sm font-semibold text-background transition-opacity disabled:opacity-40"
+            className="h-12 rounded-xl bg-foreground px-6 text-[16px] font-semibold text-background transition-opacity disabled:opacity-40 sm:h-10 sm:rounded-lg sm:px-5 sm:text-sm"
           >
             {pending
               ? "Working…"

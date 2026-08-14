@@ -203,6 +203,32 @@ html:has(#den-root) body {
 .den-sheet { animation: den-sheet-up 0.3s cubic-bezier(0.32, 0.72, 0, 1); }
 .den-scrim { animation: den-fade-in 0.25s ease-out; }
 
+/* Animated exits (Rem, 2026-08-13: closing must roll down, never blink out). All
+   transform/opacity — compositor-only, no per-frame layout. The sheet slides back the
+   way it came while the scrim lifts; the queue bubble pops in near its button and drops
+   away with a short fade-down. */
+@keyframes den-sheet-down {
+  from { transform: translateY(0); opacity: 1; }
+  to   { transform: translateY(100%); opacity: 0.6; }
+}
+@keyframes den-fade-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+.den-sheet.den-closing { animation: den-sheet-down 230ms cubic-bezier(0.4, 0, 0.7, 0.95) both; }
+.den-scrim.den-closing { animation: den-fade-out 230ms ease-out both; }
+
+@keyframes den-pop-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.94); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes den-pop-out {
+  from { opacity: 1; transform: none; }
+  to   { opacity: 0; transform: translateY(8px); }
+}
+.den-pop { animation: den-pop-in 170ms cubic-bezier(0.2, 0.8, 0.25, 1) both; }
+.den-pop.den-closing { animation: den-pop-out 180ms ease-in both; }
+
 /* ---- Day list: the "From" cell scrolls its own text on hover ---------------------
    A song usually lives in more than one playlist, so that cell's text is often wider than the
    column — which cannot grow without pushing every other column around. It clips to an ellipsis
@@ -226,6 +252,10 @@ html:has(#den-root) body {
   .den-panda-awake,
   .den-sheet,
   .den-scrim,
+  .den-sheet.den-closing,
+  .den-scrim.den-closing,
+  .den-pop,
+  .den-pop.den-closing,
   .np-live,
   #den-root.den-reveal .den-row,
   .den-marquee[data-run] > span {
@@ -234,13 +264,14 @@ html:has(#den-root) body {
 }
 
 /* ---- The play handoff (bar -> today's list) ------------------------------------- */
-/* The row a finished song just landed on: a brief lift-in plus a green wash that decays,
-   timed to read as the song "arriving" from the player bar in the same beat the bar
-   moves on. Applied by den-home for ~1.6s via the freshKey state. */
+/* The row a finished song just landed on: a brief lift-in, timed to read as the song
+   "arriving" from the player bar in the same beat the bar moves on. Applied by den-home
+   for ~1.6s via the freshKey state. No colour wash — the green tint read as an error
+   state on the row (Rem, 2026-08-13); the motion alone is the arrival. */
 @keyframes den-row-fresh {
-  0%   { opacity: 0; transform: translateY(-6px); background-color: rgba(29, 185, 84, 0.14); }
-  35%  { opacity: 1; transform: translateY(0);    background-color: rgba(29, 185, 84, 0.10); }
-  100% { opacity: 1; transform: translateY(0);    background-color: transparent; }
+  0%   { opacity: 0; transform: translateY(-6px); }
+  35%  { opacity: 1; transform: translateY(0); }
+  100% { opacity: 1; transform: translateY(0); }
 }
 .row-fresh > td {
   animation: den-row-fresh 1.4s cubic-bezier(0.2, 0.7, 0.3, 1) both;

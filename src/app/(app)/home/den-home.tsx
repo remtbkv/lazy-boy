@@ -1245,12 +1245,18 @@ export function DenHome({
                               "row-fresh",
                           )}
                         >
-                          <td className="py-2 pr-3">
+                          {/* touch-callout off + phone select-none: a long-press READS
+                              the clipped title (HoldTitle) instead of raising the iOS
+                              selection callout over the row (Rem, 2026-08-13). */}
+                          <td className="py-2 pr-3 [-webkit-touch-callout:none]">
                             <div className="flex min-w-0 items-center gap-3">
-                              <Art image={t.albumImage} size={10} />
+                              {/* Phone: art fills the row's actual height (the three text
+                                  lines) instead of floating small inside it — same row
+                                  height, text shifted right (Rem). */}
+                              <Art image={t.albumImage} sizeCls="size-14 sm:size-10" />
                               <div className="min-w-0 flex-1">
-                                <p className="truncate select-text">{t.name}</p>
-                                <p className="truncate text-[13px] text-muted-foreground select-text">
+                                <HoldTitle text={t.name} />
+                                <p className="truncate text-[13px] text-muted-foreground select-none sm:select-text">
                                   {t.artist}
                                 </p>
                                 {/* Phones hide the side columns — fold time + source here.
@@ -1451,12 +1457,63 @@ function FromCell({ text }: { text: string }) {
   );
 }
 
-function Art({ image, size = 11 }: { image: string | null; size?: 9 | 10 | 11 }) {
-  const cls = size === 9 ? "size-9" : size === 10 ? "size-10" : "size-11";
+function Art({
+  image,
+  size = 11,
+  sizeCls,
+}: {
+  image: string | null;
+  size?: 9 | 10 | 11;
+  /** Responsive size classes that replace the `size` mapping (e.g. "size-14 sm:size-10"). */
+  sizeCls?: string;
+}) {
+  const cls = sizeCls ?? (size === 9 ? "size-9" : size === 10 ? "size-10" : "size-11");
   return image ? (
     <img src={image} alt="" loading="lazy" className={`${cls} shrink-0 rounded-md object-cover`} />
   ) : (
     <span className={`${cls} shrink-0 rounded-md bg-secondary`} />
+  );
+}
+
+// A day row's title. Desktop: a plain selectable truncated line. Phone: press-and-hold
+// walks the clipped remainder into view (same measured marquee as the From cell — the
+// distance and speed come from the real overflow) and releases back; selection is off
+// there so the hold reads the title instead of raising the text-selection callout.
+function HoldTitle({ text }: { text: string }) {
+  const box = useRef<HTMLParagraphElement>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const start = () => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => {
+      const el = box.current;
+      if (!el) return;
+      const over = el.scrollWidth - el.clientWidth;
+      if (over <= 1) return;
+      el.style.setProperty("--den-marquee-x", `${-over}px`);
+      el.style.setProperty(
+        "--den-marquee-dur",
+        `${(over / MARQUEE_PX_PER_S / MARQUEE_MOVING).toFixed(2)}s`,
+      );
+      el.dataset.run = "";
+    }, 350);
+  };
+  const stop = () => {
+    if (timer.current) clearTimeout(timer.current);
+    const el = box.current;
+    if (el) delete el.dataset.run;
+  };
+  return (
+    <p
+      ref={box}
+      onTouchStart={start}
+      onTouchEnd={stop}
+      onTouchCancel={stop}
+      // A moving finger is a scroll, not a hold.
+      onTouchMove={stop}
+      className="den-marquee truncate select-none sm:select-text"
+    >
+      <span>{text}</span>
+    </p>
   );
 }
 
