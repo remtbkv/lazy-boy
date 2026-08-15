@@ -1,38 +1,59 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button";
 
+// The (app) error boundary. Three jobs beyond showing the message:
+//   • REPORT: production RSC errors reach the browser as a generic line plus a digest —
+//     the digest is the only thread back to the server logs, and Vercel's runtime logs
+//     age out within the hour. So every landing here beacons page + digest + message into
+//     client_metrics (the same js-error channel /usage prints verbatim), which is how a
+//     "something went wrong at 9am" stays diagnosable at 9pm.
+//   • SELF-HEAL: one guarded reload. The known transient classes both recover on retry —
+//     a stale-build server-action id after a deploy, and a first-query-of-the-morning
+//     timeout against the store over the funnel (Rem's stale-tab refresh, 2026-08-15).
+//     The 10s timestamp guard means a genuinely persistent failure reloads once, comes
+//     back here, and shows the real error page instead of looping.
+//   • The sign-in link, for the auth case where a reload can't help.
 export default function AppError({
   error,
 }: {
   error: Error & { digest?: string };
 }) {
   const isAuthError = /not authenticated/i.test(error.message);
-  // A deploy gives server actions fresh ids, so a tab left open across a deploy posts an id
-  // the new build doesn't have ("Failed to find Server Action …"). That's purely a stale-build
-  // mismatch, not a real failure — reload once to pull the current build and land back where
-  // you were. Guarded by a timestamp so a genuinely persistent error can't loop (won't retry
-  // within 10s), while a later deploy still recovers.
-  const isStaleAction = /server action|failed to find/i.test(error.message);
-  useEffect(() => {
-    if (!isStaleAction) return;
-    const KEY = "stale-action-reload-at";
-    const last = Number(sessionStorage.getItem(KEY) || 0);
-    if (Date.now() - last < 10_000) return;
-    sessionStorage.setItem(KEY, String(Date.now()));
-    window.location.reload();
-  }, [isStaleAction]);
+  const [retrying, setRetrying] = useState(false);
 
-  if (isStaleAction) {
+  useEffect(() => {
+    try {
+      const meta = `rsc-error ${error.digest ?? "no-digest"} ${error.message}`.slice(0, 200);
+      const body = JSON.stringify({
+        session: "",
+        events: [{ page: location.pathname, event: "js-error", value: 1, meta }],
+      });
+      navigator.sendBeacon?.("/api/metrics", new Blob([body], { type: "application/json" }));
+    } catch {
+      /* reporting must never add its own error */
+    }
+  }, [error]);
+
+  useEffect(() => {
+    if (isAuthError) return;
+    const KEY = "app-error-reload-at";
+    const last = Number(sessionStorage.getItem(KEY) || 0);
+    if (Date.now() - last < 10_000) return; // second failure inside 10s: show the page
+    sessionStorage.setItem(KEY, String(Date.now()));
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one flip, then a reload
+    setRetrying(true);
+    window.location.reload();
+  }, [isAuthError]);
+
+  if (retrying) {
     return (
       <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-24 pt-7 sm:px-6 sm:pb-20 sm:pt-6">
         <div className="mx-auto max-w-md space-y-2 py-16 text-center">
-          <h2 className="text-xl font-semibold">Updating…</h2>
-          <p className="text-sm text-muted-foreground">
-            Loading the latest version.
-          </p>
+          <h2 className="text-xl font-semibold">Reloading…</h2>
+          <p className="text-sm text-muted-foreground">One moment.</p>
         </div>
       </main>
     );
@@ -47,11 +68,23 @@ export default function AppError({
             ? "Your Spotify session expired. Please sign in again."
             : error.message}
         </p>
+        {error.digest ? (
+          <p className="font-mono text-xs text-muted-foreground/60">{error.digest}</p>
+        ) : null}
         {/* Neutral outline, matching the in-app buttons (quick-action pills) — not the green
           primary, which we reserve for the Spotify-brand login CTA. */}
-        <Link href="/login" className={buttonVariants({ variant: "outline" })}>
-          Back to sign in
-        </Link>
+        <div className="flex items-center justify-center gap-2">
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className={buttonVariants({ variant: "outline" })}
+          >
+            Try again
+          </button>
+          <Link href="/login" className={buttonVariants({ variant: "outline" })}>
+            Back to sign in
+          </Link>
+        </div>
       </div>
     </main>
   );

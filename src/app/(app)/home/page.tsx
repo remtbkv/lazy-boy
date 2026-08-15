@@ -68,7 +68,13 @@ export default async function HomePage() {
   // "The Home payload"). The page used to run those as two or three sequential query waves,
   // each paying a full round trip to the funnel-reached primary before any work started, to
   // recompute an answer that only moves when a sync writes.
-  const [session, payload] = await Promise.all([auth(), getHomePayload()]);
+  // The payload read gets a catch: a transient store hiccup (cold funnel, sqld restart)
+  // should fall through to the inline path — which retries the connection — rather than
+  // crash the render into the error boundary (Rem's stale-tab morning refresh, 2026-08-15).
+  const [session, payload] = await Promise.all([
+    auth(),
+    getHomePayload().catch(() => null),
+  ]);
   // Gate here, not just in the layout: Next renders layout and page in parallel, so the
   // layout's redirect alone still flushes this page's data into the 307 body (SECURITY.md).
   if (!session || session.error) redirect("/login");

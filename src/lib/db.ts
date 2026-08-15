@@ -683,6 +683,15 @@ async function recomputeOrphanFlags(
   return changed;
 }
 
+// Backfilled plays (context_type = 'backfill') are catalog imports, not listening: songs
+// from the pre-tracking era logged once (played_at = the 2026-05-30 sentinel, the day
+// before tracking began) so they stay known and searchable after their playlists are
+// deleted (Rem, 2026-08-15; scripts/backfill-scan.mjs writes them). They are EXCLUDED
+// from every listening counter — all-time totals, the day strip, day rows — and INCLUDED
+// wherever a song's history/existence is the point (the search payloads, per-play
+// history, source labels, the all-time list).
+const NOT_BACKFILL = `(p.context_type IS NULL OR p.context_type <> 'backfill')`;
+
 // `source` is the context (playlist/album name, or type) of the MOST RECENT play
 // only — not every context the track ever appeared in, which would be misleading
 // (a one-off queue shouldn't read as "in this playlist").
@@ -722,6 +731,7 @@ const playsWithListened = cache(async (): Promise<ListenRow[]> => {
   const res = await client.execute(
     `SELECT p.played_at AS playedAt, p.track_id AS trackId, t.duration_ms AS durationMs
      FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
+     WHERE ${NOT_BACKFILL}
      ORDER BY p.played_at ASC`,
   );
   const rows = plainRows(res.rows) as unknown as {
@@ -965,7 +975,7 @@ async function readDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
     // did not reproduce. LEFT is kept as the default style, not for performance.
     sql: `SELECT p.played_at AS playedAt, p.track_id AS trackId, t.duration_ms AS durationMs
           FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
-          WHERE p.played_at >= :cutoff
+          WHERE p.played_at >= :cutoff AND ${NOT_BACKFILL}
           ORDER BY p.played_at ASC`,
     args: { cutoff },
   });
@@ -1010,7 +1020,7 @@ export async function hasPlaysBeforeDay(day: string, offsetMin = 0): Promise<boo
   // Start of `day` in the user's local zone, as a UTC instant.
   const cutoff = new Date(Date.parse(day + "T00:00:00.000Z") - offMs).toISOString();
   const res = await client.execute({
-    sql: `SELECT EXISTS(SELECT 1 FROM plays WHERE played_at < :cutoff) AS e`,
+    sql: `SELECT EXISTS(SELECT 1 FROM plays p WHERE p.played_at < :cutoff AND ${NOT_BACKFILL}) AS e`,
     args: { cutoff },
   });
   return !!(res.rows[0] && Number(res.rows[0].e));
@@ -1054,6 +1064,7 @@ async function readPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]>
   const res = await client.execute({
     sql: `${SELECT_TRACK}
           WHERE p.played_at >= :from AND p.played_at < :to
+            AND ${NOT_BACKFILL}
             AND ${localDay("p.played_at", offsetMin)} = :day
           GROUP BY t.id ORDER BY plays DESC, lastPlayed DESC`,
     args: {
