@@ -1015,11 +1015,16 @@ export function DenHome({
     artist: string;
     x: number;
     y: number;
+    /** The row's played-from context, when the menu came from a DAY row: "Play from"
+     *  offers only that playlist (Rem, 2026-08-16 — not every playlist the song lives
+     *  in; that broader list belongs to search rows, which leave this undefined). */
+    from?: string | null;
   } | null>(null);
-  const openMenu = (name: string, artist: string) => (e: React.MouseEvent) => {
-    e.preventDefault();
-    setCtxMenu({ name, artist, x: e.clientX, y: e.clientY });
-  };
+  const openMenu =
+    (name: string, artist: string, from?: string | null) => (e: React.MouseEvent) => {
+      e.preventDefault();
+      setCtxMenu({ name, artist, x: e.clientX, y: e.clientY, from });
+    };
 
   // ---- Row selection (Spotify-ported): click or right-click holds a wash on the row so
   // the context menu's target is visible; moves with the next selection, clears on an
@@ -1293,7 +1298,7 @@ export function DenHome({
                           onClick={() => selectRow(rowKey)}
                           onContextMenu={(e) => {
                             selectRow(rowKey);
-                            openMenu(t.name, t.artist)(e);
+                            openMenu(t.name, t.artist, from)(e);
                           }}
                           style={{ "--i": i } as React.CSSProperties}
                           className={cn(
@@ -1423,6 +1428,7 @@ export function DenHome({
         <IdentityTrackMenu
           name={ctxMenu.name}
           artist={ctxMenu.artist}
+          playedFrom={ctxMenu.from}
           x={ctxMenu.x}
           y={ctxMenu.y}
           onClose={() => setCtxMenu(null)}

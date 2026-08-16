@@ -15,12 +15,17 @@ import type { Track } from "@/lib/spotify";
 export function IdentityTrackMenu({
   name,
   artist,
+  playedFrom,
   x,
   y,
   onClose,
 }: {
   name: string;
   artist: string;
+  /** When set (day rows), "Play from" offers ONLY the playlist the play actually came
+   *  from — the From column's answer — not every playlist holding the song. undefined
+   *  (search rows) keeps the full membership list; null/no-match offers none. */
+  playedFrom?: string | null;
   x: number;
   y: number;
   onClose: () => void;
@@ -63,7 +68,11 @@ export function IdentityTrackMenu({
       onClose={onClose}
       withPlay
       playOnly
-      playFrom={res.playlists}
+      playFrom={
+        playedFrom === undefined
+          ? res.playlists
+          : res.playlists.filter((p) => p.name === playedFrom)
+      }
     />
   );
 }
