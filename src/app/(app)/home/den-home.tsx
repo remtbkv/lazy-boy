@@ -1021,6 +1021,24 @@ export function DenHome({
     setCtxMenu({ name, artist, x: e.clientX, y: e.clientY });
   };
 
+  // ---- Row selection (Spotify-ported): click or right-click holds a wash on the row so
+  // the context menu's target is visible; moves with the next selection, clears on an
+  // outside click. Pointer devices only — a phone tap shouldn't flash a selection.
+  const [selRow, setSelRow] = useState<string | null>(null);
+  const selectRow = (key: string) => {
+    if (window.matchMedia("(hover: hover)").matches) setSelRow(key);
+  };
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      const el = e.target;
+      if (el instanceof Element && el.closest(".den-rowstate, [data-den-menu], [role='menu'], [role='dialog']"))
+        return;
+      setSelRow(null);
+    };
+    document.addEventListener("pointerdown", onDown);
+    return () => document.removeEventListener("pointerdown", onDown);
+  }, []);
+
   // ---- Sort (day / all-time list) ----
   const [sort, setSort] = useState<Sort>("recent");
   const [dir, setDir] = useState<"asc" | "desc">("desc");
@@ -1268,13 +1286,19 @@ export function DenHome({
                   <tbody className="divide-y divide-border/50">
                     {displayRows.map((t, i) => {
                       const from = t.source;
+                      const rowKey = `${t.id}-${t.lastPlayed}-${i}`;
                       return (
                         <tr
-                          key={`${t.id}-${t.lastPlayed}-${i}`}
-                          onContextMenu={openMenu(t.name, t.artist)}
+                          key={rowKey}
+                          onClick={() => selectRow(rowKey)}
+                          onContextMenu={(e) => {
+                            selectRow(rowKey);
+                            openMenu(t.name, t.artist)(e);
+                          }}
                           style={{ "--i": i } as React.CSSProperties}
                           className={cn(
-                            "den-row",
+                            "den-row den-rowstate",
+                            selRow === rowKey && "den-rowsel",
                             freshKey === `${t.artist.toLowerCase()}\n${t.name.toLowerCase()}` &&
                               "row-fresh",
                           )}

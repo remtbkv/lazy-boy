@@ -116,6 +116,7 @@ export function TrackContextMenu({
   return (
     <div
       ref={ref}
+      data-den-menu
       className="fixed z-50 w-max max-w-[calc(100vw-1rem)] overflow-hidden rounded-lg border border-border bg-popover p-1 text-sm shadow-2xl shadow-black/50 ring-1 ring-white/5"
       style={{ left: pos.left, top: pos.top }}
       onClick={(e) => e.stopPropagation()}

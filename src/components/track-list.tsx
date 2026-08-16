@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Clock3, Pause, Play } from "lucide-react";
 import { toast } from "@/lib/toast";
 import { playPlaylistTrackAction } from "@/app/(app)/actions";
@@ -51,6 +51,22 @@ export function TrackList({
   const [sort, setSort] = useState<Sort>("original");
   const [dir, setDir] = useState<"asc" | "desc">("asc");
   const [menu, setMenu] = useState<{ x: number; y: number; track: Track } | null>(null);
+  // Spotify-ported row selection: click or right-click holds a wash on the row (see
+  // den.css .den-rowstate) so the context menu's target is visible; outside click clears.
+  const [selRow, setSelRow] = useState<string | null>(null);
+  const selectRow = (key: string) => {
+    if (window.matchMedia("(hover: hover)").matches) setSelRow(key);
+  };
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      const el = e.target;
+      if (el instanceof Element && el.closest(".den-rowstate, [data-den-menu], [role='menu'], [role='dialog']"))
+        return;
+      setSelRow(null);
+    };
+    document.addEventListener("pointerdown", onDown);
+    return () => document.removeEventListener("pointerdown", onDown);
+  }, []);
   // URIs removed this session — filtered out immediately so the row disappears
   // without waiting on the server revalidation.
   const [removed, setRemoved] = useState<Set<string>>(new Set());
@@ -158,13 +174,16 @@ export function TrackList({
             <li key={`${t.id}-${i}`} id={`t-${t.id}`} className="scroll-mt-24">
               <div
                 className={
-                  "relative grid cursor-default grid-cols-[1.5rem_1fr_auto] items-center gap-3 px-3 py-2 transition-colors hover:bg-accent/30 md:grid-cols-[1.5rem_2fr_1.4fr_auto]" +
+                  "den-rowstate relative grid cursor-default grid-cols-[1.5rem_1fr_auto] items-center gap-3 rounded-md px-3 py-2 transition-colors md:grid-cols-[1.5rem_2fr_1.4fr_auto]" +
+                  (selRow === `${t.id}-${i}` ? " den-rowsel" : "") +
                   (isCurrent ? " bg-white/5" : "")
                 }
+                onClick={() => selectRow(`${t.id}-${i}`)}
                 onDoubleClick={() => play(t)}
                 onContextMenu={(e) => {
                   e.preventDefault();
                   e.stopPropagation(); // don't let the menu's own outside-click closer fire
+                  selectRow(`${t.id}-${i}`);
                   setMenu({ x: e.clientX, y: e.clientY, track: t });
                 }}
               >

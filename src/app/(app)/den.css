@@ -229,6 +229,33 @@ html:has(#den-root) body {
 .den-pop { animation: den-pop-in 170ms cubic-bezier(0.2, 0.8, 0.25, 1) both; }
 .den-pop.den-closing { animation: den-pop-out 180ms ease-in both; }
 
+/* ---- Row states, ported from Spotify (Rem, 2026-08-16) ---------------------------
+   Hover: a quiet wash. Click or RIGHT-CLICK: a stronger wash that STAYS after the cursor
+   leaves — so the row a context menu is acting on is unmistakable — until the selection
+   moves to another row or an outside click clears it (den-home / track-list own that
+   state). Spotify's own values eyeballed off its desktop client on near-black: hover
+   ≈ 7% white, selected ≈ 16%. Backgrounds live on the CELLS for table rows (a tr's
+   background can't clip to a radius), on the row itself for div lists; the end cells
+   round like Spotify's row blocks. Hover only where hovering exists. */
+@media (hover: hover) {
+  tr.den-rowstate:hover > td,
+  div.den-rowstate:hover {
+    background-color: rgba(255, 255, 255, 0.07);
+  }
+}
+tr.den-rowstate.den-rowsel > td,
+div.den-rowstate.den-rowsel {
+  background-color: rgba(255, 255, 255, 0.16);
+}
+tr.den-rowstate > td:first-child {
+  border-top-left-radius: 6px;
+  border-bottom-left-radius: 6px;
+}
+tr.den-rowstate > td:last-child {
+  border-top-right-radius: 6px;
+  border-bottom-right-radius: 6px;
+}
+
 /* ---- Day list: the "From" cell scrolls its own text on hover ---------------------
    A song usually lives in more than one playlist, so that cell's text is often wider than the
    column — which cannot grow without pushing every other column around. It clips to an ellipsis
