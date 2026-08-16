@@ -136,11 +136,29 @@ function getClient(): Promise<Client> {
   return ready;
 }
 
+// Every store query rides this fetch. Some Vercel invocations intermittently fail to
+// RESOLVE the funnel hostname (`getaddrinfo ENOTFOUND ubuntu.tail026729.ts.net` — RSC
+// digest 3227098399, Rem's "refresh crashes, second refresh is fine", 2026-08-16): a
+// resolver blip, not a store outage, and the very next attempt typically succeeds. So a
+// network-level failure (fetch rejects — DNS, reset; NOT an HTTP error response) retries
+// twice with a short pause before it is allowed to surface. Bounded: worst case adds
+// ~700ms to a request that was about to crash the render.
+async function retryingFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fetch(input, init);
+    } catch (e) {
+      if (attempt >= 2) throw e;
+      await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+    }
+  }
+}
+
 async function init(): Promise<Client> {
   if (url.startsWith("file:")) {
     fs.mkdirSync(path.join(process.cwd(), "data"), { recursive: true });
   }
-  const client = createClient({ url, authToken, intMode: "number" });
+  const client = createClient({ url, authToken, intMode: "number", fetch: retryingFetch });
   await client.executeMultiple(`
     CREATE TABLE IF NOT EXISTS tracks (
       id TEXT PRIMARY KEY,
