@@ -146,7 +146,15 @@ function getClient(): Promise<Client> {
 async function retryingFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
     try {
-      return await fetch(input, init);
+      const res = await fetch(input, init);
+      // Gateway-class failures (502/503/504) come from the funnel edge, not sqld — the
+      // request almost certainly never executed, so a retry is safe even for writes.
+      // A 500 is sqld itself and is NOT retried: it may have executed.
+      if (attempt < 2 && (res.status === 502 || res.status === 503 || res.status === 504)) {
+        await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+        continue;
+      }
+      return res;
     } catch (e) {
       if (attempt >= 2) throw e;
       await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
