@@ -279,6 +279,19 @@ async function init(): Promise<Client> {
   if (!playsCols.has("ctx_orphan")) {
     await client.execute("ALTER TABLE plays ADD COLUMN ctx_orphan INTEGER");
   }
+  // plays.skipped: the listened-fraction verdict per play (Rem, 2026-08-16 — a play with
+  // less than 35% of the song actually listened is a SKIP: not listed, not counted).
+  // NULL = pending: the newest play has no successor yet, so its listened time can't be
+  // estimated; treated as not-skipped until recomputeSkipFlags() rules on it.
+  if (!playsCols.has("skipped")) {
+    await client.execute("ALTER TABLE plays ADD COLUMN skipped INTEGER");
+    // Backfill imports are catalog rows, not listening — verdict them immediately so they
+    // never sit in the pending set.
+    await client.execute("UPDATE plays SET skipped = 0 WHERE context_type = 'backfill'");
+  }
+  await client.execute(
+    "CREATE INDEX IF NOT EXISTS idx_plays_skip_null ON plays (played_at) WHERE skipped IS NULL",
+  );
   // Every orphan recompute, and playedTracksInContext (Resume), select plays BY context_uri;
   // without this they scan the whole plays table.
   await client.execute(
@@ -525,6 +538,9 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
   if (insertResultIdx.length > 0) {
     // Give the plays we just inserted their membership verdict before anything reads them.
     await recomputeOrphanFlags({ newOnly: true });
+    // …and rule on skips: each newly-landed play gives its PREDECESSOR a successor, so
+    // the pending verdicts can now be decided.
+    await recomputeSkipFlags();
   }
   // The write moved the marker; drop this request's copy so the read that follows re-keys.
   if (changed) dropWriteSeqCache();
@@ -725,6 +741,50 @@ async function recomputeOrphanFlags(
 // history, source labels, the all-time list).
 const NOT_BACKFILL = `(p.context_type IS NULL OR p.context_type <> 'backfill')`;
 
+// A play with less than this fraction of the song actually listened is a SKIP — spam-
+// clicking through tracks must not read as listening (Rem, 2026-08-16). Listened time is
+// estimated exactly as the hours are: the gap to the NEXT play, capped at song length.
+// The verdict is materialized in plays.skipped by recomputeSkipFlags() (NULL = the
+// newest play, still pending — shown until its successor rules on it), and every list
+// and counter filters on it.
+const SKIP_FRACTION = 0.35;
+const NOT_SKIPPED = `(p.skipped IS NULL OR p.skipped = 0)`;
+
+/** Rule on every pending (skipped IS NULL) real play that now has a successor: listened
+ *  = min(gap to next play, duration); skipped = listened < 35% of duration. Unknown
+ *  duration or a clock-weird negative gap counts as not-skipped (be permissive). The
+ *  newest play stays pending. Runs after each sync that inserted plays; the pending set
+ *  is tiny (idx_plays_skip_null). */
+async function recomputeSkipFlags(): Promise<void> {
+  const client = await getClient();
+  const res = await client.execute(`
+    SELECT p.id AS id, p.played_at AS playedAt, p.skipped AS skipped,
+           t.duration_ms AS durationMs
+    FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
+    WHERE ${NOT_BACKFILL}
+      AND p.played_at >= (SELECT COALESCE(MIN(p2.played_at), '9999')
+                          FROM plays p2
+                          WHERE p2.skipped IS NULL
+                            AND (p2.context_type IS NULL OR p2.context_type <> 'backfill'))
+    ORDER BY p.played_at ASC`);
+  const rows = plainRows(res.rows) as unknown as {
+    id: number;
+    playedAt: string;
+    skipped: number | null;
+    durationMs: number | null;
+  }[];
+  const updates: InStatement[] = [];
+  for (let i = 0; i < rows.length - 1; i++) {
+    const r = rows[i];
+    if (r.skipped !== null) continue;
+    const gap = Date.parse(rows[i + 1].playedAt) - Date.parse(r.playedAt);
+    const dur = r.durationMs;
+    const skipped = dur && gap >= 0 && Math.min(gap, dur) < SKIP_FRACTION * dur ? 1 : 0;
+    updates.push({ sql: "UPDATE plays SET skipped = ? WHERE id = ?", args: [skipped, r.id] });
+  }
+  if (updates.length > 0) await client.batch(updates, "write");
+}
+
 // `source` is the context (playlist/album name, or type) of the MOST RECENT play
 // only — not every context the track ever appeared in, which would be misleading
 // (a one-off queue shouldn't read as "in this playlist").
@@ -762,7 +822,8 @@ type ListenRow = { playedAt: string; trackId: string; listenedMs: number };
 const playsWithListened = cache(async (): Promise<ListenRow[]> => {
   const client = await getClient();
   const res = await client.execute(
-    `SELECT p.played_at AS playedAt, p.track_id AS trackId, t.duration_ms AS durationMs
+    `SELECT p.played_at AS playedAt, p.track_id AS trackId, t.duration_ms AS durationMs,
+            p.skipped AS skipped
      FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
      WHERE ${NOT_BACKFILL}
      ORDER BY p.played_at ASC`,
@@ -771,18 +832,25 @@ const playsWithListened = cache(async (): Promise<ListenRow[]> => {
     playedAt: string;
     trackId: string;
     durationMs: number | null;
+    skipped: number | null;
   }[];
-  return rows.map((r, i) => {
-    const dur = r.durationMs ?? LISTEN_FALLBACK_MS;
-    const next = rows[i + 1];
-    const gap = next ? Date.parse(next.playedAt) - Date.parse(r.playedAt) : null;
-    const ran = gap != null && gap >= 0 ? Math.min(dur, gap) : dur;
-    return {
-      playedAt: r.playedAt,
-      trackId: r.trackId,
-      listenedMs: ran < LISTEN_MIN_MS ? 0 : ran,
-    };
-  });
+  // Gaps are computed over the FULL chain (a skip still ends its predecessor's listen at
+  // the right moment), then flagged skips drop out of the result — so neither the play
+  // count nor the listened total sees them.
+  return rows
+    .map((r, i) => {
+      const dur = r.durationMs ?? LISTEN_FALLBACK_MS;
+      const next = rows[i + 1];
+      const gap = next ? Date.parse(next.playedAt) - Date.parse(r.playedAt) : null;
+      const ran = gap != null && gap >= 0 ? Math.min(dur, gap) : dur;
+      return {
+        playedAt: r.playedAt,
+        trackId: r.trackId,
+        listenedMs: ran < LISTEN_MIN_MS ? 0 : ran,
+        skipped: r.skipped === 1,
+      };
+    })
+    .filter((r) => !r.skipped);
 });
 
 // One row per individual play (no GROUP BY): each listen keeps its own timestamp and the
@@ -803,14 +871,14 @@ export async function searchHistory(query: string, limit = 300): Promise<TrackSt
   const q = query.trim();
   if (!q) {
     const res = await client.execute({
-      sql: `${SELECT_PLAY} ORDER BY p.played_at DESC LIMIT ?`,
+      sql: `${SELECT_PLAY} WHERE ${NOT_SKIPPED} ORDER BY p.played_at DESC LIMIT ?`,
       args: [limit],
     });
     return plainRows(res.rows) as unknown as TrackStats[];
   }
   const like = `%${q}%`;
   const res = await client.execute({
-    sql: `${SELECT_PLAY} WHERE t.name LIKE ? OR t.artist LIKE ?
+    sql: `${SELECT_PLAY} WHERE (t.name LIKE ? OR t.artist LIKE ?) AND ${NOT_SKIPPED}
           ORDER BY p.played_at DESC LIMIT ?`,
     args: [like, like, limit],
   });
@@ -913,7 +981,7 @@ export async function getAllTimePlays(limit: number): Promise<TrackStats[]> {
 async function readAllTimePlays(limit: number): Promise<TrackStats[]> {
   const client = await getClient();
   const res = await client.execute({
-    sql: `${SELECT_TRACK} GROUP BY t.id
+    sql: `${SELECT_TRACK} WHERE ${NOT_SKIPPED} GROUP BY t.id
           ORDER BY plays DESC, lastPlayed DESC, t.name ASC LIMIT ?`,
     args: [limit],
   });
@@ -1006,7 +1074,8 @@ async function readDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
     // LEFT and INNER measured indistinguishable here, rows identical (primary 66/104ms LEFT
     // vs 68/47ms INNER, medians n=15×2, 2026-08-01) — the old "INNER was 150ms-1.5s+" figure
     // did not reproduce. LEFT is kept as the default style, not for performance.
-    sql: `SELECT p.played_at AS playedAt, p.track_id AS trackId, t.duration_ms AS durationMs
+    sql: `SELECT p.played_at AS playedAt, p.track_id AS trackId, t.duration_ms AS durationMs,
+                 p.skipped AS skipped
           FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
           WHERE p.played_at >= :cutoff AND ${NOT_BACKFILL}
           ORDER BY p.played_at ASC`,
@@ -1016,6 +1085,7 @@ async function readDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
     playedAt: string;
     trackId: string;
     durationMs: number | null;
+    skipped: number | null;
   }[];
   // The window's real row count, so this one is modeled off what was actually scanned.
   void ledgerAdd("day_strip", dailyStatsRows(rows.length));
@@ -1029,6 +1099,8 @@ async function readDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
     const gap = next ? Date.parse(next.playedAt) - Date.parse(rows[i].playedAt) : null;
     const ran = gap != null && gap >= 0 ? Math.min(dur, gap) : dur;
     const listenedMs = ran < LISTEN_MIN_MS ? 0 : ran;
+    // Skips stay in the gap chain (above) but never count as plays or time.
+    if (rows[i].skipped === 1) continue;
     const day = new Date(Date.parse(rows[i].playedAt) + offMs).toISOString().slice(0, 10);
     let acc = byDay.get(day);
     if (!acc) {
@@ -1053,7 +1125,7 @@ export async function hasPlaysBeforeDay(day: string, offsetMin = 0): Promise<boo
   // Start of `day` in the user's local zone, as a UTC instant.
   const cutoff = new Date(Date.parse(day + "T00:00:00.000Z") - offMs).toISOString();
   const res = await client.execute({
-    sql: `SELECT EXISTS(SELECT 1 FROM plays p WHERE p.played_at < :cutoff AND ${NOT_BACKFILL}) AS e`,
+    sql: `SELECT EXISTS(SELECT 1 FROM plays p WHERE p.played_at < :cutoff AND ${NOT_BACKFILL} AND ${NOT_SKIPPED}) AS e`,
     args: { cutoff },
   });
   return !!(res.rows[0] && Number(res.rows[0].e));
@@ -1097,7 +1169,7 @@ async function readPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]>
   const res = await client.execute({
     sql: `${SELECT_TRACK}
           WHERE p.played_at >= :from AND p.played_at < :to
-            AND ${NOT_BACKFILL}
+            AND ${NOT_BACKFILL} AND ${NOT_SKIPPED}
             AND ${localDay("p.played_at", offsetMin)} = :day
           GROUP BY t.id ORDER BY plays DESC, lastPlayed DESC`,
     args: {
@@ -1532,6 +1604,7 @@ async function readHistoryIndex(): Promise<HistoryIndex> {
             p.played_at AS playedAt, ${sourceExpr("p", "c")} AS source
      FROM plays p JOIN tracks t ON t.id = p.track_id
        LEFT JOIN contexts c ON c.uri = p.context_uri
+     WHERE ${NOT_SKIPPED}
      ORDER BY p.played_at DESC`,
   );
   const images = interner();

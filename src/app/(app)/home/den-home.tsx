@@ -824,7 +824,11 @@ export function DenHome({
   useEffect(() => {
     const prev = lastPlayingRef.current;
     const finish = (p: NonNullable<typeof prev>) => {
-      if (p.maxProgress < 30_000) return;
+      // Same bar the store applies (plays.skipped): under 35% of the song listened is a
+      // skip, not a play — don't hand it to the list (Rem, 2026-08-16). 30s floor stands
+      // in when the duration is unknown.
+      const need = p.durationMs > 0 ? p.durationMs * 0.35 : 30_000;
+      if (p.maxProgress < need) return;
       const nowIso = new Date().toISOString();
       const row = {
         id: p.id,
