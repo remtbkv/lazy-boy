@@ -55,6 +55,9 @@ export class HttpClient {
   constructor(
     private token: TokenSource,
     private patient = false,
+    /** WHO is calling and why — written into api_log per request, so a 429 can be
+     *  attributed to its traffic source, not just its endpoint (Rem, 2026-08-16). */
+    private source: string = "untagged",
   ) {}
 
   private async bearer(): Promise<string> {
@@ -95,7 +98,7 @@ export class HttpClient {
         });
       } catch (e) {
         // Log the failed attempt too (network error / timeout), then retry or surface it.
-        void logSpotifyRequest({ method, path, status: 0, retryAfter: null }).catch(() => {});
+        void logSpotifyRequest({ method, path, status: 0, retryAfter: null, source: this.source }).catch(() => {});
         // Never blind-retry a POST: a timeout doesn't mean Spotify didn't apply it, and
         // POSTs here aren't idempotent (add items again = duplicate tracks; create
         // playlist again = a second playlist; next/previous again = double skip).
@@ -111,7 +114,7 @@ export class HttpClient {
       // (the DB write must never slow a Spotify request).
       const rawRetryAfter =
         res.status === 429 ? Number(res.headers.get("Retry-After") ?? "") || null : null;
-      void logSpotifyRequest({ method, path, status: res.status, retryAfter: rawRetryAfter }).catch(
+      void logSpotifyRequest({ method, path, status: res.status, retryAfter: rawRetryAfter, source: this.source }).catch(
         () => {},
       );
 

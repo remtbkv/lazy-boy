@@ -6,7 +6,7 @@ import { redirect } from "next/navigation";
 import { auth, spotifyAccessToken } from "@/lib/auth";
 import { spotifyClient } from "@/lib/spotify";
 
-export async function getSpotify() {
+export async function getSpotify(source = "action") {
   // auth() FIRST, then the token: the jwt callback inside auth() is what refreshes an expired
   // token and publishes it for spotifyAccessToken() to read. Never parallelize these two.
   // Short-circuited on purpose — a caller with no session must not pay a tokens read.
@@ -15,5 +15,5 @@ export async function getSpotify() {
   if (!accessToken) {
     redirect("/login");
   }
-  return spotifyClient(accessToken);
+  return spotifyClient(accessToken, false, source);
 }

@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import {
   getClientLoadSpeed,
+  getSpotifyCallBreakdown,
   readLedger,
   type ClientMetricsPage,
   type MetricStat,
@@ -240,11 +241,12 @@ function LoadStory({
 export default async function UsagePage() {
   const session = await auth();
   if (!session || session.error) redirect("/login");
-  const [ledger, counters, client, tz] = await Promise.all([
+  const [ledger, counters, client, tz, spotifyCalls] = await Promise.all([
     readLedger(DAYS),
     liveCounters(),
     getClientLoadSpeed(),
     tzOffsetMinutes(),
+    getSpotifyCallBreakdown(24),
   ]);
   const summaryByPage = new Map(client.pages.map((p) => [p.page, p]));
 
@@ -341,6 +343,48 @@ export default async function UsagePage() {
           )}
         </section>
       )}
+
+      {/* ── Spotify traffic, by source ──────────────────────────────────────────────────── */}
+      {/* Who talks to Spotify and how much — the view a rate limit gets analysed from.
+          Every call is tagged with its caller (api_log.source); errors = anything ≥400
+          or a network failure, 429s broken out. A week of raw rows sits in api_log for
+          deeper digging. */}
+      <section className="mt-12">
+        <div className="flex items-baseline justify-between border-b border-border/60 pb-1">
+          <h2 className="font-mono text-sm">spotify calls</h2>
+          <p className="text-sm text-muted-foreground">last 24h · by source</p>
+        </div>
+        {spotifyCalls.length === 0 ? (
+          <p className="mt-3 text-sm text-muted-foreground">No Spotify calls recorded.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="mt-1 w-full min-w-[24rem] text-sm">
+              <thead>
+                <tr className="text-xs text-muted-foreground">
+                  <th className="py-1 text-left font-normal">source</th>
+                  <th className="w-20 py-1 text-right font-normal">calls</th>
+                  <th className="w-20 py-1 text-right font-normal">errors</th>
+                  <th className="w-20 py-1 text-right font-normal">429s</th>
+                </tr>
+              </thead>
+              <tbody>
+                {spotifyCalls.map((c) => (
+                  <tr key={c.source} className={c.rateLimited > 0 ? "text-destructive" : ""}>
+                    <td className="py-1 font-mono text-xs">{c.source}</td>
+                    <td className="w-20 py-1 text-right tabular-nums">{c.calls}</td>
+                    <td className="w-20 py-1 text-right tabular-nums text-muted-foreground">
+                      {c.errors}
+                    </td>
+                    <td className="w-20 py-1 text-right tabular-nums text-muted-foreground">
+                      {c.rateLimited}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
 
       {/* ── What each read path costs the store ─────────────────────────────────────────── */}
       <section className="mt-12">

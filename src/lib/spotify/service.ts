@@ -26,8 +26,8 @@ export class Service {
   // `patient` rides out rate limits for background bulk work (e.g. cleaning a
   // playlist); forwarded to Resources/HttpClient. Interactive callers omit it so
   // they fail fast and let the UI degrade rather than hang.
-  constructor(token: TokenSource, patient = false) {
-    this.resources = new Resources(token, patient);
+  constructor(token: TokenSource, patient = false, source = "untagged") {
+    this.resources = new Resources(token, patient, source);
   }
 
   me() {

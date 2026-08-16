@@ -10,8 +10,8 @@ import type { TokenSource } from "./client";
 // `token` is the request's access token for interactive use, or a getter returning a
 // currently-valid one for background work that can outlive a single token (see
 // actions.ts → refreshingToken).
-export function spotifyClient(token: TokenSource, patient = false): Service {
-  return new Service(token, patient);
+export function spotifyClient(token: TokenSource, patient = false, source = "untagged"): Service {
+  return new Service(token, patient, source);
 }
 
 export { SpotifyError } from "./client";

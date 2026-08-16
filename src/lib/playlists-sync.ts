@@ -39,7 +39,7 @@ export async function startLibrarySync(): Promise<{ taskId: string }> {
     const t = await getValidAccessToken();
     if (!t) throw new Error("Spotify session expired — log out and back in.");
     return t;
-  }, true);
+  }, true, "library-scan-bg");
   const task: Task = runTask("library-sync", (onProgress) =>
     syncLibrary(sp, onProgress, { paceMs: SYNC_PACE_MS }),
   );

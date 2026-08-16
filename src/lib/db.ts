@@ -256,6 +256,13 @@ async function init(): Promise<Client> {
   if (!ctxCols.has("checked_at")) {
     await client.execute("ALTER TABLE contexts ADD COLUMN checked_at TEXT");
   }
+  // Which traffic source made each Spotify call (cron-sync, now-playing, an action…) —
+  // added 2026-08-16 so a 429 is attributable to its CALLER, not just its endpoint.
+  const apiLogInfo = await client.execute("PRAGMA table_info(api_log)");
+  const apiLogCols = new Set(apiLogInfo.rows.map((r) => String(r.name)));
+  if (!apiLogCols.has("source")) {
+    await client.execute("ALTER TABLE api_log ADD COLUMN source TEXT");
+  }
   // ctx_orphan caches the playlist-membership verdict per play (see sourceExpr). NULL means
   // "not computed yet" — recomputeOrphanFlags() fills it, and until it does the read falls
   // back to treating the play as non-orphan, which is the same answer for ~91% of plays.
@@ -2293,9 +2300,11 @@ async function getMeta(key: string): Promise<string | null> {
 // ---- Spotify API request log ----------------------------------------------------------
 // Every outgoing Spotify call is recorded here (fire-and-forget from the HTTP client, so
 // it never slows a request), so a 429 can be analysed after the fact: how many calls we
-// made, over what window, and what wait Spotify demanded. Kept tiny — rows older than an
-// hour are pruned, since the limit is a per-second/minute window, not daily.
-const API_LOG_TTL_MS = 60 * 60 * 1000; // keep one hour
+// made, from which SOURCE, over what window, and what wait Spotify demanded. A week is
+// kept (the 2026-08-16 extended rate-limit needed more than the old one-hour window to
+// reason about, and the store is self-hosted — rows cost nothing). /usage renders the
+// 24h per-source rollup; deeper analysis queries this table directly.
+const API_LOG_TTL_MS = 7 * 24 * 60 * 60 * 1000; // keep a week
 let apiLogWrites = 0;
 
 export async function logSpotifyRequest(entry: {
@@ -2303,6 +2312,7 @@ export async function logSpotifyRequest(entry: {
   path: string;
   status: number;
   retryAfter: number | null;
+  source?: string;
 }): Promise<void> {
   const client = await getClient();
   // Store just the endpoint path (no host, no query string) — enough to see which calls
@@ -2313,19 +2323,38 @@ export async function logSpotifyRequest(entry: {
   } catch {
     /* keep the raw path */
   }
-  // Don't log successful now-playing polls: they fire every few seconds while the app is
-  // open and each log row costs 2 row writes (insert + prune delete, both billed on Turso) for
-  // no diagnostic value. Failures (429s, errors) on this endpoint still always log, and the
-  // getApiLogSummary windows correspondingly exclude successful now-playing traffic.
-  if (entry.status >= 200 && entry.status < 300 && p.endsWith("/me/player/currently-playing")) {
-    return;
-  }
+  // Successful now-playing polls ARE logged now (they used to be skipped to save Turso
+  // row-writes): they are the app's dominant Spotify traffic, and a rate-limit analysis
+  // that can't see the dominant source is blind (Rem, 2026-08-16). Self-hosted store —
+  // the writes cost nothing.
   await client.execute({
-    sql: `INSERT INTO api_log (ts, method, path, status, retry_after) VALUES (?, ?, ?, ?, ?)`,
-    args: [Date.now(), entry.method, p, entry.status, entry.retryAfter],
+    sql: `INSERT INTO api_log (ts, method, path, status, retry_after, source) VALUES (?, ?, ?, ?, ?, ?)`,
+    args: [Date.now(), entry.method, p, entry.status, entry.retryAfter, entry.source ?? null],
   });
   // Prune occasionally rather than on every write.
   if (++apiLogWrites % 256 === 0) await pruneApiLog();
+}
+
+/** Per-source Spotify traffic over the trailing window — the interpretable rollup /usage
+ *  renders: who is calling, how much, and how much of it Spotify refused. */
+export type SpotifyCallSource = {
+  source: string;
+  calls: number;
+  errors: number;
+  rateLimited: number;
+  lastTs: number;
+};
+export async function getSpotifyCallBreakdown(hours = 24): Promise<SpotifyCallSource[]> {
+  const client = await getClient();
+  const res = await client.execute({
+    sql: `SELECT COALESCE(source, 'untagged') AS source, COUNT(*) AS calls,
+                 SUM(status >= 400 OR status = 0) AS errors,
+                 SUM(status = 429) AS rateLimited, MAX(ts) AS lastTs
+          FROM api_log WHERE ts > ? GROUP BY COALESCE(source, 'untagged')
+          ORDER BY calls DESC`,
+    args: [Date.now() - hours * 3600_000],
+  });
+  return plainRows(res.rows) as unknown as SpotifyCallSource[];
 }
 
 export async function pruneApiLog(): Promise<void> {

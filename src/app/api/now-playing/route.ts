@@ -26,7 +26,7 @@ export async function GET() {
     return reply(null);
   }
   try {
-    const sp = spotifyClient(accessToken);
+    const sp = spotifyClient(accessToken, false, "now-playing");
     const playing = await sp.currentlyPlaying();
     if (!playing) return reply(null);
 

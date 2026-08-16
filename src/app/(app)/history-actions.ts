@@ -129,7 +129,7 @@ export async function refreshHistoryAction(
   // keeps a signed-out caller from being bounced mid-render — no session, nothing to sync.
   if (!(await allowed())) return NO_REFRESH;
   try {
-    const sp = await getSpotify();
+    const sp = await getSpotify("home-sync");
     const { added } = await syncRecentPlays(sp);
     // This fires every 120 s from an open tab, twice per track change and on visibility, so
     // it is the term an open tab contributes. Only the sync plus this action's own bounded

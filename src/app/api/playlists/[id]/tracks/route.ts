@@ -18,7 +18,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const { id } = await params;
     const body = (await req.json().catch(() => ({}))) as { snapshot?: unknown };
     const cachedSnapshot = typeof body.snapshot === "string" ? body.snapshot : undefined;
-    const sp = spotifyClient(accessToken);
+    const sp = spotifyClient(accessToken, false, "playlist-resync");
 
     const playlist = await sp.playlist(id);
     if (cachedSnapshot && playlist.snapshot && playlist.snapshot === cachedSnapshot) {

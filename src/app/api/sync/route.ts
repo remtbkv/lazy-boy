@@ -22,7 +22,7 @@ export async function POST() {
     return Response.json({ ok: true, skipped: true });
   }
   try {
-    const { added, skipped } = await syncRecentPlays(spotifyClient(accessToken));
+    const { added, skipped } = await syncRecentPlays(spotifyClient(accessToken, false, "onload-sync"));
     // The open tab's share of the burn, kept separate from the cron's: the debounce above
     // already returned for the calls that did no work, so what reaches here really synced.
     if (!skipped) void ledgerSyncCall("sync_onload", added);

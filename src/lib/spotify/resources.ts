@@ -82,8 +82,8 @@ let playlistsCache: { at: number; items: Playlist[] } | null = null;
 
 export class Resources {
   readonly http: HttpClient;
-  constructor(token: TokenSource, patient = false) {
-    this.http = new HttpClient(token, patient);
+  constructor(token: TokenSource, patient = false, source = "untagged") {
+    this.http = new HttpClient(token, patient, source);
   }
 
   /** Whole library in native order, cached for a short TTL. */

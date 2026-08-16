@@ -16,7 +16,7 @@ const LIBRARY_MAX_AGE_MS = 30 * 60 * 1000;
 async function maybeSyncLibrary(token: () => Promise<string>): Promise<string> {
   const at = await getLibrarySyncedAt();
   if (at && Date.now() - Date.parse(at) < LIBRARY_MAX_AGE_MS) return "fresh";
-  await syncLibrary(spotifyClient(token, true));
+  await syncLibrary(spotifyClient(token, true, "cron-library-scan"));
   return "synced";
 }
 
@@ -63,7 +63,7 @@ export async function GET(req: Request) {
     return t;
   };
   try {
-    const { added, skipped } = await syncRecentPlays(spotifyClient(token));
+    const { added, skipped } = await syncRecentPlays(spotifyClient(token, false, "cron-sync"));
     // Attribution for the dominant traffic on this database: ~720 of these a day, and which
     // of the two costs a tick paid depends entirely on whether it landed a play. A skipped
     // tick short-circuits on the cooldown for ~2 rows and is deliberately not ledgered.

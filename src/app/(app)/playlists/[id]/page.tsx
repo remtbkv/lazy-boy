@@ -52,7 +52,7 @@ export default async function PlaylistDetailPage({
   // Only when we have nothing cached at all (unknown id — e.g. a stale link to a deleted
   // playlist) do we have to ask Spotify, both for the header and to surface a real 404.
   if (!cached && cachedTracks.length === 0) {
-    const sp = await getSpotify();
+    const sp = await getSpotify("playlist-detail");
     try {
       const live = await sp.playlist(id);
       coldLive = live;
@@ -158,7 +158,7 @@ async function Tracks({
   canRemove: boolean;
   live?: Playlist;
 }) {
-  const sp = await getSpotify();
+  const sp = await getSpotify("playlist-detail");
   let tracks: Track[] | null = null;
   let snapshot: string | undefined;
   let status = 0;
