@@ -820,10 +820,19 @@ export function DenHome({
     durationMs: number;
     source: string | null;
     maxProgress: number;
+    /** When a poll last SAW this song playing. A finish() long after that means the tab
+     *  was suspended in between — see the staleness guard below. */
+    seenAt: number;
   } | null>(null);
   useEffect(() => {
     const prev = lastPlayingRef.current;
     const finish = (p: NonNullable<typeof prev>) => {
+      // STALE finish = the tab slept holding this song and woke to a different one. The
+      // handoff stamps the play as "now", so a suspended tab minted a play an hour after
+      // the song actually ended (Abracadabra, 10:46 PM, Rem 2026-08-16) — a song that old
+      // is the SYNC's business (it recorded the real play with its real time long ago),
+      // never this shortcut's. The poll runs every ~6s; a 60s gap only happens suspended.
+      if (Date.now() - p.seenAt > 60_000) return;
       // Same bar the store applies (plays.skipped): under 35% of the song listened is a
       // skip, not a play — don't hand it to the list (Rem, 2026-08-16). 30s floor stands
       // in when the duration is unknown.
@@ -871,6 +880,7 @@ export function DenHome({
       if (prev && prev.id === playing.track.id) {
         prev.maxProgress = Math.max(prev.maxProgress, playing.progressMs);
         prev.source = playing.context?.name ?? prev.source;
+        prev.seenAt = Date.now();
       } else {
         if (prev) finish(prev);
         lastPlayingRef.current = {
@@ -882,6 +892,7 @@ export function DenHome({
           durationMs: playing.durationMs,
           source: playing.context?.name ?? null,
           maxProgress: playing.progressMs,
+          seenAt: Date.now(),
         };
       }
     } else if (prev) {
