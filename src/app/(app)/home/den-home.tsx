@@ -852,6 +852,16 @@ export function DenHome({
         firstPlayed: nowIso,
         source: p.source,
       };
+      // daily[0] is only "today" when today already has plays. On the FIRST play of a
+      // new local day the strip still leads with yesterday, and crediting that card put
+      // a 10:15 AM play inside "Yesterday" (Rem, 2026-08-17). No card for today yet →
+      // leave the play entirely to the sync, which creates the day properly.
+      const localToday = new Date(
+        Date.now() - new Date().getTimezoneOffset() * 60000,
+      )
+        .toISOString()
+        .slice(0, 10);
+      if (daily[0]?.day !== localToday) return;
       provisionalsRef.current.push({ row, at: Date.now() });
       const today = daily[0]?.day;
       setDaily((d) =>
