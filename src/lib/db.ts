@@ -2178,6 +2178,24 @@ export async function setLibrarySyncedAt(): Promise<void> {
 // Spotify rate-limit backoff, persisted so it survives across serverless invocations
 // (the HTTP client's in-memory cooldown is wiped between each cron/API invocation, so
 // without this every scheduled tick would re-poke a banned endpoint). Stored as epoch ms.
+// ── The recently-played harvest gate ────────────────────────────────────────────────
+// Two timestamps that let the cron tick SKIP the recently-played call when nothing has
+// played since the last harvest (Rem, 2026-08-17: two multi-hour QUOTA_EXCEEDED penalties
+// on that endpoint in two days — Spotify has this app on a tight quota, so the dominant
+// call must stop running around the clock). currently-playing sits in its own quota
+// bucket and is what the tick checks instead.
+export async function getHarvestGate(): Promise<{ lastActive: number; lastHarvest: number }> {
+  const [a, h] = await Promise.all([getMeta("player_last_active"), getMeta("rp_last_harvest")]);
+  return { lastActive: Number(a) || 0, lastHarvest: Number(h) || 0 };
+}
+export async function setHarvestGate(v: {
+  lastActive?: number;
+  lastHarvest?: number;
+}): Promise<void> {
+  if (v.lastActive !== undefined) await setMeta("player_last_active", String(v.lastActive));
+  if (v.lastHarvest !== undefined) await setMeta("rp_last_harvest", String(v.lastHarvest));
+}
+
 export async function getSpotifyCooldownUntil(): Promise<number> {
   const v = await getMeta("spotify_cooldown_until");
   return v ? Number(v) || 0 : 0;

@@ -3,7 +3,13 @@ import { getValidAccessToken } from "@/lib/auth";
 import { spotifyClient, SpotifyError } from "@/lib/spotify";
 import { syncRecentPlays } from "@/lib/sync/history";
 import { syncLibrary } from "@/lib/sync/library";
-import { getLibrarySyncedAt, ledgerSyncCall, recomputeAllTimeStats } from "@/lib/db";
+import {
+  getHarvestGate,
+  getLibrarySyncedAt,
+  ledgerSyncCall,
+  recomputeAllTimeStats,
+  setHarvestGate,
+} from "@/lib/db";
 import { ensureCronJobEnabled } from "@/lib/cronjob";
 
 // Rebuild the library index at most every 30 min (snapshot-diffing makes a run cheap, but no
@@ -63,7 +69,28 @@ export async function GET(req: Request) {
     return t;
   };
   try {
+    // GATE the recently-played harvest on actual playback (Rem, 2026-08-17: two multi-
+    // hour QUOTA_EXCEEDED penalties on that endpoint in two days — this app is on a tight
+    // Spotify quota, and ~720 harvests/day around the clock is what keeps hitting it).
+    // currently-playing lives in its OWN quota bucket, so the tick checks it first and
+    // harvests only when something is playing, when something HAS played since the last
+    // harvest (the session's tail), or hourly as a backstop (other-device edge cases;
+    // recently-played buffers 50 plays, so nothing is lost by waiting).
+    const now = Date.now();
+    const gate = await getHarvestGate();
+    const playingNow = !!(await spotifyClient(token, false, "cron-player-check")
+      .currentlyPlaying()
+      .catch(() => null));
+    if (playingNow) await setHarvestGate({ lastActive: now });
+    const shouldHarvest =
+      playingNow ||
+      gate.lastActive > gate.lastHarvest ||
+      now - gate.lastHarvest > 60 * 60 * 1000;
+    if (!shouldHarvest) {
+      return Response.json({ ok: true, added: 0, idle: true });
+    }
     const { added, skipped } = await syncRecentPlays(spotifyClient(token, false, "cron-sync"));
+    if (!skipped) await setHarvestGate({ lastHarvest: now });
     // Attribution for the dominant traffic on this database: ~720 of these a day, and which
     // of the two costs a tick paid depends entirely on whether it landed a play. A skipped
     // tick short-circuits on the cooldown for ~2 rows and is deliberately not ledgered.

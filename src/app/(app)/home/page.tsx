@@ -7,11 +7,13 @@ import {
   getDailyStats,
   getHomePayload,
   getPlaysByDay,
+  getSpotifyCooldownUntil,
   rebuildHomePayload,
   type HomePayload,
 } from "@/lib/db";
 import { tzOffsetMinutes } from "@/lib/tz";
 import { DenHome } from "./den-home";
+import { RateLimitNotice } from "./rate-limit-notice";
 import { DockLoader } from "./dock-loader";
 import { LockViewport } from "./lock-viewport";
 
@@ -71,9 +73,10 @@ export default async function HomePage() {
   // The payload read gets a catch: a transient store hiccup (cold funnel, sqld restart)
   // should fall through to the inline path — which retries the connection — rather than
   // crash the render into the error boundary (Rem's stale-tab morning refresh, 2026-08-15).
-  const [session, payload] = await Promise.all([
+  const [session, payload, cooldownUntil] = await Promise.all([
     auth(),
     getHomePayload().catch(() => null),
+    getSpotifyCooldownUntil().catch(() => 0),
   ]);
   // Gate here, not just in the layout: Next renders layout and page in parallel, so the
   // layout's redirect alone still flushes this page's data into the 307 body (SECURITY.md).
@@ -111,6 +114,9 @@ export default async function HomePage() {
           <div className="den-home-band shrink-0">
             <DockLoader />
           </div>
+
+          {/* eslint-disable-next-line react-hooks/purity -- per-request clock read, like the greeting */}
+          <RateLimitNotice until={cooldownUntil > Date.now() ? cooldownUntil : 0} />
 
           <DenHome
             daily={daily}
