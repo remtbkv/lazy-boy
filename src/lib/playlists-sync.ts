@@ -9,6 +9,7 @@
 // so newly-cached data appears as it lands.
 import "server-only";
 import { auth, getValidAccessToken, spotifyAccessToken } from "@/lib/auth";
+import { getSpotifyCooldownUntil } from "@/lib/db";
 import { spotifyClient } from "@/lib/spotify";
 import { syncLibrary } from "@/lib/sync/library";
 import { getTask, runTask, type Task } from "@/lib/tasks/registry";
@@ -23,6 +24,15 @@ let currentSyncId: string | null = null;
 export async function startLibrarySync(): Promise<{ taskId: string }> {
   const session = await auth();
   if (!session || session.error || !(await spotifyAccessToken())) throw new Error("unauthorized");
+
+  // A live Spotify penalty makes a scan pointless: its first call 429s, and because the
+  // library then STAYS stale, every navigation re-kicks another doomed probe (api_log,
+  // 2026-08-17: library-scan-bg hitting /me a minute apart into a 36-minute Retry-After —
+  // the persisted cooldown was only honored by the history sync, not here). Skip until the
+  // window passes; the cron tick and the next client kick retry naturally.
+  if (Date.now() < (await getSpotifyCooldownUntil())) {
+    throw new Error("Spotify is rate-limiting — scan skipped.");
+  }
 
   if (currentSyncId) {
     const t = getTask(currentSyncId);
