@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import {
   getClientLoadSpeed,
+  getRecentlyPlayedQuotaWindows,
   getSpotifyCallBreakdown,
   readLedger,
   type ClientMetricsPage,
@@ -241,12 +242,13 @@ function LoadStory({
 export default async function UsagePage() {
   const session = await auth();
   if (!session || session.error) redirect("/login");
-  const [ledger, counters, client, tz, spotifyCalls] = await Promise.all([
+  const [ledger, counters, client, tz, spotifyCalls, quotaWindows] = await Promise.all([
     readLedger(DAYS),
     liveCounters(),
     getClientLoadSpeed(),
     tzOffsetMinutes(),
     getSpotifyCallBreakdown(24),
+    getRecentlyPlayedQuotaWindows(),
   ]);
   const summaryByPage = new Map(client.pages.map((p) => [p.page, p]));
 
@@ -377,6 +379,58 @@ export default async function UsagePage() {
                     </td>
                     <td className="w-20 py-1 text-right tabular-nums text-muted-foreground">
                       {c.rateLimited}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {/* ── The recently-played daily quota ─────────────────────────────────────────────── */}
+      {/* The one Spotify limit that has actually bitten this app (db.ts, "The recently-played
+          daily quota"): a per-day budget on /me/player/recently-played, resetting ~10:50 AM ET.
+          One row per quota day; a day that hit the wall shows the call count it took — the
+          measured budget — so a future ban can be compared against both the expectation and
+          every past exhaustion point instead of guessed at. */}
+      <section className="mt-12">
+        <div className="flex items-baseline justify-between border-b border-border/60 pb-1">
+          <h2 className="font-mono text-sm">recently-played daily quota</h2>
+          <p className="text-sm text-muted-foreground">resets ~10:50 AM ET</p>
+        </div>
+        <p className="mt-3 max-w-xl text-sm leading-relaxed text-muted-foreground">
+          Spotify budgets this endpoint per day for this app — every observed penalty lifted at
+          the same minute regardless of when it started. Expected shape with the harvest gate:
+          ~24 hourly backstops plus ~30/hr while listening. A ban at a call count far below the
+          past &ldquo;banned at&rdquo; values means the model is wrong, not just the traffic —
+          and the source split names who overran.
+        </p>
+        {quotaWindows.length === 0 ? (
+          <p className="mt-3 text-sm text-muted-foreground">No calls recorded yet.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="mt-1 w-full min-w-[28rem] text-sm">
+              <thead>
+                <tr className="text-xs text-muted-foreground">
+                  <th className="py-1 text-left font-normal">quota day</th>
+                  <th className="w-16 py-1 text-right font-normal">calls</th>
+                  <th className="py-1 pl-4 text-left font-normal">by source</th>
+                  <th className="py-1 pl-4 text-left font-normal">banned</th>
+                </tr>
+              </thead>
+              <tbody>
+                {quotaWindows.map((w) => (
+                  <tr key={w.windowStart} className={w.banTs !== null ? "text-destructive" : ""}>
+                    <td className="py-1 font-mono text-xs">{openTime(new Date(w.windowStart).toISOString(), tz).split(",").slice(0, 1).join("")}</td>
+                    <td className="w-16 py-1 text-right tabular-nums">{w.calls}</td>
+                    <td className="py-1 pl-4 font-mono text-xs text-muted-foreground">
+                      {w.bySource.map((s) => `${s.source} ${s.calls}`).join(" · ")}
+                    </td>
+                    <td className="py-1 pl-4 text-xs">
+                      {w.banTs === null
+                        ? "—"
+                        : `at ${w.callsBeforeBan} calls · ${openTime(new Date(w.banTs).toISOString(), tz)}`}
                     </td>
                   </tr>
                 ))}

@@ -2456,6 +2456,87 @@ export async function getSpotifyCallBreakdown(hours = 24): Promise<SpotifyCallSo
   return plainRows(res.rows) as unknown as SpotifyCallSource[];
 }
 
+// ── The recently-played daily quota ──────────────────────────────────────────────────────
+// Spotify runs a per-endpoint DAILY budget on /me/player/recently-played for this app.
+// Pinned from api_log on 2026-08-17: six penalty episodes (Aug 12–17), onset anywhere from
+// 11 PM to 8 AM, but every one LIFTING at 10:46–10:51 AM ET — a daily reset (drifting about
+// a minute later each day) — while the burst window was never close (peak 18 calls/30s
+// against a per-30s limit). So the thing to track is calls per QUOTA DAY, not per minute:
+// each window below is one reset-to-reset day; when a window contains a 429 on the endpoint,
+// `callsBeforeBan` is that day's measured budget (observed 2026-08-12..17: bans landed in
+// the ~400–700-calls range). Expectation under the harvest gate (cron/sync/route.ts):
+// ~24 hourly backstops + ~30/hr while actually listening. A ban in a window where calls sat
+// far below past `callsBeforeBan` values means the model is wrong, not the traffic — and
+// `bySource` names whoever overran.
+const RP_QUOTA_PATH = "/me/player/recently-played";
+// The observed reset, expressed as a UTC anchor: 14:51 UTC = 10:51 AM EDT on 2026-08-17.
+// It drifts ~+1 min/day, so window edges are approximate to a few minutes — fine for
+// bucketing calls that arrive hours apart.
+const RP_QUOTA_ANCHOR_MS = Date.UTC(2026, 0, 1, 14, 51);
+const RP_QUOTA_DAY_MS = 24 * 3600_000;
+
+export type QuotaWindow = {
+  windowStart: number; // ms epoch of the window's (approximate) reset
+  calls: number;
+  rateLimited: number;
+  bySource: { source: string; calls: number }[];
+  banTs: number | null; // first 429 in the window, if any
+  banRetryAfterS: number | null;
+  callsBeforeBan: number | null; // the day's measured budget, when it was hit
+};
+
+export async function getRecentlyPlayedQuotaWindows(): Promise<QuotaWindow[]> {
+  const client = await getClient();
+  const res = await client.execute({
+    sql: `SELECT ts, status, retry_after, COALESCE(source, 'untagged') AS source
+          FROM api_log WHERE path = ? ORDER BY ts`,
+    args: [RP_QUOTA_PATH],
+  });
+  const rows = plainRows(res.rows) as {
+    ts: number;
+    status: number;
+    retry_after: number | null;
+    source: string;
+  }[];
+  const windows = new Map<number, QuotaWindow & { sourceMap: Map<string, number> }>();
+  for (const r of rows) {
+    const ts = Number(r.ts);
+    const idx = Math.floor((ts - RP_QUOTA_ANCHOR_MS) / RP_QUOTA_DAY_MS);
+    let w = windows.get(idx);
+    if (!w) {
+      w = {
+        windowStart: RP_QUOTA_ANCHOR_MS + idx * RP_QUOTA_DAY_MS,
+        calls: 0,
+        rateLimited: 0,
+        bySource: [],
+        banTs: null,
+        banRetryAfterS: null,
+        callsBeforeBan: null,
+        sourceMap: new Map(),
+      };
+      windows.set(idx, w);
+    }
+    w.calls++;
+    w.sourceMap.set(r.source, (w.sourceMap.get(r.source) ?? 0) + 1);
+    if (Number(r.status) === 429) {
+      w.rateLimited++;
+      if (w.banTs === null) {
+        w.banTs = ts;
+        w.banRetryAfterS = r.retry_after == null ? null : Number(r.retry_after);
+        w.callsBeforeBan = w.calls - 1; // everything sent before the wall
+      }
+    }
+  }
+  return [...windows.values()]
+    .sort((a, b) => b.windowStart - a.windowStart)
+    .map(({ sourceMap, ...w }) => ({
+      ...w,
+      bySource: [...sourceMap.entries()]
+        .map(([source, calls]) => ({ source, calls }))
+        .sort((a, b) => b.calls - a.calls),
+    }));
+}
+
 export async function pruneApiLog(): Promise<void> {
   const client = await getClient();
   await client.execute({
