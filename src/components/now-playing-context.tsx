@@ -51,6 +51,13 @@ type NPMessage =
 
 const CHANNEL = "lb-nowplaying";
 const CACHE_KEY = "lb-nowplaying";
+// How old a CACHE_KEY entry may be and still paint. The cache exists so a NEW tab shows the
+// chip instantly while a sibling tab's poll is seconds old — it must never resurrect a dead
+// session: a tab reopened a day later painted yesterday's song as "playing now", and that
+// stale state flowed into Home's instant-handoff as if freshly observed, minting a phantom
+// play stamped with the reopen time (等一個人 5:37 PM, Rem 2026-08-19). 30s covers a
+// throttled background leader; anything older waits the ~1s for the live poll.
+const CACHE_MAX_AGE_MS = 30_000;
 const LEADER_LOCK = "lb-nowplaying-leader";
 // This bundle's build id (inlined by next.config.ts), and where the last skew reload was
 // stamped — the throttle that keeps a broken beacon from reload-looping.
@@ -343,7 +350,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       const cached = localStorage.getItem(CACHE_KEY);
       if (cached) {
         const { playing: p, at } = JSON.parse(cached) as { playing: Playing; at: number };
-        applyShared(p, at);
+        if (Date.now() - at < CACHE_MAX_AGE_MS) applyShared(p, at);
       }
     } catch {
       /* ignore */

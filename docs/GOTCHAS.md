@@ -535,6 +535,21 @@ at the next idle or hidden moment, and a hidden tab (the expensive kind) reloads
 End to end a pinned stale tab reloads within ~3–8 min of a deploy (probe cadence + debounce).
 Known answers, including the pinned case and its control: `node scripts/test-build-skew.mjs`.
 
+## The now-playing localStorage cache must never resurrect a dead session
+
+The chip's cross-tab cache (`lb-nowplaying` in localStorage) exists so a brand-new tab can
+paint what a sibling tab polled seconds ago. Left unaged, it painted whatever the LAST tab
+ever observed — a tab reopened a day later showed yesterday's song as "playing now", and the
+stale state flowed into Home's instant-handoff as if freshly observed: `lastPlayingRef` got
+`seenAt = now` at mount, so when the first live poll returned a different track, the handoff
+"finished" yesterday's song as a play stamped with the reopen time (等一個人 5:37 PM,
+2026-08-19). The staleness guard was laundered at birth — the entry's own `at` timestamp was
+old, but nothing checked it. The seed now only applies when the cache entry is under 30s old
+(`CACHE_MAX_AGE_MS`); anything older waits ~1s for the live poll. Every handoff verdict
+(`commit`/`stale`/`skip`/`no-today`, with the gap/progress/source it judged) beacons to
+`client_metrics` as `handoff` — the mint happens purely in the browser, so without that
+breadcrumb a phantom row is undiagnosable from the store.
+
 ## Production security
 
 See `docs/SECURITY.md` before any public deploy. Biggest item: the listen-history DB is

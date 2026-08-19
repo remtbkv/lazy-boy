@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 import { searchPerfEnabled, startSearchProbe, type IndexStatus } from "@/lib/search-perf";
 import { patchHistoryPayload } from "@/lib/history-patch";
 import { addPlay, reconcilePlays, type Provisional } from "@/lib/optimistic-play";
+import { recordAppEvent } from "@/lib/metrics-client";
 import { IdentityTrackMenu } from "@/components/identity-track-menu";
 import { useNowPlaying } from "@/components/now-playing-context";
 import { usePhone, useSearchMode } from "../use-search-mode";
@@ -827,17 +828,29 @@ export function DenHome({
   useEffect(() => {
     const prev = lastPlayingRef.current;
     const finish = (p: NonNullable<typeof prev>) => {
+      // Every verdict this shortcut reaches is beaconed to client_metrics ("handoff"): the
+      // mint happens purely in the browser, so a wrong row on screen is undiagnosable from
+      // the store alone — the 2026-08-19 phantom took store archaeology to rule paths out.
+      // One event per song change while the tab is open; meta carries the inputs the
+      // guards judged.
+      const verdict = (v: string) =>
+        recordAppEvent(
+          "handoff",
+          `${v}|${p.artist} — ${p.title}|gap=${Math.round((Date.now() - p.seenAt) / 1000)}s|prog=${
+            p.durationMs > 0 ? `${Math.round((p.maxProgress / p.durationMs) * 100)}%` : "?"
+          }|from=${p.source ?? ""}`,
+        );
       // STALE finish = the tab slept holding this song and woke to a different one. The
       // handoff stamps the play as "now", so a suspended tab minted a play an hour after
       // the song actually ended (Abracadabra, 10:46 PM, Rem 2026-08-16) — a song that old
       // is the SYNC's business (it recorded the real play with its real time long ago),
       // never this shortcut's. The poll runs every ~6s; a 60s gap only happens suspended.
-      if (Date.now() - p.seenAt > 60_000) return;
+      if (Date.now() - p.seenAt > 60_000) return verdict("stale");
       // Same bar the store applies (plays.skipped): under 35% of the song listened is a
       // skip, not a play — don't hand it to the list (Rem, 2026-08-16). 30s floor stands
       // in when the duration is unknown.
       const need = p.durationMs > 0 ? p.durationMs * 0.35 : 30_000;
-      if (p.maxProgress < need) return;
+      if (p.maxProgress < need) return verdict("skip");
       const nowIso = new Date().toISOString();
       const row = {
         id: p.id,
@@ -861,7 +874,8 @@ export function DenHome({
       )
         .toISOString()
         .slice(0, 10);
-      if (daily[0]?.day !== localToday) return;
+      if (daily[0]?.day !== localToday) return verdict("no-today");
+      verdict("commit");
       provisionalsRef.current.push({ row, at: Date.now() });
       const today = daily[0]?.day;
       setDaily((d) =>

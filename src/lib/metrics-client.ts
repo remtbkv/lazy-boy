@@ -184,6 +184,14 @@ function onClick(e: MouseEvent): void {
   pendingNav = { path: normalizePage(link.pathname), at: performance.now() };
 }
 
+/** App-level breadcrumb: a decision the client made that a later investigation will need to
+ *  reconstruct (e.g. the instant-handoff's verdict on each song change — the 2026-08-19
+ *  phantom play was undiagnosable from the store alone because the mint happened purely in
+ *  the browser). Rides the normal buffer/flush; `meta` truncated like errors are. */
+export function recordAppEvent(event: string, meta?: string, value?: number): void {
+  record(event, value, meta?.slice(0, MAX_ERROR_CHARS));
+}
+
 /** Tell the collector which view is on screen. Called on mount and on every soft navigation;
  *  the first call fixes the page the vitals belong to. */
 export function setPage(path: string): void {
