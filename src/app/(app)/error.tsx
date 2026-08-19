@@ -41,7 +41,12 @@ export default function AppError({
     if (isAuthError) return;
     const KEY = "app-error-reload-at";
     const last = Number(sessionStorage.getItem(KEY) || 0);
-    if (Date.now() - last < 10_000) return; // second failure inside 10s: show the page
+    // One auto-reload per 10 MINUTES per tab. The old 10-second window measured
+    // reload-initiation → next-failure-arrival, so any failure that took longer than 10s
+    // to fail (a store/funnel timeout — the motivating case) reloaded forever at roughly
+    // the timeout period (audit 2026-08-19, T2.8). A failure that recurs within the window
+    // shows this page; a genuinely transient one is healed by the single reload.
+    if (Date.now() - last < 10 * 60 * 1000) return;
     sessionStorage.setItem(KEY, String(Date.now()));
     // eslint-disable-next-line react-hooks/set-state-in-effect -- one flip, then a reload
     setRetrying(true);

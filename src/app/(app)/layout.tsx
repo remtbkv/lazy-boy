@@ -55,12 +55,16 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     <div id="den-root" className="flex min-h-dvh flex-col">
       <NowPlayingProvider>
         <DenChrome name={name} image={image} />
+        {/* BEFORE {children}, deliberately: effects flush in tree order, so the collector's
+            setPage must run before the arriving page's own performance.mark effects — after
+            them, every soft-nav mark was measured against the OLD view's origin, clamped to
+            an exact 0, and pooled into the percentiles (audit 2026-08-19, T2.16). */}
+        <MetricsCollector />
         {children}
         <CleanProgressWatcher />
         <SyncOnLoad />
         <TimezoneCookie />
         <ScrollbarHover />
-        <MetricsCollector />
       </NowPlayingProvider>
     </div>
   );

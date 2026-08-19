@@ -32,7 +32,15 @@ async function watchColdStart(taskId: string, refresh: () => void): Promise<void
   try {
     while (Date.now() < deadline) {
       const res = await fetch(`/api/tasks/${taskId}`).catch(() => null);
-      if (!res?.ok) return; // task gone or a blip — the next navigation reads the store
+      if (!res?.ok) {
+        // The task registry is per-instance on serverless, so a poll routed to another
+        // instance 404s even while the scan is running fine. Bailing on the first miss
+        // left the cold-start grid empty for the whole scan (audit 2026-08-19, T2.10) —
+        // instead, refresh on a slow cadence so the grid fills as playlists commit.
+        refresh();
+        await new Promise((r) => setTimeout(r, POLL_MS * 5));
+        continue;
+      }
       const task = (await res.json()) as Task;
       // `total` is only set once the playlist list has been stored, which is what the grid
       // renders — so this is the moment the empty grid can fill, long before the scan ends.

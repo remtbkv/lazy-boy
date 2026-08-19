@@ -43,6 +43,14 @@ export async function GET() {
         if (resolved) {
           await recordContexts([{ uri: playing.context.uri, name: resolved.name, type: resolved.type }]);
           context = { name: resolved.name, type: resolved.type };
+        } else {
+          // Cache the FAILURE too. Only the sync path wrote negative rows, so a 403'd
+          // context playing right now (a friend's playlist, dev mode) cost ~2 forbidden
+          // Spotify calls per 6s poll until a sync happened to carry the URI — ~1,200
+          // calls/hour into a dead endpoint (audit 2026-08-19, T2.14).
+          await recordContexts([
+            { uri: playing.context.uri, name: null, type: playing.context.type },
+          ]);
         }
       }
     }

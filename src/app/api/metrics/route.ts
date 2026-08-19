@@ -31,7 +31,7 @@ export async function POST(req: Request) {
     const rows: ClientMetricInput[] = [];
     for (const e of events) {
       if (!e || typeof e !== "object") continue;
-      const { page, event, value, meta } = e as Record<string, unknown>;
+      const { page, event, value, meta, at } = e as Record<string, unknown>;
       if (typeof page !== "string" || typeof event !== "string") continue;
       rows.push({
         session,
@@ -39,6 +39,8 @@ export async function POST(req: Request) {
         event: event.slice(0, 64),
         value: typeof value === "number" && Number.isFinite(value) ? value : null,
         meta: typeof meta === "string" ? meta.slice(0, 200) : null,
+        // Observation time; the store clamps it (recordClientMetrics), so pass-through is safe.
+        at: typeof at === "number" && Number.isFinite(at) ? at : null,
       });
     }
     await recordClientMetrics(rows);

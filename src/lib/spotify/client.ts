@@ -25,6 +25,9 @@ const HARD_BAN_S = 120;
 // re-probe within a bounded window rather than staying dark for the full multi-hour wait
 // Spotify sometimes demands. One probe per this interval can't sustain a ban.
 const PERSIST_COOLDOWN_CAP_MS = 30 * 60 * 1000;
+// A patient caller rides out short throttles by sleeping through them; past this it bails
+// like an interactive one — sleeping minutes inside a serverless invocation helps nobody.
+const PATIENT_MAX_COOLDOWN_WAIT_MS = 2 * 60 * 1000;
 
 export class SpotifyError extends Error {
   status: number;
@@ -75,11 +78,20 @@ export class HttpClient {
     let forbidden = 0; // 403s — retried once (see FORBIDDEN_RETRIES)
     for (;;) {
       // Respect a global cooldown before sending: don't add to a throttle in progress.
-      const cooldown = cooldownUntil - Date.now();
-      if (cooldown > 0) {
+      // Both caller classes bail on a LONG window rather than poking through it: the old
+      // patient behavior slept its 30s cap and then SENT ANYWAY — one poke per 30s for the
+      // whole ban, the opposite of the "one probe per persist interval" the design claims
+      // (audit 2026-08-19, T1.10). Patient callers ride out short throttles (≤2 min) by
+      // sleeping in capped slices until the window has actually passed.
+      for (;;) {
+        const cooldown = cooldownUntil - Date.now();
+        if (cooldown <= 0) break;
         const capMs = (this.patient ? RETRY_AFTER_CAP_S.patient : RETRY_AFTER_CAP_S.fast) * 1000;
         if (!this.patient && cooldown > capMs) {
           throw new SpotifyError(429, "Spotify is rate-limiting — try again shortly.");
+        }
+        if (this.patient && cooldown > PATIENT_MAX_COOLDOWN_WAIT_MS) {
+          throw new SpotifyError(429, "Spotify is rate-limiting — long cooldown in effect.");
         }
         await sleep(Math.min(cooldown, capMs) + 250);
       }
@@ -102,8 +114,11 @@ export class HttpClient {
         // Never blind-retry a POST: a timeout doesn't mean Spotify didn't apply it, and
         // POSTs here aren't idempotent (add items again = duplicate tracks; create
         // playlist again = a second playlist; next/previous again = double skip).
-        // GET/PUT/DELETE are safe to re-send.
-        if (method !== "POST" && transient++ < MAX_RETRIES) {
+        // Player PUTs aren't idempotent either: a re-sent /me/player/play restarts the
+        // track from 0, a re-sent seek yanks the head back (audit 2026-08-19, T2.11).
+        // Everything else (GET, playlist PUT/DELETE) is safe to re-send.
+        const playerMutation = method !== "GET" && path.startsWith("/me/player");
+        if (method !== "POST" && !playerMutation && transient++ < MAX_RETRIES) {
           await sleep(transient * 500);
           continue;
         }
@@ -112,8 +127,12 @@ export class HttpClient {
 
       // Record every outgoing call so a 429 can be analysed after the fact. Fire-and-forget
       // (the DB write must never slow a Spotify request).
-      const rawRetryAfter =
-        res.status === 429 ? Number(res.headers.get("Retry-After") ?? "") || null : null;
+      // `Number(x) || null` read "Retry-After: 0" as null and an HTTP-date form as null too;
+      // 0 is a real (immediate-retry) answer and a date form should not be mistaken for
+      // "no answer" (audit 2026-08-19, T2.11). NaN → null, finite numbers pass through.
+      const retryHeader = res.status === 429 ? res.headers.get("Retry-After") : null;
+      const retryParsed = retryHeader === null ? NaN : Number(retryHeader);
+      const rawRetryAfter = Number.isFinite(retryParsed) ? retryParsed : null;
       void logSpotifyRequest({ method, path, status: res.status, retryAfter: rawRetryAfter, source: this.source }).catch(
         () => {},
       );
@@ -124,8 +143,12 @@ export class HttpClient {
       const rlCap = this.patient ? RETRY_AFTER_CAP_S.patient : RETRY_AFTER_CAP_S.fast;
       if (res.status === 429) {
         const retryAfter = Math.min(rawRetryAfter ?? 1, rlCap);
-        // Make every other request back off too, not just this one.
-        cooldownUntil = Math.max(cooldownUntil, Date.now() + (retryAfter + 0.25) * 1000);
+        // Make every other request back off too, not just this one. The shared window uses
+        // Spotify's ACTUAL ask (bounded at 30 min), not the per-wait retry cap — capping the
+        // cooldown at 5s for a 60s demand kept traffic flowing into the throttle for the
+        // whole 5–120s band (audit 2026-08-19, T2.11).
+        const askMs = Math.min((rawRetryAfter ?? 1) * 1000, PERSIST_COOLDOWN_CAP_MS);
+        cooldownUntil = Math.max(cooldownUntil, Date.now() + askMs + 250);
         // On the first 429 of this call, log how hard we were hitting Spotify just before
         // it throttled — the data we use to learn where the real limit is.
         if (rateLimited === 0) {
@@ -147,7 +170,13 @@ export class HttpClient {
           // so without this every tick re-pokes the banned endpoint.
           const untilMs = Date.now() + Math.min((rawRetryAfter ?? 0) * 1000, PERSIST_COOLDOWN_CAP_MS);
           cooldownUntil = Math.max(cooldownUntil, untilMs);
-          void setSpotifyCooldownUntil(untilMs).catch(() => {});
+          // AWAITED: this write is the entire cross-invocation mechanism, and a void'd
+          // promise right before `return` can be frozen with the invocation on Vercel —
+          // the ban then never persists and every tick re-pokes (audit 2026-08-19, T1.10).
+          await setSpotifyCooldownUntil(untilMs).catch(() => {});
+          console.warn(
+            `[spotify] hard ban on ${method} ${path} — Retry-After=${rawRetryAfter}s; persisted cooldown ${Math.round((untilMs - Date.now()) / 60000)}min`,
+          );
           return res;
         }
         if (rateLimited < rlMax) {
@@ -176,14 +205,16 @@ export class HttpClient {
     }
     if (res.status === 204) return undefined as T;
     // Player mutations (seek/next/play/pause/queue) can answer 200 with an empty
-    // or non-JSON body. GETs always return valid JSON, so a parse failure here
-    // means a bodyless mutation — return undefined instead of throwing.
+    // or non-JSON body — an EMPTY body means a bodyless mutation and undefined is right.
+    // A NON-EMPTY body that fails to parse is a different animal (an edge error page, a
+    // truncated response): silently widening it to undefined surfaced later as a bare
+    // TypeError deep in a caller instead of a SpotifyError here (audit 2026-08-19, T2.11).
     const text = await res.text();
     if (!text.trim()) return undefined as T;
     try {
       return JSON.parse(text) as T;
     } catch {
-      return undefined as T;
+      throw new SpotifyError(res.status, `non-JSON ${res.status} body from ${method} ${path}`);
     }
   }
 
@@ -211,8 +242,15 @@ export class HttpClient {
     const items: T[] = [];
     let url: string | null = firstPath;
     let total = 0;
+    // Termination was delegated entirely to Spotify's `next` — a self-referencing link
+    // would loop forever. 500 pages ≈ 25k items covers any real collection here.
+    let pages = 0;
     while (url) {
+      if (++pages > 500) throw new SpotifyError(508, `pagination did not terminate: ${firstPath}`);
       const page: Paging<T> = await this.get<Paging<T>>(url);
+      if (!page || !Array.isArray(page.items)) {
+        throw new SpotifyError(502, `malformed page from ${url}`);
+      }
       items.push(...page.items);
       total = page.total || total;
       onProgress?.(items.length, total);

@@ -133,6 +133,10 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
   const streakRef = useRef<SkewStreak>(NO_SKEW);
   const serverBuildRef = useRef<string | undefined>(undefined);
   const authBuildRef = useRef<string | undefined>(undefined);
+  // When the authoritative id was last OBSERVED. The visibilitychange re-check replays the
+  // refs as if current; replaying a pre-deploy authoritative match with no age bound could
+  // clear a genuine skew streak indefinitely while probes fail (audit 2026-08-19, T2.15).
+  const authBuildAtRef = useRef(0);
   const lastInteractionRef = useRef<number | null>(null);
   const pollTickRef = useRef(0);
 
@@ -180,6 +184,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       const res = await fetch("/api/build", { credentials: "omit", cache: "no-store" });
       if (!res.ok) return;
       const { build } = (await res.json()) as { build?: string };
+      authBuildAtRef.current = Date.now();
       checkSkew(build, "authoritative");
     } catch {
       /* transient — the next tick probes again */
@@ -195,7 +200,11 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     };
     const onVisibilityChange = () => {
       checkSkew(serverBuildRef.current, "poll");
-      checkSkew(authBuildRef.current, "authoritative");
+      // Replay the authoritative reading only while it's reasonably current (2 probe
+      // periods) — an undated replay could keep absolving a genuinely stale tab.
+      if (Date.now() - authBuildAtRef.current < 10 * 60 * 1000) {
+        checkSkew(authBuildRef.current, "authoritative");
+      }
     };
     window.addEventListener("pointerdown", touch, { passive: true, capture: true });
     window.addEventListener("keydown", touch, { passive: true, capture: true });
@@ -224,8 +233,14 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     }
   }, []);
 
-  // Apply an incoming shared state, honoring both suppression and monotonic ordering.
+  // Apply an incoming shared state, honoring suppression, monotonic ordering — and AGE.
+  // The age gate lives HERE, not just on the localStorage seed: the leader's `request`
+  // answer carries whatever it last applied, hours old if that tab has been hidden, and a
+  // fresh tab (lastAppliedAt = 0) used to accept it. That was the still-open phantom-play
+  // vector after the 2026-08-19 cache fix — same laundering, sibling path (audit T1.1).
+  // A rejected stale state costs nothing: the newcomer's own live poll answers within ~1s.
   const applyShared = useCallback((p: Playing, at: number) => {
+    if (Date.now() - at > CACHE_MAX_AGE_MS) return;
     if (Date.now() < suppressUntil.current) return;
     if (at <= lastAppliedAt.current) return;
     lastAppliedAt.current = at;
@@ -360,13 +375,18 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       const msg = e.data;
       if (msg.type === "state") {
         applyShared(msg.playing, msg.at);
-        // A follower tab never fetches, so the leader's broadcast IS its first live answer.
-        markNowPlayingReady();
-        // A follower never fetches, so the leader's broadcast is its only view of both build
-        // ids. Authoritative goes LAST: it is the one reading allowed to clear the streak, so
-        // it must land after the poll id it overrules.
-        checkSkew(msg.build, "poll");
-        checkSkew(msg.authBuild, "authoritative");
+        // Freshness-gated: a STALE state message (a hidden leader answering `request` with
+        // hours-old state) must neither count as "the first live answer" nor feed its
+        // equally-old build ids into skew clearing — a replayed pre-deploy "authoritative"
+        // match could absolve a genuine streak forever (audit 2026-08-19, T1.1/T2.15).
+        if (Date.now() - msg.at <= CACHE_MAX_AGE_MS) {
+          markNowPlayingReady();
+          // Authoritative goes LAST: it is the one reading allowed to clear the streak, so
+          // it must land after the poll id it overrules.
+          checkSkew(msg.build, "poll");
+          if (msg.authBuild) authBuildAtRef.current = Date.now();
+          checkSkew(msg.authBuild, "authoritative");
+        }
       } else if (msg.type === "optimistic") {
         // A user action elsewhere — apply it and match its suppression so neither this tab's
         // view nor the leader's next poll clobbers it before Spotify catches up.
@@ -376,19 +396,36 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
           if (aliveRef.current) setPlaying(msg.playing);
         }
       } else if (msg.type === "request" && isLeaderRef.current) {
-        // Only the leader answers a newcomer, with the freshest state it has.
-        broadcast({
-          type: "state",
-          playing: playingRef.current,
-          at: lastAppliedAt.current,
-          build: serverBuildRef.current,
-          authBuild: authBuildRef.current,
-        });
+        // Only the leader answers a newcomer — and only with state fresh enough to trust.
+        // A hidden leader answering with hours-old state was the request-path phantom
+        // vector; a stale-holding leader now polls instead, and the poll's own broadcast
+        // reaches the newcomer with genuinely current state (audit 2026-08-19, T1.1).
+        if (Date.now() - lastAppliedAt.current <= CACHE_MAX_AGE_MS) {
+          broadcast({
+            type: "state",
+            playing: playingRef.current,
+            at: lastAppliedAt.current,
+            build: serverBuildRef.current,
+            authBuild: authBuildRef.current,
+          });
+        } else {
+          void pollOnceRef.current();
+        }
       }
     };
 
     // Ask whoever's leading for the current state (covers a fresh non-leader tab).
     broadcast({ type: "request" });
+
+    // Follower self-rescue: every poll trigger is gated on the LEADER's visibility, so a
+    // visible follower whose leader is hidden used to freeze — its chip showed the last
+    // broadcast forever (audit 2026-08-19, T2.15). A visible tab that hasn't applied a
+    // fresh state in 4 poll periods fetches once itself; the result broadcasts, so one
+    // rescue also feeds every other starved tab.
+    const rescue = setInterval(() => {
+      if (document.visibilityState !== "visible" || isLeaderRef.current) return;
+      if (Date.now() - lastAppliedAt.current > POLL_MS * 4) void pollOnceRef.current();
+    }, POLL_MS * 2);
 
     // Leader election: the tab that acquires the lock is the sole poller and holds the lock
     // until it unmounts/closes; then a queued tab takes over.
@@ -415,6 +452,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     return () => {
       aliveRef.current = false;
       isLeaderRef.current = false;
+      clearInterval(rescue);
       if (leaderInterval) clearInterval(leaderInterval);
       if (endTimerRef.current) clearTimeout(endTimerRef.current);
       document.removeEventListener("visibilitychange", onVisible);

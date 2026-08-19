@@ -405,28 +405,41 @@ export function DenHome({
   // it can't balloon: this is text only, a few KB a day.
   const DAY_STORE = "lb-days";
   const DAY_STORE_MAX = 20;
+  // The store is BUILD-STAMPED: sessionStorage survives reloads — including the build-skew
+  // reload — so a deploy that changes TrackStats used to hand the new bundle old-shaped rows
+  // with no runtime detection (the exact hazard the server's shape tokens exist to close;
+  // audit 2026-08-19, T1.7). A build mismatch discards the whole store.
+  const DAY_STORE_BUILD = process.env.NEXT_PUBLIC_BUILD_ID ?? "dev";
   useEffect(() => {
     try {
       const raw = sessionStorage.getItem(DAY_STORE);
       if (!raw) return;
-      const saved = JSON.parse(raw) as Record<string, TrackStats[]>;
-      for (const [day, rows] of Object.entries(saved)) {
+      const parsed = JSON.parse(raw) as { build?: string; days?: Record<string, TrackStats[]> };
+      if (parsed.build !== DAY_STORE_BUILD || !parsed.days) {
+        sessionStorage.removeItem(DAY_STORE);
+        return;
+      }
+      for (const [day, rows] of Object.entries(parsed.days)) {
         if (!cache.current.has(day)) cache.current.set(day, rows);
       }
     } catch {
       /* storage unavailable / corrupt — just fetch as usual */
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const persistDay = (day: string, rows: TrackStats[]) => {
     // `initialDay` is the most recent day with plays — treat it as live, everything older is frozen.
     if (day === "all" || day >= initialDay) return;
     try {
       const raw = sessionStorage.getItem(DAY_STORE);
-      const saved = raw ? (JSON.parse(raw) as Record<string, TrackStats[]>) : {};
+      const parsed = raw
+        ? (JSON.parse(raw) as { build?: string; days?: Record<string, TrackStats[]> })
+        : null;
+      const saved = parsed?.build === DAY_STORE_BUILD && parsed.days ? parsed.days : {};
       saved[day] = rows;
       const keys = Object.keys(saved).sort();
       while (keys.length > DAY_STORE_MAX) delete saved[keys.shift() as string];
-      sessionStorage.setItem(DAY_STORE, JSON.stringify(saved));
+      sessionStorage.setItem(DAY_STORE, JSON.stringify({ build: DAY_STORE_BUILD, days: saved }));
     } catch {
       /* quota / unavailable — the in-memory cache still works */
     }
@@ -436,10 +449,17 @@ export function DenHome({
   // query, so we fetch it ONCE and reveal more by slicing on the client — the chevron and
   // "See all" are then instant instead of paying a server round-trip each press. Prefetched
   // on mount so the full set is usually already in hand before the first click.
-  const allDailyPromise = useRef<ReturnType<typeof dailyStatsAction> | null>(null);
+  const allDailyPromise = useRef<{ p: ReturnType<typeof dailyStatsAction>; at: number } | null>(
+    null,
+  );
   const loadAllDaily = () => {
-    allDailyPromise.current ??= dailyStatsAction(100000);
-    return allDailyPromise.current;
+    // Memoized for a minute, not for the component's life: the old forever-memo meant
+    // pressing "See all" after an hour of listening replaced the live strip with the
+    // mount-time snapshot (audit 2026-08-19, T2.7).
+    if (!allDailyPromise.current || Date.now() - allDailyPromise.current.at > 60_000) {
+      allDailyPromise.current = { p: dailyStatsAction(100000), at: Date.now() };
+    }
+    return allDailyPromise.current.p;
   };
   useEffect(() => {
     void loadAllDaily();
@@ -626,6 +646,14 @@ export function DenHome({
         indexStatus.current = "fallback";
         return;
       }
+      // Both EMPTY is not an index either: a cold/half-built store answering 200 with
+      // `{tracks: []}` used to mint `entries = []`, which is truthy — every search then
+      // rendered "No songs match" for the visit with no fallback scheduled
+      // (audit 2026-08-19, T2.6). Empty payloads → server fallback, same as failure.
+      if (!l?.tracks.length && !h?.tracks.length) {
+        indexStatus.current = "fallback";
+        return;
+      }
       indexStatus.current = "memory";
       setEntries(buildEntries(l, h));
       // The history half also feeds the day list (buildDays). Only set on success: a failed
@@ -726,9 +754,22 @@ export function DenHome({
     selRef.current = selected;
   }, [selected]);
 
-  const doRefresh = useRef<() => Promise<void>>(async () => {});
+  const doRefresh = useRef<(force?: boolean) => Promise<void>>(async () => {});
+  // Ordering guard: three independent triggers (track change + its 4s echo, the 120s
+  // interval, visibilitychange) used to run doRefresh concurrently with no sequencing —
+  // the slower run could land LAST with staler rows, resurrecting provisionals the faster
+  // one had already confirmed (double-count; audit 2026-08-19, T1.9). Last-started wins.
+  const refreshRun = useRef(0);
+  // Sync throttle: a Spotify recently-played harvest rides every refresh, and the pile of
+  // triggers meant ~2 calls per track change plus one per tab-switch — real pressure on the
+  // one endpoint with a daily quota (audit 2026-08-19, T2.1). Track changes force through;
+  // ambient triggers (interval, visibility) skip if a refresh ran in the last 45s.
+  const lastRefreshAt = useRef(0);
   useEffect(() => {
-    doRefresh.current = async () => {
+    doRefresh.current = async (force = false) => {
+      if (!force && Date.now() - lastRefreshAt.current < 45_000) return;
+      lastRefreshAt.current = Date.now();
+      const run = ++refreshRun.current;
       const at = selected;
       // A pinned past day is frozen history, and a search owns its own result set: in both
       // cases refresh the stats but skip rows we'd only overwrite with identical ones.
@@ -748,12 +789,17 @@ export function DenHome({
         const hist = histReq.current ? await histReq.current : null;
         if (hist) {
           const patched = patchHistoryPayload(hist, r.newPlays);
-          histReq.current = Promise.resolve(patched);
-          const lib = libReq.current ? await libReq.current : null;
-          setEntries(buildEntries(lib, patched));
-          // Same delta, same object: the derived days re-group off the patched payload, so a
-          // play that just landed is in yesterday's rows too if that is where it belongs.
-          setHistory(patched);
+          // The delta can re-deliver the boundary minute (the server filters `>=` now);
+          // when everything deduped away, `plays` is the same reference — skip the
+          // re-render entirely.
+          if (patched.plays !== hist.plays) {
+            histReq.current = Promise.resolve(patched);
+            const lib = libReq.current ? await libReq.current : null;
+            setEntries(buildEntries(lib, patched));
+            // Same delta, same object: the derived days re-group off the patched payload, so a
+            // play that just landed is in yesterday's rows too if that is where it belongs.
+            setHistory(patched);
+          }
         } else {
           // No payload in memory yet (still fetching or failed) — the old drop-and-refetch
           // is the right fallback; the ≤10-min-stale copy beats none.
@@ -761,17 +807,26 @@ export function DenHome({
           loadIndex();
         }
       }
-      if (!r.ok || selRef.current !== at) return;
+      if (!r.ok || selRef.current !== at || refreshRun.current !== run) return;
       // Fold the still-unconfirmed optimistic plays into the server truth before it hits
       // the screen — otherwise a sync that hasn't caught a play yet would make the row the
       // handoff just added flicker out (optimistic-play.ts owns the confirm/expire rules).
+      //
+      // ONLY when the response actually carries today's rows (`want === "latest"`).
+      // Reconciling against `null` (searching / a pinned past day) meant NOTHING could
+      // confirm, so the card rendered server-count + N provisionals — over-counting for
+      // the whole TTL; the "all" rows are all-time aggregates, the wrong universe in both
+      // directions (audit 2026-08-19, T1.9). Wrong universe → leave the provisionals and
+      // the server's own card alone; the next latest-mode refresh reconciles properly.
       const provs = provisionalsRef.current;
-      const bump = provs.length
-        ? reconcilePlays(r.tracks ?? [], provs, Date.now())
-        : { rows: r.tracks ?? [], remaining: [] };
+      const canReconcile = want === "latest" && !!r.tracks;
+      const bump =
+        canReconcile && provs.length
+          ? reconcilePlays(r.tracks ?? [], provs, Date.now())
+          : { rows: r.tracks ?? [], remaining: canReconcile ? [] : provs };
       provisionalsRef.current = bump.remaining;
       setDaily(
-        bump.remaining.length && r.daily.length
+        canReconcile && bump.remaining.length && r.daily.length
           ? [
               { ...r.daily[0], plays: r.daily[0].plays + bump.remaining.length },
               ...r.daily.slice(1),
@@ -795,8 +850,10 @@ export function DenHome({
   // visibilitychange handler below catches it up the moment it's looked at again.
   useEffect(() => {
     if (document.visibilityState !== "visible") return;
-    void doRefresh.current();
-    const t = setTimeout(() => void doRefresh.current(), 4000);
+    // Track changes force through the sync throttle (this is the just-finished play the
+    // shortcut exists for); the 4s echo covers Spotify's recently-played lag.
+    void doRefresh.current(true);
+    const t = setTimeout(() => void doRefresh.current(true), 4000);
     return () => clearTimeout(t);
   }, [nowPlayingId]);
 
@@ -808,6 +865,10 @@ export function DenHome({
   // (the nowPlayingId effect above) confirms it against the store within seconds.
   const provisionalsRef = useRef<Provisional[]>([]);
   const [freshKey, setFreshKey] = useState<string | null>(null);
+  const freshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (freshTimer.current) clearTimeout(freshTimer.current);
+  }, []);
   const lastPlayingRef = useRef<{
     id: string;
     title: string;
@@ -821,9 +882,16 @@ export function DenHome({
     durationMs: number;
     source: string | null;
     maxProgress: number;
-    /** When a poll last SAW this song playing. A finish() long after that means the tab
-     *  was suspended in between — see the staleness guard below. */
+    /** When a poll last SAW this song ACTUALLY PLAYING (isPlaying true). A finish() long
+     *  after that means the tab was suspended or the song sat paused — see the staleness
+     *  guard below. Paused polls must NOT refresh this: a song paused at 9 PM and swapped
+     *  at 12:30 AM used to read as "seen 6s ago" and mint a 3.5-hour-late play
+     *  (audit 2026-08-19, T1.2). */
     seenAt: number;
+    /** Whether this tab ever observed the song PLAYING. A track first seen paused (a
+     *  reopened tab, a device left loaded) carries progress it earned long ago — crediting
+     *  it on the next song change is the paused-seed phantom. */
+    sawPlaying: boolean;
   } | null>(null);
   useEffect(() => {
     const prev = lastPlayingRef.current;
@@ -846,6 +914,8 @@ export function DenHome({
       // is the SYNC's business (it recorded the real play with its real time long ago),
       // never this shortcut's. The poll runs every ~6s; a 60s gap only happens suspended.
       if (Date.now() - p.seenAt > 60_000) return verdict("stale");
+      // Never observed playing in this tab = nothing to credit: its progress predates us.
+      if (!p.sawPlaying) return verdict("never-played");
       // Same bar the store applies (plays.skipped): under 35% of the song listened is a
       // skip, not a play — don't hand it to the list (Rem, 2026-08-16). 30s floor stands
       // in when the duration is unknown.
@@ -897,14 +967,22 @@ export function DenHome({
           return next;
         });
         setFreshKey(`${row.artist.toLowerCase()}\n${row.name.toLowerCase()}`);
-        setTimeout(() => setFreshKey(null), 1600);
+        // Re-armed, not stacked: two commits inside 1.6s used to let the first timer clear
+        // the second's highlight early.
+        if (freshTimer.current) clearTimeout(freshTimer.current);
+        freshTimer.current = setTimeout(() => setFreshKey(null), 1600);
       }
     };
     if (playing?.track) {
       if (prev && prev.id === playing.track.id) {
-        prev.maxProgress = Math.max(prev.maxProgress, playing.progressMs);
         prev.source = playing.context?.name ?? prev.source;
-        prev.seenAt = Date.now();
+        // Only a PLAYING observation refreshes the liveness stamp and earns progress —
+        // a paused chip re-observed every 6s must not keep a dead song "fresh".
+        if (playing.isPlaying) {
+          prev.maxProgress = Math.max(prev.maxProgress, playing.progressMs);
+          prev.seenAt = Date.now();
+          prev.sawPlaying = true;
+        }
       } else {
         if (prev) finish(prev);
         lastPlayingRef.current = {
@@ -915,8 +993,11 @@ export function DenHome({
           albumImage: playing.track.albumImage,
           durationMs: playing.durationMs,
           source: playing.context?.name ?? null,
-          maxProgress: playing.progressMs,
+          // A track first seen PAUSED starts with no credit: whatever progress it shows
+          // was earned before this tab was watching.
+          maxProgress: playing.isPlaying ? playing.progressMs : 0,
           seenAt: Date.now(),
+          sawPlaying: !!playing.isPlaying,
         };
       }
     } else if (prev) {
@@ -1108,6 +1189,10 @@ export function DenHome({
   // lands the aggregated server rows stand in.
   const displayRows = useMemo(() => {
     if (!phone || selected === "all") return dayRows;
+    // Known, accepted gap: these payload-derived rows don't contain the handoff's
+    // provisional (it lives in `tracks`), so on phone a just-finished play appears only
+    // when the ~4s refresh patches the payload — a few seconds later than desktop. The
+    // per-play-per-row view is worth those seconds (Rem, 2026-08-13).
     return memoryDays?.playRows.get(selected) ?? dayRows;
   }, [phone, selected, memoryDays, dayRows]);
 
@@ -1116,7 +1201,9 @@ export function DenHome({
   useEffect(() => {
     const el = dayScrollRef.current;
     setDayMoreBelow(!!el && el.scrollHeight - el.clientHeight - el.scrollTop > 2);
-  }, [dayRows]);
+    // displayRows, not dayRows: on phone the rendered set is the per-play list, and the
+    // scroll cue was derived from the other one.
+  }, [displayRows]);
   useEffect(() => {
     const check = () => {
       const el = resScrollRef.current;

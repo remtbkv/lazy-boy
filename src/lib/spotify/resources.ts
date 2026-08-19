@@ -193,6 +193,9 @@ export class Resources {
       await this.http.post(`/playlists/${playlistId}/items`, { uris: batch, position: pos });
       pos += batch.length;
     }
+    // Same collection write as addItems — it moves snapshot_id and trackCount, so the
+    // cached playlist list is stale (this was the one mutation that didn't bust it).
+    playlistsCache = null;
   }
 
   /** Delete (unfollow) one of the user's own playlists. Spotify has no hard "delete";

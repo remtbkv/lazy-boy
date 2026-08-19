@@ -1,6 +1,7 @@
+import { cookies } from "next/headers";
 import { auth, spotifyAccessToken } from "@/lib/auth";
 import { spotifyClient, SpotifyError } from "@/lib/spotify";
-import { getLastSync, ledgerSyncCall } from "@/lib/db";
+import { getLastSync, ledgerSyncCall, setUserTzOffset } from "@/lib/db";
 import { syncRecentPlays } from "@/lib/sync/history";
 
 // In-app history sync. SyncOnLoad pings this on load, every 2 min while open, and on
@@ -16,6 +17,13 @@ export async function POST() {
   const accessToken = session && !session.error ? await spotifyAccessToken() : undefined;
   if (!accessToken) {
     return Response.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
+  // Publish the browser's tz offset so write-path day bucketing (the home payload) and
+  // cookie-less requests use the reader's zone instead of a hardcoded one. Once per load,
+  // fire-and-forget.
+  const tzRaw = Number((await cookies()).get("tzoffset")?.value);
+  if (Number.isFinite(tzRaw)) {
+    void setUserTzOffset(Math.max(-720, Math.min(840, Math.round(tzRaw)))).catch(() => {});
   }
   const last = await getLastSync();
   if (last && Date.now() - new Date(last).getTime() < STALE_MS) {

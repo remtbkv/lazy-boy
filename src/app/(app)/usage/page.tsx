@@ -430,7 +430,9 @@ export default async function UsagePage() {
                     <td className="py-1 pl-4 text-xs">
                       {w.banTs === null
                         ? "—"
-                        : `at ${w.callsBeforeBan} calls · ${openTime(new Date(w.banTs).toISOString(), tz)}`}
+                        : `at ${w.callsBeforeBan} calls · ${openTime(new Date(w.banTs).toISOString(), tz)}${
+                            w.banRetryAfterS ? ` · ${Math.round(w.banRetryAfterS / 60)}m ban` : ""
+                          }`}
                     </td>
                   </tr>
                 ))}

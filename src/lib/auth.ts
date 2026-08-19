@@ -127,7 +127,17 @@ async function refreshAccessToken(refreshToken: string) {
     }
 
     if (res.ok) {
-      const data = await res.json();
+      // Guarded: a 200 with a non-JSON body used to escape as a raw SyntaxError, skipping
+      // the RefreshError terminal/transient classification every caller relies on.
+      let data: { access_token?: string; refresh_token?: string; expires_in?: number };
+      try {
+        data = await res.json();
+      } catch {
+        throw new RefreshError(false, "token endpoint returned non-JSON 200");
+      }
+      if (!data.access_token || !data.expires_in) {
+        throw new RefreshError(false, "token endpoint 200 missing fields");
+      }
       return {
         accessToken: data.access_token as string,
         // Spotify may or may not return a new refresh token.
@@ -200,13 +210,18 @@ async function coordinatedRefresh(triedToken: string): Promise<SpotifyTokens> {
         await releaseLock("spotify_refresh", lockOwner);
       }
     }
-    // Lost the lock — wait for whoever holds it to publish a fresh token.
-    const published = await waitForFreshToken(10_000);
+    // Lost the lock — wait for whoever holds it to publish a fresh token. 16s, not 10:
+    // the lock TTL is 15s, and a loser that gave up BEFORE the holder's lease could even
+    // expire went on to refresh unilaterally with a possibly-rotated token — the exact
+    // PKCE collision the lock exists to prevent (audit 2026-08-19, T2.13).
+    const published = await waitForFreshToken(16_000);
     if (published) return published;
-    // Holder stalled/crashed; loop to retry (its lock TTL has likely expired).
+    // Holder stalled/crashed; loop to retry (its lock TTL has genuinely expired now).
   }
-  // Last resort: refresh ourselves rather than fail the request.
-  const updated = await refreshAccessToken(triedToken);
+  // Last resort: refresh ourselves rather than fail the request — with the STORE's current
+  // refresh token, not the one this caller started with, which the winner may have rotated.
+  const latest = await getSpotifyTokens();
+  const updated = await refreshAccessToken(latest?.refreshToken ?? triedToken);
   await setSpotifyTokens(updated);
   return updated;
 }

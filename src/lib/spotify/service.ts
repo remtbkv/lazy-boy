@@ -210,11 +210,19 @@ export class Service {
         n++;
         await this.resources.nextTrack();
         await sleep(300);
-        // Wait for the track to actually change; nudge again if it stalls.
+        // Wait for the track to actually change; nudge again if it stalls. DEADLINED:
+        // with repeat-one on the device, `next` replays the same id forever and this
+        // inner loop used to spin unboundedly at 1-2 Spotify calls per 150ms — a runaway
+        // call generator (audit 2026-08-19, T2.12). 15s of no movement = the walk is
+        // stuck; bail with what's collected (the catch below already saves partials).
         const prevId = curr.id;
         let next: Track | null = curr;
         let nudgedAt = Date.now();
+        const stuckAt = Date.now();
         while (next && next.id === prevId) {
+          if (Date.now() - stuckAt > 15_000) {
+            throw new Error("queue walk stalled — same track keeps playing (repeat-one on?)");
+          }
           await sleep(150);
           next = await playingTrack();
           if (Date.now() - nudgedAt > 1500) {

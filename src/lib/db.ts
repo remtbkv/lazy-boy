@@ -228,6 +228,7 @@ async function init(): Promise<Client> {
       retry_after INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_api_log_ts ON api_log (ts);
+    CREATE INDEX IF NOT EXISTS idx_api_log_path_ts ON api_log (path, ts);
     -- Per-reader modeled rows-read attribution, one row per (UTC day, reader). See "The
     -- read-cost ledger" near the bottom of this file. The primary key is (day, reader) so
     -- the upsert is an indexed probe and a day's rows are a range seek.
@@ -538,6 +539,18 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
   if (insertResultIdx.length > 0) {
     // Give the plays we just inserted their membership verdict before anything reads them.
     await recomputeOrphanFlags({ newOnly: true });
+    // An out-of-order batch (a gap-filling harvest, the backstop replay) lands BETWEEN
+    // existing plays, so the row immediately before the batch was verdicted against a
+    // successor that is no longer adjacent. Re-open exactly that one verdict; the recompute
+    // below re-rules it against the true neighbour. In-order batches re-verdict the same
+    // pair to the same answer, so this is safe to run unconditionally (audit 2026-08-19, T1.6).
+    await client.execute({
+      sql: `UPDATE plays SET skipped = NULL WHERE id = (
+              SELECT p.id FROM plays p
+              WHERE p.played_at < :minAt AND ${NOT_BACKFILL}
+              ORDER BY p.played_at DESC LIMIT 1)`,
+      args: { minAt },
+    });
     // …and rule on skips: each newly-landed play gives its PREDECESSOR a successor, so
     // the pending verdicts can now be decided.
     await recomputeSkipFlags();
@@ -782,7 +795,15 @@ async function recomputeSkipFlags(): Promise<void> {
     const skipped = dur && gap >= 0 && Math.min(gap, dur) < SKIP_FRACTION * dur ? 1 : 0;
     updates.push({ sql: "UPDATE plays SET skipped = ? WHERE id = ?", args: [skipped, r.id] });
   }
-  if (updates.length > 0) await client.batch(updates, "write");
+  if (updates.length > 0) {
+    await client.batch(updates, "write");
+    // Same rule recomputeOrphanFlags follows: this ran AFTER the caller's batch already
+    // bumped, and skipped is filtered by cached reads (day lists, counters, the history
+    // payload) — without its own announcement, an entry cached between the insert-bump and
+    // this write serves pre-verdict rows for its whole TTL (audit 2026-08-19, T1.4).
+    await bumpWriteSeq();
+    dropWriteSeqCache();
+  }
 }
 
 // `source` is the context (playlist/album name, or type) of the MOST RECENT play
@@ -794,7 +815,9 @@ const SELECT_TRACK = `
     COUNT(p.id) AS plays, MAX(p.played_at) AS lastPlayed, MIN(p.played_at) AS firstPlayed,
     (SELECT ${sourceExpr("p2", "c2")}
        FROM plays p2 LEFT JOIN contexts c2 ON c2.uri = p2.context_uri
-       WHERE p2.track_id = t.id ORDER BY p2.played_at DESC LIMIT 1) AS source
+       WHERE p2.track_id = t.id
+       ORDER BY (p2.context_type = 'backfill') ASC, (p2.skipped = 1) ASC,
+                p2.played_at DESC LIMIT 1) AS source
   FROM plays p LEFT JOIN tracks t ON t.id = p.track_id`;
 
 // Estimated time *actually* listened per play: the gap until the next play, capped at the
@@ -907,12 +930,12 @@ export async function searchHistory(query: string, limit = 300): Promise<TrackSt
 // and scans ~75× the rows, and both are far above the ~20ms a cache hit replaces.
 //
 // So each goes through unstable_cache, in one of two shapes:
-//   • FROZEN — a day at or older than today-2 in the USER'S zone. Its plays can no longer
-//     change:
-//     plays only arrive at "now", and the furthest back a resumed sync can reach is Spotify's
-//     last-50-plays window. Two days of slack because that window is the bound, not the clock.
-//     Keyed on (day, offset) only, so every later visit — any tab, any instance, any day —
-//     is a cache hit and costs ZERO DB reads.
+//   • FROZEN — a day at or older than today-2 in the USER'S zone. Its plays almost never
+//     change (plays arrive at "now"; the sync reaches back only Spotify's last-50 window) —
+//     but "almost" is the point: the backstop replay inserts into arbitrary past days, and
+//     source/ctx_orphan/skipped rewrites touch old rows too. So frozen entries carry the
+//     write marker in their key like everything else (audit 2026-08-19, T1.7); what makes
+//     them "frozen" now is only the longer TTL on superseded keys.
 //   • LIVE — today, yesterday, the strip, the all-time list, the playlist grid. Keyed on
 //     `meta.write_seq`, so ANY write that changes what they read produces a different cache key
 //     and the next read recomputes. That is what keeps TODAY honest on the existing ~2-min
@@ -1135,8 +1158,16 @@ export async function hasPlaysBeforeDay(day: string, offsetMin = 0): Promise<boo
  *  `plays`/`lastPlayed`/`source` are scoped to that day, not all-time.
  *
  *  Two cache shapes, one per day-kind — see "Read caching" above for which and why. */
+// Both day-kinds carry the write marker in the key now. The frozen shape used to key on
+// (day, offset) alone — "its plays can no longer change" — but two writers rejected that
+// premise in practice: the backstop replay (scripts/backfill-from-backstop.mjs) inserts
+// plays into arbitrary past days and its write_seq bump couldn't reach a markerless key,
+// and `source`/`ctx_orphan`/`skipped` rewrites always could change a frozen day's rows
+// (audit 2026-08-19, T1.7). The store is self-hosted — a re-read after a bump costs ~90
+// unmetered rows — so the longer TTL is the only remaining difference: a superseded
+// frozen key lingers a day, a live one an hour.
 const playsByDayFrozen = unstable_cache(
-  (day: string, offsetMin: number) => readPlaysByDay(day, offsetMin),
+  (day: string, offsetMin: number, _seq: string) => readPlaysByDay(day, offsetMin),
   ["plays-by-day-frozen"],
   { revalidate: FROZEN_TTL_S },
 );
@@ -1146,9 +1177,10 @@ const playsByDayLive = unstable_cache(
   { revalidate: LIVE_TTL_S },
 );
 export async function getPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]> {
-  if (isFrozenDay(day, offsetMin)) return playsByDayFrozen(day, offsetMin);
   const seq = await liveKey();
-  return seq === null ? readPlaysByDay(day, offsetMin) : playsByDayLive(day, offsetMin, seq);
+  if (seq === null) return readPlaysByDay(day, offsetMin);
+  if (isFrozenDay(day, offsetMin)) return playsByDayFrozen(day, offsetMin, seq);
+  return playsByDayLive(day, offsetMin, seq);
 }
 
 async function readPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]> {
@@ -1265,7 +1297,15 @@ function zoneOffsetMinutes(zone: string, at: Date = new Date()): number {
 /** Recompute Home's whole first paint and store it. Called from the sync (see
  *  `syncRecentPlays`) whenever plays land, and by Home itself when the row is missing. */
 export async function rebuildHomePayload(): Promise<HomePayload> {
-  const tzOffsetMinutes = zoneOffsetMinutes(HOME_TZ);
+  // The browser's last-published offset when we have it (written through by /api/sync from
+  // the tz cookie), the fixed home zone otherwise. The hardcoded zone alone meant the
+  // payload's buckets and every cookie-driven read on the same page could disagree the
+  // moment the user wasn't in NY (audit 2026-08-19, T2.20).
+  const stored = await getMeta("user_tz_offset").catch(() => null);
+  const storedN = stored === null ? NaN : Number(stored);
+  const tzOffsetMinutes = Number.isFinite(storedN)
+    ? Math.max(-720, Math.min(840, Math.round(storedN)))
+    : zoneOffsetMinutes(HOME_TZ);
   const [daily, allTime] = await Promise.all([
     readDailyStats(tzOffsetMinutes, HOME_DAILY_DAYS),
     // Already a single meta read off the primary, refreshed on write by recordPlays.
@@ -1467,9 +1507,18 @@ export const HISTORY_INDEX_SHAPE = "v2";
  *
  *  STALENESS BOUND: it does not move for an in-place edit of a track's name, artist, album or
  *  art (a re-tag by Spotify, or a play sync refreshing a track's fields). Those are bounded to
- *  ~24h by the daily bucket in the route's ETag. */
-export async function getLibraryIndexVersion(): Promise<string> {
-  return (await getMeta(LIBRARY_SEQ_KEY)) ?? "0";
+ *  ~24h by the cache entry's own `revalidate` (the ETag's daily bucket only re-validates the
+ *  browser; the body it re-validates against is this entry).
+ *
+ *  Returns null when the store can't be read — the caller must serve uncached rather than
+ *  mint cache entries under a guessed version (audit 2026-08-19, T2.4: a transient failure
+ *  used to read as "0" and poison the "0"-keyed entry for a day). */
+export async function getLibraryIndexVersion(): Promise<string | null> {
+  try {
+    return (await getMeta(LIBRARY_SEQ_KEY)) ?? "0";
+  } catch {
+    return null;
+  }
 }
 
 // ── The slow marker (`meta.slow_seq_pub`) ───────────────────────────────────────────────
@@ -1500,14 +1549,27 @@ async function slowSeq(): Promise<string | null> {
       /* republish below */
     }
   }
+  // Re-read just before publishing: two instances racing here used to let the LOSER land a
+  // lower seq with a newer stamp, which then served the superseded key for the whole window
+  // (audit 2026-08-19, T2.18). A newer published seq wins; never publish backwards.
+  const raced = await getMeta("slow_seq_pub").catch(() => null);
+  if (raced) {
+    try {
+      const pub = JSON.parse(raced) as { seq: string; at: number };
+      if (Number(pub.seq) >= Number(seq)) return pub.seq;
+    } catch {
+      /* fall through to publish */
+    }
+  }
   await setMeta("slow_seq_pub", JSON.stringify({ seq, at: Date.now() }));
   return seq;
 }
 
 /** The history payload's version: the slow marker (write_seq, published at most every
- *  10 min) — the rebuild is a full plays scan, so it must not run once per play. */
-export async function getHistoryIndexVersion(): Promise<string> {
-  return (await slowSeq()) ?? "0";
+ *  10 min) — the rebuild is a full plays scan, so it must not run once per play. Null when
+ *  the store can't be read: serve uncached, never mint entries under a guessed version. */
+export async function getHistoryIndexVersion(): Promise<string | null> {
+  return slowSeq();
 }
 
 // LIVE-shaped cache (the section above): keyed on a content version, with the daily TTL as a
@@ -1517,11 +1579,14 @@ const libraryIndexCached = unstable_cache(
   ["library-index", LIBRARY_INDEX_SHAPE],
   { revalidate: FROZEN_TTL_S },
 );
-export async function getLibraryIndex(version: string): Promise<LibraryIndex> {
+export async function getLibraryIndex(version: string | null): Promise<LibraryIndex> {
   // The shape token goes in BOTH the key parts and the arguments: key parts are the documented
   // cache key, and passing it as an argument as well means the identity holds even if a Next
   // version ever treats key parts as a namespace rather than as key material.
-  return libraryIndexCached(version, LIBRARY_INDEX_SHAPE);
+  // Null version = the store couldn't say what's current. Read fresh and DON'T cache:
+  // an entry minted under a guessed key would be served to every later request that also
+  // fails the version read (audit 2026-08-19, T2.4).
+  return version === null ? readLibraryIndex() : libraryIndexCached(version, LIBRARY_INDEX_SHAPE);
 }
 
 const historyIndexCached = unstable_cache(
@@ -1529,8 +1594,9 @@ const historyIndexCached = unstable_cache(
   ["history-index", HISTORY_INDEX_SHAPE],
   { revalidate: FROZEN_TTL_S },
 );
-export async function getHistoryIndex(version: string): Promise<HistoryIndex> {
-  return historyIndexCached(version, HISTORY_INDEX_SHAPE);
+export async function getHistoryIndex(version: string | null): Promise<HistoryIndex> {
+  // Same null contract as getLibraryIndex: fresh and uncached when the version is unknown.
+  return version === null ? readHistoryIndex() : historyIndexCached(version, HISTORY_INDEX_SHAPE);
 }
 
 async function readLibraryIndex(): Promise<LibraryIndex> {
@@ -1836,7 +1902,23 @@ async function readStoredPlaylists(): Promise<StoredPlaylist[]> {
  *  actually changes). 0 until first cached — Home falls back to the raw track-count sum. */
 export async function getUniqueSongCount(): Promise<number> {
   const v = await getMeta("unique_song_count");
-  return v ? Number(v) || 0 : 0;
+  if (!v) return 0;
+  // Stored as {n, seq} where seq is library_seq at compute time. The old trigger — "end of
+  // each library sync" — missed every other writer of playlist_tracks (playlist deletes,
+  // single-track removes, out-of-band stores that also suppress the next sync's snapshot
+  // diff; audit 2026-08-19, T2.3). Now: serve the cached number instantly, and when the
+  // library marker has moved since it was computed, kick a background recompute so the next
+  // render is right. Never blocks a render.
+  try {
+    const parsed = JSON.parse(v) as { n: number; seq: string | null };
+    const cur = await getMeta(LIBRARY_SEQ_KEY).catch(() => null);
+    if (parsed.seq !== cur) void recomputeUniqueSongCount().catch(() => {});
+    return Number(parsed.n) || 0;
+  } catch {
+    // Legacy plain-number value: adopt it and refresh in the background.
+    void recomputeUniqueSongCount().catch(() => {});
+    return Number(v) || 0;
+  }
 }
 
 /** Run the expensive distinct-song scan once and cache it in meta. Called at the end of a
@@ -1846,6 +1928,10 @@ export async function recomputeUniqueSongCount(): Promise<number> {
   // stale before the scan below even runs.
   dropWriteSeqCache();
   const client = await getClient();
+  // Marker BEFORE the scan: if a write lands mid-scan, the stored seq is older than the
+  // data and the next read re-kicks — the safe direction. Read after, a mid-scan bump
+  // would label a pre-bump count as current.
+  const seq = await getMeta(LIBRARY_SEQ_KEY).catch(() => null);
   const res = await client.execute(
     `SELECT COUNT(*) AS n FROM (
        SELECT DISTINCT lower(t.artist) AS a, lower(t.name) AS m
@@ -1856,7 +1942,7 @@ export async function recomputeUniqueSongCount(): Promise<number> {
   // The DISTINCT count returns one row, so the scan is modeled from the library's size, not
   // from what came back.
   void ledgerAdd("unique_song_count", uniqueSongCountRows());
-  await setMeta("unique_song_count", String(n));
+  await setMeta("unique_song_count", JSON.stringify({ n, seq }));
   return n;
 }
 
@@ -2174,6 +2260,27 @@ export async function getLibrarySyncedAt(): Promise<string | null> {
 export async function setLibrarySyncedAt(): Promise<void> {
   await setMeta("library_synced_at", new Date().toISOString());
 }
+/** The browser's last-published tz offset (minutes to add to UTC), written through from the
+ *  tzoffset cookie by /api/sync. Read by tzOffsetMinutes() as the no-cookie fallback and by
+ *  rebuildHomePayload so write-path day buckets match the reader's. */
+export async function getUserTzOffset(): Promise<number | null> {
+  const v = await getMeta("user_tz_offset").catch(() => null);
+  const n = v === null ? NaN : Number(v);
+  return Number.isFinite(n) ? Math.max(-720, Math.min(840, Math.round(n))) : null;
+}
+export async function setUserTzOffset(offsetMin: number): Promise<void> {
+  await setMeta("user_tz_offset", String(Math.round(offsetMin)));
+}
+
+/** When a library scan was last STARTED (the completion stamp above only lands on success —
+ *  gating on it alone retried a failing scan every cron tick). Epoch ms. */
+export async function getLibraryScanAttemptAt(): Promise<number | null> {
+  const v = await getMeta("library_scan_attempt_at");
+  return v ? Number(v) || null : null;
+}
+export async function setLibraryScanAttemptAt(): Promise<void> {
+  await setMeta("library_scan_attempt_at", String(Date.now()));
+}
 
 // Spotify rate-limit backoff, persisted so it survives across serverless invocations
 // (the HTTP client's in-memory cooldown is wiped between each cron/API invocation, so
@@ -2201,7 +2308,17 @@ export async function getSpotifyCooldownUntil(): Promise<number> {
   return v ? Number(v) || 0 : 0;
 }
 export async function setSpotifyCooldownUntil(untilMs: number): Promise<void> {
-  await setMeta("spotify_cooldown_until", String(Math.floor(untilMs)));
+  // MAX, not overwrite: a later, shorter ban must never SHORTEN a persisted longer one
+  // (audit 2026-08-19, T1.10 — the module-scoped copy in spotify/client.ts already maxes;
+  // the persisted copy silently didn't).
+  const client = await getClient();
+  await client.execute({
+    sql: `INSERT INTO meta (key, value) VALUES ('spotify_cooldown_until', :v)
+          ON CONFLICT(key) DO UPDATE SET
+            value = CASE WHEN CAST(meta.value AS INTEGER) >= CAST(excluded.value AS INTEGER)
+                         THEN meta.value ELSE excluded.value END`,
+    args: { v: String(Math.floor(untilMs)) },
+  });
 }
 
 // ---- preferences / background-job bookkeeping (meta-backed) ----
@@ -2399,11 +2516,13 @@ async function getMeta(key: string): Promise<string | null> {
 // ---- Spotify API request log ----------------------------------------------------------
 // Every outgoing Spotify call is recorded here (fire-and-forget from the HTTP client, so
 // it never slows a request), so a 429 can be analysed after the fact: how many calls we
-// made, from which SOURCE, over what window, and what wait Spotify demanded. A week is
-// kept (the 2026-08-16 extended rate-limit needed more than the old one-hour window to
-// reason about, and the store is self-hosted — rows cost nothing). /usage renders the
-// 24h per-source rollup; deeper analysis queries this table directly.
-const API_LOG_TTL_MS = 7 * 24 * 60 * 60 * 1000; // keep a week
+// made, from which SOURCE, over what window, and what wait Spotify demanded. Thirty days
+// are kept: the quota-window table exists to compare a new ban against every PAST
+// exhaustion point, and a 7-day TTL was quietly deleting that history (audit 2026-08-19,
+// T2.17). Store is self-hosted — rows cost nothing. Retention is enforced by the daily
+// cron tick (cron/sync route), not just the best-effort write-path counter below, which
+// resets with every serverless instance.
+const API_LOG_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 let apiLogWrites = 0;
 
 export async function logSpotifyRequest(entry: {
@@ -2447,7 +2566,7 @@ export async function getSpotifyCallBreakdown(hours = 24): Promise<SpotifyCallSo
   const client = await getClient();
   const res = await client.execute({
     sql: `SELECT COALESCE(source, 'untagged') AS source, COUNT(*) AS calls,
-                 SUM(status >= 400 OR status = 0) AS errors,
+                 SUM((status >= 400 OR status = 0) AND status <> 429) AS errors,
                  SUM(status = 429) AS rateLimited, MAX(ts) AS lastTs
           FROM api_log WHERE ts > ? GROUP BY COALESCE(source, 'untagged')
           ORDER BY calls DESC`,
@@ -2487,10 +2606,12 @@ export type QuotaWindow = {
 
 export async function getRecentlyPlayedQuotaWindows(): Promise<QuotaWindow[]> {
   const client = await getClient();
+  // Bounded to the retention window and served by idx_api_log_path_ts — this used to be an
+  // unbounded scan on an unindexed predicate, on the page whose subject is read cost.
   const res = await client.execute({
     sql: `SELECT ts, status, retry_after, COALESCE(source, 'untagged') AS source
-          FROM api_log WHERE path = ? ORDER BY ts`,
-    args: [RP_QUOTA_PATH],
+          FROM api_log WHERE path = ? AND ts > ? ORDER BY ts`,
+    args: [RP_QUOTA_PATH, Date.now() - API_LOG_TTL_MS],
   });
   const rows = plainRows(res.rows) as {
     ts: number;
@@ -2542,6 +2663,17 @@ export async function pruneApiLog(): Promise<void> {
   await client.execute({
     sql: `DELETE FROM api_log WHERE ts < ?`,
     args: [Date.now() - API_LOG_TTL_MS],
+  });
+}
+
+/** client_metrics had NO prune at all — unbounded growth with only the last 7 days ever
+ *  read (audit 2026-08-19, T2.16). 30 days kept for post-hoc digging; the daily cron tick
+ *  calls this alongside pruneApiLog. ISO-TEXT ts, so the cutoff is the same format. */
+export async function pruneClientMetrics(): Promise<void> {
+  const client = await getClient();
+  await client.execute({
+    sql: `DELETE FROM client_metrics WHERE ts < ?`,
+    args: [new Date(Date.now() - 30 * 86_400_000).toISOString()],
   });
 }
 
@@ -2760,6 +2892,8 @@ export type ClientMetricInput = {
   event: string;
   value?: number | null;
   meta?: string | null;
+  /** Browser-side observation time (ms epoch). Optional — old clients don't send it. */
+  at?: number | null;
 };
 
 /** One event's distribution over the summary window. */
@@ -2834,18 +2968,26 @@ function splitMeta(raw: string | null): { pv: string; meta: string | null } {
   return { pv: raw.slice(PV_TAG.length, bar), meta: raw.slice(bar + 1) };
 }
 
-/** Append a batch of reported timings. One statement batch, on the primary; `ts` is stamped
- *  HERE rather than trusted from the browser, so a clock-skewed tab can't file rows into next
- *  week. No write_seq bump (see the section note). */
+/** Append a batch of reported timings. `ts` is the browser's OBSERVATION time when the event
+ *  carries one — beacons only flush every so often (and always at pagehide), so arrival time
+ *  stamped a whole sitting's opens and errors at the moment the tab closed (audit 2026-08-19,
+ *  T1.8). The client clock is clamped to [now - 7d, now]: a skewed tab can neither file rows
+ *  into next week nor before the read window. Events with no `at` keep the arrival stamp.
+ *  No write_seq bump (see the section note). */
 export async function recordClientMetrics(rows: ClientMetricInput[]): Promise<void> {
   if (rows.length === 0) return;
   const client = await getClient();
-  const ts = new Date().toISOString();
+  const now = Date.now();
+  const arrival = new Date(now).toISOString();
+  const stamp = (at: number | null | undefined): string => {
+    if (typeof at !== "number" || !Number.isFinite(at)) return arrival;
+    return new Date(Math.min(now, Math.max(now - CLIENT_METRICS_WINDOW_MS, at))).toISOString();
+  };
   await client.batch(
     rows.map((r) => ({
       sql: `INSERT INTO client_metrics (ts, session, page, event, value, meta)
             VALUES (?, ?, ?, ?, ?, ?)`,
-      args: [ts, r.session, r.page, r.event, r.value ?? null, r.meta ?? null],
+      args: [stamp(r.at), r.session, r.page, r.event, r.value ?? null, r.meta ?? null],
     })),
     "write",
   );
@@ -2884,9 +3026,14 @@ export async function getClientLoadSpeed(): Promise<ClientLoadSpeed> {
     const page = String(row.page ?? "");
     const event = String(row.event ?? "");
     const { pv, meta } = splitMeta(row.meta === null ? null : String(row.meta));
-    if (event === "js-error" && meta) {
+    if ((event === "js-error" || event === "server-error") && meta) {
+      // server-error rows (instrumentation.ts) were written and surfaced NOWHERE — the
+      // digest-decoding they exist for never reached /usage (audit 2026-08-19, T2.16).
       errors.push({ at: String(row.ts ?? ""), page, message: meta });
     }
+    // Server rows carry raw request paths and no view id; letting them fall through minted
+    // blank all-dashes page rows in the per-page table. They exist for the errors list only.
+    if (event === "server-error") continue;
     const value = row.value === null ? null : Number(row.value);
     const finite = value !== null && Number.isFinite(value);
 

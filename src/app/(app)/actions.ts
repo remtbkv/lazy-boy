@@ -7,7 +7,7 @@ import { auth, signIn, signOut, getValidAccessToken, spotifyAccessToken } from "
 import { getSpotify } from "@/lib/session";
 import { spotifyClient, SpotifyError, type Track } from "@/lib/spotify";
 import { intersect, keyOf, subtract } from "@/lib/spotify/domain";
-import { runTask } from "@/lib/tasks/registry";
+import { runTask, taskDone } from "@/lib/tasks/registry";
 import { cleanPhase1, reconcileClean } from "@/lib/clean/run";
 import { syncLibrary } from "@/lib/sync/library";
 import {
@@ -126,6 +126,9 @@ export async function startCleanAction(
     const task = runTask("clean-reconcile", () =>
       reconcileClean(spotifyClient(token, true, "action:clean"), ctx),
     );
+    // Keep the invocation alive for the detached reconcile (serverless may freeze it
+    // once the action returns).
+    after(taskDone(task.id));
     revalidatePath("/playlists");
     return { ok: true, name: result.name, kept: result.kept, removed: result.removed, taskId: task.id };
   } catch (e) {
@@ -164,10 +167,11 @@ export async function deletePlaylistAction(
     await deletePlaylistFromDb(playlistId);
     revalidatePath("/playlists");
     if (alreadyGone) {
-      // Fire-and-forget background resync (the registry runs it; we don't await).
-      runTask("sync-backend", (onProgress) =>
+      // Background resync; after() keeps the invocation alive until it finishes.
+      const t = runTask("sync-backend", (onProgress) =>
         syncLibrary(spotifyClient(token, true, "action:library-scan"), onProgress),
       );
+      after(taskDone(t.id));
     }
     return { ok: true, alreadyGone };
   } catch (e) {

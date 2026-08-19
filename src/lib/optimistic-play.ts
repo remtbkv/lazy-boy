@@ -45,7 +45,12 @@ export function addPlay(rows: PlayRow[], prov: PlayRow): PlayRow[] {
   merged[at] = {
     ...merged[at],
     plays: merged[at].plays + 1,
-    lastPlayed: prov.lastPlayed,
+    // Newest-wins: unconditionally taking the provisional's stamp could move a row's
+    // timestamp BACKWARDS when the server row is already newer (the day list sorts on it).
+    lastPlayed:
+      Date.parse(prov.lastPlayed) >= Date.parse(merged[at].lastPlayed)
+        ? prov.lastPlayed
+        : merged[at].lastPlayed,
     source: prov.source ?? merged[at].source,
   };
   return merged;
@@ -55,12 +60,18 @@ export function addPlay(rows: PlayRow[], prov: PlayRow): PlayRow[] {
  *  or expired ones from `provs` (returned second — the caller keeps that list). A
  *  provisional is confirmed by a server row for the same song whose lastPlayed is no
  *  earlier than the provisional's creation minus `graceMs` (clock skew + the minute
- *  resolution of Spotify timestamps). */
+ *  resolution of Spotify timestamps).
+ *
+ *  graceMs is 30s, down from 90: the rows are per-song AGGREGATES (lastPlayed = the
+ *  song's newest play), so any EARLIER play of the same song inside the grace window
+ *  falsely confirmed a fresh provisional and the repeat play vanished until the next
+ *  payload rebuild (audit 2026-08-19, T1.9 — repeat-one made it the common case, since a
+ *  real distinct play that passed the 35% gate must have ended ≥30s before the mint). */
 export function reconcilePlays(
   serverRows: PlayRow[],
   provs: Provisional[],
   now: number,
-  graceMs = 90_000,
+  graceMs = 30_000,
 ): { rows: PlayRow[]; remaining: Provisional[] } {
   const remaining: Provisional[] = [];
   let rows = serverRows;

@@ -83,8 +83,11 @@ export async function syncRecentPlays(
     for (const r of batch) if (r) resolved.push(r);
   }
   await recordContexts(resolved);
-  // Stamp only after a completed pass, so a throw above retries it on the next call.
-  if (fullDue) await setContextsFullCheckAt();
+  // Stamp only after a completed pass, so a throw above retries it on the next call — and
+  // only when the 20-cap did NOT truncate it: a stamped-but-truncated pass closed the daily
+  // window with negative-cache re-checks still starved behind never-seen URIs (audit
+  // 2026-08-19, T2.14).
+  if (fullDue && pending.length < 20) await setContextsFullCheckAt();
 
   // Home renders from one materialized row (db.ts, "The Home payload"), so the sync that
   // changes the data is what has to rewrite it. This is the single point both triggers pass

@@ -63,13 +63,24 @@ export function updateTask(id: string, patch: Partial<Omit<Task, "id">>): void {
  * Run `work` in the background, wiring its progress callback into the task. Returns
  * immediately; callers hand the task id to the client for polling.
  */
+// The detached work promise, per task — so a serverless caller can hand it to
+// `after(...)` and keep the invocation alive until the work finishes. Without that, the
+// platform may freeze the invocation as soon as the response returns, mid-scan
+// (audit 2026-08-19, T2.10). Same lifetime caveats as `store` above.
+const running = new Map<string, Promise<void>>();
+
+/** The task's completion promise (never rejects), or resolved if unknown/finished. */
+export function taskDone(id: string): Promise<void> {
+  return running.get(id) ?? Promise.resolve();
+}
+
 export function runTask<R>(
   label: string,
   work: (onProgress: (processed: number, total: number) => void) => Promise<R>,
 ): Task {
   const task = createTask(label);
   updateTask(task.id, { status: "running" });
-  void (async () => {
+  const done = (async () => {
     try {
       const result = await work((processed, total) =>
         updateTask(task.id, { processed, total }),
@@ -80,7 +91,10 @@ export function runTask<R>(
         status: "error",
         error: e instanceof Error ? e.message : String(e),
       });
+    } finally {
+      running.delete(task.id);
     }
   })();
+  running.set(task.id, done);
   return task;
 }

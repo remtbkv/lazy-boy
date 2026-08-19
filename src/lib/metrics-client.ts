@@ -58,10 +58,10 @@ const SESSION_KEY = "lb:metrics-session";
 const FLUSH_AFTER_LOAD_MS = 10_000;
 const MAX_BATCH = 50; // the route rejects more than this in one body
 const MAX_BUFFER = 200; // a runaway mark loop must not grow the buffer without bound
-const MAX_ERRORS = 5; // per tab: the first few throws say what broke, the rest are the echo
+const MAX_ERRORS = 5; // per VIEW (reset in setPage): the first few throws say what broke
 const MAX_ERROR_CHARS = 180; // the route truncates `meta` at 200 anyway
 
-type MetricEvent = { page: string; event: string; value?: number; meta?: string };
+type MetricEvent = { page: string; event: string; value?: number; meta?: string; at?: number };
 
 let started = false;
 let buffer: MetricEvent[] = [];
@@ -115,7 +115,13 @@ function record(
   if (buffer.length >= MAX_BUFFER) return;
   const view = forPv || pv;
   const tagged = view ? (meta ? `${PV_TAG}${view}|${meta}` : `${PV_TAG}${view}`) : meta;
-  buffer.push({ page: forPage || page, event, value, meta: tagged });
+  // `at` = observation time. Without it the store stamped a whole sitting's events with
+  // the beacon-arrival instant (i.e. pagehide) — every open and error of an 8-hour tab
+  // rendered at one minute (audit 2026-08-19, T1.8).
+  buffer.push({ page: forPage || page, event, value, meta: tagged, at: Date.now() });
+  // Flush by fullness, not only by timer/pagehide: a long sitting used to fill MAX_BUFFER
+  // and silently drop everything after — the handoff breadcrumbs first (audit T1.8).
+  if (buffer.length >= MAX_BATCH) flush();
 }
 
 function flush(): void {
@@ -154,6 +160,11 @@ function onVisibility(): void {
 function onPageHide(): void {
   stopVisible();
   if (page) record("visit-ms", visibleMs);
+  // Reset after reporting: pagehide with bfcache means the document can come BACK — the
+  // old code kept accumulating, so a restore + later hide re-reported the first stint
+  // inside the second (double-count; audit 2026-08-19, T2.16). The visibilitychange
+  // handler restarts the clock on restore.
+  visibleMs = 0;
   flush();
 }
 
@@ -174,7 +185,8 @@ function onError(message: unknown): void {
 
 /** A capture-phase click on an in-app link starts the soft-navigation clock; setPage() stops
  *  it when the destination actually renders. Cheap and honest — it measures what the user
- *  waited through. A click that never lands (a new page, an aborted nav) just expires. */
+ *  waited through. setPage() consumes or expires it (see there): a click that never lands
+ *  used to survive indefinitely and stamp minutes of idle as a later nav's wait. */
 function onClick(e: MouseEvent): void {
   if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
     return;
@@ -196,7 +208,13 @@ export function recordAppEvent(event: string, meta?: string, value?: number): vo
  *  the first call fixes the page the vitals belong to. */
 export function setPage(path: string): void {
   const next = normalizePage(path);
-  if (next === page) return;
+  if (next === page) {
+    // Same-route arrival still CONSUMES the pending click: a click on the already-active
+    // tab used to leave pendingNav armed forever, and a later keyboard navigation matched
+    // it — minutes of idle reported as that nav's wait (audit 2026-08-19, T2.16).
+    pendingNav = null;
+    return;
+  }
   const from = page;
   const fromPv = pv;
   pv = newViewId();
@@ -208,13 +226,17 @@ export function setPage(path: string): void {
     startVisible();
     // Marks from here on are measured against the arrival, not the document.
     viewStart = performance.now();
+    // A new view starts a fresh error budget (the cap used to be per-tab while its comment
+    // said per view — after 5 errors anywhere, the whole sitting reported zero).
+    errorsRecorded = 0;
   } else {
     loadPage = next;
     loadPv = pv;
   }
   page = next;
   record("pageview");
-  if (pendingNav && pendingNav.path === next) {
+  // 10s expiry: only a click that RECENTLY started a navigation may claim this arrival.
+  if (pendingNav && pendingNav.path === next && performance.now() - pendingNav.at < 10_000) {
     // Filed against the page navigated FROM (that is whose link was slow to leave), but under
     // the ARRIVING view's id — it is the one number that says how long this open waited before
     // it began, so it belongs in that open's row on the usage page.
@@ -256,6 +278,14 @@ export function startMetrics(): void {
     window.addEventListener("unhandledrejection", (e) => onError(e.reason));
     document.addEventListener("click", onClick, true);
     document.addEventListener("visibilitychange", onVisibility);
+    // Flush on HIDE as well as pagehide, registered AFTER the web-vitals observers above so
+    // their visibilitychange handlers (INP/CLS report on hide, not pagehide — the unload
+    // order is pagehide THEN visibilitychange) have already recorded into the buffer this
+    // flush drains. Without this, a never-hidden visit's inp/cls landed in a buffer nothing
+    // flushed again (audit 2026-08-19, T2.16).
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") flush();
+    });
     window.addEventListener("pagehide", onPageHide);
     // The one-shot flush: LCP and the late marks have settled by now, and a visit that ends
     // without a usable pagehide (mobile task-switch, crash) has still reported them.

@@ -4,6 +4,7 @@ import {
   getLikedSignals,
   getPlaylistSnapshot,
   getSavedSyncedAt,
+  recomputeAllTimeStats,
   recomputeUniqueSongCount,
   setLibrarySyncedAt,
   storePlaylists,
@@ -90,6 +91,10 @@ export async function syncLibrary(
   // no benefit.
   if (changed) {
     await recomputeUniqueSongCount();
+    // A library sync rewrites tracks' duration_ms, an input of the all-time hours — the
+    // old triggers (plays landing, the daily heal) missed it, so a played track whose
+    // duration arrived late kept its 10-min fallback in the totals (audit 2026-08-19, T2.2).
+    await recomputeAllTimeStats();
   }
 
   await setLibrarySyncedAt();

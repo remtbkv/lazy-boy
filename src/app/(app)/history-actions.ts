@@ -148,9 +148,15 @@ export async function refreshHistoryAction(
         if (sinceMinute == null) return added > 0 ? searchHistory("", Math.min(added, 50)) : null;
         const head = await searchHistory("", 1);
         const newest = head[0] ? Math.floor(Date.parse(head[0].lastPlayed) / 60000) : null;
-        if (newest == null || newest <= sinceMinute) return null;
+        // `>=` on the boundary minute, not `>`: a second play landing in the SAME minute
+        // the client already holds was strictly-greater-filtered out of every delta and
+        // stayed missing until the next cold payload (audit 2026-08-19, T2.5). The client
+        // patch dedupes on (identity, minute), so re-delivering the boundary is free.
+        if (newest == null || newest < sinceMinute) return null;
         const rows = await searchHistory("", 50);
-        const fresh = rows.filter((r) => Math.floor(Date.parse(r.lastPlayed) / 60000) > sinceMinute);
+        const fresh = rows.filter(
+          (r) => Math.floor(Date.parse(r.lastPlayed) / 60000) >= sinceMinute,
+        );
         return fresh.length > 0 ? fresh : null;
       })(),
     ]);

@@ -8,6 +8,10 @@ import { cookies } from "next/headers";
 export async function tzOffsetMinutes(): Promise<number> {
   const v = (await cookies()).get("tzoffset")?.value;
   const n = Number(v);
-  if (!Number.isFinite(n)) return 0;
-  return Math.max(-720, Math.min(840, Math.round(n)));
+  if (Number.isFinite(n)) return Math.max(-720, Math.min(840, Math.round(n)));
+  // No cookie (first paint, or a request that lost it): the last offset any browser
+  // published beats UTC — a cookie-less refresh used to re-bucket the whole strip in UTC
+  // against a payload bucketed locally (audit 2026-08-19, T2.20).
+  const { getUserTzOffset } = await import("@/lib/db");
+  return (await getUserTzOffset().catch(() => null)) ?? 0;
 }

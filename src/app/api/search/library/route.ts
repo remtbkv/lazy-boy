@@ -22,6 +22,14 @@ export async function GET(req: Request) {
   if (!(await auth())) return new Response("Unauthorized", { status: 401 });
 
   const version = await getLibraryIndexVersion();
+  // Version unknown (store hiccup): serve a fresh, uncacheable body. Tagging it with a
+  // guessed version would let a browser 304 against a body nothing can vouch for.
+  if (version === null) {
+    const index = await getLibraryIndex(null);
+    return new Response(JSON.stringify({ v: null, ...index }), {
+      headers: { "Cache-Control": "no-store", "Content-Type": "application/json" },
+    });
+  }
   // Three parts. LIBRARY_INDEX_SHAPE is the payload format — the SAME token that keys the
   // server-side cache entry (db.ts), so one bump moves both layers and neither can serve a
   // shape this client can't read. The version is `meta.library_seq`, which moves when the

@@ -16,6 +16,13 @@ export async function GET(req: Request) {
   if (!(await auth())) return new Response("Unauthorized", { status: 401 });
 
   const version = await getHistoryIndexVersion();
+  // Version unknown (store hiccup): fresh and uncacheable, same contract as the library route.
+  if (version === null) {
+    const index = await getHistoryIndex(null);
+    return new Response(JSON.stringify({ v: null, ...index }), {
+      headers: { "Cache-Control": "no-store", "Content-Type": "application/json" },
+    });
+  }
   const etag = `"hist-${HISTORY_INDEX_SHAPE}-${version}-${new Date().toISOString().slice(0, 10)}"`;
   const headers: Record<string, string> = {
     ETag: etag,

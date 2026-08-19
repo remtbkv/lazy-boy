@@ -98,9 +98,20 @@ for (const it of items) {
 }
 
 if (inserted > 0) {
+  // The row immediately before the replayed window was skip-verdicted against a successor
+  // that is no longer adjacent — re-open that one verdict so the next sync's recompute rules
+  // it against the true neighbour (mirrors recordPlays' out-of-order reset, db.ts).
+  const oldest = items.reduce((m, it) => (it.played_at < m ? it.played_at : m), items[0].played_at);
+  stmts.push({
+    sql: `UPDATE plays SET skipped = NULL WHERE id = (
+            SELECT id FROM plays
+            WHERE played_at < ? AND (context_type IS NULL OR context_type <> 'backfill')
+            ORDER BY played_at DESC LIMIT 1)`,
+    args: [oldest],
+  });
   // One announcement for the whole batch — `plays` feeds cached reads and the client-side
   // history payload, and this bump is what invalidates both (same rule as every write in
-  // db.ts). Without it the app serves the pre-backfill answer until each entry's TTL expires.
+  // db.ts; the day caches carry the marker in their keys, frozen days included).
   stmts.push({
     sql: `INSERT INTO meta (key, value) VALUES ('write_seq', '1')
           ON CONFLICT(key) DO UPDATE SET value = CAST(meta.value AS INTEGER) + 1`,

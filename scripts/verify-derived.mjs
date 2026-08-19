@@ -36,9 +36,14 @@ const LISTEN_FALLBACK_MS = 600000;
 const LISTEN_MIN_MS = 5000;
 
 // db.ts playsWithListened() — the ordered plays⋈tracks fetch the gap math runs over.
+// Backfill rows are excluded in the WHERE and skips are excluded AFTER the gap chain, both
+// exactly as the store does it — this clone had drifted (neither filter) and the check was
+// comparing a filtered stored value against an unfiltered recomputation (audit 2026-08-19, T1.5).
 const PLAYS_ORDERED_SQL = `
-  SELECT p.played_at AS playedAt, p.track_id AS trackId, t.duration_ms AS durationMs
+  SELECT p.played_at AS playedAt, p.track_id AS trackId, t.duration_ms AS durationMs,
+         p.skipped AS skipped
   FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
+  WHERE (p.context_type IS NULL OR p.context_type <> 'backfill')
   ORDER BY p.played_at ASC`;
 
 // db.ts recomputeUniqueSongCount() — the DISTINCT (artist, title) scan.
@@ -70,17 +75,23 @@ function listenedMs(row, next) {
   return ran < LISTEN_MIN_MS ? 0 : ran;
 }
 
-// db.ts recomputeAllTimeStats(), over the same ordered fetch.
+// db.ts recomputeAllTimeStats(), over the same ordered fetch. Gaps run over the FULL chain
+// (a skip still ends its predecessor's listen at the right moment); rows flagged skipped
+// then drop out of every aggregate — mirroring db.ts playsWithListened.
 function computeAllTimeStats(rows) {
   if (rows.length === 0) return { plays: 0, uniqueTracks: 0, durationMs: 0, since: null };
   const tracks = new Set();
   let durationMs = 0;
+  let plays = 0;
+  let since = null;
   for (let i = 0; i < rows.length; i++) {
+    if (rows[i].skipped === 1) continue;
+    plays++;
     tracks.add(rows[i].trackId);
     durationMs += listenedMs(rows[i], rows[i + 1]);
+    if (since === null) since = rows[i].playedAt;
   }
-  // rows come back ascending, so the first is the earliest recorded play.
-  return { plays: rows.length, uniqueTracks: tracks.size, durationMs, since: rows[0].playedAt };
+  return { plays, uniqueTracks: tracks.size, durationMs, since };
 }
 
 // ── plumbing ──────────────────────────────────────────────────────────────────────────
@@ -134,7 +145,13 @@ async function checkUniqueSongCount() {
     // getUniqueSongCount() returns 0 and Home falls back to the raw sum until it's cached.
     return { name: "unique_song_count", status: "NOT-CACHED", detail: `no meta row; recomputed ${live}` };
   }
-  const storedN = Number(stored) || 0;
+  // Stored as {n, seq} since 2026-08-19 (seq-aware staleness); plain numbers predate that.
+  let storedN;
+  try {
+    storedN = Number(JSON.parse(stored).n) || 0;
+  } catch {
+    storedN = Number(stored) || 0;
+  }
   return storedN === live
     ? { name: "unique_song_count", status: "OK", detail: `${live}` }
     : {

@@ -54,7 +54,13 @@ export function patchHistoryPayload(
     const key = `${artist.toLowerCase()}\n${name.toLowerCase()}`;
     if (!trackAt.has(key)) trackAt.set(key, i);
   });
-  const seen = new Set(out.plays.map(([t, m]) => `${t}:${m}`));
+  // Seen-keys are IDENTITY:minute, not index:minute — the payload can hold the same song
+  // under two track indices (dual Spotify ids), and an index-keyed set re-added a play the
+  // payload already had under the sibling index (audit 2026-08-19, T2.5).
+  const idxKey = out.tracks.map(
+    ([name, artist]) => `${artist.toLowerCase()}\n${name.toLowerCase()}`,
+  );
+  const seen = new Set(out.plays.map(([t, m]) => `${idxKey[t] ?? t}:${m}`));
 
   const fresh: [number, number, number][] = [];
   for (const p of newPlays) {
@@ -73,7 +79,7 @@ export function patchHistoryPayload(
       trackAt.set(key, t);
     }
     const minute = Math.floor(Date.parse(p.lastPlayed) / 60000);
-    const id = `${t}:${minute}`;
+    const id = `${key}:${minute}`;
     if (seen.has(id)) continue;
     seen.add(id);
     fresh.push([t, minute, intern(out.sources, p.source)]);
