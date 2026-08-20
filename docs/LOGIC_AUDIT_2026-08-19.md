@@ -276,3 +276,20 @@ writes silently drop a cached row).
 - Same-song-same-minute plays are structurally unrepresentable in the minute-floored
   client payload; server rows keep both.
 - clean_backup_pref still has no writer (the persisted preference is unreachable).
+
+## Wave-3 addendum (2026-08-20)
+
+The simulated environment (tests/) is the standing gate: `npm test` runs 441 vitest
+checks (including two independently-authored adversarial suites, 400 tests, whose writers
+were forbidden from reading the fix author's tests) + 62 node:test known-answer checks,
+all against a throwaway local store and scripted Spotify — zero real-backend contact.
+
+Independent-suite catches fixed this wave: timestamp-tie skip verdicts were arrival-order
+dependent (F1-F3, through to the all-time count); the reconcile grace window's two
+documented jobs were mutually unsatisfiable — replaced by count-baseline confirmation
+(basePlays), with prod evidence settling that Spotify stamps played_at at track START;
+latestSource identity keying; enforced newest-first payload ordering; set-true idSetChanged;
+negative Retry-After; injective keyOf; future reload stamps; plus the wave-2-diff review
+round (clean lock release, resume stray-tap, source-side name clamp, per-attempt fetch
+timeouts, and ten more). Every expectation-wrong red was adjudicated in place with a
+citation rather than silenced.
