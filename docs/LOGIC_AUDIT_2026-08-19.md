@@ -244,3 +244,35 @@ Judge ledger with per-item verdicts: adjudicated same day. CONFIRMED items were 
 source by the judge; LIKELY items rest on quoted code that was spot-checked but not executed;
 nothing was verified at runtime. No live-store queries were made by collectors; data-dependent
 claims (e.g. whether duplicate-id play pairs exist today) are code-path claims only.
+
+---
+
+## Outcome addendum (same day)
+
+**Wave 1 (commit `50fb542`):** all Tier-1 items and ~15 Tier-2 items fixed and deployed.
+
+**Wave 2 (commit `5bd709d`):** a second collector sweep covered everything wave 1 didn't
+fully read (actions/clean pipelines, den-home render/search, db internals + ledger,
+components), plus an adversarial review of the wave-1 diff itself. That review confirmed
+three regressions wave 1 introduced (predecessor reset mistargeted and firing every tick;
+`>=` harvest gate re-poking every 2 min under a persistently-throwing harvest; empty
+Retry-After parsing as retry-in-250ms) — all three fixed in wave 2 along with ~25 new
+findings, the largest being the clean pipeline's name-based self-exclusion (a rename or
+name clamp could make the reconcile EMPTY the cleaned playlist it had just made) and the
+sparse-position bug in the playlist-tracks cache (a single-track removal made later
+writes silently drop a cached row).
+
+**Still open (documented, not fixed — needs Rem or is accepted):**
+- Tier-3 REVIEW items (resume-counts-skips semantics, all-time backfill list inclusion,
+  paused-chip display, playlist route snapshot trust).
+- ASCII-only SQL `lower()` vs JS `toLowerCase()`: non-ASCII artists ("Björk") can be
+  orphan-flagged while the payload counts them as members — fixing means normalizing at
+  write time (migration); parked.
+- Ledger cost-model drift (wave-2 collector E1–E10): the models understate post-audit
+  query shapes; the platform half is dormant (self-hosted store), so the residual has no
+  right-hand side today. Re-calibrate if Turso ever comes back.
+- Task registry is per-instance (ROADMAP Phase 3 seam); mitigations (after(), poll
+  tolerance, blind-refresh caps) are in, the real fix is a store-backed registry.
+- Same-song-same-minute plays are structurally unrepresentable in the minute-floored
+  client payload; server rows keep both.
+- clean_backup_pref still has no writer (the persisted preference is unreachable).
