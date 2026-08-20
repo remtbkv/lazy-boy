@@ -18,6 +18,7 @@ type ReconcileResult = { changed: boolean; name: string; added: number; removed:
 // the result. A small "Tidying up…" pill shows while it runs.
 export function CleanProgressWatcher() {
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const misses = useRef(0);
   const [active, setActive] = useState(false);
 
   useEffect(() => {
@@ -52,10 +53,18 @@ export function CleanProgressWatcher() {
       const res = await fetch(`/api/tasks/${a.taskId}`).catch(() => null);
       if (!res) return; // transient blip — keep polling
       if (res.status === 404) {
-        clearCleanActive();
-        stop();
+        // The task registry is per-instance on serverless: a poll routed to another
+        // instance 404s while the reconcile is running fine, and clearing on the first
+        // miss dropped the pill and the completion toast (audit 2026-08-19 wave 2, E1).
+        // Only three consecutive misses (≈ the task genuinely gone or swept) clear it.
+        misses.current += 1;
+        if (misses.current >= 3) {
+          clearCleanActive();
+          stop();
+        }
         return;
       }
+      misses.current = 0;
       if (!res.ok) return;
 
       const task = (await res.json()) as Task<ReconcileResult>;

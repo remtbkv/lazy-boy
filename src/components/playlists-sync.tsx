@@ -29,6 +29,7 @@ async function watchColdStart(taskId: string, refresh: () => void): Promise<void
   watching = true;
   const deadline = Date.now() + WATCH_MAX_MS;
   let filled = false;
+  let blindRefreshes = 0;
   try {
     while (Date.now() < deadline) {
       const res = await fetch(`/api/tasks/${taskId}`).catch(() => null);
@@ -37,6 +38,9 @@ async function watchColdStart(taskId: string, refresh: () => void): Promise<void
         // instance 404s even while the scan is running fine. Bailing on the first miss
         // left the cold-start grid empty for the whole scan (audit 2026-08-19, T2.10) —
         // instead, refresh on a slow cadence so the grid fills as playlists commit.
+        // Capped: a permanently-dead task must not drive router.refresh() for the whole
+        // 10-min watch window (wave-2 adversarial review, finding L).
+        if (++blindRefreshes > 6) return;
         refresh();
         await new Promise((r) => setTimeout(r, POLL_MS * 5));
         continue;

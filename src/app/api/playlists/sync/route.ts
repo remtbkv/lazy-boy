@@ -7,11 +7,14 @@ import { taskDone } from "@/lib/tasks/registry";
 // request, paced and committing per playlist, while the client polls progress.
 export async function POST() {
   try {
-    const { taskId } = await startLibrarySync();
+    const r = await startLibrarySync();
+    if (r.skipped !== undefined || r.taskId === undefined) {
+      return Response.json({ ok: true, skipped: r.skipped ?? "unknown" });
+    }
     // Keep the invocation alive until the detached scan finishes — without this, Vercel may
     // freeze the function the moment the response returns, mid-scan (audit 2026-08-19, T2.10).
-    after(taskDone(taskId));
-    return Response.json({ ok: true, taskId });
+    after(taskDone(r.taskId));
+    return Response.json({ ok: true, taskId: r.taskId });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return Response.json({ ok: false, error: msg }, { status: msg === "unauthorized" ? 401 : 500 });

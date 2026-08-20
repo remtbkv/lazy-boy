@@ -41,7 +41,7 @@ const ACTIONS: {
   { key: "merge", label: "Merge", icon: GitMerge, select: "ordered",
     blurb: "Combines the playlists you pick into one, kept in the order you pick them." },
   { key: "subtract", label: "Subtract", icon: Diff, select: "subtract",
-    blurb: "Pick base playlists, then the playlists to subtract from them — see which songs are unique vs. shared." },
+    blurb: "Pick a base playlist, then the playlists to subtract from it — see which songs are unique vs. shared." },
 ];
 
 // The action dock. Desktop: a quiet row of text buttons — hover reveals the surface
@@ -261,16 +261,19 @@ function ActionSheet({
       return;
     }
     // subtract: a tap toggles the playlist in the ACTIVE group; if it sits in the
-    // other group it moves over instead of being in both.
-    const [active, setActive, passive, setPassive] =
-      group === "base"
-        ? ([picked, setPicked, others, setOthers] as const)
-        : ([others, setOthers, picked, setPicked] as const);
-    if (active.includes(id)) {
-      setActive(active.filter((x) => x !== id));
+    // other group it moves over instead of being in both. The BASE group holds exactly
+    // ONE playlist: the action only ever diffs picked[0], and the old multi-select UI
+    // numbered B1/B2/B3 while silently ignoring everything after B1 (wave-2 audit, D1/C4).
+    if (group === "base") {
+      if (others.includes(id)) setOthers(others.filter((x) => x !== id));
+      setPicked((cur) => (cur[0] === id ? [] : [id]));
+      return;
+    }
+    if (others.includes(id)) {
+      setOthers(others.filter((x) => x !== id));
     } else {
-      if (passive.includes(id)) setPassive(passive.filter((x) => x !== id));
-      setActive([...active, id]);
+      if (picked.includes(id)) setPicked(picked.filter((x) => x !== id));
+      setOthers([...others, id]);
     }
   };
 
@@ -553,7 +556,7 @@ function SelectionBadge({
           : "border border-[var(--muted-foreground)] text-foreground",
       )}
     >
-      {action === "subtract" ? (isBase ? `B${n}` : `S${n}`) : n}
+      {action === "subtract" ? (isBase ? "B" : `S${n}`) : n}
     </span>
   );
 }

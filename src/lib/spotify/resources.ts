@@ -161,8 +161,12 @@ export class Resources {
     // Spotify removed `POST /users/{id}/playlists` in the Feb 2026 API changes;
     // the current create endpoint is `POST /me/playlists` (this was the source of
     // the 403 on Save queue / Clean / Merge). Body fields are unchanged.
+    // Clamp HERE, the single create path, so the name we send is the name Spotify stores.
+    // Callers build names from user playlist names with prefixes ("Cleaned: X", "A + B");
+    // a silent Spotify-side truncation made the stored name diverge from every derived
+    // name and the clean's name-based exclusion missed its own output (wave-2 audit, A1).
     const pl = await this.http.post<{ id: string }>(`/me/playlists`, {
-      name,
+      name: name.slice(0, 100),
       public: isPublic,
       // Always blank — never let a placeholder ("no"/null/a coerced boolean) land in the
       // description, which is public-facing in the user's Spotify.

@@ -130,8 +130,11 @@ export class HttpClient {
       // `Number(x) || null` read "Retry-After: 0" as null and an HTTP-date form as null too;
       // 0 is a real (immediate-retry) answer and a date form should not be mistaken for
       // "no answer" (audit 2026-08-19, T2.11). NaN → null, finite numbers pass through.
+      // Empty/whitespace headers must read as "no answer" too — Number("") is 0, which the
+      // 429 branch would treat as "retry immediately" (wave-2 adversarial review, finding I).
       const retryHeader = res.status === 429 ? res.headers.get("Retry-After") : null;
-      const retryParsed = retryHeader === null ? NaN : Number(retryHeader);
+      const retryParsed =
+        retryHeader === null || retryHeader.trim() === "" ? NaN : Number(retryHeader);
       const rawRetryAfter = Number.isFinite(retryParsed) ? retryParsed : null;
       void logSpotifyRequest({ method, path, status: res.status, retryAfter: rawRetryAfter, source: this.source }).catch(
         () => {},

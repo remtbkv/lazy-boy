@@ -11,7 +11,8 @@
 
 /** Track length, e.g. 5:29. */
 export function formatDuration(ms?: number | null): string {
-  if (!ms) return "—";
+  // `<= 0` and NaN both render the dash — a negative used to render "-1:-1".
+  if (!ms || !Number.isFinite(ms) || ms <= 0) return "—";
   const s = Math.round(ms / 1000);
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
@@ -28,6 +29,7 @@ export function formatListenTime(ms: number): string {
 /** Relative time, e.g. "2h ago". (Client-only — reads the current time.) */
 export function timeAgo(iso: string): string {
   const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (!Number.isFinite(s)) return "—"; // unparseable input used to render "NaNmo ago"
   if (s < 60) return "just now";
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m ago`;

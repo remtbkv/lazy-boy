@@ -464,9 +464,19 @@ export function DenHome({
   useEffect(() => {
     void loadAllDaily();
   }, []);
-  const extendDays = async (days: number) => {
+  const extendDays = async (days: number): Promise<boolean> => {
     const all = await loadAllDaily();
-    if (all.length) setDaily(all.slice(0, days));
+    if (!all.length) return false;
+    // Keep the LIVE head: the snapshot can be up to 60s old, and replacing today's card
+    // with it discarded a handoff bump or a just-landed play (wave-2 audit, A18).
+    setDaily((cur) => {
+      const next = all.slice(0, days);
+      if (next[0] && cur[0] && next[0].day === cur[0].day && cur[0].plays > next[0].plays) {
+        next[0] = cur[0];
+      }
+      return next;
+    });
+    return true;
   };
 
   // One day into the cache. Shared by the click path and the neighbour prefetch below so a
@@ -483,6 +493,12 @@ export function DenHome({
     setSelected(day);
     const hit = cache.current.get(day);
     if (hit) {
+      // Advance the counter here too: without it, a slower server fetch already in flight
+      // for the PREVIOUS selection still passed its own guard and overwrote these rows
+      // (wave-2 audit, A1 — click All-time, then a cached day: the all-time response
+      // landed on the day view).
+      dayReq.current++;
+      setDayPending(false);
       setTracks(hit);
       return;
     }
@@ -818,7 +834,11 @@ export function DenHome({
       // the whole TTL; the "all" rows are all-time aggregates, the wrong universe in both
       // directions (audit 2026-08-19, T1.9). Wrong universe → leave the provisionals and
       // the server's own card alone; the next latest-mode refresh reconciles properly.
-      const provs = provisionalsRef.current;
+      // Day-scoped: a provisional minted before local midnight must never be bumped onto
+      // the NEW day's card (wave-2 audit, A3). Ones whose day has rolled off the newest
+      // server day can no longer confirm in this universe — drop them (the sync recorded
+      // the real play on the right day long since).
+      const provs = provisionalsRef.current.filter((p) => p.day === r.daily[0]?.day);
       const canReconcile = want === "latest" && !!r.tracks;
       const bump =
         canReconcile && provs.length
@@ -946,7 +966,7 @@ export function DenHome({
         .slice(0, 10);
       if (daily[0]?.day !== localToday) return verdict("no-today");
       verdict("commit");
-      provisionalsRef.current.push({ row, at: Date.now() });
+      provisionalsRef.current.push({ row, at: Date.now(), day: localToday });
       const today = daily[0]?.day;
       setDaily((d) =>
         d.length
@@ -1143,6 +1163,10 @@ export function DenHome({
   const openMenu =
     (name: string, artist: string, from?: string | null) => (e: React.MouseEvent) => {
       e.preventDefault();
+      // Without this, right-clicking a second row while a menu is open let the open
+      // menu's window-level contextmenu closer fire on the SAME event — the menu closed
+      // instead of moving (wave-2 audit, A12).
+      e.stopPropagation();
       setCtxMenu({ name, artist, x: e.clientX, y: e.clientY, from });
     };
 
@@ -1351,7 +1375,7 @@ export function DenHome({
               dayPending && "opacity-60 transition-opacity",
             )}
           >
-            {dayRows.length === 0 ? (
+            {displayRows.length === 0 ? (
               <p className="py-10 text-center text-sm text-muted-foreground">
                 No plays recorded here.
               </p>
@@ -1552,6 +1576,10 @@ export function DenHome({
       </SearchIsland>
       {ctxMenu ? (
         <IdentityTrackMenu
+          // Keyed on the identity: the component resolves ONCE per instance, so reusing
+          // one instance across a second right-click showed song B's menu acting on song
+          // A's resolved track (wave-2 audit, A11).
+          key={`${ctxMenu.artist}\n${ctxMenu.name}`}
           name={ctxMenu.name}
           artist={ctxMenu.artist}
           playedFrom={ctxMenu.from}

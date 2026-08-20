@@ -4,7 +4,7 @@ import {
   getLikedSignals,
   getPlaylistSnapshot,
   getSavedSyncedAt,
-  recomputeAllTimeStats,
+  maybeRecomputeAllTimeStats,
   recomputeUniqueSongCount,
   setLibrarySyncedAt,
   storePlaylists,
@@ -93,8 +93,11 @@ export async function syncLibrary(
     await recomputeUniqueSongCount();
     // A library sync rewrites tracks' duration_ms, an input of the all-time hours — the
     // old triggers (plays landing, the daily heal) missed it, so a played track whose
-    // duration arrived late kept its 10-min fallback in the totals (audit 2026-08-19, T2.2).
-    await recomputeAllTimeStats();
+    // duration arrived late kept its 10-min fallback in the totals (audit 2026-08-19,
+    // T2.2). THROTTLED variant: `changed` fires on any snapshot move (a reorder counts),
+    // and the unthrottled recompute made every 30-min cron scan pay a full plays scan on
+    // top (wave-2 adversarial review, finding L).
+    await maybeRecomputeAllTimeStats();
   }
 
   await setLibrarySyncedAt();

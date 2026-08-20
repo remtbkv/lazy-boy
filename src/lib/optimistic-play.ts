@@ -24,7 +24,10 @@ export type PlayRow = {
   source: string | null;
 };
 
-export type Provisional = { row: PlayRow; at: number };
+/** `day` = the local day the play was minted for. Reconciliation must not credit it to a
+ *  different day's card — a provisional minted at 11:59 PM used to be bumped onto the NEW
+ *  day after midnight (wave-2 audit, A3). */
+export type Provisional = { row: PlayRow; at: number; day: string };
 
 /** How long an unconfirmed provisional keeps being re-applied before it is presumed a
  *  play Spotify never recorded. Sync attempts run every ~4s–2min while the tab is open,

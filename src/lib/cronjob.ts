@@ -22,7 +22,13 @@ export async function ensureCronJobEnabled(): Promise<
       cache: "no-store",
       signal: AbortSignal.timeout(8000),
     });
-    if (!res.ok) return "error";
+    if (!res.ok) {
+      // Logged, because the caller cannot see it: this function never throws, so a
+      // watchdog that has been failing for weeks (expired API key, 429) was otherwise
+      // indistinguishable from one that healed (wave-2 audit, G2).
+      console.error(`[cronjob] enable check failed: ${res.status}`);
+      return "error";
+    }
     const job = (await res.json())?.jobDetails;
     if (job?.enabled) return "already-on";
     const patch = await fetch(`${API}/jobs/${jobId}`, {

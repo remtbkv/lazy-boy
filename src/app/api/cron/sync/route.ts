@@ -79,9 +79,12 @@ export async function GET(req: Request) {
     await pruneApiLog().catch(() => {});
     await pruneClientMetrics().catch(() => {});
   }
-  const token = await getValidAccessToken();
+  // Guarded: this runs OUTSIDE the try below, and a store hiccup inside the token read
+  // used to escape as a 500 — feeding the external pinger's auto-disable, the exact storm
+  // the 429 branch dodges (wave-2 audit, B5).
+  const token = await getValidAccessToken().catch(() => null);
   if (!token) {
-    // Nobody signed in / refresh token dead — nothing to do, not an error.
+    // Nobody signed in / refresh token dead / store hiccup — nothing to do, not an error.
     return Response.json({ ok: true, skipped: "no token" });
   }
   // Getter for the longer-running work below — re-validates through the shared
@@ -122,7 +125,19 @@ export async function GET(req: Request) {
     if (!shouldHarvest) {
       return Response.json({ ok: true, added: 0, idle: true });
     }
-    const { added, skipped } = await syncRecentPlays(spotifyClient(token, false, "cron-sync"));
+    // A THROWING harvest still stamps lastHarvest: with `>=` above, an unstamped failure
+    // would hold the tail branch open and re-poke the quota'd endpoint every 2 minutes for
+    // as long as the failure lasted (wave-2 adversarial review, finding H). Stamping on
+    // failure degrades to the hourly backstop — the pre-fix cadence. The cooldown-skip
+    // case still deliberately withholds the stamp (it made no Spotify call).
+    let harvest: { added: number; skipped?: string };
+    try {
+      harvest = await syncRecentPlays(spotifyClient(token, false, "cron-sync"));
+    } catch (e) {
+      await setHarvestGate({ lastHarvest: now }).catch(() => {});
+      throw e;
+    }
+    const { added, skipped } = harvest;
     if (!skipped) await setHarvestGate({ lastHarvest: now });
     // Attribution for the dominant traffic on this database: ~720 of these a day, and which
     // of the two costs a tick paid depends entirely on whether it landed a play. A skipped

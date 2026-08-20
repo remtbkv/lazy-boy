@@ -11,6 +11,7 @@ import { runTask, taskDone } from "@/lib/tasks/registry";
 import { cleanPhase1, reconcileClean } from "@/lib/clean/run";
 import { syncLibrary } from "@/lib/sync/library";
 import {
+  acquireLock,
   clearSpotifyTokens,
   deletePlaylistFromDb,
   findTrackWithPlaylists,
@@ -113,6 +114,12 @@ export async function startCleanAction(
     // Background bulk work can outlive the access token → refreshing getter, not a fixed
     // string (a 1h+ clean would otherwise 401 mid-run). Patient: ride out rate limits.
     const token = refreshingToken();
+    // Server-side double-submit guard: two clicks landing before React commits the
+    // disabled state used to run TWO cleans — two identically-named playlists, two
+    // backups (audit 2026-08-19 wave 2, A8). The lock outlives Phase 1 comfortably and
+    // expires on its own; no release needed on the error path.
+    const lock = await acquireLock(`clean:${playlistId}`, 5 * 60 * 1000);
+    if (!lock) throw new Error("A clean of this playlist is already running.");
     const useBackup = backup ?? (await getCleanBackupPref());
     const { result, ctx } = await cleanPhase1(spotifyClient(token, true, "action:clean"), playlistId, useBackup);
     // Nothing removed → no playlist created, nothing to reconcile.
@@ -340,7 +347,8 @@ export async function trackMenuAction(
     playlists: { id: string; name: string }[];
   }>
 > {
-  if (!(await auth())) return { ok: false, error: "Not signed in." };
+  const session = await auth();
+  if (!session || session.error) return { ok: false, error: "Not signed in." };
   try {
     const { track, playlists } = await findTrackWithPlaylists(name, artist);
     if (!track) return { ok: false, error: "This song isn't in the library yet." };
@@ -477,12 +485,12 @@ export async function resumePlaylistAction(
 ): Promise<ActionResult<{ track: string; fromTop: boolean }>> {
   try {
     const uri = `spotify:playlist:${playlistId}`;
-    // Read the cached track list (instant) and the timestamped plays in parallel with
-    // auth, instead of re-paginating the whole playlist from Spotify before playing —
-    // that live scan was the lag. Only cold (never-cached) playlists fall back to a live
-    // fetch, and we cache that result for next time.
-    const [sp, cached, plays] = await Promise.all([
-      getSpotify("action:resumePlaylist"),
+    // Auth FIRST, then the two store reads in parallel — never in one Promise.all with
+    // the gate, or a dead session still pays (and exposes) the reads before the redirect
+    // throws (the rule the pages document; audit 2026-08-19 wave 2, C5). The reads are
+    // instant either way; only cold (never-cached) playlists fall back to a live fetch.
+    const sp = await getSpotify("action:resumePlaylist");
+    const [cached, plays] = await Promise.all([
       getPlaylistTrackOrder(playlistId),
       playedTracksInContext(uri),
     ]);
@@ -526,23 +534,34 @@ export async function resumePlaylistAction(
       (a, b) => a - b,
     );
 
-    // Within the session: end of the LONGEST in-order run, tolerating small skips (a gap of
-    // up to GAP positions between consecutive plays still counts as the same run).
+    // Within the session, runs are position-clusters tolerating small skips (a gap of up
+    // to GAP positions between consecutive plays counts as the same run). The run that
+    // wins is the one CONTAINING THE MOST RECENT PLAY — "where you actually stopped" —
+    // not the longest: play 0-9, jump to 50-55, stop → you stopped at 55, and longest-run
+    // resumed you at 10 (audit 2026-08-19 wave 2, C1). Longest is the fallback when the
+    // newest play's position isn't in any run (can't happen, but belt and braces).
     const GAP = 10;
+    const session = events.slice(sessionStart);
+    const lastPos = session.length ? session[session.length - 1].pos : -1;
     let bestEnd = -1;
     let bestLen = 0;
+    let lastPosRunEnd = -1;
     let runStart = 0;
     for (let k = 1; k <= positions.length; k++) {
       const broke = k === positions.length || positions[k] - positions[k - 1] > GAP;
       if (broke) {
         const len = k - runStart;
+        const runLo = positions[runStart];
+        const runHi = positions[k - 1];
+        if (lastPos >= runLo && lastPos <= runHi) lastPosRunEnd = runHi;
         if (len > bestLen) {
           bestLen = len;
-          bestEnd = positions[k - 1];
+          bestEnd = runHi;
         }
         runStart = k;
       }
     }
+    if (lastPosRunEnd >= 0) bestEnd = lastPosRunEnd;
     // If your run already reached the last track, you've finished the playlist — start
     // over from the top rather than replaying the final song.
     const finished = bestEnd >= 0 && bestEnd + 1 >= tracks.length;

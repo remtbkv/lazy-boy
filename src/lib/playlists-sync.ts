@@ -9,7 +9,7 @@
 // so newly-cached data appears as it lands.
 import "server-only";
 import { auth, getValidAccessToken, spotifyAccessToken } from "@/lib/auth";
-import { getSpotifyCooldownUntil } from "@/lib/db";
+import { getLibrarySyncedAt, getSpotifyCooldownUntil } from "@/lib/db";
 import { spotifyClient } from "@/lib/spotify";
 import { syncLibrary } from "@/lib/sync/library";
 import { getTask, runTask, type Task } from "@/lib/tasks/registry";
@@ -21,7 +21,9 @@ const SYNC_PACE_MS = 150;
 // the running task instead of each kicking off a fresh scan.
 let currentSyncId: string | null = null;
 
-export async function startLibrarySync(): Promise<{ taskId: string }> {
+export async function startLibrarySync(): Promise<
+  { taskId: string; skipped?: undefined } | { skipped: string; taskId?: undefined }
+> {
   const session = await auth();
   if (!session || session.error || !(await spotifyAccessToken())) throw new Error("unauthorized");
 
@@ -31,7 +33,18 @@ export async function startLibrarySync(): Promise<{ taskId: string }> {
   // the persisted cooldown was only honored by the history sync, not here). Skip until the
   // window passes; the cron tick and the next client kick retry naturally.
   if (Date.now() < (await getSpotifyCooldownUntil())) {
-    throw new Error("Spotify is rate-limiting — scan skipped.");
+    return { skipped: "rate-limited" };
+  }
+
+  // Store-freshness gate, server-side: the client kick's staleness check runs against a
+  // prop that is `null` for the dock's first render (dock-loader's EMPTY placeholder), so
+  // every cold document fired one spurious scan kick regardless of the store's actual
+  // state (wave-2 audit, C7). A store synced within the client's own 2h staleness window
+  // has nothing to scan for. Skips are ordinary answers, not errors — a 500 here reads as
+  // breakage in every console.
+  const syncedAt = await getLibrarySyncedAt();
+  if (syncedAt && Date.now() - Date.parse(syncedAt) < 2 * 60 * 60 * 1000) {
+    return { skipped: "fresh" };
   }
 
   if (currentSyncId) {

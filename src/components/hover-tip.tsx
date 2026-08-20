@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 // A small styled tooltip matching the app's popover look, so labels (exact
@@ -27,6 +27,11 @@ export function HoverTip({
 }) {
   const ref = useRef<HTMLSpanElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A pending show-timer surviving unmount fired setTip on a dead component (the play
+  // button rows re-render every poll) — cleanup-only effect (wave-2 audit, K1).
+  useEffect(() => () => {
+    if (timer.current) clearTimeout(timer.current);
+  }, []);
   // Once the wrapped control is clicked, suppress the tip until the pointer leaves —
   // an info hint shouldn't hang around over the thing you just acted on.
   const suppressed = useRef(false);

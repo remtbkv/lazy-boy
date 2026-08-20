@@ -167,6 +167,12 @@ async function refreshAccessToken(refreshToken: string) {
 // token we just failed with; otherwise someone else won the race, so keep theirs.
 async function clearTokensIfStale(attemptedRefreshToken: string): Promise<void> {
   const current = await getSpotifyTokens();
+  // A FRESH stored access token vetoes the clear regardless of the refresh-token compare:
+  // Spotify doesn't always rotate refresh tokens, so a winner's successful refresh can
+  // leave the same refresh token beside a brand-new access token — and the loser's
+  // invalid_grant (a replay rejection) then matched on refreshToken and logged the user
+  // out of a live session (wave-2 audit, B4).
+  if (current && isFresh(current)) return;
   if (!current || current.refreshToken === attemptedRefreshToken) {
     await clearSpotifyTokens();
   }
@@ -198,7 +204,10 @@ async function coordinatedRefresh(triedToken: string): Promise<SpotifyTokens> {
   if (current && isFresh(current)) return current;
 
   for (let attempt = 0; attempt < 2; attempt++) {
-    const lockOwner = await acquireLock("spotify_refresh", 15_000);
+    // 30s, not 15: the refresh worst-case (3 attempts × 3s + backoff, plus the DB writes)
+    // can overrun a 15s lease, and a holder past its lease writing tokens is the PKCE
+    // collision the lock exists to prevent (wave-2 audit, B2).
+    const lockOwner = await acquireLock("spotify_refresh", 30_000);
     if (lockOwner) {
       try {
         current = await getSpotifyTokens(); // the winner may have just written

@@ -144,6 +144,11 @@ function getClient(): Promise<Client> {
 // twice with a short pause before it is allowed to surface. Bounded: worst case adds
 // ~700ms to a request that was about to crash the render.
 async function retryingFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  // Bound each attempt: every other outbound fetch in the repo carries a timeout, and this
+  // one carries EVERY store query — a funnel that accepts and stalls used to hang the
+  // render to the platform timeout (wave-2 audit, A1). Only added when the caller didn't
+  // pass its own signal.
+  if (!init?.signal) init = { ...(init ?? {}), signal: AbortSignal.timeout(15_000) };
   for (let attempt = 0; ; attempt++) {
     try {
       const res = await fetch(input, init);
@@ -497,15 +502,21 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
     sql: `SELECT track_id AS trackId, played_at AS playedAt FROM plays WHERE played_at >= ?`,
     args: [minAt],
   });
-  const existing = new Set(
-    (plainRows(existingRes.rows) as unknown as { trackId: string; playedAt: string }[]).map(
-      playKey,
-    ),
-  );
+  const existingRows = plainRows(existingRes.rows) as unknown as {
+    trackId: string;
+    playedAt: string;
+  }[];
+  const existing = new Set(existingRows.map(playKey));
+  // The newest play already in the store — the boundary that tells an ordinary tail append
+  // (every new play newer than this) apart from an OUT-OF-ORDER insert (a gap-fill landing
+  // between existing plays), which is the only case that needs verdicts re-opened.
+  const newestExisting = existingRows.reduce((m, r) => (r.playedAt > m ? r.playedAt : m), "");
 
   const stmts: InStatement[] = tracksNeedingWrite(tracks, cached).map(trackUpsertStmt);
   const insertResultIdx: number[] = [];
+  const inserted: string[] = [];
   for (const r of newPlays(plays, existing)) {
+    inserted.push(r.playedAt);
     insertResultIdx.push(stmts.length);
     // Keep OR IGNORE as a race guard — a concurrent sync may have inserted the same play
     // between our read and this write.
@@ -539,18 +550,24 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
   if (insertResultIdx.length > 0) {
     // Give the plays we just inserted their membership verdict before anything reads them.
     await recomputeOrphanFlags({ newOnly: true });
-    // An out-of-order batch (a gap-filling harvest, the backstop replay) lands BETWEEN
-    // existing plays, so the row immediately before the batch was verdicted against a
-    // successor that is no longer adjacent. Re-open exactly that one verdict; the recompute
-    // below re-rules it against the true neighbour. In-order batches re-verdict the same
-    // pair to the same answer, so this is safe to run unconditionally (audit 2026-08-19, T1.6).
-    await client.execute({
-      sql: `UPDATE plays SET skipped = NULL WHERE id = (
-              SELECT p.id FROM plays p
-              WHERE p.played_at < :minAt AND ${NOT_BACKFILL}
-              ORDER BY p.played_at DESC LIMIT 1)`,
-      args: { minAt },
-    });
+    // An out-of-order insert (a gap-fill landing BETWEEN existing plays) makes the row
+    // immediately before it wrong: its verdict was measured against a successor that is no
+    // longer adjacent. Re-open the predecessor of each such insert — and ONLY those. The
+    // first cut of this fix used the whole batch's minAt, which on a recently-played
+    // harvest is ~50 plays back, so it re-opened a verdict ~50 rows deep on every landed
+    // tick and never the actually-affected row (wave-2 adversarial review, finding A).
+    // Ordinary tail appends (every insert newer than everything stored) skip this
+    // entirely; their predecessor is still pending and the recompute below covers it.
+    const outOfOrder = [...new Set(inserted.filter((at) => at < newestExisting))];
+    for (const at of outOfOrder) {
+      await client.execute({
+        sql: `UPDATE plays SET skipped = NULL WHERE id = (
+                SELECT p.id FROM plays p
+                WHERE p.played_at < :at AND ${NOT_BACKFILL}
+                ORDER BY p.played_at DESC LIMIT 1)`,
+        args: { at },
+      });
+    }
     // …and rule on skips: each newly-landed play gives its PREDECESSOR a successor, so
     // the pending verdicts can now be decided.
     await recomputeSkipFlags();
@@ -571,7 +588,7 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
 
 const ALLTIME_RECOMPUTE_MIN_MS = 10 * 60 * 1000;
 
-async function maybeRecomputeAllTimeStats(): Promise<void> {
+export async function maybeRecomputeAllTimeStats(): Promise<void> {
   const v = await getMeta("alltime_at");
   if (v && Date.now() - (Number(v) || 0) < ALLTIME_RECOMPUTE_MIN_MS) return;
   await recomputeAllTimeStats();
@@ -1540,6 +1557,17 @@ const SLOW_SEQ_MIN_MS = 10 * 60 * 1000;
 async function slowSeq(): Promise<string | null> {
   const seq = await liveKey();
   if (seq === null) return null;
+  try {
+    return await slowSeqInner(seq);
+  } catch {
+    // Any store failure past the liveKey read must ALSO resolve to null (serve uncached),
+    // or the null-version contract's failure branch is unreachable on the very failures it
+    // exists for (wave-2 adversarial review, finding J).
+    return null;
+  }
+}
+
+async function slowSeqInner(seq: string): Promise<string | null> {
   const raw = await getMeta("slow_seq_pub");
   if (raw) {
     try {
@@ -1912,13 +1940,27 @@ export async function getUniqueSongCount(): Promise<number> {
   try {
     const parsed = JSON.parse(v) as { n: number; seq: string | null };
     const cur = await getMeta(LIBRARY_SEQ_KEY).catch(() => null);
-    if (parsed.seq !== cur) void recomputeUniqueSongCount().catch(() => {});
+    if (parsed.seq !== cur) kickUniqueRecompute();
     return Number(parsed.n) || 0;
   } catch {
     // Legacy plain-number value: adopt it and refresh in the background.
-    void recomputeUniqueSongCount().catch(() => {});
+    kickUniqueRecompute();
     return Number(v) || 0;
   }
+}
+
+// One background recompute at a time per instance: without the guard, a recompute whose
+// setMeta the platform froze mid-flight left seq stale, and every later render kicked a
+// fresh full DISTINCT scan (wave-2 adversarial review, finding C).
+let uniqueRecomputeInFlight = false;
+function kickUniqueRecompute(): void {
+  if (uniqueRecomputeInFlight) return;
+  uniqueRecomputeInFlight = true;
+  void recomputeUniqueSongCount()
+    .catch(() => {})
+    .finally(() => {
+      uniqueRecomputeInFlight = false;
+    });
 }
 
 /** Run the expensive distinct-song scan once and cache it in meta. Called at the end of a
@@ -2113,6 +2155,18 @@ export async function removeCachedPlaylistTrack(playlistId: string, uri: string)
               WHERE playlist_id = :pid AND track_id IN (SELECT id FROM tracks WHERE uri = :uri)`,
         args: { pid: playlistId, uri },
       },
+      {
+        // COMPACT the positions after the delete. diffPositions treats the cached array's
+        // INDEX as the position value, so a gap left by this delete made the next store
+        // overwrite the wrong slot (a track silently vanished from the cache) or trim a
+        // live row (audit 2026-08-19 wave 2, B1). One correlated-subquery renumber keeps
+        // index === position, which is the invariant every diff consumer assumes.
+        sql: `UPDATE playlist_tracks
+              SET position = (SELECT COUNT(*) FROM playlist_tracks q
+                              WHERE q.playlist_id = :pid AND q.position < playlist_tracks.position)
+              WHERE playlist_id = :pid`,
+        args: { pid: playlistId },
+      },
       writeSeqStmt(),
       librarySeqStmt(),
     ],
@@ -2225,9 +2279,16 @@ export async function getSavedSyncedAt(): Promise<string | null> {
 export async function getLibraryTracks(
   exceptPlaylistId?: string,
   exceptName?: string,
+  /** The target's own cleaned/backup playlist IDS, when the caller knows them (Phase 2).
+   *  Exclusion by id is what actually holds: the name-based exclusion below breaks the
+   *  moment the stored name and the derived name diverge — a rename between phases, or a
+   *  Spotify-side length clamp — and the reconcile then reads its own output as "library"
+   *  and empties the playlist it just made (audit 2026-08-19 wave 2, A1/A2). */
+  exceptIds: string[] = [],
 ): Promise<Track[]> {
   const client = await getClient();
   const meId = await getMeId();
+  const ex = [exceptPlaylistId ?? "", ...exceptIds.filter(Boolean)];
   const res = await client.execute({
     sql: `
       SELECT t.id, t.name AS title, t.artist, t.uri, t.album,
@@ -2239,13 +2300,14 @@ export async function getLibraryTracks(
       FROM playlist_tracks pt
         JOIN tracks t ON t.id = pt.track_id
         JOIN playlists p ON p.id = pt.playlist_id
-      WHERE p.owner_id = :meId AND pt.playlist_id <> :except
+      WHERE p.owner_id = :meId AND pt.playlist_id NOT IN (${ex.map((_, i) => `:ex${i}`).join(", ")})
         AND p.name <> :ownCleaned
         AND p.name NOT LIKE :backupLike`,
     args: {
       meId,
-      except: exceptPlaylistId ?? "",
-      // The target's own cleaned output, excluded by exact name. With no target name there's
+      ...Object.fromEntries(ex.map((id, i) => [`ex${i}`, id])),
+      // The target's own cleaned output, excluded by exact name — the Phase-1 fallback for
+      // the run where the cleaned playlist doesn't exist yet. With no target name there's
       // nothing to exclude → a sentinel no real playlist matches.
       ownCleaned: exceptName ? CLEANED_PREFIX + exceptName : "",
       backupLike: BACKUP_PREFIX + "%",
@@ -2471,14 +2533,19 @@ export async function clearSpotifyTokens(): Promise<void> {
 export async function acquireLock(name: string, ttlMs: number): Promise<string | null> {
   const client = await getClient();
   const now = Date.now();
+  // Owner token = expiry + a nonce. A pure-expiry token is a function of (now, ttl), so
+  // two acquisitions in the same millisecond minted the SAME token and one holder's
+  // release could free the other's lock (wave-2 audit, B1). SQLite's CAST parses the
+  // leading digits, so the expiry comparison below still works on the combined string.
   const exp = String(now + ttlMs);
+  const owner = `${exp}:${Math.random().toString(36).slice(2, 10)}`;
   const res = await client.execute({
-    sql: `INSERT INTO meta (key, value) VALUES (:k, :exp)
-          ON CONFLICT(key) DO UPDATE SET value = :exp
+    sql: `INSERT INTO meta (key, value) VALUES (:k, :owner)
+          ON CONFLICT(key) DO UPDATE SET value = :owner
           WHERE CAST(meta.value AS INTEGER) < :now`,
-    args: { k: `lock:${name}`, exp, now },
+    args: { k: `lock:${name}`, owner, now },
   });
-  return res.rowsAffected > 0 ? exp : null;
+  return res.rowsAffected > 0 ? owner : null;
 }
 
 export async function releaseLock(name: string, owner: string): Promise<void> {

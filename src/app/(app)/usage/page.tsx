@@ -431,7 +431,9 @@ export default async function UsagePage() {
                       {w.banTs === null
                         ? "—"
                         : `at ${w.callsBeforeBan} calls · ${openTime(new Date(w.banTs).toISOString(), tz)}${
-                            w.banRetryAfterS ? ` · ${Math.round(w.banRetryAfterS / 60)}m ban` : ""
+                            w.banRetryAfterS != null && w.banRetryAfterS > 0
+                              ? ` · ${Math.max(1, Math.round(w.banRetryAfterS / 60))}m ban`
+                              : ""
                           }`}
                     </td>
                   </tr>

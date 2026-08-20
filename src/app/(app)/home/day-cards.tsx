@@ -33,7 +33,7 @@ export function DayCards({
   selected: string;
   allTime: { plays: number; durationMs: number; since: string | null };
   onSelect: (day: string) => void;
-  onExtend: (days: number) => Promise<void>;
+  onExtend: (days: number) => Promise<boolean | void>;
 }) {
   const [level, setLevel] = useState(0);
   const [extending, setExtending] = useState(false);
@@ -51,16 +51,23 @@ export function DayCards({
     () => false,
   );
   const spans = phone ? PHONE_SPANS : SPANS;
-  const canExtend = level < spans.length - 1;
-  const shownDaily = daily.slice(0, spans[level]);
+  // Clamped: `level` indexes whichever ladder the viewport selects, and the two ladders
+  // have different lengths — crossing the breakpoint at the last rung indexed past the
+  // end (wave-2 audit, B1).
+  const lvl = Math.min(level, spans.length - 1);
+  const canExtend = lvl < spans.length - 1;
+  const shownDaily = daily.slice(0, spans[lvl]);
   const scrollerRef = useRef<HTMLDivElement>(null);
 
   const extend = async () => {
     if (extending || !canExtend) return;
     setExtending(true);
     try {
-      await onExtend(spans[level + 1]);
-      setLevel(level + 1);
+      // Only advance the rung when the fetch actually delivered days — an expired session
+      // used to walk the ladder (and remove the chevron) while adding nothing (wave-2
+      // audit, A19).
+      const ok = await onExtend(spans[lvl + 1]);
+      if (ok !== false) setLevel(lvl + 1);
     } finally {
       setExtending(false);
     }

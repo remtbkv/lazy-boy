@@ -22,6 +22,7 @@ export type CleanContext = {
   backup: boolean;
   backupName: string; // "Dupes removed from: X"
   kept: Track[]; // exactly what Phase 1 wrote to the cleaned playlist (target order)
+  removed: Track[]; // exactly what Phase 1 wrote to the backup (dupes at clean time)
 };
 
 export type CleanResult = {
@@ -69,9 +70,12 @@ export async function cleanPhase1(
   const name = cleanedName(target.name);
   const backupName = makeBackupName(target.name);
 
-  // Nothing's a duplicate → don't create a redundant full-copy "Cleaned: X"; the caller
-  // just tells the user the playlist is unique. (No reconcile either.)
-  if (removed.length === 0) {
+  // Nothing's a duplicate AND nothing collapses internally → don't create a redundant
+  // full-copy "Cleaned: X"; the caller just tells the user the playlist is unique. The
+  // second test matters: `kept`/`removed` are deduped, so a playlist whose only defect is
+  // the same song twice used to hit removed=0 and be reported "unique" while the duplicate
+  // stayed (audit 2026-08-19 wave 2, A5) — the clean also dedupes, so run it.
+  if (removed.length === 0 && kept.length === targetTracks.length) {
     return {
       result: { name, kept: kept.length, removed: 0, unique: true },
       ctx: null,
@@ -89,7 +93,7 @@ export async function cleanPhase1(
 
   return {
     result: { id: cleanedId, name, kept: kept.length, removed: removed.length, backupId: backupId ?? undefined },
-    ctx: { targetId, name, cleanedId, backupId, backup, backupName, kept },
+    ctx: { targetId, name, cleanedId, backupId, backup, backupName, kept, removed },
   };
 }
 
@@ -103,7 +107,13 @@ export async function reconcileClean(sp: Spotify, ctx: CleanContext): Promise<Re
   const targetFresh = await sp.playlistTracks(ctx.targetId);
   if (targetFresh.length) await storePlaylistTracks(ctx.targetId, targetFresh, target.snapshot);
 
-  const libraryFresh = await getLibraryTracks(ctx.targetId, target.name);
+  // Exclude this clean's own output by ID, not just name: a rename between phases or a
+  // name clamp made the name-based exclusion miss, and the reconcile then counted the
+  // cleaned playlist's own tracks as "saved elsewhere" — emptying it (audit wave 2, A1/A2).
+  const libraryFresh = await getLibraryTracks(ctx.targetId, target.name, [
+    ctx.cleanedId,
+    ctx.backupId ?? "",
+  ]);
   const keptFresh = subtract(targetFresh, libraryFresh);
   const removedFresh = intersect(targetFresh, libraryFresh);
 
@@ -122,8 +132,14 @@ export async function reconcileClean(sp: Spotify, ctx: CleanContext): Promise<Re
   }
 
   // Exact-mirror the backup to the true removed set (so nothing sits in both the
-  // cleaned playlist and the backup).
-  if (ctx.backup) {
+  // cleaned playlist and the backup). Only when it CHANGED: replaceItems is a
+  // clear-then-refill, and running it unconditionally opened an empty-backup window on
+  // every reconcile — a throw between the clear and the refill left the backup empty for
+  // nothing (audit 2026-08-19 wave 2, A7).
+  const backupChanged =
+    subtract(removedFresh, ctx.removed).length > 0 ||
+    subtract(ctx.removed, removedFresh).length > 0;
+  if (ctx.backup && backupChanged) {
     if (ctx.backupId) {
       await sp.replaceItems(ctx.backupId, removedFresh.map((t) => t.uri));
     } else if (removedFresh.length) {
