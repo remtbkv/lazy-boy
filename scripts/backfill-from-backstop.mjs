@@ -105,11 +105,13 @@ if (inserted > 0) {
   // has a mis-verdicted predecessor; interior rows are all new and pending anyway.
   const oldest = items.reduce((m, it) => (it.played_at < m ? it.played_at : m), items[0].played_at);
   stmts.push({
-    sql: `UPDATE plays SET skipped = NULL WHERE id = (
+    sql: `UPDATE plays SET skipped = NULL
+          WHERE (played_at = ? AND (context_type IS NULL OR context_type <> 'backfill'))
+             OR id = (
             SELECT id FROM plays
             WHERE played_at < ? AND (context_type IS NULL OR context_type <> 'backfill')
-            ORDER BY played_at DESC LIMIT 1)`,
-    args: [oldest],
+            ORDER BY played_at DESC, track_id DESC LIMIT 1)`,
+    args: [oldest, oldest],
   });
   // One announcement for the whole batch — `plays` feeds cached reads and the client-side
   // history payload, and this bump is what invalidates both (same rule as every write in

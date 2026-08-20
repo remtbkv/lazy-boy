@@ -561,13 +561,19 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
     // tick and never the actually-affected row (wave-2 adversarial review, finding A).
     // Ordinary tail appends (every insert newer than everything stored) skip this
     // entirely; their predecessor is still pending and the recompute below covers it.
-    const outOfOrder = [...new Set(inserted.filter((at) => at < newestExisting))];
+    // `<=`, and the reset covers TIE-MATES too: a play landing AT a timestamp already in
+    // the store makes its tie-mate's verdict stale exactly like a strict predecessor's —
+    // the strict `<` version could never re-open it, so the same three rows counted
+    // differently depending on delivery order (wave-3 independent adversarial suite, F2/F3).
+    const outOfOrder = [...new Set(inserted.filter((at) => at <= newestExisting))];
     for (const at of outOfOrder) {
       await client.execute({
-        sql: `UPDATE plays SET skipped = NULL WHERE id = (
+        sql: `UPDATE plays SET skipped = NULL
+              WHERE (played_at = :at AND (context_type IS NULL OR context_type <> 'backfill'))
+                 OR id = (
                 SELECT p.id FROM plays p
                 WHERE p.played_at < :at AND ${NOT_BACKFILL}
-                ORDER BY p.played_at DESC LIMIT 1)`,
+                ORDER BY p.played_at DESC, p.track_id DESC LIMIT 1)`,
         args: { at },
       });
     }
@@ -787,7 +793,12 @@ const NOT_SKIPPED = `(p.skipped IS NULL OR p.skipped = 0)`;
  *  = min(gap to next play, duration); skipped = listened < 35% of duration. Unknown
  *  duration or a clock-weird negative gap counts as not-skipped (be permissive). The
  *  newest play stays pending. Runs after each sync that inserted plays; the pending set
- *  is tiny (idx_plays_skip_null). */
+ *  is tiny (idx_plays_skip_null).
+ *
+ *  TIES (two plays sharing one played_at) break on track_id, everywhere a gap chain is
+ *  ordered — a verdict is a fact about the TIMELINE, and the rowid tie-break made it an
+ *  arrival artifact: which of the pair got skipped depended on delivery order (wave-3
+ *  independent adversarial suite, F1-F3). */
 async function recomputeSkipFlags(): Promise<void> {
   const client = await getClient();
   const res = await client.execute(`
@@ -799,7 +810,7 @@ async function recomputeSkipFlags(): Promise<void> {
                           FROM plays p2
                           WHERE p2.skipped IS NULL
                             AND (p2.context_type IS NULL OR p2.context_type <> 'backfill'))
-    ORDER BY p.played_at ASC`);
+    ORDER BY p.played_at ASC, p.track_id ASC`);
   const rows = plainRows(res.rows) as unknown as {
     id: number;
     playedAt: string;
@@ -869,7 +880,7 @@ const playsWithListened = cache(async (): Promise<ListenRow[]> => {
             p.skipped AS skipped
      FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
      WHERE ${NOT_BACKFILL}
-     ORDER BY p.played_at ASC`,
+     ORDER BY p.played_at ASC, p.track_id ASC`,
   );
   const rows = plainRows(res.rows) as unknown as {
     playedAt: string;
@@ -1121,7 +1132,7 @@ async function readDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
                  p.skipped AS skipped
           FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
           WHERE p.played_at >= :cutoff AND ${NOT_BACKFILL}
-          ORDER BY p.played_at ASC`,
+          ORDER BY p.played_at ASC, p.track_id ASC`,
     args: { cutoff },
   });
   const rows = plainRows(res.rows) as unknown as {

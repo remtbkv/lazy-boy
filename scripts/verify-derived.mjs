@@ -44,7 +44,7 @@ const PLAYS_ORDERED_SQL = `
          p.skipped AS skipped
   FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
   WHERE (p.context_type IS NULL OR p.context_type <> 'backfill')
-  ORDER BY p.played_at ASC`;
+  ORDER BY p.played_at ASC, p.track_id ASC`;
 
 // db.ts recomputeUniqueSongCount() — the DISTINCT (artist, title) scan.
 const UNIQUE_SONG_SQL = `
