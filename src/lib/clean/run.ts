@@ -30,6 +30,10 @@ export type CleanResult = {
   name: string;
   kept: number;
   removed: number;
+  /** In-playlist duplicate copies collapsed by the clean (they go nowhere — the kept copy
+   *  stays). Surfaced so the user isn't told "0 removed" when a track count dropped
+   *  (wave-3 adversarial review, K2). */
+  deduped?: number;
   backupId?: string;
   // True when nothing was a duplicate — no "Cleaned: …" playlist was created.
   unique?: boolean;
@@ -91,8 +95,16 @@ export async function cleanPhase1(
     await sp.addItems(backupId, removed.map((t) => t.uri));
   }
 
+  const deduped = targetTracks.length - kept.length - removed.length;
   return {
-    result: { id: cleanedId, name, kept: kept.length, removed: removed.length, backupId: backupId ?? undefined },
+    result: {
+      id: cleanedId,
+      name,
+      kept: kept.length,
+      removed: removed.length,
+      deduped: deduped > 0 ? deduped : undefined,
+      backupId: backupId ?? undefined,
+    },
     ctx: { targetId, name, cleanedId, backupId, backup, backupName, kept, removed },
   };
 }

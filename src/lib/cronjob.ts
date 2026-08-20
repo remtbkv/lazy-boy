@@ -38,6 +38,7 @@ export async function ensureCronJobEnabled(): Promise<
       cache: "no-store",
       signal: AbortSignal.timeout(8000),
     });
+    if (!patch.ok) console.error(`[cronjob] enable PATCH failed: ${patch.status}`);
     return patch.ok ? "enabled" : "error";
   } catch {
     return "error";

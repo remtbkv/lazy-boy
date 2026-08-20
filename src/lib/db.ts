@@ -12,7 +12,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { createClient, type Client, type InStatement, type Row } from "@libsql/client";
 import type { Track } from "@/lib/spotify/types";
-import { CLEANED_PREFIX, BACKUP_PREFIX } from "@/lib/clean/names";
+import { BACKUP_PREFIX, cleanedName } from "@/lib/clean/names";
 import {
   CALIBRATION,
   STEADY_SYNC_TICK_ROWS,
@@ -144,14 +144,17 @@ function getClient(): Promise<Client> {
 // twice with a short pause before it is allowed to surface. Bounded: worst case adds
 // ~700ms to a request that was about to crash the render.
 async function retryingFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  // Bound each attempt: every other outbound fetch in the repo carries a timeout, and this
-  // one carries EVERY store query — a funnel that accepts and stalls used to hang the
-  // render to the platform timeout (wave-2 audit, A1). Only added when the caller didn't
-  // pass its own signal.
-  if (!init?.signal) init = { ...(init ?? {}), signal: AbortSignal.timeout(15_000) };
+  // Bound each attempt — a FRESH signal inside the loop below, not one shared deadline: a
+  // single pre-loop AbortSignal.timeout started counting at creation, so a slow first
+  // attempt exhausted it and attempts 2-3 rejected instantly, making the gateway-retry
+  // ladder unreachable (wave-3 adversarial review, M1). Every other outbound fetch in the
+  // repo carries a timeout; this one carries EVERY store query — a funnel that accepts and
+  // stalls used to hang the render to the platform timeout. Caller-supplied signals win.
+  const perAttempt = (): RequestInit =>
+    init?.signal ? init : { ...(init ?? {}), signal: AbortSignal.timeout(15_000) };
   for (let attempt = 0; ; attempt++) {
     try {
-      const res = await fetch(input, init);
+      const res = await fetch(input, perAttempt());
       // Gateway-class failures (502/503/504) come from the funnel edge, not sqld — the
       // request almost certainly never executed, so a retry is safe even for writes.
       // A 500 is sqld itself and is NOT retried: it may have executed.
@@ -1949,18 +1952,17 @@ export async function getUniqueSongCount(): Promise<number> {
   }
 }
 
-// One background recompute at a time per instance: without the guard, a recompute whose
+// One background recompute per minute per instance: without a guard, a recompute whose
 // setMeta the platform froze mid-flight left seq stale, and every later render kicked a
-// fresh full DISTINCT scan (wave-2 adversarial review, finding C).
-let uniqueRecomputeInFlight = false;
+// fresh full DISTINCT scan (wave-2 adversarial review, finding C). A TIMESTAMP, not a
+// boolean — a boolean frozen `true` by that same platform freeze would have silenced this
+// path for the instance's whole lifetime (wave-3 adversarial review, M5); a timestamp
+// self-heals after the window.
+let uniqueRecomputeKickedAt = 0;
 function kickUniqueRecompute(): void {
-  if (uniqueRecomputeInFlight) return;
-  uniqueRecomputeInFlight = true;
-  void recomputeUniqueSongCount()
-    .catch(() => {})
-    .finally(() => {
-      uniqueRecomputeInFlight = false;
-    });
+  if (Date.now() - uniqueRecomputeKickedAt < 60_000) return;
+  uniqueRecomputeKickedAt = Date.now();
+  void recomputeUniqueSongCount().catch(() => {});
 }
 
 /** Run the expensive distinct-song scan once and cache it in meta. Called at the end of a
@@ -2309,7 +2311,8 @@ export async function getLibraryTracks(
       // The target's own cleaned output, excluded by exact name — the Phase-1 fallback for
       // the run where the cleaned playlist doesn't exist yet. With no target name there's
       // nothing to exclude → a sentinel no real playlist matches.
-      ownCleaned: exceptName ? CLEANED_PREFIX + exceptName : "",
+      // Derived through cleanedName so the clamp matches what Spotify stores (wave-3, P1).
+      ownCleaned: exceptName ? cleanedName(exceptName) : "",
       backupLike: BACKUP_PREFIX + "%",
     },
   });

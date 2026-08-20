@@ -45,6 +45,9 @@ async function watchColdStart(taskId: string, refresh: () => void): Promise<void
         await new Promise((r) => setTimeout(r, POLL_MS * 5));
         continue;
       }
+      // A successful poll restores the budget — a flaky-but-alive task (ok, 404, ok…)
+      // must not exhaust it cumulatively (wave-3 adversarial review, G2).
+      blindRefreshes = 0;
       const task = (await res.json()) as Task;
       // `total` is only set once the playlist list has been stored, which is what the grid
       // renders — so this is the moment the empty grid can fill, long before the scan ends.

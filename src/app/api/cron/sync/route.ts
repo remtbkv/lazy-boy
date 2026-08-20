@@ -83,7 +83,12 @@ export async function GET(req: Request) {
   // Guarded: this runs OUTSIDE the try below, and a store hiccup inside the token read
   // used to escape as a 500 — feeding the external pinger's auto-disable, the exact storm
   // the 429 branch dodges (wave-2 audit, B5).
-  const token = await getValidAccessToken().catch(() => null);
+  const token = await getValidAccessToken().catch((e) => {
+    // Logged: a persistent store outage otherwise reads as an endless silent
+    // "nobody signed in" (wave-3 adversarial review, F1).
+    console.error("[cron] token read failed", e);
+    return null;
+  });
   if (!token) {
     // Nobody signed in / refresh token dead / store hiccup — nothing to do, not an error.
     return Response.json({ ok: true, skipped: "no token" });
@@ -131,7 +136,10 @@ export async function GET(req: Request) {
     try {
       harvest = await syncRecentPlays(spotifyClient(token, false, "cron-sync"));
     } catch (e) {
-      await setHarvestGate({ lastHarvest: now }).catch(() => {});
+      // Only a SPOTIFY failure stamps: it means a call was actually spent. A store error
+      // thrown before the call (the cooldown read) must not burn an hour of harvesting
+      // over a 2-minute store blip (wave-3 adversarial review, F2).
+      if (e instanceof SpotifyError) await setHarvestGate({ lastHarvest: now }).catch(() => {});
       throw e;
     }
     const { added, skipped } = harvest;

@@ -7,5 +7,10 @@
 export const CLEANED_PREFIX = "Cleaned: ";
 export const BACKUP_PREFIX = "Dupes removed from: ";
 
-export const cleanedName = (name: string) => `${CLEANED_PREFIX}${name}`;
-export const backupName = (name: string) => `${BACKUP_PREFIX}${name}`;
+// Clamped at the SOURCE of every derived name: Spotify stores at most ~100 chars, and a
+// derived name longer than the stored one made the clean's name-based self-exclusion miss
+// its own output for any playlist name > 91 chars (wave-3 adversarial review, P1). The
+// clamp must match resources.createPlaylist's send-side clamp exactly.
+export const PLAYLIST_NAME_MAX = 100;
+export const cleanedName = (name: string) => `${CLEANED_PREFIX}${name}`.slice(0, PLAYLIST_NAME_MAX);
+export const backupName = (name: string) => `${BACKUP_PREFIX}${name}`.slice(0, PLAYLIST_NAME_MAX);

@@ -310,7 +310,9 @@ function ActionSheet({
           toast.success(
             r.unique
               ? `"${r.name}" — nothing to strip, every song is new`
-              : `Cleaning "${r.name}" — ${r.removed} already-saved removed, ${r.kept} kept`,
+              : `Cleaning "${r.name}" — ${r.removed} already-saved removed, ${r.kept} kept${
+                  r.deduped ? `, ${r.deduped} duplicate cop${r.deduped === 1 ? "y" : "ies"} collapsed` : ""
+                }`,
           );
           break;
         }

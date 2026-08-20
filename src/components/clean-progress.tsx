@@ -31,6 +31,10 @@ export function CleanProgressWatcher() {
         clearInterval(timer.current);
         timer.current = null;
       }
+      // Fresh miss budget for the NEXT clean: the component never unmounts, so a counter
+      // left at 3 made the next clean's first cross-instance 404 clear it instantly —
+      // reintroducing the bug the counter fixed (wave-3 adversarial review, H1).
+      misses.current = 0;
       setActive(false);
     }
 

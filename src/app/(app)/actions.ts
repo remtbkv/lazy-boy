@@ -14,6 +14,7 @@ import {
   acquireLock,
   clearSpotifyTokens,
   deletePlaylistFromDb,
+  releaseLock,
   findTrackWithPlaylists,
   getCleanBackupPref,
   getMeId,
@@ -104,7 +105,14 @@ export async function startCleanAction(
   playlistId: string,
   backup?: boolean,
 ): Promise<
-  ActionResult<{ name: string; kept: number; removed: number; taskId?: string; unique?: boolean }>
+  ActionResult<{
+    name: string;
+    kept: number;
+    removed: number;
+    deduped?: number;
+    taskId?: string;
+    unique?: boolean;
+  }>
 > {
   try {
     const session = await auth();
@@ -120,24 +128,32 @@ export async function startCleanAction(
     // expires on its own; no release needed on the error path.
     const lock = await acquireLock(`clean:${playlistId}`, 5 * 60 * 1000);
     if (!lock) throw new Error("A clean of this playlist is already running.");
-    const useBackup = backup ?? (await getCleanBackupPref());
-    const { result, ctx } = await cleanPhase1(spotifyClient(token, true, "action:clean"), playlistId, useBackup);
-    // Nothing removed → no playlist created, nothing to reconcile.
-    if (!ctx || result.unique) {
-      return { ok: true, name: result.name, kept: result.kept, removed: 0, unique: true };
+    // RELEASED on every exit — the first cut relied on TTL expiry alone, which blocked a
+    // legitimate re-clean for 5 minutes after a finished one and leaked a permanent
+    // lock:clean:<id> meta row per playlist (wave-3 adversarial review, A1). The lock's
+    // job is only the Phase-1 double-submit window.
+    try {
+      const useBackup = backup ?? (await getCleanBackupPref());
+      const { result, ctx } = await cleanPhase1(spotifyClient(token, true, "action:clean"), playlistId, useBackup);
+      // Nothing removed → no playlist created, nothing to reconcile.
+      if (!ctx || result.unique) {
+        return { ok: true, name: result.name, kept: result.kept, removed: 0, unique: true };
+      }
+      // The new playlists show in the grid right away (reconcile's syncLibrary would
+      // also get there, but only after the whole background pass).
+      if (result.id) await recordNewPlaylist(result.id, result.name, result.kept);
+      if (ctx.backupId) await recordNewPlaylist(ctx.backupId, ctx.backupName, result.removed);
+      const task = runTask("clean-reconcile", () =>
+        reconcileClean(spotifyClient(token, true, "action:clean"), ctx),
+      );
+      // Keep the invocation alive for the detached reconcile (serverless may freeze it
+      // once the action returns).
+      after(taskDone(task.id));
+      revalidatePath("/playlists");
+      return { ok: true, name: result.name, kept: result.kept, removed: result.removed, deduped: result.deduped, taskId: task.id };
+    } finally {
+      await releaseLock(`clean:${playlistId}`, lock).catch(() => {});
     }
-    // The new playlists show in the grid right away (reconcile's syncLibrary would
-    // also get there, but only after the whole background pass).
-    if (result.id) await recordNewPlaylist(result.id, result.name, result.kept);
-    if (ctx.backupId) await recordNewPlaylist(ctx.backupId, ctx.backupName, result.removed);
-    const task = runTask("clean-reconcile", () =>
-      reconcileClean(spotifyClient(token, true, "action:clean"), ctx),
-    );
-    // Keep the invocation alive for the detached reconcile (serverless may freeze it
-    // once the action returns).
-    after(taskDone(task.id));
-    revalidatePath("/playlists");
-    return { ok: true, name: result.name, kept: result.kept, removed: result.removed, taskId: task.id };
   } catch (e) {
     return fail(e);
   }
@@ -546,6 +562,7 @@ export async function resumePlaylistAction(
     let bestEnd = -1;
     let bestLen = 0;
     let lastPosRunEnd = -1;
+    let lastPosRunLen = 0;
     let runStart = 0;
     for (let k = 1; k <= positions.length; k++) {
       const broke = k === positions.length || positions[k] - positions[k - 1] > GAP;
@@ -553,7 +570,10 @@ export async function resumePlaylistAction(
         const len = k - runStart;
         const runLo = positions[runStart];
         const runHi = positions[k - 1];
-        if (lastPos >= runLo && lastPos <= runHi) lastPosRunEnd = runHi;
+        if (lastPos >= runLo && lastPos <= runHi) {
+          lastPosRunEnd = runHi;
+          lastPosRunLen = len;
+        }
         if (len > bestLen) {
           bestLen = len;
           bestEnd = runHi;
@@ -561,7 +581,12 @@ export async function resumePlaylistAction(
         runStart = k;
       }
     }
-    if (lastPosRunEnd >= 0) bestEnd = lastPosRunEnd;
+    // The newest play's run wins — that's where you stopped — UNLESS it's a length-1 run:
+    // an unconditional override let a single stray tap as the session's last event skip
+    // you past everything you'd actually heard (wave-3 adversarial review, A4 — the exact
+    // case the length-tolerance exists for). A deliberate jump shows ≥2 plays and wins;
+    // a lone tap falls back to the longest run.
+    if (lastPosRunEnd >= 0 && (lastPosRunLen >= 2 || bestLen <= 1)) bestEnd = lastPosRunEnd;
     // If your run already reached the last track, you've finished the playlist — start
     // over from the top rather than replaying the final song.
     const finished = bestEnd >= 0 && bestEnd + 1 >= tracks.length;

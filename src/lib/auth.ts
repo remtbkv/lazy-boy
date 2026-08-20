@@ -219,10 +219,10 @@ async function coordinatedRefresh(triedToken: string): Promise<SpotifyTokens> {
         await releaseLock("spotify_refresh", lockOwner);
       }
     }
-    // Lost the lock — wait for whoever holds it to publish a fresh token. 16s, not 10:
-    // the lock TTL is 15s, and a loser that gave up BEFORE the holder's lease could even
-    // expire went on to refresh unilaterally with a possibly-rotated token — the exact
-    // PKCE collision the lock exists to prevent (audit 2026-08-19, T2.13).
+    // Lost the lock — wait for whoever holds it to publish a fresh token. Two 16s waits
+    // total 32s > the 30s lease, so by the time the loop falls through to the unilateral
+    // last resort the holder's lease has genuinely expired (and the last resort re-reads
+    // the STORE's current refresh token, not this caller's original — audit T2.13).
     const published = await waitForFreshToken(16_000);
     if (published) return published;
     // Holder stalled/crashed; loop to retry (its lock TTL has genuinely expired now).

@@ -364,7 +364,16 @@ export function DenHome({
     void loadAllDaily();
   }, []);
   const extendDays = async (days: number): Promise<boolean> => {
-    const all = await loadAllDaily();
+    let all: DayStats[];
+    try {
+      all = await loadAllDaily();
+    } catch {
+      // A rejected action would otherwise stay memoized for 60s AND throw out of the
+      // chevron's onClick (wave-3 adversarial review, B2). Clear the memo so the next
+      // press retries immediately.
+      allDailyPromise.current = null;
+      return false;
+    }
     if (!all.length) return false;
     // Keep the LIVE head: the snapshot can be up to 60s old, and replacing today's card
     // with it discarded a handoff bump or a just-landed play (wave-2 audit, A18).
@@ -734,15 +743,17 @@ export function DenHome({
       // directions (audit 2026-08-19, T1.9). Wrong universe → leave the provisionals and
       // the server's own card alone; the next latest-mode refresh reconciles properly.
       // Day-scoped: a provisional minted before local midnight must never be bumped onto
-      // the NEW day's card (wave-2 audit, A3). Ones whose day has rolled off the newest
-      // server day can no longer confirm in this universe — drop them (the sync recorded
-      // the real play on the right day long since).
-      const provs = provisionalsRef.current.filter((p) => p.day === r.daily[0]?.day);
+      // the NEW day's card (wave-2 audit, A3) — but ONLY the reconciling branch may drop
+      // them: filtering before the split silently discarded provisionals on every
+      // searching/past-day refresh, the exact "leave them alone" mode (wave-3 adversarial
+      // review, C3).
       const canReconcile = want === "latest" && !!r.tracks;
+      const provsAll = provisionalsRef.current;
+      const provs = canReconcile ? provsAll.filter((p) => p.day === r.daily[0]?.day) : provsAll;
       const bump =
         canReconcile && provs.length
           ? reconcilePlays(r.tracks ?? [], provs, Date.now())
-          : { rows: r.tracks ?? [], remaining: canReconcile ? [] : provs };
+          : { rows: r.tracks ?? [], remaining: canReconcile ? [] : provsAll };
       provisionalsRef.current = bump.remaining;
       setDaily(
         canReconcile && bump.remaining.length && r.daily.length

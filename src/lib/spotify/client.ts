@@ -127,9 +127,10 @@ export class HttpClient {
 
       // Record every outgoing call so a 429 can be analysed after the fact. Fire-and-forget
       // (the DB write must never slow a Spotify request).
-      // `Number(x) || null` read "Retry-After: 0" as null and an HTTP-date form as null too;
-      // 0 is a real (immediate-retry) answer and a date form should not be mistaken for
-      // "no answer" (audit 2026-08-19, T2.11). NaN → null, finite numbers pass through.
+      // `Number(x) || null` read "Retry-After: 0" as null; 0 is a real (immediate-retry)
+      // answer and now passes through. HTTP-date forms still parse to NaN → null ("no
+      // answer" → 1s default) — accepted: Spotify sends seconds, and date arithmetic here
+      // isn't worth the surface (audit T2.11; wording fixed per wave-3 review, O1).
       // Empty/whitespace headers must read as "no answer" too — Number("") is 0, which the
       // 429 branch would treat as "retry immediately" (wave-2 adversarial review, finding I).
       const retryHeader = res.status === 429 ? res.headers.get("Retry-After") : null;
