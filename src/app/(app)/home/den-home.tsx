@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 import { searchPerfEnabled, startSearchProbe, type IndexStatus } from "@/lib/search-perf";
 import { patchHistoryPayload } from "@/lib/history-patch";
 import { buildDays, iso, type HistoryPayload } from "@/lib/history-days";
+import { judgeHandoff } from "@/lib/handoff";
 import { addPlay, reconcilePlays, type Provisional } from "@/lib/optimistic-play";
 import { recordAppEvent } from "@/lib/metrics-client";
 import { IdentityTrackMenu } from "@/components/identity-track-menu";
@@ -826,19 +827,13 @@ export function DenHome({
             p.durationMs > 0 ? `${Math.round((p.maxProgress / p.durationMs) * 100)}%` : "?"
           }|from=${p.source ?? ""}`,
         );
-      // STALE finish = the tab slept holding this song and woke to a different one. The
-      // handoff stamps the play as "now", so a suspended tab minted a play an hour after
-      // the song actually ended (Abracadabra, 10:46 PM, Rem 2026-08-16) — a song that old
-      // is the SYNC's business (it recorded the real play with its real time long ago),
-      // never this shortcut's. The poll runs every ~6s; a 60s gap only happens suspended.
-      if (Date.now() - p.seenAt > 60_000) return verdict("stale");
-      // Never observed playing in this tab = nothing to credit: its progress predates us.
-      if (!p.sawPlaying) return verdict("never-played");
-      // Same bar the store applies (plays.skipped): under 35% of the song listened is a
-      // skip, not a play — don't hand it to the list (Rem, 2026-08-16). 30s floor stands
-      // in when the duration is unknown.
-      const need = p.durationMs > 0 ? p.durationMs * 0.35 : 30_000;
-      if (p.maxProgress < need) return verdict("skip");
+      // The guards live in src/lib/handoff.ts (pure, known-answer tested — they killed
+      // three separate phantom-play bugs and must never regress silently again).
+      const localToday = new Date(Date.now() - new Date().getTimezoneOffset() * 60000)
+        .toISOString()
+        .slice(0, 10);
+      const ruled = judgeHandoff(p, Date.now(), daily[0]?.day === localToday);
+      if (ruled !== "commit") return verdict(ruled);
       const nowIso = new Date().toISOString();
       const row = {
         id: p.id,
@@ -853,16 +848,6 @@ export function DenHome({
         firstPlayed: nowIso,
         source: p.source,
       };
-      // daily[0] is only "today" when today already has plays. On the FIRST play of a
-      // new local day the strip still leads with yesterday, and crediting that card put
-      // a 10:15 AM play inside "Yesterday" (Rem, 2026-08-17). No card for today yet →
-      // leave the play entirely to the sync, which creates the day properly.
-      const localToday = new Date(
-        Date.now() - new Date().getTimezoneOffset() * 60000,
-      )
-        .toISOString()
-        .slice(0, 10);
-      if (daily[0]?.day !== localToday) return verdict("no-today");
       verdict("commit");
       provisionalsRef.current.push({ row, at: Date.now(), day: localToday });
       const today = daily[0]?.day;
