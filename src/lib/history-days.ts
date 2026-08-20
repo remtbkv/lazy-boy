@@ -49,8 +49,18 @@ export function buildDays(
   // seconds of every visit are still the server's. Plays arrive newest-first, so the first one
   // seen for a song is its latest. (Checked against getPlaysByDay over all 69 days in the
   // store, 2026-08-11: per-day source instead of this disagreed on 66 of them.)
-  const latestSource = new Map<number, number>();
-  for (const [t, , src] of hist.plays) if (!latestSource.has(t)) latestSource.set(t, src);
+  // Keyed by IDENTITY, not track index: payloads can hold one song under two Spotify ids,
+  // and an index-keyed map gave each id-half its own "latest" — the rule says the SONG's
+  // most recent play overall (wave-3 independent suite, B; same defect class as T2.5).
+  const identityOf = (t: number): string | null => {
+    const track = hist.tracks[t];
+    return track ? `${track[1].toLowerCase()}\n${track[0].toLowerCase()}` : null;
+  };
+  const latestSource = new Map<string, number>();
+  for (const [t, , src] of hist.plays) {
+    const key = identityOf(t);
+    if (key !== null && !latestSource.has(key)) latestSource.set(key, src);
+  }
   const days = new Map<string, Map<string, TrackStats>>();
   const playRows = new Map<string, TrackStats[]>();
   for (const [t, minute, playSrc] of hist.plays) {
@@ -64,7 +74,9 @@ export function buildDays(
       if (!list) playRows.set(day, (list = []));
       const played = iso(minute);
       list.push({
-        id: `${artist.toLowerCase()}\n${name.toLowerCase()}@${minute}`,
+        // The per-play list position disambiguates dual-id plays of one song in one
+        // minute — identity@minute alone collided as a React key (wave-3 suite, D).
+        id: `${artist.toLowerCase()}\n${name.toLowerCase()}@${minute}#${list.length}`,
         name,
         artist,
         uri: "",
@@ -89,7 +101,7 @@ export function buildDays(
       hit.firstPlayed = played;
       continue;
     }
-    const src = latestSource.get(t) ?? -1;
+    const src = latestSource.get(key) ?? -1;
     rows.set(key, {
       // The identity IS the id here: the payload carries no track ids (it is joined on
       // identity — db.ts), and the only thing the day list uses `id` for is the React key.
@@ -116,5 +128,8 @@ export function buildDays(
     );
   }
   // Plays arrive newest-first, so each day's per-play list is already newest-first.
-  return { rows, playRows, newest: hist.plays.length ? localDay(hist.plays[0][1]) : null };
+  // `newest` from the first play whose track REF RESOLVES — an unresolvable head play
+  // named a frontier day the payload holds no rows for (wave-3 suite, C).
+  const firstResolved = hist.plays.find(([t]) => hist.tracks[t]);
+  return { rows, playRows, newest: firstResolved ? localDay(firstResolved[1]) : null };
 }

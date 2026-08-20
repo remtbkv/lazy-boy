@@ -78,7 +78,10 @@ export function dayLabel(day: string): string {
   yest.setDate(yest.getDate() - 1);
   if (day === local(today)) return "Today";
   if (day === local(yest)) return "Yesterday";
-  return new Date(`${day}T00:00:00`).toLocaleDateString(undefined, {
+  const parsed = new Date(`${day}T00:00:00`);
+  // Junk in → the raw string out, matching this file's other guards ("—", never "NaN…").
+  if (Number.isNaN(parsed.getTime())) return day;
+  return parsed.toLocaleDateString(undefined, {
     month: "short",
     day: "numeric",
   });

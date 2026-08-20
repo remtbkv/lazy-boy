@@ -26,8 +26,16 @@ export type PlayRow = {
 
 /** `day` = the local day the play was minted for. Reconciliation must not credit it to a
  *  different day's card — a provisional minted at 11:59 PM used to be bumped onto the NEW
- *  day after midnight (wave-2 audit, A3). */
-export type Provisional = { row: PlayRow; at: number; day: string };
+ *  day after midnight (wave-2 audit, A3).
+ *  `basePlays` = the song's TODAY count in the view at mint time. Confirmation is the
+ *  count going up — the one signal that actually means "the sync recorded my play".
+ *  Timestamp windows can't do this job: Spotify stamps played_at at track START (settled
+ *  empirically 2026-08-19 — a play's store row existed while the track was still
+ *  playing), so the finished play's row timestamp is ~a song-length before the mint, and
+ *  no scalar grace both rejects the previous play and accepts this one (wave-3
+ *  independent suite, A1/A2 — the two documented jobs of the old graceMs were
+ *  contradictory). */
+export type Provisional = { row: PlayRow; at: number; day: string; basePlays: number };
 
 /** How long an unconfirmed provisional keeps being re-applied before it is presumed a
  *  play Spotify never recorded. Sync attempts run every ~4s–2min while the tab is open,
@@ -61,31 +69,23 @@ export function addPlay(rows: PlayRow[], prov: PlayRow): PlayRow[] {
 
 /** Merge server truth with the still-unconfirmed provisionals, and prune the confirmed
  *  or expired ones from `provs` (returned second — the caller keeps that list). A
- *  provisional is confirmed by a server row for the same song whose lastPlayed is no
- *  earlier than the provisional's creation minus `graceMs` (clock skew + the minute
- *  resolution of Spotify timestamps).
- *
- *  graceMs is 30s, down from 90: the rows are per-song AGGREGATES (lastPlayed = the
- *  song's newest play), so any EARLIER play of the same song inside the grace window
- *  falsely confirmed a fresh provisional and the repeat play vanished until the next
- *  payload rebuild (audit 2026-08-19, T1.9 — repeat-one made it the common case, since a
- *  real distinct play that passed the 35% gate must have ended ≥30s before the mint). */
+ *  provisional is confirmed when the server's TODAY row for the song shows MORE plays
+ *  than it had when the provisional was minted (`basePlays`) — the count going up is
+ *  the direct signal "the sync recorded my play". A repeat play can't be swallowed by
+ *  the previous play (that one was already in basePlays), and no timestamp arithmetic
+ *  is involved (see the Provisional docstring for why time windows were unsound). */
 export function reconcilePlays(
   serverRows: PlayRow[],
   provs: Provisional[],
   now: number,
-  graceMs = 30_000,
 ): { rows: PlayRow[]; remaining: Provisional[] } {
   const remaining: Provisional[] = [];
   let rows = serverRows;
   for (const p of provs) {
     if (now - p.at > PROVISIONAL_TTL_MS) continue; // expired: presumed never recorded
     const key = identity(p.row.name, p.row.artist);
-    const confirmed = serverRows.some(
-      (r) =>
-        identity(r.name, r.artist) === key &&
-        Date.parse(r.lastPlayed) >= p.at - graceMs,
-    );
+    const server = serverRows.find((r) => identity(r.name, r.artist) === key);
+    const confirmed = (server?.plays ?? 0) > p.basePlays;
     if (confirmed) continue;
     rows = addPlay(rows, p.row);
     remaining.push(p);

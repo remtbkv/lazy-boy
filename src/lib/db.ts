@@ -13,6 +13,7 @@ import fs from "node:fs";
 import { createClient, type Client, type InStatement, type Row } from "@libsql/client";
 import type { Track } from "@/lib/spotify/types";
 import { BACKUP_PREFIX, cleanedName } from "@/lib/clean/names";
+import { HANDOFF_SKIP_FRACTION } from "@/lib/handoff";
 import {
   CALIBRATION,
   STEADY_SYNC_TICK_ROWS,
@@ -786,7 +787,9 @@ const NOT_BACKFILL = `(p.context_type IS NULL OR p.context_type <> 'backfill')`;
 // The verdict is materialized in plays.skipped by recomputeSkipFlags() (NULL = the
 // newest play, still pending — shown until its successor rules on it), and every list
 // and counter filters on it.
-const SKIP_FRACTION = 0.35;
+// ONE source of truth for the bar — handoff.ts declares it (the client-side gate must
+// apply the same fraction; a second literal here was drift waiting to happen).
+const SKIP_FRACTION = HANDOFF_SKIP_FRACTION;
 const NOT_SKIPPED = `(p.skipped IS NULL OR p.skipped = 0)`;
 
 /** Rule on every pending (skipped IS NULL) real play that now has a successor: listened

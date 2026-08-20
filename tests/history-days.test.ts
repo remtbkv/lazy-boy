@@ -49,8 +49,10 @@ describe("buildDays (pure)", () => {
   it("a play referencing a missing track index is skipped, not crashed on", () => {
     const d = buildDays(payload([[99, m(12, 0), 0]]), 0);
     expect(d.rows.size).toBe(0);
-    // newest still derives from the play list (documented: newest = plays[0]'s day).
-    expect(d.newest).toBe("2026-08-10");
+    // ADJUDICATED 2026-08-20 (independent suite, C): `newest` comes from the first play
+    // whose track ref RESOLVES — an unresolvable head must not name a frontier day the
+    // client holds no rows for.
+    expect(d.newest).toBeNull();
   });
 
   it("-1 interner slots render as null, never as an array read at -1", () => {

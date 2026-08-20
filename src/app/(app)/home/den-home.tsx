@@ -845,6 +845,17 @@ export function DenHome({
         .slice(0, 10);
       const ruled = judgeHandoff(p, Date.now(), daily[0]?.day === localToday);
       if (ruled !== "commit") return verdict(ruled);
+      // Only mint while the TODAY view is actually on screen: that's the one universe
+      // where `basePlays` (the song's current today-count, confirmation's baseline) is
+      // known, and the whole point of the shortcut is instant feedback on the visible
+      // list. Off-today/searching, the ~4s refresh covers it — minting there was what
+      // created the wrong-universe reconcile class (simplicity call, 2026-08-20).
+      const today = daily[0]?.day;
+      if (!today || selRef.current !== today) return verdict("not-viewing");
+      const identityKey = `${p.artist.toLowerCase()}\n${p.title.toLowerCase()}`;
+      const basePlays =
+        tracks.find((t) => `${t.artist.toLowerCase()}\n${t.name.toLowerCase()}` === identityKey)
+          ?.plays ?? 0;
       const nowIso = new Date().toISOString();
       const row = {
         id: p.id,
@@ -860,8 +871,7 @@ export function DenHome({
         source: p.source,
       };
       verdict("commit");
-      provisionalsRef.current.push({ row, at: Date.now(), day: localToday });
-      const today = daily[0]?.day;
+      provisionalsRef.current.push({ row, at: Date.now(), day: localToday, basePlays });
       setDaily((d) =>
         d.length
           ? [

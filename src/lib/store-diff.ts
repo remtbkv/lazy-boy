@@ -120,9 +120,12 @@ function diffValue(v: string | number | null): string | null {
 }
 
 function sameIdSet(a: PlaylistListRow[], b: PlaylistListRow[]): boolean {
-  if (a.length !== b.length) return false;
-  const ids = new Set(b.map((r) => r.id));
-  return a.every((r) => ids.has(r.id));
+  // SET comparison, not array-length + one-way membership: a duplicated id (a paginated
+  // /me/playlists race repeating an entry) masked a removal — [p1,p1] vs [p1,p2] read as
+  // "same set" and the orphan pass was skipped (wave-3 independent suite, F).
+  const as = new Set(a.map((r) => r.id));
+  const bs = new Set(b.map((r) => r.id));
+  return as.size === bs.size && [...as].every((id) => bs.has(id));
 }
 
 /** Three-tier diff of the playlist LIST against its cache, in cached `position` order.

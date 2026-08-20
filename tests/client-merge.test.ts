@@ -22,27 +22,31 @@ const row = (name: string, lastPlayed: string, over: Partial<PlayRow> = {}): Pla
   ...over,
 });
 
-const prov = (name: string, at: number, day = "2026-08-10"): Provisional => ({
+const prov = (name: string, at: number, day = "2026-08-10", basePlays = 0): Provisional => ({
   row: row(name, new Date(at).toISOString()),
   at,
   day,
+  basePlays,
 });
 
 describe("reconcilePlays", () => {
   const T = Date.parse("2026-08-10T20:00:00Z");
 
-  it("an EARLIER play of the same song no longer falsely confirms a fresh provisional", () => {
-    // Server row's lastPlayed is 40s before the mint — outside the 30s grace, so the
-    // repeat play must survive as a provisional (old 90s grace swallowed it).
-    const server = [row("Repeat", new Date(T - 40_000).toISOString())];
-    const { rows, remaining } = reconcilePlays(server, [prov("Repeat", T)], T + 1000);
+  // ADJUDICATED 2026-08-20 (independent suite A1/A2): timestamp-grace confirmation was
+  // structurally unsound (Spotify stamps played_at at track START, and no scalar grace
+  // both rejects the previous play and accepts this one). Confirmation is now the TODAY
+  // count exceeding the mint-time baseline.
+  it("a repeat play is not swallowed: same count as at mint = unconfirmed", () => {
+    // The previous play is already inside basePlays; the server still shows 1 → survive.
+    const server = [{ ...row("Repeat", new Date(T - 40_000).toISOString()), plays: 1 }];
+    const { rows, remaining } = reconcilePlays(server, [prov("Repeat", T, "2026-08-10", 1)], T + 1000);
     expect(remaining.length).toBe(1);
     expect(rows.find((r) => r.name === "Repeat")?.plays).toBe(2);
   });
 
-  it("a server row at/after the mint confirms and retires the provisional", () => {
-    const server = [row("Fresh", new Date(T + 5_000).toISOString())];
-    const { rows, remaining } = reconcilePlays(server, [prov("Fresh", T)], T + 10_000);
+  it("the count going up confirms and retires the provisional", () => {
+    const server = [{ ...row("Fresh", new Date(T - 40_000).toISOString()), plays: 1 }];
+    const { rows, remaining } = reconcilePlays(server, [prov("Fresh", T, "2026-08-10", 0)], T + 10_000);
     expect(remaining.length).toBe(0);
     expect(rows.find((r) => r.name === "Fresh")?.plays).toBe(1);
   });

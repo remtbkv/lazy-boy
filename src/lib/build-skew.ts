@@ -92,7 +92,10 @@ export function evaluateSkew(input: SkewInput): SkewDecision {
 
   if (now - since < MISMATCH_GRACE_MS) return { streak: next, reload: false };
 
-  if (input.lastReloadAt !== null && now - input.lastReloadAt < RELOAD_THROTTLE_MS) {
+  // A stamp in the FUTURE (corrupt storage, a clock step) must not suppress reloads
+  // indefinitely — only a genuine recent past reload throttles (wave-3 independent suite).
+  const sinceReload = input.lastReloadAt !== null ? now - input.lastReloadAt : null;
+  if (sinceReload !== null && sinceReload >= 0 && sinceReload < RELOAD_THROTTLE_MS) {
     return { streak: next, reload: false };
   }
 

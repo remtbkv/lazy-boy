@@ -85,7 +85,18 @@ export function patchHistoryPayload(
     fresh.push([t, minute, intern(out.sources, p.source)]);
   }
   if (fresh.length === 0) return out;
-  // Both lists are newest-first; the delta is by construction newer than the payload.
-  out.plays = [...fresh, ...hist.plays];
+  // Newest-first is a CONTRACT every consumer leans on (buildDays derives latestSource,
+  // per-day fold order and `newest` from it) — so it is ENFORCED here, not assumed: the
+  // delta is usually newer than the payload head, but a gap-filling sync or the backstop
+  // replay can deliver older plays, and a blind prepend silently broke all three
+  // derivations (wave-3 independent suite, E). Fast path when the assumption holds.
+  const merged = [...fresh, ...hist.plays];
+  for (let i = 1; i < merged.length; i++) {
+    if (merged[i][1] > merged[i - 1][1]) {
+      merged.sort((a, b) => b[1] - a[1]);
+      break;
+    }
+  }
+  out.plays = merged;
   return out;
 }

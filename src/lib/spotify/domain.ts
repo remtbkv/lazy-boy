@@ -6,9 +6,13 @@
 
 import type { Track } from "./types";
 
-/** Dedupe key: primary artist + title, lowercased. */
+/** Dedupe key: primary artist + title, lowercased (JS toLowerCase by design — Spotify's
+ *  own metadata is what flows in on both sides, so locale-sensitive folding like ß→ss is
+ *  deliberately NOT applied). Length-prefixed so the key is injective: a plain separator
+ *  could collide when a name contained the separator itself (wave-3 independent suite). */
 export function keyOf(t: Track): string {
-  return `${t.artist.toLowerCase()}\x00${t.title.toLowerCase()}`;
+  const a = t.artist.toLowerCase();
+  return `${a.length}:${a}\x00${t.title.toLowerCase()}`;
 }
 
 /** Keep the first occurrence of each (artist, title). */

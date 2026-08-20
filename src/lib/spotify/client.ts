@@ -136,7 +136,9 @@ export class HttpClient {
       const retryHeader = res.status === 429 ? res.headers.get("Retry-After") : null;
       const retryParsed =
         retryHeader === null || retryHeader.trim() === "" ? NaN : Number(retryHeader);
-      const rawRetryAfter = Number.isFinite(retryParsed) ? retryParsed : null;
+      // Negative values are junk, not an answer — they used to zero out both the sleep
+      // floor and the shared cooldown (wave-3 independent suite, G).
+      const rawRetryAfter = Number.isFinite(retryParsed) && retryParsed >= 0 ? retryParsed : null;
       void logSpotifyRequest({ method, path, status: res.status, retryAfter: rawRetryAfter, source: this.source }).catch(
         () => {},
       );
