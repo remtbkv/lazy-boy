@@ -7,6 +7,7 @@ import { exactTimeShort, formatDuration, timeAgo } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { searchPerfEnabled, startSearchProbe, type IndexStatus } from "@/lib/search-perf";
 import { patchHistoryPayload } from "@/lib/history-patch";
+import { buildDays, iso, type HistoryPayload } from "@/lib/history-days";
 import { addPlay, reconcilePlays, type Provisional } from "@/lib/optimistic-play";
 import { recordAppEvent } from "@/lib/metrics-client";
 import { IdentityTrackMenu } from "@/components/identity-track-menu";
@@ -115,14 +116,7 @@ type LibraryPayload = {
   playlists: string[];
   tracks: [string, string, number, number, number[]][];
 };
-type HistoryPayload = {
-  images: string[];
-  albums: string[];
-  sources: string[];
-  /** [name, artist, image, album, durationMs] — durationMs is 0 when unknown. */
-  tracks: [string, string, number, number, number][];
-  plays: [number, number, number][];
-};
+// HistoryPayload/buildDays live in src/lib/history-days.ts (pure, known-answer tested).
 
 // How many results a query may show. A one-letter query matches thousands of songs and the
 // only cost left is DOM: every one of them is already in memory, matched and ranked. What is
@@ -134,10 +128,6 @@ const NO_FALLBACK = { key: "", rows: [] as TrackStats[], failed: false };
 /** "12 songs" / "1 song". */
 const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
 
-/** Epoch minutes (what the payloads carry) → the ISO string the formatters take. */
-function iso(minute: number): string {
-  return new Date(minute * 60000).toISOString();
-}
 
 // A 200 does NOT mean a payload this build can read. A cache one layer up — the browser's, or
 // Vercel's Data Cache, which outlives a deployment — can hand back a body written by an older
@@ -235,98 +225,6 @@ function buildEntries(lib: LibraryPayload | null, hist: HistoryPayload | null): 
 // play count, last-played minute, source, album and duration, except for the 18 of 3,025
 // played identities that exist under two track ids — and the first version of the source rule
 // disagreed on 66 of the 69 days, so the comparison can fail.
-type MemoryDays = {
-  rows: Map<string, TrackStats[]>;
-  /** One row PER PLAY, newest first, per-play source — the phone's day list shows a song
-   *  again for each play instead of a count (Rem, 2026-08-13). Includes the newest day:
-   *  the refresh patches new plays into the payload, so it stays current. */
-  playRows: Map<string, TrackStats[]>;
-  /** The local day of the newest play in the payload. Days strictly older than this are fully
-   *  covered; that day itself may be missing the last few minutes (the payload rebuilds at
-   *  most every 10 min — db.ts's slow marker), so it is left to the server path. */
-  newest: string | null;
-};
-function buildDays(hist: HistoryPayload): MemoryDays {
-  // Minutes to ADD to UTC, i.e. the same number TimezoneCookie writes for the server to use.
-  const offMs = -new Date().getTimezoneOffset() * 60000;
-  const localDay = (minute: number) => new Date(minute * 60000 + offMs).toISOString().slice(0, 10);
-  // The "From" a day row shows is the song's most recent play OVERALL, not its last play that
-  // day: SELECT_TRACK's source subquery (db.ts) is not filtered to the day, and TrackStats
-  // says so in as many words. Reproduced rather than corrected, because the alternative is the
-  // same day reading differently depending on which path produced its rows — and the first
-  // seconds of every visit are still the server's. Plays arrive newest-first, so the first one
-  // seen for a song is its latest. (Checked against getPlaysByDay over all 69 days in the
-  // store, 2026-08-11: per-day source instead of this disagreed on 66 of them.)
-  const latestSource = new Map<number, number>();
-  for (const [t, , src] of hist.plays) if (!latestSource.has(t)) latestSource.set(t, src);
-  const days = new Map<string, Map<string, TrackStats>>();
-  const playRows = new Map<string, TrackStats[]>();
-  for (const [t, minute, playSrc] of hist.plays) {
-    const track = hist.tracks[t];
-    if (!track) continue;
-    const [name, artist, img, alb, durationMs] = track;
-    const day = localDay(minute);
-    {
-      // The per-play row: this play's own time and its own context.
-      let list = playRows.get(day);
-      if (!list) playRows.set(day, (list = []));
-      const played = iso(minute);
-      list.push({
-        id: `${artist.toLowerCase()}\n${name.toLowerCase()}@${minute}`,
-        name,
-        artist,
-        uri: "",
-        album: alb >= 0 ? (hist.albums[alb] ?? null) : null,
-        albumImage: img >= 0 ? (hist.images[img] ?? null) : null,
-        durationMs: durationMs || null,
-        plays: 1,
-        lastPlayed: played,
-        firstPlayed: played,
-        source: playSrc >= 0 ? (hist.sources[playSrc] ?? null) : null,
-      });
-    }
-    let rows = days.get(day);
-    if (!rows) days.set(day, (rows = new Map()));
-    const key = `${artist.toLowerCase()}\n${name.toLowerCase()}`;
-    const played = iso(minute);
-    const hit = rows.get(key);
-    if (hit) {
-      // Plays arrive newest-first, so the row was created from the day's LAST play — its time
-      // is already right, and every later play can only push firstPlayed back.
-      hit.plays += 1;
-      hit.firstPlayed = played;
-      continue;
-    }
-    const src = latestSource.get(t) ?? -1;
-    rows.set(key, {
-      // The identity IS the id here: the payload carries no track ids (it is joined on
-      // identity — db.ts), and the only thing the day list uses `id` for is the React key.
-      id: key,
-      name,
-      artist,
-      uri: "",
-      album: alb >= 0 ? (hist.albums[alb] ?? null) : null,
-      albumImage: img >= 0 ? (hist.images[img] ?? null) : null,
-      durationMs: durationMs || null,
-      plays: 1,
-      lastPlayed: played,
-      firstPlayed: played,
-      source: src >= 0 ? (hist.sources[src] ?? null) : null,
-    });
-  }
-  const rows = new Map<string, TrackStats[]>();
-  for (const [day, byKey] of days) {
-    rows.set(
-      day,
-      [...byKey.values()].sort(
-        (a, b) => b.plays - a.plays || b.lastPlayed.localeCompare(a.lastPlayed),
-      ),
-    );
-  }
-  // Plays arrive newest-first, so each day's per-play list is already newest-first.
-  return { rows, playRows, newest: hist.plays.length ? localDay(hist.plays[0][1]) : null };
-}
-
 /** Match rank: an exact title beats a title that starts with the query, which beats one that
  *  merely contains it. The library is 5x the size of the history, so without this a typed-out
  *  title can sit below a hundred incidental substring hits — the old index was small enough

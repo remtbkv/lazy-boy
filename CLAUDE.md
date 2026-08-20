@@ -119,6 +119,11 @@ art → `album-thumb`; sort dropdown → `sort-menu`; bottom search pill → `fl
 npm run dev      # local dev (http://127.0.0.1:3000)
 npm run build    # production build — MUST pass before declaring done
 npm run lint
+npm test         # MUST pass before declaring done — the simulated environment (tests/):
+                 # real lib code against a throwaway local SQLite file + a scripted fetch
+                 # standing in for Spotify. Touches NO real store, NO Spotify, NO Vercel.
+                 # Every audit-class bug fix gets a regression test here (vitest), plus the
+                 # node:test known-answer suites (store-diff, build-skew, ledger).
 ```
 
 Spotify redirect URI registered in the dashboard. Local default:

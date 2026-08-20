@@ -16,6 +16,7 @@ import {
   setLibraryScanAttemptAt,
 } from "@/lib/db";
 import { ensureCronJobEnabled } from "@/lib/cronjob";
+import { shouldHarvest } from "@/lib/harvest-gate";
 
 // Rebuild the library index at most every 30 min (snapshot-diffing makes a run cheap, but no
 // need to do it every 2-minute tick). This tick is the AUTHORITATIVE refresh for the stored
@@ -118,11 +119,7 @@ export async function GET(req: Request) {
     // session waited for the hourly backstop (audit 2026-08-19, T1.3). With `>=`, the
     // first idle tick after playback harvests the tail once (equal stamps), then its own
     // fresher lastHarvest closes the branch.
-    const shouldHarvest =
-      playingNow ||
-      gate.lastActive >= gate.lastHarvest ||
-      now - gate.lastHarvest > 60 * 60 * 1000;
-    if (!shouldHarvest) {
+    if (!shouldHarvest(gate, playingNow, now)) {
       return Response.json({ ok: true, added: 0, idle: true });
     }
     // A THROWING harvest still stamps lastHarvest: with `>=` above, an unstamped failure
