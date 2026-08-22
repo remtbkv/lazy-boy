@@ -7,6 +7,7 @@ import { PlaylistThumb } from "@/components/playlist-thumb";
 import { SearchIsland } from "../search-island";
 import type { StoredPlaylist } from "@/lib/db";
 import { fuzzyFilter } from "@/lib/filter";
+import { useTabReset } from "@/lib/tab-reset";
 
 type Sort = "recents" | "name" | "songs";
 const SORTS: { key: Sort; label: string }[] = [
@@ -34,6 +35,9 @@ export function PlaylistsGrid({
   uniqueSongs: number;
 }) {
   const [query, setQuery] = useState("");
+  // Pressing Playlists while already on Playlists clears the filter — same rule as Home's
+  // search (tab-reset.ts). The sort is a setting and stays.
+  useTabReset("playlists", () => setQuery(""));
   const [sort, setSort] = useState<Sort>("recents");
   const [dir, setDir] = useState<"asc" | "desc">("asc");
   // Picking a key only picks the key — direction is its own control now (no hidden

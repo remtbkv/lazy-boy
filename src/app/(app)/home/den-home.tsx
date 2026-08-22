@@ -10,6 +10,7 @@ import { patchHistoryPayload } from "@/lib/history-patch";
 import { buildDays, iso, type HistoryPayload } from "@/lib/history-days";
 import { judgeHandoff } from "@/lib/handoff";
 import { hanFold } from "@/lib/han-fold";
+import { useTabReset } from "@/lib/tab-reset";
 import { addPlay, reconcilePlays, type Provisional } from "@/lib/optimistic-play";
 import { recordAppEvent } from "@/lib/metrics-client";
 import { IdentityTrackMenu } from "@/components/identity-track-menu";
@@ -503,6 +504,14 @@ export function DenHome({
   const [mode, setMode] = useState<"songs" | "artists">("songs");
   const [expanded, setExpanded] = useState<string | null>(null);
   const searching = query.trim().length > 0;
+
+  // Pressing Home while already on Home clears the search (tab-reset.ts). The songs/artists
+  // switch is left alone — it is a setting, not part of the query — and dropping the query is
+  // enough to end search mode, which restores the day that was selected before it.
+  useTabReset("home", () => {
+    setQuery("");
+    setExpanded(null);
+  });
 
   // ---- Phone search MODE (Rem's spec, 2026-08-13) ----------------------------------------
   // While the search input is focused OR a query stands, on a phone, search owns the

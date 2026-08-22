@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { announceTabReset } from "@/lib/tab-reset";
 
 // App chrome: ONE top bar, both sizes (the mobile bottom tab bar is gone — two bars ate
 // too much of a phone screen; Rem, 2026-08-12). Mark, quiet nav (Home / Playlists /
@@ -127,7 +128,17 @@ export function DenChrome({ name, image }: { name: string; image: string | null 
       <div className="mx-auto flex h-16 w-full max-w-5xl items-center gap-4 px-4 sm:gap-6 sm:px-6">
         {/* Just the mark — the tab title already says the name. Gentle idle motion:
             a slow breathe while nothing plays, the slight sway while something does. */}
-        <Link href="/home" className="flex items-center" aria-label="Lazy Boy">
+        <Link
+          href="/home"
+          className="flex items-center"
+          aria-label="Lazy Boy"
+          // The mark is a Home link too, so it clears Home's search for the same reason the
+          // Home tab does — leaving one of the two inert would just be the same complaint
+          // again.
+          onClick={() => {
+            if (pathname === "/home") announceTabReset("home");
+          }}
+        >
           <img
             src="/icon.svg"
             alt=""
@@ -147,6 +158,12 @@ export function DenChrome({ name, image }: { name: string; image: string | null 
               prefetch={true}
               ref={(el) => {
                 tabRefs.current[t.key] = el ?? undefined;
+              }}
+              // Pressing the tab you are already on is a navigation to nowhere, so the page
+              // keeps whatever was in its search box. Tell it to clear (tab-reset.ts) — Rem,
+              // 2026-08-22.
+              onClick={() => {
+                if (pathname === t.href) announceTabReset(t.key);
               }}
               className={cn(
                 // No focus ring on the tabs: arrow-key nav moves DOM focus with the
