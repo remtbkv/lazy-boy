@@ -9,6 +9,7 @@ import { searchPerfEnabled, startSearchProbe, type IndexStatus } from "@/lib/sea
 import { patchHistoryPayload } from "@/lib/history-patch";
 import { buildDays, iso, type HistoryPayload } from "@/lib/history-days";
 import { judgeHandoff } from "@/lib/handoff";
+import { hanFold } from "@/lib/han-fold";
 import { addPlay, reconcilePlays, type Provisional } from "@/lib/optimistic-play";
 import { recordAppEvent } from "@/lib/metrics-client";
 import { IdentityTrackMenu } from "@/components/identity-track-menu";
@@ -80,9 +81,10 @@ function compareTracks(a: TrackStats, b: TrackStats, sort: Sort): number {
 // `key` is the song's IDENTITY — lower(artist) + "\n" + lower(name) — which is how the two
 // payloads are joined. Not the track id: Spotify hands the same song a different id in a
 // playlist than in recently-played, so an id join marks songs you play constantly as never
-// played (db.ts has the count). `ln`/`la` are the lower-cased name/artist, folded once at load
-// so a keystroke is one String.includes per song (13,464 in playlists or Liked Songs, plus
-// the 496 played ones that are in neither) over strings already in the right case.
+// played (db.ts has the count). `fn`/`fa` are the match forms of the name/artist — lower-cased
+// and Han-folded (han-fold.ts) once at load, so a keystroke is one String.includes per song
+// (13,464 in playlists or Liked Songs, plus the 496 played ones that are in neither) over
+// strings already in the form the query is folded into.
 type Play = { minute: number; source: string | null };
 type Entry = {
   key: string;
@@ -92,22 +94,30 @@ type Entry = {
   album: string | null;
   /** Playlists the song is in, by name. Empty for a song known only from the history. */
   playlists: string[];
-  /** Newest first. Empty = never played. */
+  /** Newest first. Empty = never played — but only trustworthy when the history payload
+   *  actually loaded; see `playsKnown`. */
   plays: Play[];
-  ln: string;
-  la: string;
+  /** The lower-cased, Han-folded name/artist — what a query is matched against, so
+   *  `再见只是陌生人` finds the library's `再見只是陌生人` (han-fold.ts). */
+  fn: string;
+  fa: string;
 };
 
 // One search result: a song with all its plays collapsed behind it (expandable), or an artist
-// with their totals.
+// with their totals — expandable too, into the songs of theirs this library holds.
 type SongGroup = { kind: "song"; entry: Entry };
 type ArtistGroup = {
   kind: "artist";
+  /** Folded artist name — the group's identity, so one artist spelled in both scripts is one
+   *  row rather than two. */
+  key: string;
   artist: string;
   image: string | null;
   songs: number;
   plays: number;
   last: number | null;
+  /** Their songs, played first / most recent first. What the row expands into. */
+  entries: Entry[];
 };
 
 /** The wire shapes. Kept as tuples for size — see db.ts for what each slot means. */
@@ -163,8 +173,8 @@ function buildEntries(lib: LibraryPayload | null, hist: HistoryPayload | null): 
       album,
       playlists: [],
       plays: [],
-      ln: name.toLowerCase(),
-      la: artist.toLowerCase(),
+      fn: hanFold(name),
+      fa: hanFold(artist),
     };
     entries.push(e);
     return e;
@@ -536,6 +546,17 @@ export function DenHome({
   const [entries, setEntries] = useState<Entry[] | null>(null);
   const libReq = useRef<Promise<LibraryPayload | null> | null>(null);
   const histReq = useRef<Promise<HistoryPayload | null> | null>(null);
+  // Whether `entries` can be trusted about PLAYS. False when the library half loaded and the
+  // history half did not: the set then finds songs but knows nothing about listening, and a
+  // row that renders "Never played" off it is stating a fact it does not have. Rem hit exactly
+  // that on 2026-08-22 — /api/search/history was 500ing (store-fetch.ts) and every artist he
+  // had played for months read "Never played".
+  const [playsKnown, setPlaysKnown] = useState(true);
+  // When the history half may be retried. A failed half used to be permanent for the visit —
+  // the refs are the idempotence guard, so a null result stuck. Bounded so a run of keystrokes
+  // can't turn one failure into a request loop.
+  const histRetryAt = useRef(0);
+  const HIST_RETRY_MS = 30_000;
   // Where a query would be answered from right now. Only the perf readout reads it.
   const indexStatus = useRef<IndexStatus>("fallback");
 
@@ -545,6 +566,9 @@ export function DenHome({
     // hand back a new array identity, re-run the effect and call this again — a render loop
     // that pins the tab. One handler per pair of requests; a re-fetch only happens after a
     // ref is cleared (new plays landed).
+    // A history half that failed earlier is allowed one retry per window — otherwise a single
+    // 500 leaves the whole visit without play data (the 2026-08-22 outage).
+    if (histReq.current === null && libReq.current && Date.now() < histRetryAt.current) return;
     if (libReq.current && histReq.current) return;
     if (!libReq.current) indexStatus.current = "fetching";
     libReq.current ??= fetchPayload<LibraryPayload>(
@@ -568,6 +592,8 @@ export function DenHome({
       // successful build is kept — a failed refresh should not empty the box.
       if (!l && !h) {
         indexStatus.current = "fallback";
+        histReq.current = null;
+        histRetryAt.current = Date.now() + HIST_RETRY_MS;
         return;
       }
       // Both EMPTY is not an index either: a cold/half-built store answering 200 with
@@ -579,6 +605,13 @@ export function DenHome({
         return;
       }
       indexStatus.current = "memory";
+      // The library half alone cannot answer "have I played this" — say so rather than
+      // rendering its silence as "never". Arm a retry; the history half is the one that moves.
+      setPlaysKnown(h !== null);
+      if (h === null) {
+        histReq.current = null;
+        histRetryAt.current = Date.now() + HIST_RETRY_MS;
+      }
       setEntries(buildEntries(l, h));
       // The history half also feeds the day list (buildDays). Only set on success: a failed
       // history fetch must leave an earlier payload — and the days derived from it — standing.
@@ -972,8 +1005,8 @@ export function DenHome({
           album: r.album,
           playlists: [],
           plays: [],
-          ln: r.name.toLowerCase(),
-          la: r.artist.toLowerCase(),
+          fn: hanFold(r.name),
+          fa: hanFold(r.artist),
         };
         by.set(key, e);
       }
@@ -992,7 +1025,9 @@ export function DenHome({
   // cap, so the list can say what it dropped instead of silently truncating.
   const { groups, total } = useMemo<{ groups: (SongGroup | ArtistGroup)[]; total: number }>(() => {
     const none = { groups: [], total: 0 };
-    const q = query.trim().toLowerCase();
+    // Folded, like the index: a query typed in either script matches a title stored in the
+    // other (han-fold.ts). Latin queries are untouched by the fold.
+    const q = hanFold(query.trim());
     const source = entries ?? fallbackEntries;
     if (!q || !source) return none;
 
@@ -1010,11 +1045,11 @@ export function DenHome({
     }
 
     if (mode === "songs") {
-      let hits = source.filter((e) => e.ln.includes(q));
+      let hits = source.filter((e) => e.fn.includes(q));
       if (scope) hits = hits.map(scope).filter((e): e is Entry => e !== null);
       hits.sort(
         (a, b) =>
-          tier(a.ln, q) - tier(b.ln, q) ||
+          tier(a.fn, q) - tier(b.fn, q) ||
           // Played first, most recent first. A song you listen to is the one you meant.
           (b.plays[0]?.minute ?? -1) - (a.plays[0]?.minute ?? -1) ||
           a.name.localeCompare(b.name),
@@ -1026,27 +1061,48 @@ export function DenHome({
     }
 
     // Artists: every song by a matching artist folded into one row, so the totals are over the
-    // whole artist, not over the songs whose titles happened to match.
+    // whole artist, not over the songs whose titles happened to match. Keyed on the FOLDED
+    // name, so an artist credited in both scripts is one row.
     const byArtist = new Map<string, ArtistGroup>();
     for (const raw of source) {
-      if (!raw.la.includes(q)) continue;
+      if (!raw.fa.includes(q)) continue;
       const e = scope ? scope(raw) : raw;
       if (!e) continue; // nothing played that day — out of a day-scoped answer
-      let g = byArtist.get(e.la);
+      let g = byArtist.get(e.fa);
       if (!g) {
-        g = { kind: "artist", artist: e.artist, image: null, songs: 0, plays: 0, last: null };
-        byArtist.set(e.la, g);
+        g = {
+          kind: "artist",
+          key: e.fa,
+          artist: e.artist,
+          image: null,
+          songs: 0,
+          plays: 0,
+          last: null,
+          entries: [],
+        };
+        byArtist.set(e.fa, g);
       }
       g.image ??= e.image;
       g.songs += 1;
       g.plays += e.plays.length;
+      g.entries.push(e);
       const last = e.plays[0]?.minute ?? null;
       if (last != null && (g.last == null || last > g.last)) g.last = last;
     }
     const artists = [...byArtist.values()];
+    for (const g of artists) {
+      // Played first, most recently played first — "which of theirs have I actually played"
+      // is the question the row expands to answer (Rem, 2026-08-22).
+      g.entries.sort(
+        (a, b) =>
+          (b.plays.length > 0 ? 1 : 0) - (a.plays.length > 0 ? 1 : 0) ||
+          (b.plays[0]?.minute ?? -1) - (a.plays[0]?.minute ?? -1) ||
+          a.name.localeCompare(b.name),
+      );
+    }
     artists.sort(
       (a, b) =>
-        tier(a.artist.toLowerCase(), q) - tier(b.artist.toLowerCase(), q) ||
+        tier(a.key, q) - tier(b.key, q) ||
         (b.last ?? -1) - (a.last ?? -1) ||
         a.artist.localeCompare(b.artist),
     );
@@ -1217,31 +1273,17 @@ export function DenHome({
                             setExpanded((e) => (e === g.entry.key ? null : g.entry.key))
                           }
                           onMenu={openMenu(g.entry.name, g.entry.artist)}
+                          playsKnown={playsKnown}
                         />
                       ) : (
-                        <li
-                          key={g.artist}
-                          className="den-row"
-                          style={{ "--i": i } as React.CSSProperties}
-                        >
-                          <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 py-2 sm:gap-4">
-                            <Art image={g.image} />
-                            <div className="min-w-0">
-                              {/* Same 15px as the day table's titles — the results rows
-                                  read as one system with the browsing view (Rem). */}
-                              <p className="truncate text-[15px] font-medium select-text">
-                                {g.artist}
-                              </p>
-                              {/* Library first, listening second: how much of them you HAVE is
-                                  the fact that survives an artist you've never got to. */}
-                              <p className="text-[13px] text-muted-foreground">
-                                {plural(g.songs, "song")}
-                                {g.plays > 0 ? ` · ${plural(g.plays, "play")}` : ""}
-                              </p>
-                            </div>
-                            <PlayedAt last={g.last} />
-                          </div>
-                        </li>
+                        <ArtistResult
+                          key={g.key}
+                          group={g}
+                          index={i}
+                          expanded={expanded === g.key}
+                          onToggle={() => setExpanded((e) => (e === g.key ? null : g.key))}
+                          playsKnown={playsKnown}
+                        />
                       ),
                     )}
                   </ul>
@@ -1644,8 +1686,18 @@ function HoldTitle({ text }: { text: string }) {
  *  to SAY that rather than leave the slot empty — an empty slot reads as a number still
  *  loading, which is the thing this whole change removed. It sits at half ink and in the same
  *  place a timestamp would, so a run of them settles into a column instead of shouting once per
- *  line, and ranking puts played songs first within each match tier, so they cluster. */
-function PlayedAt({ last }: { last: number | null }) {
+ *  line, and ranking puts played songs first within each match tier, so they cluster.
+ *
+ *  `known: false` = the history payload didn't load, so there is no play data to report either
+ *  way. That is NOT "never played" — it is the one thing this slot must never say on a guess. */
+function PlayedAt({ last, known = true }: { last: number | null; known?: boolean }) {
+  if (!known) {
+    return (
+      <p className="text-xs text-muted-foreground/40" title="Play history didn’t load">
+        —
+      </p>
+    );
+  }
   return last == null ? (
     <p className="text-xs text-muted-foreground/50">Never played</p>
   ) : (
@@ -1653,6 +1705,97 @@ function PlayedAt({ last }: { last: number | null }) {
     <p suppressHydrationWarning className="text-xs tabular-nums text-muted-foreground">
       {timeAgo(iso(last))}
     </p>
+  );
+}
+
+// A matched artist: their whole presence in this library on one row, expanding into the songs
+// of theirs it holds — played ones first, with the count and when, then the rest (Rem,
+// 2026-08-22: "I should be able to click their thing and then it should show me which ones I
+// have played by them"). Same data as the song rows, already in memory.
+function ArtistResult({
+  group,
+  index,
+  expanded,
+  onToggle,
+  playsKnown,
+}: {
+  group: ArtistGroup;
+  index: number;
+  expanded: boolean;
+  onToggle: () => void;
+  playsKnown: boolean;
+}) {
+  const SHOW = 20;
+  const [showAll, setShowAll] = useState(false);
+  const listed = showAll ? group.entries : group.entries.slice(0, SHOW);
+  const played = group.entries.filter((e) => e.plays.length > 0).length;
+  return (
+    <li className="den-row" style={{ "--i": index } as React.CSSProperties}>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={expanded}
+        className="grid w-full grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-3 py-2 text-left sm:gap-4"
+      >
+        <Art image={group.image} />
+        <div className="min-w-0">
+          {/* Same 15px as the day table's titles — the results rows read as one system with
+              the browsing view (Rem). */}
+          <p className="truncate text-[15px] font-medium select-text">{group.artist}</p>
+          {/* Library first, listening second: how much of them you HAVE is the fact that
+              survives an artist you've never got to. */}
+          <p className="text-[13px] text-muted-foreground">
+            {plural(group.songs, "song")}
+            {playsKnown && group.plays > 0 ? ` · ${plural(group.plays, "play")}` : ""}
+            {playsKnown && played > 0 && played < group.songs ? ` · ${played} played` : ""}
+          </p>
+        </div>
+        <PlayedAt last={group.last} known={playsKnown} />
+        <ChevronDown
+          className={cn(
+            "size-4 text-muted-foreground/60 transition-transform",
+            expanded && "rotate-180",
+          )}
+        />
+      </button>
+      {expanded ? (
+        <ul className="mb-2 ml-[3.75rem] space-y-1 border-l border-border/60 pl-4">
+          {listed.map((e) => (
+            <li
+              key={e.key}
+              className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-3 text-[13px]"
+            >
+              <span className="truncate">
+                {e.name}
+                {/* Where it lives, when it lives somewhere: this is the "which ones have I
+                    saved" half of the question. */}
+                {e.playlists.length > 0 ? (
+                  <span className="text-muted-foreground/70"> · {e.playlists[0]}</span>
+                ) : null}
+              </span>
+              <span className="shrink-0 tabular-nums text-muted-foreground">
+                {!playsKnown
+                  ? "—"
+                  : e.plays.length === 0
+                    ? "—"
+                    : `×${e.plays.length} · ${timeAgo(iso(e.plays[0].minute))}`}
+              </span>
+            </li>
+          ))}
+          {group.entries.length > SHOW && !showAll ? (
+            <li>
+              <button
+                type="button"
+                onClick={() => setShowAll(true)}
+                className="text-[13px] font-medium text-muted-foreground/80 transition-colors hover:text-foreground"
+              >
+                Show all {group.entries.length}
+              </button>
+            </li>
+          ) : null}
+        </ul>
+      ) : null}
+    </li>
   );
 }
 
@@ -1666,6 +1809,7 @@ function SongResult({
   expanded,
   onToggle,
   onMenu,
+  playsKnown = true,
 }: {
   entry: Entry;
   /** Position in the result list — drives the staggered reveal's per-row delay. */
@@ -1673,6 +1817,8 @@ function SongResult({
   expanded: boolean;
   onToggle: () => void;
   onMenu?: (e: React.MouseEvent) => void;
+  /** False when the history payload failed — the row then shows no play verdict at all. */
+  playsKnown?: boolean;
 }) {
   const { name, artist, album, image, playlists, plays } = entry;
   const SHOW = 12;
@@ -1700,10 +1846,10 @@ function SongResult({
         </div>
         <p className="hidden truncate text-[13px] text-muted-foreground md:block">{album}</p>
         <div className="text-right">
-          {plays.length > 1 ? (
+          {playsKnown && plays.length > 1 ? (
             <p className="text-sm font-medium tabular-nums">×{plays.length}</p>
           ) : null}
-          <PlayedAt last={plays[0]?.minute ?? null} />
+          <PlayedAt last={plays[0]?.minute ?? null} known={playsKnown} />
         </div>
         <ChevronDown
           className={cn(

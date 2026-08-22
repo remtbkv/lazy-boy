@@ -14,6 +14,7 @@ import { createClient, type Client, type InStatement, type Row } from "@libsql/c
 import type { Track } from "@/lib/spotify/types";
 import { BACKUP_PREFIX, cleanedName } from "@/lib/clean/names";
 import { HANDOFF_SKIP_FRACTION } from "@/lib/handoff";
+import { makeStoreFetch } from "@/lib/store-fetch";
 import {
   CALIBRATION,
   STEADY_SYNC_TICK_ROWS,
@@ -137,39 +138,10 @@ function getClient(): Promise<Client> {
   return ready;
 }
 
-// Every store query rides this fetch. Some Vercel invocations intermittently fail to
-// RESOLVE the funnel hostname (`getaddrinfo ENOTFOUND ubuntu.tail026729.ts.net` — RSC
-// digest 3227098399, Rem's "refresh crashes, second refresh is fine", 2026-08-16): a
-// resolver blip, not a store outage, and the very next attempt typically succeeds. So a
-// network-level failure (fetch rejects — DNS, reset; NOT an HTTP error response) retries
-// twice with a short pause before it is allowed to surface. Bounded: worst case adds
-// ~700ms to a request that was about to crash the render.
-async function retryingFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  // Bound each attempt — a FRESH signal inside the loop below, not one shared deadline: a
-  // single pre-loop AbortSignal.timeout started counting at creation, so a slow first
-  // attempt exhausted it and attempts 2-3 rejected instantly, making the gateway-retry
-  // ladder unreachable (wave-3 adversarial review, M1). Every other outbound fetch in the
-  // repo carries a timeout; this one carries EVERY store query — a funnel that accepts and
-  // stalls used to hang the render to the platform timeout. Caller-supplied signals win.
-  const perAttempt = (): RequestInit =>
-    init?.signal ? init : { ...(init ?? {}), signal: AbortSignal.timeout(15_000) };
-  for (let attempt = 0; ; attempt++) {
-    try {
-      const res = await fetch(input, perAttempt());
-      // Gateway-class failures (502/503/504) come from the funnel edge, not sqld — the
-      // request almost certainly never executed, so a retry is safe even for writes.
-      // A 500 is sqld itself and is NOT retried: it may have executed.
-      if (attempt < 2 && (res.status === 502 || res.status === 503 || res.status === 504)) {
-        await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
-        continue;
-      }
-      return res;
-    } catch (e) {
-      if (attempt >= 2) throw e;
-      await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
-    }
-  }
-}
+// Every store query rides this fetch: it forces gzip (brotli on the Zenbook's CPU cost the
+// history payload 26 SECONDS) and owns the retry ladder. store-fetch.ts holds the whole
+// story and the measurements.
+const retryingFetch = makeStoreFetch();
 
 async function init(): Promise<Client> {
   if (url.startsWith("file:")) {
