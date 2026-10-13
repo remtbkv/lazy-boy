@@ -78,7 +78,9 @@ src/components/          app components + shared: album-thumb, sort-menu, floati
                          now-playing, track-context-menu, playlists-client, playlist-grid,
                          merge-panel, track-list, clean-panel
 docs/                    ARCHITECTURE, FEATURES, ROADMAP, CONVENTIONS, GOTCHAS, SECURITY,
-                         READ_QUOTA (the read-cost ledger + the retired Turso quota's forensics)
+                         READ_QUOTA (the read-cost ledger + the retired Turso quota's forensics),
+                         STORE_MIGRATION (the planned move of the app's data to Turso: the
+                         contract the 19xx lanes work from)
 ops/zenbook-meter/       the store meter deployed on the Zenbook (proxy on 8090 in front of
                          sqld on 8092; exact per-statement rows read/written). READ_QUOTA.md
 scripts/backfill-from-backstop.mjs  replay the Zenbook backstop recorder's captured plays
