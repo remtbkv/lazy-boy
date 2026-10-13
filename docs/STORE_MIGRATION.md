@@ -205,7 +205,7 @@ in `~/.claude/broke/scratch/lazyboy_store/markers/`: `<lane>.done` means its pas
 
 | lane | does | effort | after | gate flags |
 |---|---|---|---|---|
-| 1901 L1 | phase A build | high | – | --stat-first |
+| 1901 L1 | phase A build | high | `stat_idle` (written by the watcher below) | --stat-first |
 | 1902 L2 | adversarial review of L1, deploy, telemetry env, R1 baseline | xhigh | L1 | --stat-first |
 | 1907 L7 | Funnel certificate (phase F); not behind STAT: a Nov 8 deadline that breaks production | high | – | --night 45 --quiet-app |
 | 1903 L3 | cutover (phase C), fault injection | high | L2, L7 | --night 120 --quiet-app |
@@ -217,7 +217,10 @@ in `~/.claude/broke/scratch/lazyboy_store/markers/`: `<lane>.done` means its pas
 | 1910 L10 | scope the orphan-flag pass to changed playlists (R4 headroom) | high | L3 | --stat-first |
 | 1911 L11 | adversarial review of L10, deploy | xhigh | L10 | --stat-first |
 
-All lanes are queued at once; the `after=` markers and the gate order them. 1907 and the 1901-1902
+A LaunchAgent on the Mac, `com.remtbkv.lazyboy-statwatch`, runs `gate.py --mark-idle` every 10
+minutes and writes `markers/stat_idle` the first time STAT has nothing running, waiting or due, so
+the chain's first lane waits on a file instead of being spawned and deferred all evening; lane 1904
+removes the agent. All lanes are queued at once; the `after=` markers and the gate order them. 1907 and the 1901-1902
 pair run independently; 1904, 1905 and 1910 run in parallel after the cutover. Their code is disjoint;
 their docs overlap, so each rebases onto `origin/main` before it pushes (RULES 5) and merges both
 sides of a doc conflict.
