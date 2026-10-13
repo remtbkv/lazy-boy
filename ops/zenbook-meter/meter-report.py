@@ -15,8 +15,13 @@ FREE_READS, FREE_WRITES = 500_000_000, 10_000_000
 def load(day):
     per_q = defaultdict(lambda: [0, 0, 0, ""])  # fp -> [calls, rows_read, rows_written, sql]
     reqs = errors = 0
-    for line in open(os.path.join(LOG_DIR, f"{day}.jsonl")):
-        e = json.loads(line)
+    for line in open(os.path.join(LOG_DIR, f"{day}.jsonl"), errors="replace"):
+        # The Zenbook's 3 AM reboot can leave a run of NUL bytes where unflushed lines were.
+        try:
+            e = json.loads(line)
+        except ValueError:
+            errors += 1
+            continue
         reqs += 1
         errors += "meterError" in e
         for s in e.get("stmts", []):
