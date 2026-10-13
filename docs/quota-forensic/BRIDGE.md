@@ -27,9 +27,20 @@ Vercel (lazy-boy, production)
                                         │  Tailscale Funnel
                                         ▼
                                    Zenbook  tailscaled  ──►  127.0.0.1:8090
+                                                                  lazyboy-meter (node)
+                                                                       │
+                                                                  127.0.0.1:8092
                                                                   sqld 0.24.32
                                                                   ~/lazyboy-sqld/data
 ```
+
+Since 2026-10-12 a pass-through meter (`~/lazyboy-sqld/meter-proxy.mjs`,
+`lazyboy-meter.service`) owns 8090 and `sqld` listens on 8092. It forwards bytes untouched and
+logs the `rows_read` / `rows_written` / `query_duration_ms` sqld reports for each statement to
+`~/lazyboy-sqld/querylog/<UTC day>.jsonl` (READ_QUOTA.md, "Measured reads"). To take it out of
+the path: stop `lazyboy-meter`, restore `~/lazyboy-sqld/lazyboy-sqld.service.pre-meter`
+(port 8090), `daemon-reload`, restart `lazyboy-sqld`. The funnel line below is unchanged —
+it still points at 8090.
 
 - The app is unchanged. `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` are just pointed somewhere
   else; `@libsql/client` speaks the same Hrana-over-HTTP protocol to `sqld` that it speaks to

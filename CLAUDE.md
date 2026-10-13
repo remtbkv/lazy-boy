@@ -79,6 +79,8 @@ src/components/          app components + shared: album-thumb, sort-menu, floati
                          merge-panel, track-list, clean-panel
 docs/                    ARCHITECTURE, FEATURES, ROADMAP, CONVENTIONS, GOTCHAS, SECURITY,
                          READ_QUOTA (the read-cost ledger + the retired Turso quota's forensics)
+ops/zenbook-meter/       the store meter deployed on the Zenbook (proxy on 8090 in front of
+                         sqld on 8092; exact per-statement rows read/written). READ_QUOTA.md
 scripts/backfill-from-backstop.mjs  replay the Zenbook backstop recorder's captured plays
                          into the primary (the loss-repair path; recorder lives on the
                          Zenbook at ~/lazyboy-recorder, lazyboy-recorder.timer, every 15 min)

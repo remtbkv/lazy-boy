@@ -1,0 +1,6 @@
+[Unit]
+Description=lazyboy sqld exact rows-read/written sample (hourly, for quota sizing)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash %h/lazyboy-sqld/readmeter.sh

@@ -145,7 +145,28 @@ in a dashboard nobody re-visits. Tripping it deliberately (allowance temporarily
 below current usage) is part of its acceptance test — a guard that has never fired is a
 guard that does not work.
 
-## Continuous attribution (the ledger) — LIVE
+## Measured reads (the meter) — LIVE since 2026-10-12
+
+The ledger below MODELS reads; this measures them. sqld returns `rows_read`, `rows_written` and
+`query_duration_ms` on every statement result (the counters Turso bills on), and the meter in
+front of it on the Zenbook (quota-forensic/BRIDGE.md) logs them per statement, with the SQL, to
+`~/lazyboy-sqld/querylog/<UTC day>.jsonl`. `python3 ~/lazyboy-sqld/meter-report.py [day]`
+prints per-day totals, a day's top readers and writers, and a 30-day projection against Turso's
+free plan. `lazyboy-readmeter.timer` separately samples sqld's own cumulative counter
+(`data/dbs/default/stats.json`) every 15 minutes into `readmeter.jsonl`, which cross-checks the
+meter: a gap between the two means something reached sqld without passing through 8090.
+
+libSQL's count is not "rows scanned" as the model assumes: `SELECT count(*) FROM tracks` over
+15,852 rows reported 158 (it walks pages, not rows), while a `plays JOIN tracks` over 21,870
+plays reported 65,608 (about three per play: the scan plus each join probe). So per-path model
+numbers can be off in either direction; the meter is the authority.
+
+Calibration on 2026-10-12, before the meter existed: sqld's cumulative counter read
+**246.8M rows** and 0.81M rows written. The store moved to the Zenbook on 2026-08-08; IF the
+counter dates from then (unverified, but it survived the 2026-10-12 reboot, so it persists), that
+is ~3.8M rows read/day, ~115M/month. The ledger modeled 286.7M over the same span, so the model
+ran ~15% HIGH in aggregate. The "real is ~2× the model" residual in "Where August actually
+went" was Turso-era (syncs and paths the model didn't cover), not a property of the model now.
 
 This half survived the move off Turso unchanged, and is the part of this document that still
 describes running code. What it measures is modeled rows SCANNED per named read path, which is

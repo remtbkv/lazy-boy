@@ -1,0 +1,16 @@
+[Unit]
+Description=lazyboy store meter (pass-through proxy in front of sqld; logs sqld's exact per-statement rows_read/rows_written to ~/lazyboy-sqld/querylog)
+After=lazyboy-sqld.service
+Wants=lazyboy-sqld.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/lazyboy-sqld
+Environment=LISTEN=127.0.0.1:8090
+Environment=UPSTREAM=127.0.0.1:8092
+ExecStart=/usr/bin/node %h/lazyboy-sqld/meter-proxy.mjs
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
