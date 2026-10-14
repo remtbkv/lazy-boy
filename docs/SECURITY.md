@@ -50,6 +50,9 @@ the user-scoping item below is handled by row-level security instead.)
 - **Baseline security headers** in `next.config.ts` (`X-Content-Type-Options`,
   `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`, HSTS).
 - **Secrets are gitignored** (`.env.local`); only `.env.example` is committed.
+- **Owner-only sign-in.** The store and its token row are single-user, so the `signIn`
+  callback (`src/lib/owner.ts`) refuses every Spotify account but `SPOTIFY_OWNER_ID` (falling
+  back to the stored `me_id`). A refused login gets AccessDenied before the token is written.
 
 ## Before production — checklist
 
