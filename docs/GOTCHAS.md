@@ -198,12 +198,15 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   (`SyncOnLoad` → `POST /api/sync` on load, every 2 min, and on tab-focus; server skips
   if synced <60 s ago — so an open tab is effectively live, and the home history view also
   refreshes each minute); and the **app-closed coverage** path — an **external pinger**
-  hitting `/api/cron/sync` with the stored token every ~2 min (a service like cron-job.org,
-  or a systemd timer on an always-on machine), with a daily **Vercel Cron** (`vercel.json`)
-  as the backstop. Every scheduled hit carries `Authorization: Bearer $CRON_SECRET`
+  hitting `/api/cron/sync` with the stored token every 2 min (the Zenbook's user timer
+  `lazyboy-cron-sync.timer`; the cron-job.org job that preceded it has 401'd on a stale
+  secret since 2026-08-10), with a daily **Vercel Cron** (`vercel.json`) as the backstop. Every scheduled hit carries `Authorization: Bearer $CRON_SECRET`
   (fail-closed: an unset secret rejects all callers). A GitHub Actions cron drove this at
   first but was removed — GitHub schedules best-effort and real spacing stretched to hours,
   which loses plays against the 50-play window; a dedicated pinger holds a tight cadence.
+  A rotation of `CRON_SECRET` must update every copy listed in `docs/SECURITY.md`; a pinger
+  left holding the old one fails with a 401 that nothing reports (both the cron-job.org job
+  and the Zenbook's root `lazyboy-sync.timer` sat failing that way for months).
 - **Day buckets use the user's timezone, sent from the browser — never `'localtime'`.**
   Turso runs in UTC, so `date(played_at, 'localtime')` would bucket by UTC and plays after
   UTC-midnight show up on "tomorrow." Spotify's API has no user timezone, so `TimezoneCookie`
@@ -325,7 +328,8 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   in prod → every scanning read became billed primary rows. Incident two (Aug 6): the
   rows-read counter hit 86% — dominated by `unresolvedContextUris`, a full plays scan +
   per-row contexts probe (~14K billed rows) that ran on EVERY sync call (~1,000+/day across
-  the cron tick, the second ~5-min pinger, and the open tab's 2-min refresh), replica-less.
+  the cron tick, the second ~5-min pinger (later found to be the Zenbook's root
+  `lazyboy-sync.timer`, which 401s before any read), and the open tab's 2-min refresh), replica-less.
   It was invisible because it is milliseconds on a local file and its cost lives on a
   dashboard nobody re-visits. The rules this bought, of which only the first is now dormant:
   (1) any change that moves traffic between the store and the cache states its expected cost on
@@ -572,16 +576,22 @@ returns the id on every reply, so that beacon is free — it rides the 6s poll t
 makes. But **Vercel skew protection pins a client's requests to the deployment that served
 it**, which is what kept the burner tab on pre-fix server actions for a day: a pinned tab's
 poll answers with the pinned tab's *own* id, so its "match" means nothing and that beacon
-alone would never fire. The escape is the cookie that does the pinning. Every ~5 min (a
-counter on the existing poll — no second timer) the leader fetches `/api/build` with
-`credentials: "omit"`; no cookie goes out, so the request lands on the *current* deployment
+alone would never fire. The escape is the cookie that does the pinning. At most every 5 min,
+whichever tab is polling (the leader, or a starved follower on its rescue poll — no second
+timer) also fetches `/api/build` with `credentials: "omit"`; no cookie goes out, so the request lands on the *current* deployment
 and its answer can be believed. Hence the asymmetry in the decision module: an authoritative
 match clears the streak, a poll match clears only a streak no probe has contradicted, and a
 probe saying "stale" while the poll says "current" is not a tie — that divergence *is* the
 pinned-tab signature and counts as mismatch. `/api/build` is deliberately unauthenticated
 (a request with no credentials is one no session can attach to) and must stay free of auth
-and DB work; a tab hits it for as long as it stays open. Followers never fetch either
-endpoint — they read both ids off the leader's broadcast.
+and DB work; a tab hits it for as long as it stays open. Other tabs read both ids off the
+poller's broadcast, with two rules for multi-tab use (review K1, 2026-10-03). A relayed probe
+answer carries `authAt`, when that probe ran, and is dropped after 10 min — re-stamped as
+fresh on receipt, a hidden old leader's pre-deploy probe reload-looped a fresh tab for hours.
+And a relayed MISMATCH, poll or probe, never counts on the sender's word: the sender may be
+the stale tab (its pinned poll and its recent pre-deploy probe both report its old id), so it
+makes the receiving tab probe for itself, and only once its own probe has seen a mismatch do
+relayed mismatches feed the streak (`relayedReading`).
 
 The three brakes each cover a different failure, so don't tighten them casually: a mismatch
 must hold **continuously for 3 min**, because a deploy mid-propagation serves old and new
@@ -590,8 +600,10 @@ replies alternately and a *fresh* tab seeing that flap must not reload; **one re
 otherwise reload-loop; and a reload is **deferred while the tab is visible and was touched in
 the last 60 s**, so nobody's page is yanked mid-use — the streak keeps running and it fires
 at the next idle or hidden moment, and a hidden tab (the expensive kind) reloads immediately.
-End to end a pinned stale tab reloads within ~3–8 min of a deploy (probe cadence + debounce).
-Known answers, including the pinned case and its control: `node scripts/test-build-skew.mjs`.
+End to end a pinned stale tab reloads within ~3–8 min of a deploy (probe cadence + debounce),
+including a visible follower whose leader is hidden. Known answers, including the pinned case
+and its control: `node scripts/test-build-skew.mjs`; the multi-tab wiring, simulated against
+the real helpers: `tests/build-skew-tabs.test.ts`.
 
 ## The now-playing localStorage cache must never resurrect a dead session
 

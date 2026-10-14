@@ -18,15 +18,19 @@
 //
 // Backfilled plays get ctx_orphan = NULL, which renders as non-orphan until the next
 // orphan recompute gives them a real verdict — same as any play recorded before its
-// playlist was cached. Home reads a materialized payload (meta.home_payload, db.ts) that
-// this script does not write; the next sync tick that lands a play rebuilds it, so
-// backfilled days appear on Home then rather than immediately.
+// playlist was cached. The batch closes with import-tail.mjs: it re-opens the skip verdicts
+// on both edges of every inserted run, bumps write_seq and drops Home's materialized payload
+// (meta.home_payload, db.ts), so the next Home load rebuilds it with the backfilled days.
+//
+// Run it AFTER the C1 fix (skips ruled from the previous play) lands, or the re-opened rows
+// get verdicts under the old rule.
 //
 // Pass --db <path-or-url> to target a scratch copy instead of the primary (how the
 // known-answer test below is run):
 //   node scripts/backfill-from-backstop.mjs /tmp/backstop.jsonl --db file:/tmp/scratch.db
 import fs from "node:fs";
 import { createClient } from "@libsql/client";
+import { importTailStmts, insertedRuns } from "./import-tail.mjs";
 
 const args = process.argv.slice(2);
 const dbFlag = args.indexOf("--db");
@@ -66,11 +70,11 @@ const items = fs
   .filter((l) => l.trim())
   .map((l) => JSON.parse(l));
 
-const existing = new Set(
-  (
-    await client.execute("SELECT track_id AS t, played_at AS p FROM plays")
-  ).rows.map((r) => `${r.t}\n${r.p}`),
-);
+const stored = (
+  await client.execute("SELECT track_id AS t, played_at AS p, context_type AS c FROM plays")
+).rows;
+const existing = new Set(stored.map((r) => `${r.t}\n${r.p}`));
+const insertedAts = [];
 
 let inserted = 0;
 const stmts = [];
@@ -94,35 +98,13 @@ for (const it of items) {
           VALUES (?,?,?,?)`,
     args: [t.id, it.played_at, it.context?.type ?? null, it.context?.uri ?? null],
   });
+  insertedAts.push(it.played_at);
   inserted++;
 }
 
 if (inserted > 0) {
-  // The row immediately AFTER the replayed window was skip-verdicted from a predecessor that
-  // is no longer adjacent (a verdict is measured from the previous play's end — played_at is
-  // an END stamp, C1) — re-open that one verdict so the next sync's recompute rules it
-  // against the true neighbour. A single boundary reset (unlike recordPlays' per-insert
-  // resets) assumes a recorder capture window is CONTIGUOUS, so only its newest edge has a
-  // mis-verdicted successor; interior rows are all new and pending anyway. (D3 in the
-  // 2026-10-03 review: the input is the whole recorder history, so this should be per run.)
-  const newest = items.reduce((m, it) => (it.played_at > m ? it.played_at : m), items[0].played_at);
-  stmts.push({
-    sql: `UPDATE plays SET skipped = NULL
-          WHERE (played_at = ? AND (context_type IS NULL OR context_type <> 'backfill'))
-             OR id = (
-            SELECT id FROM plays
-            WHERE played_at > ? AND (context_type IS NULL OR context_type <> 'backfill')
-            ORDER BY played_at ASC, track_id ASC LIMIT 1)`,
-    args: [newest, newest],
-  });
-  // One announcement for the whole batch — `plays` feeds cached reads and the client-side
-  // history payload, and this bump is what invalidates both (same rule as every write in
-  // db.ts; the day caches carry the marker in their keys, frozen days included).
-  stmts.push({
-    sql: `INSERT INTO meta (key, value) VALUES ('write_seq', '1')
-          ON CONFLICT(key) DO UPDATE SET value = CAST(meta.value AS INTEGER) + 1`,
-    args: [],
-  });
+  const verdicted = stored.filter((r) => r.c !== "backfill").map((r) => String(r.p));
+  stmts.push(...importTailStmts(insertedRuns(verdicted, insertedAts)));
   await client.batch(stmts, "write");
 }
 console.log(`backfill: ${items.length} captured, ${inserted} inserted (rest already present)`);

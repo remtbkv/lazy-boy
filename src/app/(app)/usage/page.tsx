@@ -1,6 +1,8 @@
 import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
+import { captureHealthMessage } from "@/lib/capture-health";
 import {
+  getCaptureHealth,
   getClientLoadSpeed,
   getRecentlyPlayedQuotaWindows,
   getSpotifyCallBreakdown,
@@ -242,13 +244,14 @@ function LoadStory({
 export default async function UsagePage() {
   const session = await auth();
   if (!session || session.error) redirect("/login");
-  const [ledger, counters, client, tz, spotifyCalls, quotaWindows] = await Promise.all([
+  const [ledger, counters, client, tz, spotifyCalls, quotaWindows, capture] = await Promise.all([
     readLedger(DAYS),
     liveCounters(),
     getClientLoadSpeed(),
     tzOffsetMinutes(),
     getSpotifyCallBreakdown(24),
     getRecentlyPlayedQuotaWindows(),
+    getCaptureHealth().catch(() => null),
   ]);
   const summaryByPage = new Map(client.pages.map((p) => [p.page, p]));
 
@@ -259,6 +262,15 @@ export default async function UsagePage() {
         What each page costs to open, measured in the browser that opened it — then what each
         read path costs the store it reads.
       </p>
+
+      {/* History capture stopped (burn review 2026-10-03, M1) — the same line Home shows, as a
+          card, because every capture failure that night had been silent for weeks. */}
+      {capture && !capture.ok && (
+        <div className="mt-6 rounded-xl border border-amber-400/40 bg-amber-400/[0.06] px-4 py-3">
+          <h2 className="font-mono text-sm">history capture</h2>
+          <p className="mt-1 text-sm text-amber-400/90">{captureHealthMessage(capture)}</p>
+        </div>
+      )}
 
       {/* ── How fast each visible part arrived ──────────────────────────────────────────── */}
       <section className="mt-8">

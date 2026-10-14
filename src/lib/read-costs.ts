@@ -68,7 +68,7 @@ export const STEADY_SYNC_TICK_ROWS = 159;
  *  on its own. */
 export const ORPHAN_NEW_ONLY_ROWS = 50;
 
-/** `recomputeAllTimeStats` → `playsWithListened`: an ordered full scan of `plays` with a
+/** `recomputeAllTimeStats` → `orderedRealPlays`: an ordered full scan of `plays` with a
  *  `tracks` probe per row. ~14.4K at the calibration store — the figure the sibling sweep
  *  names. Grows linearly with history, which is why it is throttled to once per 10 minutes
  *  and why the queued lever is an incremental accumulator. */

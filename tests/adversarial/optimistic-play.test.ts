@@ -174,9 +174,8 @@ describe("reconcilePlays — structural invariants", () => {
 
 describe("reconcilePlays — confirmation (count-based, ADJUDICATED 2026-08-20)", () => {
   // The original grace-window tests here proved the two documented jobs of graceMs were
-  // contradictory (A1/A2): no scalar both rejects the previous play and accepts this
-  // one under the start-stamp reading then assumed (played_at is actually the play's END —
-  // C1, 2026-10-03; the count contract below needs no timestamp). The judge REDESIGNED
+  // contradictory (A1/A2) under the START-stamp reading of played_at (since shown to be
+  // END, burn lazyboy-review C1). The judge REDESIGNED
   // confirmation to a count baseline: a provisional carries basePlays (the song's
   // today-count at mint) and is confirmed iff the server row's count exceeds it.
   // These tests pin the new contract's answers to the SAME scenarios.

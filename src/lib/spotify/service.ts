@@ -162,11 +162,11 @@ export class Service {
    *
    *  Spotify's GET /me/player/queue is forbidden for many apps (403), so we use the
    *  original skip-through trick: queue a rare sentinel track followed by the current
-   *  track, mute, then skip forward collecting each song until we reach the sentinel,
-   *  and finally skip past it back onto the re-queued current track and restore the
-   *  position + volume. Paced with small sleeps so fast skipping isn't rate-limited. */
+   *  track, mute, then skip forward collecting each song until the sentinel is
+   *  immediately followed by the re-queued current track, and restore the position +
+   *  volume. Paced with small sleeps so fast skipping isn't rate-limited. */
   async saveQueue(): Promise<{ id: string; name: string; count: number }> {
-    const SENTINEL_ID = "6sVK7RXMHRGxAefiqEGEbP"; // "bittersweet" by $up1 — unlikely to be queued
+    const SENTINEL_ID = "6sVK7RXMHRGxAefiqEGEbP"; // "bittersweet" by $up1 — Rem's own song too (2017+, bibimbap)
     const SENTINEL_URI = `spotify:track:${SENTINEL_ID}`;
     const MAX = 100; // Spotify queues cap around 100
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -202,12 +202,7 @@ export class Service {
 
       const playingTrack = async () =>
         (await this.resources.currentlyPlaying())?.track ?? null;
-      let curr = await playingTrack();
-      let n = 0;
-      while (curr && curr.id !== SENTINEL_ID && n <= MAX + 5) {
-        if (n === MAX - 7) await sleep(10000); // let the API's queue view catch up
-        collected.push({ id: curr.id, uri: curr.uri });
-        n++;
+      const advance = async (prevId: string): Promise<Track | null> => {
         await this.resources.nextTrack();
         await sleep(300);
         // Wait for the track to actually change; nudge again if it stalls. DEADLINED:
@@ -215,8 +210,7 @@ export class Service {
         // inner loop used to spin unboundedly at 1-2 Spotify calls per 150ms — a runaway
         // call generator (audit 2026-08-19, T2.12). 15s of no movement = the walk is
         // stuck; bail with what's collected (the catch below already saves partials).
-        const prevId = curr.id;
-        let next: Track | null = curr;
+        let next = await playingTrack();
         let nudgedAt = Date.now();
         const stuckAt = Date.now();
         while (next && next.id === prevId) {
@@ -231,11 +225,36 @@ export class Service {
             next = await playingTrack();
           }
         }
-        curr = next;
+        return next;
+      };
+
+      let curr = await playingTrack();
+      let n = 0;
+      while (curr && n <= MAX + 5) {
+        if (curr.id === SENTINEL_ID) {
+          // The sentinel is a real song Rem plays, so it can also be a genuine queue
+          // entry. The end marker is the sentinel followed by the re-queued current
+          // track: skip once more and look. Landing on the current track means the
+          // walk is done and playback is already back on the original song.
+          if (currentUri === SENTINEL_URI) {
+            // The pair is [sentinel, sentinel]: indistinguishable, and waiting for an id
+            // change would stall. Treat the first as the marker.
+            await this.resources.nextTrack();
+            await sleep(300);
+            break;
+          }
+          const after = await advance(curr.id);
+          if (!after || after.uri === currentUri) break;
+          collected.push({ id: curr.id, uri: curr.uri });
+          n++;
+          curr = after;
+          continue;
+        }
+        if (n === MAX - 7) await sleep(10000); // let the API's queue view catch up
+        collected.push({ id: curr.id, uri: curr.uri });
+        n++;
+        curr = await advance(curr.id);
       }
-      // Skip past the sentinel back onto the re-queued current track, then restore.
-      await this.resources.nextTrack();
-      await sleep(300);
       await this.resources.seek(position);
     } catch (e) {
       // Spotify can refuse a player command (403 "Player command failed") on the

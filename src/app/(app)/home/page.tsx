@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import {
   getAllTimeStats,
+  getCaptureHealth,
   getDailyStats,
   getHomePayload,
   getPlaysByDay,
@@ -14,6 +15,7 @@ import {
 import { tzOffsetMinutes } from "@/lib/tz";
 import { DenHome } from "./den-home";
 import { RateLimitNotice } from "./rate-limit-notice";
+import { CaptureHealthNotice } from "./capture-health-notice";
 import { DockLoader } from "./dock-loader";
 import { LockViewport } from "./lock-viewport";
 
@@ -73,10 +75,11 @@ export default async function HomePage() {
   // The payload read gets a catch: a transient store hiccup (cold funnel, sqld restart)
   // should fall through to the inline path — which retries the connection — rather than
   // crash the render into the error boundary (Rem's stale-tab morning refresh, 2026-08-15).
-  const [session, payload, cooldownUntil] = await Promise.all([
+  const [session, payload, cooldownUntil, captureHealth] = await Promise.all([
     auth(),
     getHomePayload().catch(() => null),
     getSpotifyCooldownUntil().catch(() => 0),
+    getCaptureHealth().catch(() => null),
   ]);
   // Gate here, not just in the layout: Next renders layout and page in parallel, so the
   // layout's redirect alone still flushes this page's data into the 307 body (SECURITY.md).
@@ -117,6 +120,9 @@ export default async function HomePage() {
 
           {/* eslint-disable-next-line react-hooks/purity -- per-request clock read, like the greeting */}
           <RateLimitNotice until={cooldownUntil > Date.now() ? cooldownUntil : 0} />
+          {/* While Spotify's cooldown holds, the line above already says why nothing is landing. */}
+          {/* eslint-disable-next-line react-hooks/purity -- per-request clock read, like the greeting */}
+          <CaptureHealthNotice health={cooldownUntil > Date.now() ? null : captureHealth} />
 
           <DenHome
             daily={daily}

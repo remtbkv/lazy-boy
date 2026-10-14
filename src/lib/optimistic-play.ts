@@ -29,11 +29,10 @@ export type PlayRow = {
  *  day after midnight (wave-2 audit, A3).
  *  `basePlays` = the song's TODAY count in the view at mint time. Confirmation is the
  *  count going up — the one signal that actually means "the sync recorded my play".
- *  Timestamp windows were dropped for this job (wave-3 independent suite, A1/A2 — the two
- *  documented jobs of the old graceMs were contradictory). That analysis assumed Spotify
- *  stamps played_at at track START; production data says it is the END (C1, burn
- *  lazyboy-review 2026-10-03: the gap from the previous play matches a play's own
- *  duration). Count confirmation needs no timestamp under either convention, so it stays. */
+ *  It replaced a timestamp grace window (wave-3 independent suite, A1/A2), which leaned on
+ *  Spotify's played_at convention. That reasoning assumed a START stamp; real data says
+ *  played_at is the play's END (burn lazyboy-review 2026-10-03, C1), and Spotify has
+ *  flipped the convention before (web-api#1083). A count baseline holds under either. */
 export type Provisional = { row: PlayRow; at: number; day: string; basePlays: number };
 
 /** How long an unconfirmed provisional keeps being re-applied before it is presumed a

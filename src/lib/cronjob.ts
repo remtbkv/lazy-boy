@@ -1,10 +1,12 @@
 import "server-only";
 
-// cron-job.org (the every-2-min pinger that keeps closed-app history sync alive) disables a
-// job automatically after too many consecutive failed executions. The sync depends on that
-// job staying enabled, so the daily Vercel cron doubles as a watchdog: if it finds the job
-// disabled, it re-enables it — self-healing without a manual click. The disable email still
-// fires, so a genuine failure is still surfaced; this just stops it from being permanent.
+// cron-job.org was the every-2-min closed-app pinger until its bearer went stale at the
+// 2026-08-10 CRON_SECRET rotation; the Zenbook's `lazyboy-cron-sync.timer` has carried that
+// job since (whether to delete the cron-job.org job or refresh its secret is Rem's call,
+// burn lazyboy-review Z2). cron-job.org disables a job automatically after too many
+// consecutive failed executions, so the daily Vercel cron doubles as a watchdog: if it finds
+// the job disabled, it re-enables it. The disable email still fires, so a genuine failure is
+// still surfaced; this just stops it from being permanent.
 // Needs CRONJOB_API_KEY (a cron-job.org API key) + CRONJOB_JOB_ID in the environment; a
 // no-op if either is unset. Never throws — a watchdog must not break the request it rides on.
 const API = "https://api.cron-job.org";

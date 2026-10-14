@@ -132,9 +132,12 @@ file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
   and on tab-focus → `POST /api/sync`, debounced server-side to ~60 s, so an open tab is
   effectively live; the home history view also refreshes each minute via
   `refreshHistoryAction`); and — the coverage path for when the app is closed — an **external
-  pinger** hitting `/api/cron/sync` with the stored token every ~2 min (a [cron-job.org](https://cron-job.org)
-  job, or a systemd timer on an always-on machine). A daily **Vercel Cron** (`vercel.json`)
-  is the backstop. All scheduled hits share `/api/cron/sync` (`CRON_SECRET`-guarded).
+  pinger** hitting `/api/cron/sync` with the stored token every 2 min: the Zenbook's user
+  timer `lazyboy-cron-sync.timer` (`~/lazyboy-cron/ping.sh`). A daily **Vercel Cron**
+  (`vercel.json`, 07:00 UTC) is the backstop. All scheduled hits share `/api/cron/sync`
+  (`CRON_SECRET`-guarded). Two retired callers still 401 there until Rem removes them: the
+  cron-job.org job (stale secret since the 2026-08-10 rotation) and the Zenbook's root-level
+  `lazyboy-sync.timer` (stale since 07-01) — burn lazyboy-review 2026-10-03, Z1/Z2.
   (A GitHub Actions cron drove this initially but was removed: GitHub schedules best-effort
   and stretched to multi-hour gaps, losing plays against the 50-play window.)
 - Reads: Home's first paint is `getHomePayload()` — one indexed `meta` row holding the day
@@ -207,11 +210,10 @@ file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
 - `auth/[...nextauth]` — Auth.js handler.
 - `tasks/[id]` — clean-playlist progress polling.
 - `playlists/sync` (POST) — one full library scan → DB; client fires it when the store is stale.
-- `history/search?q=` — local history search (no Spotify call → instant).
 - `now-playing` — live "what's playing"; returns `{ playing: null }` when idle (never stale).
 - `sync` (POST) — on-load history sync; server debounces, skipping if synced <~60 s ago.
-- `cron/sync` (GET) — scheduled history sync. On-time trigger is an external pinger
-  (cron-job.org, ~2 min); a daily Vercel Cron is the backstop. `CRON_SECRET`-guarded
+- `cron/sync` (GET) — scheduled history sync. On-time trigger is the Zenbook's
+  `lazyboy-cron-sync.timer` (2 min); a daily Vercel Cron is the backstop. `CRON_SECRET`-guarded
   (fail-closed: an unset secret rejects all callers), session-less (uses the stored token).
 - `cron/usage-check` (GET) — the dormant Turso quota guard + the ledger reconciliation (see
   the listen-history section); `CRON_SECRET`-guarded, 500 on breach or misconfiguration so the
@@ -234,10 +236,7 @@ All check `auth()` and 401 on no session, except `cron/sync` (cron secret, no se
 - `lib/filter.ts` — `fuzzyFilter` (substring + prefix-priority name search).
 - `components/album-thumb.tsx` — album art + music-note fallback.
 - `components/sort-menu.tsx` — the "Sort by ▾" dropdown.
-- `components/floating-bar.tsx` — the bottom-centered search/see-more pill.
-- `components/animated-number.tsx` — `AnimatedNumber`: tweens a count from its old value to a
-  new one (ease-out, reduced-motion aware, no first-paint count-up). Use for any number that
-  updates live.
+- `app/(app)/search-island.tsx` — `SearchIsland`, the bottom-centered search pill.
 
 ---
 

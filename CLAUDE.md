@@ -47,7 +47,7 @@ src/app/api/now-playing/ live "what's playing"; null when idle (never stale)
 src/app/api/build/       this deployment's build id, unauthenticated, no DB — fetched with
                          credentials omitted so it escapes Vercel's deployment pinning
 src/app/api/sync/        on-load listen-history sync (POST; debounced server-side)
-src/app/api/cron/sync/   scheduled history sync (external pinger e.g. cron-job.org; daily Vercel cron
+src/app/api/cron/sync/   scheduled history sync (the Zenbook's 2-min timer; daily Vercel cron
                          backstop) + the library rescan, self-gated to every 30 min
 src/app/api/cron/usage-check/  DORMANT Turso quota guard: real usage vs month pace, 500 on
                          breach (daily cron-job.org job e-mails on failure). Only relevant if
@@ -74,9 +74,11 @@ src/lib/build-skew.ts    when a tab running an old bundle reloads itself (deboun
 src/lib/format.ts        duration/time/day formatting (shared)
 src/lib/filter.ts        fuzzyFilter — substring+prefix name search (shared)
 src/components/ui/       UI primitives — Base UI under the hood, NOT Radix (see GOTCHAS.md)
-src/components/          app components + shared: album-thumb, sort-menu, floating-bar,
-                         now-playing, track-context-menu, playlists-client, playlist-grid,
-                         merge-panel, track-list, clean-panel
+src/components/          app components + shared: album-thumb, playlist-thumb, sort-menu,
+                         now-playing(-context), track-context-menu, identity-track-menu,
+                         track-list, clean-progress, hover-tip, sync-on-load, playlists-sync
+                         (the playlists grid is app/(app)/playlists/playlists-grid.tsx; the
+                         bottom search pill is app/(app)/search-island.tsx)
 docs/                    ARCHITECTURE, FEATURES, ROADMAP, CONVENTIONS, GOTCHAS, SECURITY,
                          READ_QUOTA (the read-cost ledger + the retired Turso quota's forensics),
                          STORE_MIGRATION (the planned move of the app's data to Turso: the
@@ -86,11 +88,13 @@ ops/zenbook-meter/       the store meter deployed on the Zenbook (proxy on 8090 
 scripts/backfill-from-backstop.mjs  replay the Zenbook backstop recorder's captured plays
                          into the primary (the loss-repair path; recorder lives on the
                          Zenbook at ~/lazyboy-recorder, lazyboy-recorder.timer, every 15 min)
+scripts/import-extended-history.mjs  refill outage gaps from Spotify's Extended Streaming
+                         History export; both importers close with scripts/import-tail.mjs
 ```
 
 **Reuse before adding:** formatting → `lib/format.ts`; name search → `lib/filter.ts` (which
 folds Han scripts via `lib/han-fold.ts` — any new name match should too); album
-art → `album-thumb`; sort dropdown → `sort-menu`; bottom search pill → `floating-bar`.
+art → `album-thumb`; sort dropdown → `sort-menu`; bottom search pill → `search-island`.
 
 ## Core rules for this repo (in addition to global CLAUDE.md)
 

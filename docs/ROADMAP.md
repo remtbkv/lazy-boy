@@ -49,7 +49,7 @@ Legend: `[x]` done · `[~]` partial / seam in place · `[ ]` not started
       (`tracks`/`plays`/`contexts` tables), the listen-history view on the home page (per-day
       cards + searchable log with play counts, last-played, album art, duration, resolved
       "From" playlist names). Background sync runs in-app every 2 min while open (`/api/sync`),
-      plus an external pinger (cron-job.org, ~2 min) as the app-closed trigger with a daily
+      plus an external pinger (the Zenbook's 2-min timer) as the app-closed trigger with a daily
       Vercel Cron as backstop (all → `/api/cron/sync`); no manual sync
       button. The cadence is deliberate: `recently-played` only returns the last 50 plays, so
       polling must outrun a heavy listener. Home's search island covers title/artist search
@@ -92,10 +92,10 @@ Legend: `[x]` done · `[~]` partial / seam in place · `[ ]` not started
 
 - Mysterious rate limits / immediate 429s → handled centrally in `client.ts`; keep all calls
   going through it and keep writes batched.
-- Queue read near ~95 items errored in the prototype's skip-walk approach → avoided by using
-  the real queue endpoint.
-- Can't mute volume on phone (403 `Cannot control device volume`) → not relevant now that we
-  read the queue directly instead of muting + skipping.
+- Queue read near ~95 items errored in the prototype's skip-walk approach → still open: Save
+  Queue (`service.ts` `saveQueue`) is still the mute-and-skip walk, not a direct queue read.
+- Can't mute volume on phone (403 `Cannot control device volume`) → still applies, for the
+  same reason.
 
 ---
 

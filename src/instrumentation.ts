@@ -8,6 +8,9 @@
 import type { Instrumentation } from "next";
 
 export const onRequestError: Instrumentation.onRequestError = async (err, request) => {
+  // db.ts is Node-only (node:fs, process.cwd). Without this guard the Edge build compiles it
+  // too and every `next build` prints Edge-runtime errors that bury real warnings.
+  if (process.env.NEXT_RUNTIME !== "nodejs") return;
   try {
     const { recordClientMetrics } = await import("@/lib/db");
     const e = err as { digest?: string; message?: string };
