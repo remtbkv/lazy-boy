@@ -3,7 +3,8 @@ import { spotifyClient } from "@/lib/spotify";
 import { getContextName, recordContexts } from "@/lib/db";
 
 // Live "what's playing right now". Returns { playing: null } when nothing is
-// actively playing or there's no active device — never stale/last-played data.
+// actively playing or there's no active device — never stale/last-played data —
+// and a 503 when it can't tell (see the catch).
 // Resolves the playback context (playlist/album name) once and caches it, so the
 // poll doesn't re-hit Spotify for a name it already knows.
 
@@ -59,7 +60,10 @@ export async function GET() {
     // {name,type} one (later keys win).
     return reply({ ...playing, context });
   } catch {
-    // On any error (no device, transient), show nothing rather than guessing.
-    return reply(null);
+    // A failure (Spotify 429/timeout, a store blip resolving the context) is NOT "nothing
+    // playing": a 200 null here made Home finish() the current song and mint a provisional
+    // play mid-song. Non-200 tells the poll to keep its last state (pollOnce skips !res.ok).
+    // "No active device" never lands here — Spotify answers it 204 → null above.
+    return Response.json({ error: "unavailable" }, { status: 503 });
   }
 }
