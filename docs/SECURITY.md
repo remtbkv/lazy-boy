@@ -46,6 +46,12 @@ the user-scoping item below is handled by row-level security instead.)
 - **Cron auth (fail-closed).** `/api/cron/sync` is session-less; it requires
   `Authorization: Bearer $CRON_SECRET`. An unset `CRON_SECRET` rejects every caller (it does
   not wave them through), so the endpoint can't be triggered anonymously in a misconfigured deploy.
+- **`CRON_SECRET` holders.** A rotation must update every copy, or that caller 401s silently:
+  Vercel production env (`CRON_SECRET`, Sensitive: write-only, redeploy to apply); the Mac's
+  `.env.local`; the Zenbook's `~/lazyboy-cron/env` (the 2-min `lazyboy-cron-sync.timer`); the
+  cron-job.org job's `Authorization` header, if that job is kept (stale since 2026-08-10).
+  `/etc/lazyboy-sync.env` (the root `lazyboy-sync.timer`) holds a pre-07-01 secret and is
+  slated for removal, not update (burn lazyboy-review 2026-10-03, Z1/Z2).
 - **CSRF.** Auth.js protects its routes; Next.js server actions are POST-only with origin checks.
 - **Baseline security headers** in `next.config.ts` (`X-Content-Type-Options`,
   `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`, HSTS).

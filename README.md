@@ -37,10 +37,12 @@ closed. A hosted instance adds a persistent DB + a scheduler.
    `https://<project-name>.vercel.app`).
 3. **Spotify** — add `https://<your-domain>/api/auth/callback/spotify` as a Redirect URI.
 4. **Keep history current while closed** — point a pinger at `/api/cron/sync` so your
-   history keeps syncing when the app isn't open. Easiest: a free [cron-job.org](https://cron-job.org)
-   job that runs every 2 minutes — method GET, one header `Authorization: Bearer <CRON_SECRET>`
+   history keeps syncing when the app isn't open: a systemd timer on an always-on machine
+   (this deployment uses one on the Zenbook) or a free [cron-job.org](https://cron-job.org)
+   job, every 2 minutes — method GET, one header `Authorization: Bearer <CRON_SECRET>`
    (same value as in Vercel). The URL is your deployed origin + `/api/cron/sync`. Without
-   `CRON_SECRET` the endpoint stays closed. Claude can set this up for you :)
+   `CRON_SECRET` the endpoint stays closed. When you rotate the secret, update the pinger too
+   (`docs/SECURITY.md` lists every copy). Claude can set this up for you :)
 
 For full `AUTH_URL` / redirect-URI / token-coordination details, see `docs/ARCHITECTURE.md` and `docs/GOTCHAS.md`.
 

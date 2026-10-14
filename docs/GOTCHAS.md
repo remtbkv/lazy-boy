@@ -198,12 +198,15 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   (`SyncOnLoad` → `POST /api/sync` on load, every 2 min, and on tab-focus; server skips
   if synced <60 s ago — so an open tab is effectively live, and the home history view also
   refreshes each minute); and the **app-closed coverage** path — an **external pinger**
-  hitting `/api/cron/sync` with the stored token every ~2 min (a service like cron-job.org,
-  or a systemd timer on an always-on machine), with a daily **Vercel Cron** (`vercel.json`)
-  as the backstop. Every scheduled hit carries `Authorization: Bearer $CRON_SECRET`
+  hitting `/api/cron/sync` with the stored token every 2 min (the Zenbook's user timer
+  `lazyboy-cron-sync.timer`; the cron-job.org job that preceded it has 401'd on a stale
+  secret since 2026-08-10), with a daily **Vercel Cron** (`vercel.json`) as the backstop. Every scheduled hit carries `Authorization: Bearer $CRON_SECRET`
   (fail-closed: an unset secret rejects all callers). A GitHub Actions cron drove this at
   first but was removed — GitHub schedules best-effort and real spacing stretched to hours,
   which loses plays against the 50-play window; a dedicated pinger holds a tight cadence.
+  A rotation of `CRON_SECRET` must update every copy listed in `docs/SECURITY.md`; a pinger
+  left holding the old one fails with a 401 that nothing reports (both the cron-job.org job
+  and the Zenbook's root `lazyboy-sync.timer` sat failing that way for months).
 - **Day buckets use the user's timezone, sent from the browser — never `'localtime'`.**
   Turso runs in UTC, so `date(played_at, 'localtime')` would bucket by UTC and plays after
   UTC-midnight show up on "tomorrow." Spotify's API has no user timezone, so `TimezoneCookie`
@@ -218,7 +221,12 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   counts only the seconds it actually ran (`playsWithListened` / `getDailyStats` in `db.ts`).
   A play that ran under 5 s counts **zero** (a skip, not a listen; `LISTEN_MIN_MS`). An
   isolated play (next play more than a song-length later) is assumed to have finished — the best
-  estimate available, since Spotify reports *when* a track played, never *how long*. Plays are
+  estimate available, since Spotify reports *when* a track played, never *how long*.
+  **Known wrong, pending its fix:** Spotify's `played_at` marks the END of a play (on the
+  2026-10-02 snapshot, the gap from the PREVIOUS play matches a play's own duration with a
+  568 ms median residual; the gap to the next one, 48 s). The rule above assumes a START stamp,
+  so each skip verdict lands one play early and all-time listened time reads ~7% low. The
+  2026-08-19 "settled: START" reading was wrong (burn lazyboy-review 2026-10-03, C1; QUEUE.md). Plays are
   always the real count; this only shapes the "listened" totals. Whole-table totals
   (`alltime_stats`) are cached in `meta` and recomputed on write; per-day totals compute live.
 - **There is ONE client and no replica — `getClient()` is every read, every write and all of
@@ -318,7 +326,8 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   in prod → every scanning read became billed primary rows. Incident two (Aug 6): the
   rows-read counter hit 86% — dominated by `unresolvedContextUris`, a full plays scan +
   per-row contexts probe (~14K billed rows) that ran on EVERY sync call (~1,000+/day across
-  the cron tick, the second ~5-min pinger, and the open tab's 2-min refresh), replica-less.
+  the cron tick, the second ~5-min pinger (later found to be the Zenbook's root
+  `lazyboy-sync.timer`, which 401s before any read), and the open tab's 2-min refresh), replica-less.
   It was invisible because it is milliseconds on a local file and its cost lives on a
   dashboard nobody re-visits. The rules this bought, of which only the first is now dormant:
   (1) any change that moves traffic between the store and the cache states its expected cost on
