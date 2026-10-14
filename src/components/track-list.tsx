@@ -195,7 +195,11 @@ export function TrackList({
                         aria-label={isPlayingNow ? "Pause" : "Play"}
                         onClick={(e) => {
                           e.stopPropagation();
-                          toggle();
+                          // Same failure surface as the now-playing chip: a Premium or
+                          // no-device refusal flips the icon back, so say why.
+                          void toggle().then((r) => {
+                            if (!r.ok) toast.error(r.error ?? "Playback control failed");
+                          });
                         }}
                         onDoubleClick={(e) => e.stopPropagation()}
                         className="flex size-5 items-center justify-center text-[#1db954]"

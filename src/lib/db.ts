@@ -1300,6 +1300,15 @@ function zoneOffsetMinutes(zone: string, at: Date = new Date()): number {
   return Math.round((wall - Math.floor(at.getTime() / 1000) * 1000) / 60_000);
 }
 
+/** The offset the payload buckets with: the browser's last-published one, unless it differs
+ *  from the home zone's current offset by exactly 60 min. That is a DST change no browser has
+ *  reported yet (the stored −240 outlives Nov 1 until a tab posts −300), so the zone wins;
+ *  any other difference means the user really is elsewhere (burn lazyboy-review, L1). */
+export function payloadTzOffset(stored: number | null, zoneOffset: number): number {
+  if (stored === null || Math.abs(stored - zoneOffset) === 60) return zoneOffset;
+  return stored;
+}
+
 /** Recompute Home's whole first paint and store it. Called from the sync (see
  *  `syncRecentPlays`) whenever plays land, and by Home itself when the row is missing. */
 export async function rebuildHomePayload(): Promise<HomePayload> {
@@ -1307,11 +1316,7 @@ export async function rebuildHomePayload(): Promise<HomePayload> {
   // the tz cookie), the fixed home zone otherwise. The hardcoded zone alone meant the
   // payload's buckets and every cookie-driven read on the same page could disagree the
   // moment the user wasn't in NY (audit 2026-08-19, T2.20).
-  const stored = await getMeta("user_tz_offset").catch(() => null);
-  const storedN = stored === null ? NaN : Number(stored);
-  const tzOffsetMinutes = Number.isFinite(storedN)
-    ? Math.max(-720, Math.min(840, Math.round(storedN)))
-    : zoneOffsetMinutes(HOME_TZ);
+  const tzOffsetMinutes = payloadTzOffset(await getUserTzOffset(), zoneOffsetMinutes(HOME_TZ));
   const [daily, allTime] = await Promise.all([
     readDailyStats(tzOffsetMinutes, HOME_DAILY_DAYS),
     // Already a single meta read off the primary, refreshed on write by recordPlays.

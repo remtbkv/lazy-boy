@@ -120,7 +120,9 @@ export function PlaylistsGrid({
 
       {shown.length === 0 ? (
         <p className="py-10 text-center text-sm text-muted-foreground">
-          Nothing matches “{query.trim()}”.
+          {playlists.length === 0
+            ? "No playlists yet."
+            : `Nothing matches “${query.trim()}”.`}
         </p>
       ) : (
         // Same grid + boxed card as the live library: 4 columns on desktop, art in a

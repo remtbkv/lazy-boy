@@ -80,8 +80,12 @@ export function CleanProgressWatcher() {
         clearCleanActive();
         stop();
       } else if (task.status === "error") {
-        // Phase 1 already succeeded; a failed background reconcile just means the
-        // cleaned playlist may be a touch stale. Don't alarm the user.
+        // Phase 1 already succeeded, but a failed reconcile can leave the cleaned playlist
+        // stale or its backup half-rewritten (replaceItems clears before it refills), so
+        // say so instead of failing silently (burn lazyboy-review, L1).
+        toast.error(
+          `Couldn't finish tidying the cleaned playlist after refresh${task.error ? ` (${task.error})` : ""} — check it and its backup.`,
+        );
         clearCleanActive();
         stop();
       }
