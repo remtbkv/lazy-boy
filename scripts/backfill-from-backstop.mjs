@@ -98,20 +98,22 @@ for (const it of items) {
 }
 
 if (inserted > 0) {
-  // The row immediately before the replayed window was skip-verdicted against a successor
-  // that is no longer adjacent — re-open that one verdict so the next sync's recompute rules
-  // it against the true neighbour. A single boundary reset (unlike recordPlays' per-insert
-  // resets) is deliberate: a recorder capture window is CONTIGUOUS, so only its oldest edge
-  // has a mis-verdicted predecessor; interior rows are all new and pending anyway.
-  const oldest = items.reduce((m, it) => (it.played_at < m ? it.played_at : m), items[0].played_at);
+  // The row immediately AFTER the replayed window was skip-verdicted from a predecessor that
+  // is no longer adjacent (a verdict is measured from the previous play's end — played_at is
+  // an END stamp, C1) — re-open that one verdict so the next sync's recompute rules it
+  // against the true neighbour. A single boundary reset (unlike recordPlays' per-insert
+  // resets) assumes a recorder capture window is CONTIGUOUS, so only its newest edge has a
+  // mis-verdicted successor; interior rows are all new and pending anyway. (D3 in the
+  // 2026-10-03 review: the input is the whole recorder history, so this should be per run.)
+  const newest = items.reduce((m, it) => (it.played_at > m ? it.played_at : m), items[0].played_at);
   stmts.push({
     sql: `UPDATE plays SET skipped = NULL
           WHERE (played_at = ? AND (context_type IS NULL OR context_type <> 'backfill'))
              OR id = (
             SELECT id FROM plays
-            WHERE played_at < ? AND (context_type IS NULL OR context_type <> 'backfill')
-            ORDER BY played_at DESC, track_id DESC LIMIT 1)`,
-    args: [oldest, oldest],
+            WHERE played_at > ? AND (context_type IS NULL OR context_type <> 'backfill')
+            ORDER BY played_at ASC, track_id ASC LIMIT 1)`,
+    args: [newest, newest],
   });
   // One announcement for the whole batch — `plays` feeds cached reads and the client-side
   // history payload, and this bump is what invalidates both (same rule as every write in

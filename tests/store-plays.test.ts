@@ -1,8 +1,9 @@
 // Simulation: the plays pipeline end-to-end against a real (throwaway, local) SQLite
 // store — inserts, skip verdicts, out-of-order re-adjudication, backfill exclusion,
 // counters. Every case here pins a finding from the 2026-08-19 audit.
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
+  checkPlayedAtConvention,
   getAllTimeStats,
   getDailyStats,
   getPlaysByDay,
@@ -14,6 +15,7 @@ import {
   recomputeAllTimeStats,
   type PlayRecord,
 } from "@/lib/db";
+import { resetStore, verdicts } from "./adversarial/helpers";
 
 // All timestamps on one fixed local day, UTC offset 0 for determinism.
 const DAY = "2026-08-10";
@@ -46,10 +48,10 @@ describe("plays pipeline (simulated store)", () => {
     await recordPlays([]);
   });
 
-  it("in-order inserts: predecessor verdicts settle, newest stays pending", async () => {
-    // 10:00 (3-min song) → next play 10:03 → gap 180s ≥ 35% → NOT skipped.
-    // 10:03 (3-min song) → next play 10:03:30 → gap 30s < 63s → SKIPPED.
-    // 10:03:30 → newest → pending (NULL) → still shown.
+  it("in-order inserts: each play is ruled from its predecessor as it lands", async () => {
+    // played_at is the END of a play (C1). 10:00 → first play, no predecessor → NOT skipped.
+    // 10:03 (3-min song) ran 180s since 10:00 → NOT skipped.
+    // 10:03:30 (3-min song) ran 30s < 63s → SKIPPED.
     const a = play(at("10:00:00"), { trackId: "a" });
     const b = play(at("10:03:00"), { trackId: "b" });
     const c = play(at("10:03:30"), { trackId: "c" });
@@ -60,8 +62,8 @@ describe("plays pipeline (simulated store)", () => {
     const rows = await getPlaysByDay(DAY, 0);
     const ids = rows.map((r) => r.id).sort();
     expect(ids).toContain("a");
-    expect(ids).toContain("c"); // pending → shown
-    expect(ids).not.toContain("b"); // skipped → hidden
+    expect(ids).toContain("b");
+    expect(ids).not.toContain("c"); // skipped → hidden
   });
 
   it("duplicate (trackId, playedAt) never double-counts", async () => {
@@ -70,19 +72,19 @@ describe("plays pipeline (simulated store)", () => {
     expect(await recordPlays([d])).toBe(0);
   });
 
-  it("out-of-order gap-fill re-opens ONLY the true predecessor's verdict", async () => {
-    // Existing: e1 12:00, e3 12:10 (e1 verdicted not-skipped: gap 600s).
+  it("out-of-order gap-fill re-opens ONLY the true successor's verdict", async () => {
+    // Existing: e1 12:00, e3 12:10 (e3 verdicted not-skipped: ran 600s capped at 180s).
     const e1 = play(at("12:00:00"), { trackId: "e1" });
     const e3 = play(at("12:10:00"), { trackId: "e3" });
     await recordPlays([e1, e3]);
-    // Gap-fill: e2 at 12:00:20 → e1's true gap becomes 20s < 63s → e1 must flip to SKIPPED.
-    const e2 = play(at("12:00:20"), { trackId: "e2" });
+    // Gap-fill: e2 ends at 12:09:40 → e3 now ran 20s < 63s → e3 must flip to SKIPPED.
+    const e2 = play(at("12:09:40"), { trackId: "e2" });
     await recordPlays([e1, e2, e3]);
     const rows = await getPlaysByDay(DAY, 0);
     const ids = rows.map((r) => r.id);
-    expect(ids).not.toContain("e1"); // re-adjudicated to skipped
-    expect(ids).toContain("e3");
-    // e2's own verdict: gap to e3 ≈ 580s → not skipped.
+    expect(ids).not.toContain("e3"); // re-adjudicated to skipped
+    expect(ids).toContain("e1");
+    // e2's own verdict: ran ≈ 580s since e1 → not skipped.
     expect(ids).toContain("e2");
   });
 
@@ -97,7 +99,7 @@ describe("plays pipeline (simulated store)", () => {
     expect(bfDay).toBeUndefined(); // never a day card
     await recomputeAllTimeStats();
     const all = await getAllTimeStats();
-    // All-time counts only the real plays inserted above (a,c,d,e2,e3 — b,e1 skipped).
+    // All-time counts only the real plays inserted above (a,b,d,e1,e2 — c,e3 skipped).
     expect(all.plays).toBe(5);
     expect(all.since >= at("10:00:00")).toBe(true); // never the backfill sentinel
   });
@@ -134,5 +136,94 @@ describe("plays pipeline (simulated store)", () => {
     expect(await acquireLock("simtest", 60_000)).toBeNull();
     await releaseLock("simtest", b as string);
     expect(await acquireLock("simtest", 60_000)).not.toBeNull();
+  });
+});
+
+// C1 (burn lazyboy-review, 2026-10-03): Spotify's played_at is the moment a play ENDED, so a
+// play's run time is the gap from the PREVIOUS play's end, capped at its own duration. Known
+// answers from the review's spec; each case runs on an emptied store.
+describe("skip verdicts and listened time come from the previous play (C1)", () => {
+  beforeEach(resetStore);
+  const T = Date.parse("2026-07-01T10:00:00.000Z");
+
+  it("plays ending at T, T+200s (200s song), T+230s (180s song): 2 is a listen, 3 a skip", async () => {
+    await recordPlays([
+      play(new Date(T).toISOString(), { trackId: "k1", durationMs: 200_000 }),
+      play(new Date(T + 200_000).toISOString(), { trackId: "k2", durationMs: 200_000 }),
+      play(new Date(T + 230_000).toISOString(), { trackId: "k3", durationMs: 180_000 }),
+    ]);
+    expect(await verdicts()).toEqual({
+      [`k1@${new Date(T).toISOString()}`]: 0, // first play: no predecessor → ran in full
+      [`k2@${new Date(T + 200_000).toISOString()}`]: 0, // ran 200 of 200 s
+      [`k3@${new Date(T + 230_000).toISOString()}`]: 1, // ran 30 of 180 s < 35%
+    });
+    const all = await recomputeAllTimeStats();
+    expect(all.plays).toBe(2);
+    expect(all.durationMs).toBe(200_000 + 200_000);
+  });
+
+  it("listened time is the run from the previous play, capped at the song", async () => {
+    await recordPlays([
+      play(new Date(T).toISOString(), { trackId: "m1", durationMs: 200_000 }),
+      play(new Date(T + 200_000).toISOString(), { trackId: "m2", durationMs: 200_000 }),
+      play(new Date(T + 300_000).toISOString(), { trackId: "m3", durationMs: 180_000 }),
+      // An hour of idle before it: capped at its own 240 s.
+      play(new Date(T + 4_000_000).toISOString(), { trackId: "m4", durationMs: 240_000 }),
+    ]);
+    const all = await recomputeAllTimeStats();
+    expect(all.plays).toBe(4);
+    expect(all.durationMs).toBe(200_000 + 200_000 + 100_000 + 240_000);
+  });
+
+  it("the newest play is ruled on arrival, not left pending", async () => {
+    await recordPlays([play(new Date(T).toISOString(), { trackId: "n1", durationMs: 200_000 })]);
+    await recordPlays([play(new Date(T + 10_000).toISOString(), { trackId: "n2", durationMs: 200_000 })]);
+    expect(await verdicts()).toEqual({
+      [`n1@${new Date(T).toISOString()}`]: 0,
+      [`n2@${new Date(T + 10_000).toISOString()}`]: 1,
+    });
+  });
+
+  it("an older play inserted between two verdicted plays re-rules its SUCCESSOR only", async () => {
+    const a = play(new Date(T).toISOString(), { trackId: "o1", durationMs: 200_000 });
+    const c = play(new Date(T + 300_000).toISOString(), { trackId: "o3", durationMs: 200_000 });
+    await recordPlays([a, c]);
+    expect(Object.values(await verdicts())).toEqual([0, 0]);
+    // o2 ends 10 s before o3 does: o3 now ran 10 s → skipped. o1 has no reason to move.
+    const b = play(new Date(T + 290_000).toISOString(), { trackId: "o2", durationMs: 200_000 });
+    await recordPlays([b]);
+    expect(await verdicts()).toEqual({
+      [`o1@${new Date(T).toISOString()}`]: 0,
+      [`o2@${new Date(T + 290_000).toISOString()}`]: 0, // ran 290 s capped at 200
+      [`o3@${new Date(T + 300_000).toISOString()}`]: 1,
+    });
+  });
+
+  it("the daily convention check reads the last week and flags start stamps", async () => {
+    const start = Date.now() - 2 * 86_400_000;
+    const durs = [200_000, 180_000];
+    // Each gap equals the EARLIER play's duration: start stamps, the convention flipped.
+    const flipped = Array.from({ length: 25 }, (_, i) =>
+      play(new Date(start + i * 190_000 + (i % 2) * 10_000).toISOString(), {
+        trackId: `cv${i}`,
+        durationMs: durs[i % 2],
+      }),
+    );
+    await recordPlays(flipped);
+    const r = await checkPlayedAtConvention();
+    expect(r).toMatchObject({ pairs: 24, earlier: 24, later: 0, inverted: true });
+  });
+
+  it("the day strip measures its first play from the play before the window", async () => {
+    // getDailyStats(0, 1) reads from now − 3 days. p ends 5 min before that cutoff, q 5 min
+    // after: q ran 10 min of its 20, so the strip must count 600 s, not q's full 1,200 s.
+    const cutoff = Date.now() - 3 * 86_400_000;
+    await recordPlays([
+      play(new Date(cutoff - 300_000).toISOString(), { trackId: "p", durationMs: 1_200_000 }),
+      play(new Date(cutoff + 300_000).toISOString(), { trackId: "q", durationMs: 1_200_000 }),
+    ]);
+    const daily = await getDailyStats(0, 1);
+    expect(daily.reduce((s, d) => s + d.plays, 0)).toBe(1);
+    expect(daily.reduce((s, d) => s + d.durationMs, 0)).toBe(600_000);
   });
 });

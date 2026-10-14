@@ -213,14 +213,21 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   current offset is applied to all rows, so plays within ~1h of a
   *past* DST change can land a day off — fine for personal history. Cron-context callers
   (no request) get offset 0, but they don't compute day buckets, so it doesn't matter.
-- **Listened time ≠ play count — it's measured per play, capped at the song.** Each play
-  counts the gap until your *next* play, capped at the track length, so a song you skip part-way
-  counts only the seconds it actually ran (`playsWithListened` / `getDailyStats` in `db.ts`).
-  A play that ran under 5 s counts **zero** (a skip, not a listen; `LISTEN_MIN_MS`). An
-  isolated play (next play more than a song-length later) is assumed to have finished — the best
-  estimate available, since Spotify reports *when* a track played, never *how long*. Plays are
-  always the real count; this only shapes the "listened" totals. Whole-table totals
-  (`alltime_stats`) are cached in `meta` and recomputed on write; per-day totals compute live.
+- **Listened time ≠ play count — it's measured per play, capped at the song.** Spotify's
+  `played_at` is when a play ENDED (verified on 13,262 production plays, 2026-10-03: the gap
+  from the previous play matches a play's own duration to ~0.5 s; it was wrongly documented
+  as the start until then). So each play counts the gap since your *previous* play, capped at
+  the track length, and a song you skip part-way counts only the seconds it actually ran
+  (`src/lib/skip-rule.ts`, used by `recomputeSkipFlags` / `getDailyStats` / `alltime_stats`).
+  The same run time drives the skip verdict (< 35% of the song). A play that ran under 5 s
+  counts **zero** (`LISTEN_MIN_MS`). A play after an idle stretch (previous play more than a
+  song-length earlier) is assumed to have run in full — the best estimate available, since
+  Spotify reports *when* a play ended, never *how long* it ran. Spotify has flipped this
+  convention before, so the daily cron block runs `checkPlayedAtConvention()` and logs an
+  error if gaps start matching the EARLIER play. Plays are always the real count; this only
+  shapes the "listened" totals. Whole-table totals (`alltime_stats`) are cached in `meta` and
+  recomputed on write; per-day totals compute live. Verdicts stored before the fix were
+  re-ruled by `scripts/migrate-skip-rule.mjs`.
 - **There is ONE client and no replica — `getClient()` is every read, every write and all of
   `meta`.** Row-scanning reads used to be served by a libSQL embedded replica behind a
   per-request freshness gate; that machinery was switched off in production on 2026-08-03 and

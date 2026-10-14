@@ -13,7 +13,13 @@ import fs from "node:fs";
 import { createClient, type Client, type InStatement, type Row } from "@libsql/client";
 import type { Track } from "@/lib/spotify/types";
 import { BACKUP_PREFIX, cleanedName } from "@/lib/clean/names";
-import { HANDOFF_SKIP_FRACTION } from "@/lib/handoff";
+import {
+  allTimeStats,
+  isSkip,
+  listenedMs,
+  playedAtConvention,
+  type AllTimeStats,
+} from "@/lib/skip-rule";
 import { makeStoreFetch } from "@/lib/store-fetch";
 import {
   CALIBRATION,
@@ -263,8 +269,8 @@ async function init(): Promise<Client> {
   }
   // plays.skipped: the listened-fraction verdict per play (Rem, 2026-08-16 — a play with
   // less than 35% of the song actually listened is a SKIP: not listed, not counted).
-  // NULL = pending: the newest play has no successor yet, so its listened time can't be
-  // estimated; treated as not-skipped until recomputeSkipFlags() rules on it.
+  // NULL = pending: inserted (or re-opened by an out-of-order insert) and not yet ruled;
+  // treated as not-skipped until recomputeSkipFlags() rules on it, which the same write does.
   if (!playsCols.has("skipped")) {
     await client.execute("ALTER TABLE plays ADD COLUMN skipped INTEGER");
     // Backfill imports are catalog rows, not listening — verdict them immediately so they
@@ -388,7 +394,7 @@ async function readWriteSeq(client: Client): Promise<string | null> {
 
 // The store's marker, read ONCE per request and shared: every cached read (see "Read
 // caching") keys off it, and three serial single-key reads cost 65-72ms against 23-26ms for
-// one (the round-trip note at the top of the file). Same per-request box as playsWithListened
+// one (the round-trip note at the top of the file). Same per-request box as orderedRealPlays
 // below and the token box in auth.ts — React cache() gives a per-request box; outside a
 // request (the cron path) cache() has no dispatcher and is a pass-through, so each call reads
 // again instead, which is correct, just not deduped.
@@ -527,16 +533,15 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
     // Give the plays we just inserted their membership verdict before anything reads them.
     await recomputeOrphanFlags({ newOnly: true });
     // An out-of-order insert (a gap-fill landing BETWEEN existing plays) makes the row
-    // immediately before it wrong: its verdict was measured against a successor that is no
-    // longer adjacent. Re-open the predecessor of each such insert — and ONLY those. The
-    // first cut of this fix used the whole batch's minAt, which on a recently-played
-    // harvest is ~50 plays back, so it re-opened a verdict ~50 rows deep on every landed
-    // tick and never the actually-affected row (wave-2 adversarial review, finding A).
-    // Ordinary tail appends (every insert newer than everything stored) skip this
-    // entirely; their predecessor is still pending and the recompute below covers it.
+    // immediately AFTER it wrong: a verdict is measured from the previous play's end
+    // (played_at is an END stamp, C1), and that row's previous play just changed. Re-open
+    // the successor of each such insert — and ONLY those. (Under the old start-stamp rule
+    // this re-opened the predecessor; a first cut used the whole batch's minAt and re-opened
+    // a verdict ~50 rows deep on every landed tick — wave-2 adversarial review, finding A.)
+    // Ordinary tail appends (every insert newer than everything stored) have no successor
+    // and skip this entirely.
     // `<=`, and the reset covers TIE-MATES too: a play landing AT a timestamp already in
-    // the store makes its tie-mate's verdict stale exactly like a strict predecessor's —
-    // the strict `<` version could never re-open it, so the same three rows counted
+    // the store can become its tie-mate's predecessor, so the same three rows must not count
     // differently depending on delivery order (wave-3 independent adversarial suite, F2/F3).
     const outOfOrder = [...new Set(inserted.filter((at) => at <= newestExisting))];
     for (const at of outOfOrder) {
@@ -545,13 +550,13 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
               WHERE (played_at = :at AND (context_type IS NULL OR context_type <> 'backfill'))
                  OR id = (
                 SELECT p.id FROM plays p
-                WHERE p.played_at < :at AND ${NOT_BACKFILL}
-                ORDER BY p.played_at DESC, p.track_id DESC LIMIT 1)`,
+                WHERE p.played_at > :at AND ${NOT_BACKFILL}
+                ORDER BY p.played_at ASC, p.track_id ASC LIMIT 1)`,
         args: { at },
       });
     }
-    // …and rule on skips: each newly-landed play gives its PREDECESSOR a successor, so
-    // the pending verdicts can now be decided.
+    // …and rule on skips: every pending play — the new ones and the re-opened successors —
+    // has its predecessor in the store now.
     await recomputeSkipFlags();
   }
   // The write moved the marker; drop this request's copy so the read that follows re-keys.
@@ -753,22 +758,19 @@ async function recomputeOrphanFlags(
 // history, source labels, the all-time list).
 const NOT_BACKFILL = `(p.context_type IS NULL OR p.context_type <> 'backfill')`;
 
-// A play with less than this fraction of the song actually listened is a SKIP — spam-
-// clicking through tracks must not read as listening (Rem, 2026-08-16). Listened time is
-// estimated exactly as the hours are: the gap to the NEXT play, capped at song length.
-// The verdict is materialized in plays.skipped by recomputeSkipFlags() (NULL = the
-// newest play, still pending — shown until its successor rules on it), and every list
-// and counter filters on it.
-// ONE source of truth for the bar — handoff.ts declares it (the client-side gate must
-// apply the same fraction; a second literal here was drift waiting to happen).
-const SKIP_FRACTION = HANDOFF_SKIP_FRACTION;
+// A play with less than 35% of the song actually listened is a SKIP (src/lib/skip-rule.ts
+// owns the rule and the fraction). Listened time is estimated exactly as the hours are: the
+// run from the PREVIOUS play's end to this play's end, capped at song length — Spotify's
+// played_at is the END of a play (C1, burn lazyboy-review 2026-10-03). The verdict is
+// materialized in plays.skipped by recomputeSkipFlags() (NULL = not yet ruled, shown until
+// it is), and every list and counter filters on it.
 const NOT_SKIPPED = `(p.skipped IS NULL OR p.skipped = 0)`;
 
-/** Rule on every pending (skipped IS NULL) real play that now has a successor: listened
- *  = min(gap to next play, duration); skipped = listened < 35% of duration. Unknown
- *  duration or a clock-weird negative gap counts as not-skipped (be permissive). The
- *  newest play stays pending. Runs after each sync that inserted plays; the pending set
- *  is tiny (idx_plays_skip_null).
+/** Rule on every pending (skipped IS NULL) real play from its PREDECESSOR: ran =
+ *  min(gap from the previous play, duration); skipped = ran < 35% of duration. No
+ *  predecessor, unknown duration or a clock-weird negative gap counts as not-skipped (be
+ *  permissive). A play is ruled the moment it lands — its predecessor is already stored.
+ *  Runs after each sync that inserted plays; the pending set is tiny (idx_plays_skip_null).
  *
  *  TIES (two plays sharing one played_at) break on track_id, everywhere a gap chain is
  *  ordered — a verdict is a fact about the TIMELINE, and the rowid tie-break made it an
@@ -776,15 +778,23 @@ const NOT_SKIPPED = `(p.skipped IS NULL OR p.skipped = 0)`;
  *  independent adversarial suite, F1-F3). */
 async function recomputeSkipFlags(): Promise<void> {
   const client = await getClient();
+  // The window starts at the last real play BEFORE the oldest pending one, so that pending
+  // play has its predecessor in hand (all its tie-mates come along; they're skipped below).
   const res = await client.execute(`
+    WITH firstPending AS (
+      SELECT MIN(p2.played_at) AS at FROM plays p2
+      WHERE p2.skipped IS NULL
+        AND (p2.context_type IS NULL OR p2.context_type <> 'backfill'))
     SELECT p.id AS id, p.played_at AS playedAt, p.skipped AS skipped,
            t.duration_ms AS durationMs
     FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
     WHERE ${NOT_BACKFILL}
-      AND p.played_at >= (SELECT COALESCE(MIN(p2.played_at), '9999')
-                          FROM plays p2
-                          WHERE p2.skipped IS NULL
-                            AND (p2.context_type IS NULL OR p2.context_type <> 'backfill'))
+      AND p.played_at >= COALESCE(
+            (SELECT MAX(p3.played_at) FROM plays p3
+             WHERE p3.played_at < (SELECT at FROM firstPending)
+               AND (p3.context_type IS NULL OR p3.context_type <> 'backfill')),
+            (SELECT at FROM firstPending),
+            '9999')
     ORDER BY p.played_at ASC, p.track_id ASC`);
   const rows = plainRows(res.rows) as unknown as {
     id: number;
@@ -793,12 +803,10 @@ async function recomputeSkipFlags(): Promise<void> {
     durationMs: number | null;
   }[];
   const updates: InStatement[] = [];
-  for (let i = 0; i < rows.length - 1; i++) {
+  for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
     if (r.skipped !== null) continue;
-    const gap = Date.parse(rows[i + 1].playedAt) - Date.parse(r.playedAt);
-    const dur = r.durationMs;
-    const skipped = dur && gap >= 0 && Math.min(gap, dur) < SKIP_FRACTION * dur ? 1 : 0;
+    const skipped = isSkip(i > 0 ? rows[i - 1].playedAt : null, r.playedAt, r.durationMs);
     updates.push({ sql: "UPDATE plays SET skipped = ? WHERE id = ?", args: [skipped, r.id] });
   }
   if (updates.length > 0) {
@@ -826,29 +834,23 @@ const SELECT_TRACK = `
                 p2.played_at DESC LIMIT 1) AS source
   FROM plays p LEFT JOIN tracks t ON t.id = p.track_id`;
 
-// Estimated time *actually* listened per play: the gap until the next play, capped at the
-// song's length. A skipped/partial play counts only the seconds it ran; a fully-played one
-// counts ~its length; stopping then resuming hours later is capped at the song length (not
-// the idle gap). A play that ran under LISTEN_MIN_MS is a skip, not a listen, and counts
-// zero (so flicking through tracks never inflates listened time). 10-min fallback when a
-// track's duration is unknown.
+// Estimated time *actually* listened per play (skip-rule.ts listenedMs): the run from the
+// previous play's end, capped at the song's length. A skipped/partial play counts only the
+// seconds it ran; a fully-played one counts ~its length; a play after an idle stretch is
+// capped at the song length (not the idle gap). Under 5 s counts zero (so flicking through
+// tracks never inflates listened time). 10-min fallback when a track's duration is unknown.
 //
-// Computed in JS, not SQL, as a style choice: the equivalent `LEAD() OVER (ORDER BY
+// Computed in JS, not SQL, as a style choice: the equivalent `LAG() OVER (ORDER BY
 // played_at)` is NOT pathological — against a local SQLite copy it was ~1.5× a plain ordered
 // fetch (15.0 vs 10.4ms median, n=9, 2026-08-01), and an earlier "~3s" figure here was a
 // single-shot timing that did not reproduce. What matters is that this read is a FULL PLAYS
 // SCAN, so nothing on a render path may call it: it is reached only from
 // recomputeAllTimeStats, on the write path.
-const LISTEN_FALLBACK_MS = 600000;
-// A play whose actual run time (gap to the next play) is under this counts as a skip, not a
-// listen, and adds 0 to listened-time totals. Plays are still counted as plays.
-const LISTEN_MIN_MS = 5000;
-type ListenRow = { playedAt: string; trackId: string; listenedMs: number };
-
+//
 // Wrapped in React cache(): getDailyStats and getAllTimeStats both need this, and they run
 // together (Home's history boundary, the history refresh action) — cache() dedupes the
 // fetch to once per request instead of paying the plays scan twice.
-const playsWithListened = cache(async (): Promise<ListenRow[]> => {
+const orderedRealPlays = cache(async () => {
   const client = await getClient();
   const res = await client.execute(
     `SELECT p.played_at AS playedAt, p.track_id AS trackId, t.duration_ms AS durationMs,
@@ -857,29 +859,12 @@ const playsWithListened = cache(async (): Promise<ListenRow[]> => {
      WHERE ${NOT_BACKFILL}
      ORDER BY p.played_at ASC, p.track_id ASC`,
   );
-  const rows = plainRows(res.rows) as unknown as {
+  return plainRows(res.rows) as unknown as {
     playedAt: string;
     trackId: string;
     durationMs: number | null;
     skipped: number | null;
   }[];
-  // Gaps are computed over the FULL chain (a skip still ends its predecessor's listen at
-  // the right moment), then flagged skips drop out of the result — so neither the play
-  // count nor the listened total sees them.
-  return rows
-    .map((r, i) => {
-      const dur = r.durationMs ?? LISTEN_FALLBACK_MS;
-      const next = rows[i + 1];
-      const gap = next ? Date.parse(next.playedAt) - Date.parse(r.playedAt) : null;
-      const ran = gap != null && gap >= 0 ? Math.min(dur, gap) : dur;
-      return {
-        playedAt: r.playedAt,
-        trackId: r.trackId,
-        listenedMs: ran < LISTEN_MIN_MS ? 0 : ran,
-        skipped: r.skipped === 1,
-      };
-    })
-    .filter((r) => !r.skipped);
 });
 
 // One row per individual play (no GROUP BY): each listen keeps its own timestamp and the
@@ -1041,30 +1026,41 @@ export async function getAllTimeStats(): Promise<{
   return recomputeAllTimeStats();
 }
 
-type AllTimeStats = { plays: number; uniqueTracks: number; durationMs: number; since: string | null };
-
 /** Recompute and cache the all-time totals (the expensive gap scan over every play). Called
  *  on write when new plays are recorded, not on render. */
 export async function recomputeAllTimeStats(): Promise<AllTimeStats> {
-  const plays = await playsWithListened();
-  let stats: AllTimeStats;
-  if (plays.length === 0) {
-    stats = { plays: 0, uniqueTracks: 0, durationMs: 0, since: null };
-  } else {
-    const tracks = new Set<string>();
-    let durationMs = 0;
-    for (const p of plays) {
-      tracks.add(p.trackId);
-      durationMs += p.listenedMs;
-    }
-    // plays come back ascending, so the first is the earliest recorded play.
-    stats = { plays: plays.length, uniqueTracks: tracks.size, durationMs, since: plays[0].playedAt };
-  }
+  const stats = allTimeStats(await orderedRealPlays());
   await setMeta("alltime_stats", JSON.stringify(stats));
   // The throttle stamp for maybeRecomputeAllTimeStats — set here so every compute path
   // (write-triggered, cold-cache, daily heal) resets the window.
   await setMeta("alltime_at", String(Date.now()));
   return stats;
+}
+
+/** Daily self-check that Spotify still stamps played_at at the END of a play (skip-rule.ts
+ *  playedAtConvention). If it flipped, every skip verdict is inverted, so log loudly and keep
+ *  the last result in `meta.played_at_convention` for a capture-health surface to read. */
+export async function checkPlayedAtConvention(): Promise<ReturnType<typeof playedAtConvention>> {
+  const client = await getClient();
+  const since = new Date(Date.now() - 7 * 86_400_000).toISOString();
+  const res = await client.execute({
+    sql: `SELECT p.played_at AS playedAt, t.duration_ms AS durationMs
+          FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
+          WHERE p.played_at >= :since AND ${NOT_BACKFILL}
+          ORDER BY p.played_at ASC, p.track_id ASC`,
+    args: { since },
+  });
+  const result = playedAtConvention(
+    plainRows(res.rows) as unknown as { playedAt: string; durationMs: number | null }[],
+  );
+  if (result.inverted) {
+    console.error(
+      "[skip-rule] played_at no longer looks like an END stamp — skip verdicts are inverted",
+      result,
+    );
+  }
+  await setMeta("played_at_convention", JSON.stringify({ ...result, at: new Date().toISOString() }));
+  return result;
 }
 
 /** Per-day plays / unique songs / listening time, most recent first. */
@@ -1096,8 +1092,10 @@ async function readDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
   const client = await getClient();
   // Only fetch the recent window we actually display (a couple extra days of buffer for the
   // tz day-edge), so this stays cheap as total history grows — not a full-table scan. Uses
-  // idx_plays_played_at. Listened ms = gap to the next play, capped at song length, computed
-  // in JS (see playsWithListened for why the window function isn't used).
+  // idx_plays_played_at. Listened ms = the run from the previous play, capped at song length,
+  // computed in JS (see orderedRealPlays for why the window function isn't used). The fetch
+  // reaches back to the last play before the cutoff, so the window's first play has its
+  // predecessor; that play itself is not counted.
   const cutoff = new Date(Date.now() - (days + 2) * 86_400_000).toISOString();
   const res = await client.execute({
     // LEFT and INNER measured indistinguishable here, rows identical (primary 66/104ms LEFT
@@ -1106,7 +1104,12 @@ async function readDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
     sql: `SELECT p.played_at AS playedAt, p.track_id AS trackId, t.duration_ms AS durationMs,
                  p.skipped AS skipped
           FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
-          WHERE p.played_at >= :cutoff AND ${NOT_BACKFILL}
+          WHERE ${NOT_BACKFILL}
+            AND p.played_at >= COALESCE(
+                  (SELECT MAX(p3.played_at) FROM plays p3
+                   WHERE p3.played_at < :cutoff
+                     AND (p3.context_type IS NULL OR p3.context_type <> 'backfill')),
+                  :cutoff)
           ORDER BY p.played_at ASC, p.track_id ASC`,
     args: { cutoff },
   });
@@ -1123,13 +1126,10 @@ async function readDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
   const offMs = Math.max(-720, Math.min(840, Math.round(offsetMin) || 0)) * 60000;
   const byDay = new Map<string, { plays: number; tracks: Set<string>; ms: number }>();
   for (let i = 0; i < rows.length; i++) {
-    const dur = rows[i].durationMs ?? LISTEN_FALLBACK_MS;
-    const next = rows[i + 1];
-    const gap = next ? Date.parse(next.playedAt) - Date.parse(rows[i].playedAt) : null;
-    const ran = gap != null && gap >= 0 ? Math.min(dur, gap) : dur;
-    const listenedMs = ran < LISTEN_MIN_MS ? 0 : ran;
-    // Skips stay in the gap chain (above) but never count as plays or time.
-    if (rows[i].skipped === 1) continue;
+    // The predecessor fetched from before the window, and skips, stay in the gap chain (as
+    // the previous play of the row after them) but never count as plays or time.
+    if (rows[i].playedAt < cutoff || rows[i].skipped === 1) continue;
+    const ms = listenedMs(i > 0 ? rows[i - 1].playedAt : null, rows[i].playedAt, rows[i].durationMs);
     const day = new Date(Date.parse(rows[i].playedAt) + offMs).toISOString().slice(0, 10);
     let acc = byDay.get(day);
     if (!acc) {
@@ -1138,7 +1138,7 @@ async function readDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
     }
     acc.plays++;
     acc.tracks.add(rows[i].trackId);
-    acc.ms += listenedMs;
+    acc.ms += ms;
   }
   return [...byDay.entries()]
     .map(([day, a]) => ({ day, plays: a.plays, uniqueTracks: a.tracks.size, durationMs: a.ms }))

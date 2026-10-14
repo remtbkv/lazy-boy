@@ -4,6 +4,7 @@ import { spotifyClient, SpotifyError } from "@/lib/spotify";
 import { syncRecentPlays } from "@/lib/sync/history";
 import { syncLibrary } from "@/lib/sync/library";
 import {
+  checkPlayedAtConvention,
   getHarvestGate,
   getLibraryScanAttemptAt,
   getLibrarySyncedAt,
@@ -79,6 +80,9 @@ export async function GET(req: Request) {
     // with every serverless instance and may never fire (audit 2026-08-19, T2.17).
     await pruneApiLog().catch(() => {});
     await pruneClientMetrics().catch(() => {});
+    // Spotify has flipped what played_at marks before; if it does again, every skip verdict
+    // inverts silently. This logs it (skip-rule.ts playedAtConvention).
+    await checkPlayedAtConvention().catch((e) => console.error("[cron] convention check failed", e));
   }
   // Guarded: this runs OUTSIDE the try below, and a store hiccup inside the token read
   // used to escape as a 500 — feeding the external pinger's auto-disable, the exact storm

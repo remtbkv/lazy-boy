@@ -63,7 +63,7 @@ Six mechanisms, six different invalidation stories. This is an inventory, not a 
 
 | derived value | computed | kept current by |
 |---|---|---|
-| listened-ms per play (gap to next play, capped at song length) | JS, per read, over an ordered scan | nothing — recomputed every time |
+| listened-ms per play (gap from the previous play — played_at is the END, C1 2026-10-03 — capped at song length) | JS, per read, over an ordered scan | nothing — recomputed every time |
 | per-day buckets (`getDailyStats`) | JS, per read, over a windowed scan | nothing — recomputed every time |
 | `alltime_stats` (plays / unique / listened / since) | full `plays` scan | `recomputeAllTimeStats()` from `recordPlays` when ≥1 play is new |
 | `unique_song_count` | `DISTINCT` over `playlist_tracks ⋈ tracks` | `recomputeUniqueSongCount()` at the end of a library sync |

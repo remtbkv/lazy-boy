@@ -142,9 +142,10 @@ file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
   cards and the search box then run in the browser against the history payload;
   `getDailyStats` / `getPlaysByDay` / `searchHistory` remain as the server-side path for a
   cold store, an extended strip, and the fallback while the payload loads.
-- **Derived stats, search & resume:** "listened" time is computed per play (the gap to the
-  next play, capped at the song length; under 5 s counts as zero; an isolated play is assumed
-  to have finished) — Spotify reports *when* a track played, never *how long*. Whole-table
+- **Derived stats, search & resume:** "listened" time is computed per play (the gap since the
+  previous play, because `played_at` is when a play ENDED; capped at the song length; under
+  5 s counts as zero; a play after an idle stretch is assumed to have run in full) — Spotify
+  reports *when* a play ended, never *how long* it ran (`src/lib/skip-rule.ts`). Whole-table
   totals (`alltime_stats`) are cached in `meta` and recomputed on write; per-day totals compute
   live. **Resume** (`resumePlaylistAction`) picks up where you left off, matching plays to
   playlist positions by id then by `(name, artist)`. New `db.ts` queries follow the

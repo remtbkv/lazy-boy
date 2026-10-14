@@ -1,9 +1,9 @@
 // Recompute-from-source verifier for the store's DERIVED values.
 //
-// src/lib/db.ts caches three values that are cheap to read and expensive to compute, and
+// src/lib/db.ts caches four values that are cheap to read and expensive to compute, and
 // keeps them fresh by hand-maintained invalidation (recomputeAllTimeStats /
-// recomputeUniqueSongCount / recomputeOrphanFlags, each called from the writes that can
-// change them). Nothing checked that the stored answers still equal what the source data
+// recomputeUniqueSongCount / recomputeOrphanFlags / recomputeSkipFlags, each called from the
+// writes that can change them). Nothing checked that the stored answers still equal what the source data
 // says. This script is that check: it recomputes each value from source and exits non-zero,
 // naming the diff, when a stored value disagrees.
 //
@@ -28,20 +28,19 @@ const DEMO = process.argv.includes("--demo");
 // How long a mid-flight sync gets to finish before a mismatch is called a real failure.
 const RACE_RECHECK_MS = 2000;
 
-// ── logic copied from src/lib/db.ts ────────────────────────────────────────────────────
-// These must match the store, or the comparison is meaningless. Each block names its source.
+// ── logic shared with / copied from src/lib/db.ts ──────────────────────────────────────
+// These must match the store, or the comparison is meaningless. The skip verdict and the
+// listened-time math are imported from the module db.ts itself uses (Node strips the types),
+// so they cannot drift; the SQL below is copied and names its source.
+import { allTimeStats, isSkip } from "../src/lib/skip-rule.ts";
 
-// db.ts LISTEN_FALLBACK_MS / LISTEN_MIN_MS
-const LISTEN_FALLBACK_MS = 600000;
-const LISTEN_MIN_MS = 5000;
-
-// db.ts playsWithListened() — the ordered plays⋈tracks fetch the gap math runs over.
+// db.ts orderedRealPlays() — the ordered plays⋈tracks fetch the gap math runs over.
 // Backfill rows are excluded in the WHERE and skips are excluded AFTER the gap chain, both
 // exactly as the store does it — this clone had drifted (neither filter) and the check was
 // comparing a filtered stored value against an unfiltered recomputation (audit 2026-08-19, T1.5).
 const PLAYS_ORDERED_SQL = `
-  SELECT p.played_at AS playedAt, p.track_id AS trackId, t.duration_ms AS durationMs,
-         p.skipped AS skipped
+  SELECT p.id AS id, p.played_at AS playedAt, p.track_id AS trackId,
+         t.duration_ms AS durationMs, p.skipped AS skipped
   FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
   WHERE (p.context_type IS NULL OR p.context_type <> 'backfill')
   ORDER BY p.played_at ASC, p.track_id ASC`;
@@ -66,33 +65,6 @@ const ORPHAN_PREDICATE = `
                 AND lower(tm.name) = (SELECT lower(name) FROM tracks WHERE id = p.track_id))
        THEN 1 ELSE 0 END`;
 
-// db.ts playsWithListened(): listened time per play = the gap to the next play, capped at the
-// track's duration (10-min fallback when unknown); under LISTEN_MIN_MS it's a skip and counts 0.
-function listenedMs(row, next) {
-  const dur = row.durationMs ?? LISTEN_FALLBACK_MS;
-  const gap = next ? Date.parse(next.playedAt) - Date.parse(row.playedAt) : null;
-  const ran = gap != null && gap >= 0 ? Math.min(dur, gap) : dur;
-  return ran < LISTEN_MIN_MS ? 0 : ran;
-}
-
-// db.ts recomputeAllTimeStats(), over the same ordered fetch. Gaps run over the FULL chain
-// (a skip still ends its predecessor's listen at the right moment); rows flagged skipped
-// then drop out of every aggregate — mirroring db.ts playsWithListened.
-function computeAllTimeStats(rows) {
-  if (rows.length === 0) return { plays: 0, uniqueTracks: 0, durationMs: 0, since: null };
-  const tracks = new Set();
-  let durationMs = 0;
-  let plays = 0;
-  let since = null;
-  for (let i = 0; i < rows.length; i++) {
-    if (rows[i].skipped === 1) continue;
-    plays++;
-    tracks.add(rows[i].trackId);
-    durationMs += listenedMs(rows[i], rows[i + 1]);
-    if (since === null) since = rows[i].playedAt;
-  }
-  return { plays, uniqueTracks: tracks.size, durationMs, since };
-}
 
 // ── plumbing ──────────────────────────────────────────────────────────────────────────
 const client = createClient({ url: URL_PRIMARY, authToken: AUTH, intMode: "number" });
@@ -116,7 +88,7 @@ async function setMeta(key, value) {
 
 async function checkAllTimeStats() {
   const stored = await getMeta("alltime_stats");
-  const live = computeAllTimeStats(rows(await client.execute(PLAYS_ORDERED_SQL)));
+  const live = allTimeStats(rows(await client.execute(PLAYS_ORDERED_SQL)));
   const shown = `plays=${live.plays} uniqueTracks=${live.uniqueTracks} durationMs=${live.durationMs} since=${live.since}`;
   if (stored === null) {
     // getAllTimeStats() computes on demand when the key is absent, so this is a legitimate
@@ -196,10 +168,40 @@ async function checkCtxOrphan(onlyIds = null) {
     : { name: "ctx_orphan", status: "OK", detail: `${scope} agree ${nullNote}` };
 }
 
+// plays.skipped — every real play's stored verdict against the rule, ruled from its
+// predecessor (skip-rule.ts isSkip). A stored NULL is a play a recompute hasn't reached yet:
+// informational, never a failure.
+async function checkSkipped() {
+  const all = rows(await client.execute(PLAYS_ORDERED_SQL));
+  let nulls = 0;
+  const bad = [];
+  for (let i = 0; i < all.length; i++) {
+    const r = all[i];
+    if (r.skipped === null) {
+      nulls++;
+      continue;
+    }
+    const live = isSkip(i > 0 ? all[i - 1].playedAt : null, r.playedAt, r.durationMs);
+    if (Number(r.skipped) !== live) bad.push({ id: Number(r.id), stored: Number(r.skipped), live });
+  }
+  const nullNote = `(NULLs: ${nulls}${nulls ? " — not ruled yet, informational" : ""})`;
+  return bad.length
+    ? {
+        name: "skipped",
+        status: "FAIL",
+        detail: `${bad.length} of ${all.length} plays disagree with the rule ${nullNote}; examples: ${bad
+          .slice(0, 5)
+          .map((b) => `id=${b.id} stored=${b.stored} live=${b.live}`)
+          .join(", ")}`,
+      }
+    : { name: "skipped", status: "OK", detail: `${all.length} plays agree ${nullNote}` };
+}
+
 const CHECKS = {
   alltime_stats: () => checkAllTimeStats(),
   unique_song_count: () => checkUniqueSongCount(),
   ctx_orphan: () => checkCtxOrphan(),
+  skipped: () => checkSkipped(),
 };
 
 /** Run the named checks (all of them by default) and print one line each.
@@ -324,11 +326,35 @@ async function demo() {
     expect: (r) => /recomputed=\d+ stored=\d+/.test(r.detail),
   });
 
-  console.log("\n[demo e] final clean verification (must pass — everything restored)");
+  // (e) one plays.skipped — flip the newest ruled real play's verdict.
+  const sk = rows(
+    await client.execute(
+      `SELECT id, skipped AS flag FROM plays
+       WHERE skipped IS NOT NULL AND (context_type IS NULL OR context_type <> 'backfill')
+       ORDER BY played_at DESC LIMIT 1`,
+    ),
+  )[0];
+  if (!sk) throw new DemoStop("[demo e] no real play has a verdict — nothing to corrupt");
+  await corruptionCase({
+    step: "e",
+    name: "skipped",
+    describe: `plays.skipped for id=${sk.id} (newest ruled): ${Number(sk.flag)} -> ${1 - Number(sk.flag)}`,
+    original: Number(sk.flag),
+    corrupt: () => client.execute({ sql: "UPDATE plays SET skipped = 1 - skipped WHERE id = ?", args: [sk.id] }),
+    restore: () =>
+      client.execute({ sql: "UPDATE plays SET skipped = ? WHERE id = ?", args: [Number(sk.flag), sk.id] }),
+    reread: async () => {
+      const r = await client.execute({ sql: "SELECT skipped AS flag FROM plays WHERE id = ?", args: [sk.id] });
+      return r.rows[0] ? Number(r.rows[0].flag) : null;
+    },
+    expect: (r) => r.detail.includes(`id=${sk.id}`),
+  });
+
+  console.log("\n[demo f] final clean verification (must pass — everything restored)");
   const final = await verify({ indent: "  " });
-  if (!final.ok) throw new Error("[demo e] final verification FAILED — the data is not back to its original state");
-  console.log("[demo e] PASS");
-  console.log("\ndemo: verifier failed on all 3 injected corruptions and passes on clean data");
+  if (!final.ok) throw new Error("[demo f] final verification FAILED — the data is not back to its original state");
+  console.log("[demo f] PASS");
+  console.log("\ndemo: verifier failed on all 4 injected corruptions and passes on clean data");
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────────────

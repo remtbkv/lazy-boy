@@ -1,13 +1,12 @@
 // Adversarial: does the store's answer depend on the ORDER plays arrived in?
 //
 // The documented contract this file tests, quoted from source:
-//   db.ts:786-790 — "Rule on every pending (skipped IS NULL) real play that now has a
-//     successor: listened = min(gap to next play, duration); skipped = listened < 35% of
-//     duration. Unknown duration or a clock-weird negative gap counts as not-skipped (be
-//     permissive). The newest play stays pending."
-//   db.ts:556-563 — an out-of-order insert "makes the row immediately before it wrong: its
-//     verdict was measured against a successor that is no longer adjacent. Re-open the
-//     predecessor of each such insert."
+//   db.ts recomputeSkipFlags — "Rule on every pending (skipped IS NULL) real play from its
+//     PREDECESSOR: ran = min(gap from the previous play, duration); skipped = ran < 35% of
+//     duration. No predecessor, unknown duration or a clock-weird negative gap counts as
+//     not-skipped (be permissive). A play is ruled the moment it lands."
+//   db.ts recordPlays — an out-of-order insert "makes the row immediately AFTER it wrong …
+//     Re-open the successor of each such insert" (played_at is an END stamp, C1).
 //   docs/LOGIC_AUDIT_2026-08-19.md:55-61 (T1.6) — the bug this machinery fixes.
 // Together those say a verdict is a fact about the TIMELINE. So the same set of plays,
 // delivered in any arrival order, must converge to the same verdicts and the same reader
@@ -27,33 +26,32 @@ import { DAY_MS, iso, play, resetStore, verdicts } from "./helpers";
 const BASE = Math.floor((Date.now() - 3 * DAY_MS) / DAY_MS) * DAY_MS + 10 * 3_600_000;
 
 // Each row's `expect` is derived from the rule quoted above, by hand:
-//   listened = min(gap to next play, duration); skipped iff listened < 0.35 * duration.
+//   ran = min(gap from the previous play, duration); skipped iff ran < 0.35 * duration.
 const TIMELINE = [
-  { id: "t0", off: 0, dur: 200_000, skip: 1 }, //     gap 30_000 < 70_000
-  { id: "t1", off: 30_000, dur: 200_000, skip: 0 }, // gap 200_000 → min 200_000 ≥ 70_000
-  { id: "t2", off: 230_000, dur: 100_000, skip: 0 }, // gap 100_000 ≥ 35_000
-  { id: "t3", off: 330_000, dur: 100_000, skip: 0 }, // gap 35_000 == 35% exactly → NOT a skip
-  { id: "t4", off: 365_000, dur: 100_000, skip: 1 }, // gap 34_999, one ms under the line
-  { id: "t5", off: 399_999, dur: null, skip: 0 }, //    unknown duration → permissive
-  { id: "t6", off: 500_000, dur: 240_000, skip: 0 }, // gap 3_600_000 capped at duration
-  { id: "t7", off: 4_100_000, dur: 240_000, skip: 1 }, // gap 1_000 < 84_000
-  { id: "t8", off: 4_101_000, dur: 240_000, skip: 0 }, // gap 240_000 == duration
-  { id: "t9", off: 4_341_000, dur: 300_000, skip: null }, // newest → stays pending
+  { id: "t0", off: 0, dur: 200_000, skip: 0 }, //       first play: no predecessor → ran in full
+  { id: "t1", off: 30_000, dur: 200_000, skip: 1 }, //   gap 30_000 < 70_000
+  { id: "t2", off: 230_000, dur: 200_000, skip: 0 }, //  gap 200_000 == duration
+  { id: "t3", off: 265_000, dur: 100_000, skip: 0 }, //  gap 35_000 == 35% exactly → NOT a skip
+  { id: "t4", off: 299_999, dur: 100_000, skip: 1 }, //  gap 34_999, one ms under the line
+  { id: "t5", off: 400_000, dur: null, skip: 0 }, //     unknown duration → permissive
+  { id: "t6", off: 500_000, dur: 240_000, skip: 0 }, //  gap 100_000 ≥ 84_000
+  { id: "t7", off: 4_100_000, dur: 240_000, skip: 0 }, // gap 3_600_000 capped at duration
+  { id: "t8", off: 4_101_000, dur: 240_000, skip: 1 }, // gap 1_000 < 84_000
+  { id: "t9", off: 4_341_000, dur: 300_000, skip: 0 }, // newest: ruled on arrival, gap 240_000
 ] as const;
 
 const PLAYS = TIMELINE.map((r) => play(r.id, iso(BASE + r.off), r.dur));
 const EXPECTED_VERDICTS: Record<string, number | null> = Object.fromEntries(
   TIMELINE.map((r) => [`${r.id}@${iso(BASE + r.off)}`, r.skip]),
 );
-// Seven plays survive the skip filter (t0, t4, t7 are skips; a pending t9 counts).
+// Seven plays survive the skip filter (t1, t4, t8 are skips).
 const COUNTED = TIMELINE.filter((r) => r.skip !== 1).length;
-// playsWithListened (db.ts:865-897): gaps over the FULL chain, then skips drop out.
-//   t1 200_000 + t2 100_000 + t3 35_000 + t5 100_001 (10-min fallback, capped by gap)
-//   + t6 240_000 + t8 240_000 + t9 300_000 (no successor → the whole duration)
-const LISTENED_MS = 200_000 + 100_000 + 35_000 + 100_001 + 240_000 + 240_000 + 300_000;
-// t0 is a skip, so the earliest play that survives the filter is t1 — `since` comes off the
-// FILTERED list (db.ts:1074-1075).
-const SINCE = iso(BASE + 30_000);
+// skip-rule.ts allTimeStats: gaps over the FULL chain, then skips drop out.
+//   t0 200_000 (no predecessor → the whole duration) + t2 200_000 + t3 35_000
+//   + t5 100_001 (10-min fallback, capped by the gap) + t6 100_000 + t7 240_000 + t9 240_000
+const LISTENED_MS = 200_000 + 200_000 + 35_000 + 100_001 + 100_000 + 240_000 + 240_000;
+// t0 survives the filter, so it is `since`.
+const SINCE = iso(BASE);
 
 type Order = { name: string; batches: number[][] };
 const singles = (idx: number[]): number[][] => idx.map((i) => [i]);

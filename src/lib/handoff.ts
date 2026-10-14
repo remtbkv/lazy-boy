@@ -2,7 +2,8 @@
 // separate phantom-play bugs (Abracadabra 2026-08-16, the cache seed and the paused-state
 // launder 2026-08-19) are a pure, known-answer-tested function. den-home supplies the
 // observation state; this decides. Keep the constants in ONE place — the 0.35 bar is the
-// same SKIP_FRACTION the store applies in recomputeSkipFlags (db.ts).
+// same SKIP_FRACTION the store applies in recomputeSkipFlags (skip-rule.ts owns it).
+import { SKIP_FRACTION } from "@/lib/skip-rule";
 
 export type HandoffObservation = {
   /** When a poll last saw this song ACTUALLY PLAYING (never refreshed while paused). */
@@ -18,7 +19,7 @@ export type HandoffObservation = {
 export type HandoffVerdict = "stale" | "never-played" | "skip" | "no-today" | "commit";
 
 export const HANDOFF_STALE_MS = 60_000;
-export const HANDOFF_SKIP_FRACTION = 0.35;
+export const HANDOFF_SKIP_FRACTION = SKIP_FRACTION;
 export const HANDOFF_UNKNOWN_DURATION_FLOOR_MS = 30_000;
 
 export function judgeHandoff(

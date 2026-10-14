@@ -2,11 +2,11 @@
 // survives hostile text.
 //
 // Documented contract, quoted:
-//   db.ts:778-784 — "A play with less than this fraction of the song actually listened is a
-//     SKIP … Listened time is estimated exactly as the hours are: the gap to the NEXT play,
-//     capped at song length." SKIP_FRACTION = 0.35.
-//   db.ts:786-790 — "Unknown duration or a clock-weird negative gap counts as not-skipped
-//     (be permissive). The newest play stays pending."
+//   db.ts — "A play with less than 35% of the song actually listened is a SKIP … Listened
+//     time is estimated exactly as the hours are: the run from the PREVIOUS play's end to
+//     this play's end, capped at song length" (played_at is an END stamp, C1).
+//   db.ts recomputeSkipFlags — "No predecessor, unknown duration or a clock-weird negative
+//     gap counts as not-skipped (be permissive). A play is ruled the moment it lands."
 //   db.ts:768-774 — backfill rows "are EXCLUDED from every listening counter — all-time
 //     totals, the day strip, day rows — and INCLUDED wherever a song's history/existence is
 //     the point (the search payloads, per-play history, source labels, the all-time list)."
@@ -28,14 +28,13 @@ import { DAY_MS, iso, play, resetStore, verdicts } from "./helpers";
 const BASE = Math.floor((Date.now() - 3 * DAY_MS) / DAY_MS) * DAY_MS + 10 * 3_600_000;
 const DUR = 100_000; // 35% = 35_000 exactly
 
-/** Record `a` then `b` then a far-future terminator, and return a's stored verdict. */
+/** Record `a`, then `b` ending `gapMs` later, and return b's stored verdict. */
 async function verdictOf(gapMs: number, durationMs: number | null): Promise<number | null> {
   await recordPlays([
-    play("a", iso(BASE), durationMs),
-    play("b", iso(BASE + gapMs), 200_000),
-    play("z", iso(BASE + gapMs + 10_000_000), 200_000),
+    play("a", iso(BASE), 200_000),
+    play("b", iso(BASE + gapMs), durationMs),
   ]);
-  return (await verdicts())[`a@${iso(BASE)}`];
+  return (await verdicts())[`b@${iso(BASE + gapMs)}`];
 }
 
 describe("the 35% skip boundary", () => {
@@ -65,20 +64,20 @@ describe("the 35% skip boundary", () => {
     expect(await verdictOf(1, 0)).toBe(0);
   });
 
-  it("the newest play stays pending, and a pending play still counts as a play", async () => {
+  it("a lone play is ruled on arrival (no predecessor → a listen) and counts", async () => {
     await recordPlays([play("only", iso(BASE), DUR)]);
-    expect(await verdicts()).toEqual({ [`only@${iso(BASE)}`]: null });
+    expect(await verdicts()).toEqual({ [`only@${iso(BASE)}`]: 0 });
     expect((await recomputeAllTimeStats()).plays).toBe(1);
     expect(await searchHistory("")).toHaveLength(1);
   });
 
   it("a skipped play is excluded from every counter but keeps its row", async () => {
     await recordPlays([
-      play("skipme", iso(BASE), DUR),
-      play("kept", iso(BASE + 1_000), 200_000),
+      play("kept", iso(BASE), 200_000),
+      play("skipme", iso(BASE + 1_000), DUR),
       play("last", iso(BASE + 600_000), 200_000),
     ]);
-    expect((await verdicts())[`skipme@${iso(BASE)}`]).toBe(1);
+    expect((await verdicts())[`skipme@${iso(BASE + 1_000)}`]).toBe(1);
     const stats = await recomputeAllTimeStats();
     expect(stats.plays).toBe(2);
     expect(await searchHistory("Song skipme")).toEqual([]);
@@ -87,7 +86,7 @@ describe("the 35% skip boundary", () => {
   });
 
   // Reading chosen for the two tests below: with two plays at the same instant the rule's
-  // "next play" is ambiguous, so the store may rule either one the zero-length listen. What
+  // "previous play" is ambiguous, so the store may rule either one the zero-length listen. What
   // it may NOT do is let the answer depend on which one was handed to recordPlays first —
   // db.ts:556-563 exists precisely so a verdict is a fact about the timeline rather than an
   // arrival artifact, and db.ts:786-790 states the rule in terms of the timeline only.
@@ -118,10 +117,9 @@ describe("the 35% skip boundary", () => {
   });
 
   it("a tied play arriving LATE converges on the same verdicts as one arriving together", async () => {
-    // The predecessor re-open (db.ts:567-572) selects `p.played_at < :at` — strictly less —
-    // so a play landing at a timestamp already in the store cannot re-open its tie-mate,
-    // whose verdict was measured against a successor that is no longer adjacent. That is the
-    // exact staleness db.ts:556-563 says this machinery exists to prevent.
+    // The out-of-order re-open (db.ts recordPlays) must cover TIE-MATES as well as the strict
+    // successor: a play landing at a timestamp already in the store can become its
+    // tie-mate's predecessor, and that tie-mate's verdict then measured the wrong gap.
     const at = iso(BASE);
     const X = play("X", at, DUR);
     const Z = play("Z", at, DUR);
