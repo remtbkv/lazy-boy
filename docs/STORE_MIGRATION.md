@@ -1,8 +1,10 @@
 # Store migration: the app's data to Turso, the logs stay on the Zenbook
 
-Status: **planned 2026-10-13, not started.** Rem asked for it on 2026-10-12/13 after a 20-second Home
-load and a search that sat on "Searching…" for 49 seconds. The work runs as headless lanes on the
-enterprise seats, after STAT 139 work (section 7). This file is the contract every lane works from;
+Status: **planned 2026-10-13, not started; nothing runs before 2026-10-15 8:00 PM** (Rem, Oct 13
+8:16 PM: "do it in 2 days, don't do it tonight"; lanes 1901 and 1907 carry `not_before=2026-10-15T20:00`
+and every other lane waits on them). Rem asked for it on 2026-10-12/13 after a 20-second Home load and
+a search that sat on "Searching…" for 49 seconds. The work runs as headless lanes on the enterprise
+seats, after STAT 139 work (section 7). This file is the contract every lane works from;
 a lane that finds a premise here wrong stops and says so (its outcome log, section 12) rather than
 working around it.
 
