@@ -235,10 +235,7 @@ All check `auth()` and 401 on no session, except `cron/sync` (cron secret, no se
 - `lib/filter.ts` — `fuzzyFilter` (substring + prefix-priority name search).
 - `components/album-thumb.tsx` — album art + music-note fallback.
 - `components/sort-menu.tsx` — the "Sort by ▾" dropdown.
-- `components/floating-bar.tsx` — the bottom-centered search/see-more pill.
-- `components/animated-number.tsx` — `AnimatedNumber`: tweens a count from its old value to a
-  new one (ease-out, reduced-motion aware, no first-paint count-up). Use for any number that
-  updates live.
+- `app/(app)/search-island.tsx` — `SearchIsland`, the bottom-centered search pill.
 
 ---
 
