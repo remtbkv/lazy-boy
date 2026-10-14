@@ -1,6 +1,6 @@
 # What Am I?
 
-Next.js web app (claude slop + careful, loving human guidance) which, at its core, fixes an annoying issue in Spotify where "duplicates" aren't properly recognized. There could be the same song but in a different (e.g. deluxe) album by the same artist, and the song will not be flagged as a duplicate. So I personally did not like this and so made a very simple app initially to just "clean" out a playlist by removing all real duplicates. Then added more functionality. Now we're here.
+Next.js web app which, at its core, fixes an annoying issue in Spotify where "duplicates" aren't properly recognized. There could be the same song but in a different (e.g. deluxe) album by the same artist, and the song will not be flagged as a duplicate. So I personally did not like this and so made a very simple app initially to just "clean" out a playlist by removing all real duplicates. Then added more functionality. Now we're here.
 
 Note that due to an api update from Spotify, developer apps such as this one can no longer be used by other users unless manually whitelisted by their creator. So if you want to use this, either ask me to whitelist you (don't) or just set it up yourself (easy nowadays). Instructions below.
 
