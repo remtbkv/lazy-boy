@@ -7,6 +7,7 @@ import {
   getHarvestGate,
   getLibraryScanAttemptAt,
   getLibrarySyncedAt,
+  getSpotifyTokens,
   ledgerSyncCall,
   pruneApiLog,
   pruneClientMetrics,
@@ -83,14 +84,22 @@ export async function GET(req: Request) {
   // Guarded: this runs OUTSIDE the try below, and a store hiccup inside the token read
   // used to escape as a 500 — feeding the external pinger's auto-disable, the exact storm
   // the 429 branch dodges (wave-2 audit, B5).
+  let tokenReadFailed = false;
   const token = await getValidAccessToken().catch((e) => {
     // Logged: a persistent store outage otherwise reads as an endless silent
     // "nobody signed in" (wave-3 adversarial review, F1).
     console.error("[cron] token read failed", e);
+    tokenReadFailed = true;
     return null;
   });
   if (!token) {
-    // Nobody signed in / refresh token dead / store hiccup — nothing to do, not an error.
+    // No stored token at all (signed out, or a dead refresh token cleared it): closed-app
+    // capture has STOPPED, and a 200 here let the pinger log success for weeks (burn review
+    // 2026-10-03, M1). 503 so the pinger's unit fails visibly. A store hiccup or a transient
+    // refresh failure still answers 200 — those heal on their own.
+    const signedOut =
+      !tokenReadFailed && (await getSpotifyTokens().then((t) => t === null, () => false));
+    if (signedOut) return Response.json({ ok: false, error: "no token" }, { status: 503 });
     return Response.json({ ok: true, skipped: "no token" });
   }
   // Getter for the longer-running work below — re-validates through the shared
