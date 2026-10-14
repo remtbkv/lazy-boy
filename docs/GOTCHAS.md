@@ -565,16 +565,22 @@ returns the id on every reply, so that beacon is free — it rides the 6s poll t
 makes. But **Vercel skew protection pins a client's requests to the deployment that served
 it**, which is what kept the burner tab on pre-fix server actions for a day: a pinned tab's
 poll answers with the pinned tab's *own* id, so its "match" means nothing and that beacon
-alone would never fire. The escape is the cookie that does the pinning. Every ~5 min (a
-counter on the existing poll — no second timer) the leader fetches `/api/build` with
-`credentials: "omit"`; no cookie goes out, so the request lands on the *current* deployment
+alone would never fire. The escape is the cookie that does the pinning. At most every 5 min,
+whichever tab is polling (the leader, or a starved follower on its rescue poll — no second
+timer) also fetches `/api/build` with `credentials: "omit"`; no cookie goes out, so the request lands on the *current* deployment
 and its answer can be believed. Hence the asymmetry in the decision module: an authoritative
 match clears the streak, a poll match clears only a streak no probe has contradicted, and a
 probe saying "stale" while the poll says "current" is not a tie — that divergence *is* the
 pinned-tab signature and counts as mismatch. `/api/build` is deliberately unauthenticated
 (a request with no credentials is one no session can attach to) and must stay free of auth
-and DB work; a tab hits it for as long as it stays open. Followers never fetch either
-endpoint — they read both ids off the leader's broadcast.
+and DB work; a tab hits it for as long as it stays open. Other tabs read both ids off the
+poller's broadcast, with two rules for multi-tab use (review K1, 2026-10-03). A relayed probe
+answer carries `authAt`, when that probe ran, and is dropped after 10 min — re-stamped as
+fresh on receipt, a hidden old leader's pre-deploy probe reload-looped a fresh tab for hours.
+And a relayed MISMATCH, poll or probe, never counts on the sender's word: the sender may be
+the stale tab (its pinned poll and its recent pre-deploy probe both report its old id), so it
+makes the receiving tab probe for itself, and only once its own probe has seen a mismatch do
+relayed mismatches feed the streak (`relayedReading`).
 
 The three brakes each cover a different failure, so don't tighten them casually: a mismatch
 must hold **continuously for 3 min**, because a deploy mid-propagation serves old and new
@@ -583,8 +589,10 @@ replies alternately and a *fresh* tab seeing that flap must not reload; **one re
 otherwise reload-loop; and a reload is **deferred while the tab is visible and was touched in
 the last 60 s**, so nobody's page is yanked mid-use — the streak keeps running and it fires
 at the next idle or hidden moment, and a hidden tab (the expensive kind) reloads immediately.
-End to end a pinned stale tab reloads within ~3–8 min of a deploy (probe cadence + debounce).
-Known answers, including the pinned case and its control: `node scripts/test-build-skew.mjs`.
+End to end a pinned stale tab reloads within ~3–8 min of a deploy (probe cadence + debounce),
+including a visible follower whose leader is hidden. Known answers, including the pinned case
+and its control: `node scripts/test-build-skew.mjs`; the multi-tab wiring, simulated against
+the real helpers: `tests/build-skew-tabs.test.ts`.
 
 ## The now-playing localStorage cache must never resurrect a dead session
 

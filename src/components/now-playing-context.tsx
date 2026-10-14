@@ -9,7 +9,15 @@ import {
   useState,
 } from "react";
 import { playerSetPlayingAction } from "@/app/(app)/actions";
-import { NO_SKEW, evaluateSkew, type SkewSource, type SkewStreak } from "@/lib/build-skew";
+import {
+  AUTH_MAX_AGE_MS,
+  NO_SKEW,
+  evaluateSkew,
+  probeDue,
+  relayedReading,
+  type SkewSource,
+  type SkewStreak,
+} from "@/lib/build-skew";
 
 export type NowPlayingTrack = {
   id: string;
@@ -45,7 +53,9 @@ const Ctx = createContext<NowPlayingValue | null>(null);
 
 // Cross-tab messages on the shared BroadcastChannel.
 type NPMessage =
-  | { type: "state"; playing: Playing; at: number; build?: string; authBuild?: string } // a poll result
+  // A poll result. `authAt` is when the sender's /api/build probe ran — the relayed reading
+  // keeps its own age instead of looking fresh on receipt (src/lib/build-skew.ts).
+  | { type: "state"; playing: Playing; at: number; build?: string; authBuild?: string; authAt?: number }
   | { type: "optimistic"; playing: Playing; until: number; at: number } // a user action
   | { type: "request" }; // a new tab asking the leader for the current state
 
@@ -63,8 +73,6 @@ const LEADER_LOCK = "lb-nowplaying-leader";
 // stamped — the throttle that keeps a broken beacon from reload-looping.
 const BUILD_ID = process.env.NEXT_PUBLIC_BUILD_ID;
 const RELOAD_STAMP_KEY = "lb-build-reload-at";
-// Polls between unpinned /api/build probes: 50 × 6s ≈ 5 min.
-const BUILD_PROBE_EVERY = 50;
 const POLL_MS = 6000;
 // A track boundary is predictable (progress + duration are both known), so instead of
 // waiting up to POLL_MS for the steady interval to notice a song change, the poller that
@@ -133,12 +141,14 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
   const streakRef = useRef<SkewStreak>(NO_SKEW);
   const serverBuildRef = useRef<string | undefined>(undefined);
   const authBuildRef = useRef<string | undefined>(undefined);
-  // When the authoritative id was last OBSERVED. The visibilitychange re-check replays the
-  // refs as if current; replaying a pre-deploy authoritative match with no age bound could
-  // clear a genuine skew streak indefinitely while probes fail (audit 2026-08-19, T2.15).
+  // When the authoritative id was last OBSERVED — by this tab's probe, or by the probe of the
+  // tab that relayed it. The visibilitychange re-check replays the refs as if current;
+  // replaying a pre-deploy authoritative match with no age bound could clear a genuine skew
+  // streak indefinitely while probes fail (audit 2026-08-19, T2.15).
   const authBuildAtRef = useRef(0);
+  // This tab's own last /api/build attempt (probeDue's clock).
+  const lastProbeAtRef = useRef<number | null>(null);
   const lastInteractionRef = useRef<number | null>(null);
-  const pollTickRef = useRef(0);
 
   const checkSkew = useCallback((serverBuild: string | undefined, source: SkewSource) => {
     // No beacon = no information (an older server, a probe that didn't come back). Leave the
@@ -177,9 +187,10 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
 
   // The unpinned reading: no credentials means no deployment-pinning cookie, so this lands on
   // the CURRENT deployment even when everything else this tab does is pinned to an old one.
-  // Cheap (no auth, no DB) but not free, so it runs on a counter over the existing poll —
-  // every BUILD_PROBE_EVERY ticks ≈ 5 min — rather than on a timer of its own.
+  // Cheap (no auth, no DB) but not free, so it rides the existing poll — whichever tab polls,
+  // at most every PROBE_EVERY_MS (probeDue) — rather than a timer of its own.
   const probeCurrentBuild = useCallback(async () => {
+    lastProbeAtRef.current = Date.now();
     try {
       const res = await fetch("/api/build", { credentials: "omit", cache: "no-store" });
       if (!res.ok) return;
@@ -202,7 +213,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       checkSkew(serverBuildRef.current, "poll");
       // Replay the authoritative reading only while it's reasonably current (2 probe
       // periods) — an undated replay could keep absolving a genuinely stale tab.
-      if (Date.now() - authBuildAtRef.current < 10 * 60 * 1000) {
+      if (Date.now() - authBuildAtRef.current < AUTH_MAX_AGE_MS) {
         checkSkew(authBuildRef.current, "authoritative");
       }
     };
@@ -271,11 +282,10 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
   // tab updates without its own fetch.
   const pollOnce = useCallback(async () => {
     if (Date.now() < suppressUntil.current) return;
-    // Only the tab doing real network calls carries the probe, on its own counter; followers
-    // get the reading off its broadcast.
-    if (isLeaderRef.current && pollTickRef.current++ % BUILD_PROBE_EVERY === 0) {
-      void probeCurrentBuild();
-    }
+    // Whichever tab is polling probes too — the leader, or a starved follower on its rescue
+    // poll. A leader-only probe left a visible stale follower of a hidden idle leader with no
+    // probe at all (review K1). Other tabs get the reading off this tab's broadcast.
+    if (probeDue(Date.now(), lastProbeAtRef.current)) void probeCurrentBuild();
     const seq = ++refreshSeq.current;
     try {
       const res = await fetch("/api/now-playing", { cache: "no-store" });
@@ -297,6 +307,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
           at,
           build: data.build,
           authBuild: authBuildRef.current,
+          authAt: authBuildAtRef.current,
         });
         // Only the owner of real polling schedules the next boundary poll — otherwise every
         // open tab would independently hit Spotify at track boundaries, multiplying the rate
@@ -371,6 +382,28 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       /* ignore */
     }
 
+    // A build id another tab relayed. The sender may be the stale one (its pinned poll and
+    // its pre-deploy probe both report its old id), so a mismatch only counts once this
+    // tab's own probe has seen one; until then it prompts that probe (relayedReading).
+    const onRelayed = (build: string | undefined, source: SkewSource, authAt?: number) => {
+      const act = relayedReading({
+        clientBuild: BUILD_ID,
+        build,
+        source,
+        authAt,
+        now: Date.now(),
+        heldAuthAt: authBuildAtRef.current,
+        lastProbeAt: lastProbeAtRef.current,
+        confirmed: streakRef.current.authMismatch,
+      });
+      if (act === "apply") {
+        if (source === "authoritative" && authAt !== undefined) authBuildAtRef.current = authAt;
+        checkSkew(build, source);
+      } else if (act === "probe") {
+        void probeCurrentBuild();
+      }
+    };
+
     bc.onmessage = (e: MessageEvent<NPMessage>) => {
       const msg = e.data;
       if (msg.type === "state") {
@@ -383,9 +416,8 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
           markNowPlayingReady();
           // Authoritative goes LAST: it is the one reading allowed to clear the streak, so
           // it must land after the poll id it overrules.
-          checkSkew(msg.build, "poll");
-          if (msg.authBuild) authBuildAtRef.current = Date.now();
-          checkSkew(msg.authBuild, "authoritative");
+          onRelayed(msg.build, "poll");
+          onRelayed(msg.authBuild, "authoritative", msg.authAt);
         }
       } else if (msg.type === "optimistic") {
         // A user action elsewhere — apply it and match its suppression so neither this tab's
@@ -407,6 +439,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
             at: lastAppliedAt.current,
             build: serverBuildRef.current,
             authBuild: authBuildRef.current,
+            authAt: authBuildAtRef.current,
           });
         } else {
           void pollOnceRef.current();
@@ -462,7 +495,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       bc.close();
       bcRef.current = null;
     };
-  }, [pollOnce, applyShared, broadcast, checkSkew]);
+  }, [pollOnce, applyShared, broadcast, checkSkew, probeCurrentBuild]);
 
   // Show a track as playing immediately (e.g. double-click a song); the next poll confirms.
   const playOptimistic = useCallback(

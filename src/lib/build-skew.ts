@@ -107,3 +107,58 @@ export function evaluateSkew(input: SkewInput): SkewDecision {
 
   return { streak: next, reload: true };
 }
+
+// ── Who probes, and which relayed probes count ─────────────────────────────────────────────
+// Only polls reach the server, and which tab polls changes: the leader while visible or at a
+// track end, a starved visible follower on its self-rescue. So the probe rides whichever tab
+// actually polls, on a wall clock per tab — a leader-only poll counter left a visible stale
+// follower of a hidden idle leader with no probe at all, forever (review K1, 2026-10-03).
+export const PROBE_EVERY_MS = 5 * 60_000;
+// A probe's answer describes the deployment at the moment it ran. Relayed to another tab it
+// keeps that age: re-stamped as fresh on receipt, a hidden old leader's pre-deploy probe kept
+// telling a fresh follower it was stale, once per throttle window, for hours (review K1).
+export const AUTH_MAX_AGE_MS = 10 * 60_000;
+
+/** Whether a tab about to poll should also probe /api/build. `lastProbeAt` is this tab's own
+ *  last attempt (successful or not), so a failing probe still waits its turn. */
+export function probeDue(now: number, lastProbeAt: number | null): boolean {
+  return lastProbeAt === null || now - lastProbeAt >= PROBE_EVERY_MS;
+}
+
+export type RelayedReading = {
+  /** This bundle's build id. */
+  clientBuild: string | undefined;
+  /** A build id another tab relayed: its poll's id, or its probe's answer. */
+  build: string | undefined;
+  source: SkewSource;
+  /** When the relayed probe ran. Absent from bundles older than this field — their probe
+   *  relays can't be dated, so they are not believed. Unused for poll ids. */
+  authAt?: number;
+  now: number;
+  /** When this tab's newest probe reading (own or relayed) was taken; 0 if none. */
+  heldAuthAt: number;
+  /** This tab's own last probe attempt, for probeDue. */
+  lastProbeAt: number | null;
+  /** This tab's own probe has already reported a mismatch in the current streak
+   *  (streak.authMismatch — only an own probe can set it, see "probe" below). */
+  confirmed: boolean;
+};
+
+/** What a tab does with a build id relayed by another tab.
+ *  "apply" — feed it to evaluateSkew. A MATCH always applies (it is what lets a relay clear a
+ *  streak); a MISMATCH applies only once this tab's own probe has confirmed one.
+ *  "probe" — an unconfirmed MISMATCH. The sender may be the stale one: a stale leader's
+ *  pinned poll reports its own old id, and up to AUTH_MAX_AGE_MS after a deploy its
+ *  pre-deploy probe still reads as fresh — either would mark a tab loaded since then as
+ *  stale. So the tab asks /api/build itself (when due), and its own answer decides.
+ *  "ignore" — no id; a probe reading undated, too old, or older than one this tab holds; or
+ *  an unconfirmed mismatch while this tab's own probe isn't due. */
+export function relayedReading(r: RelayedReading): "apply" | "probe" | "ignore" {
+  if (!r.build) return "ignore";
+  if (r.source === "authoritative") {
+    if (r.authAt === undefined) return "ignore";
+    if (r.now - r.authAt > AUTH_MAX_AGE_MS || r.authAt < r.heldAuthAt) return "ignore";
+  }
+  if (r.build === r.clientBuild || r.confirmed) return "apply";
+  return probeDue(r.now, r.lastProbeAt) ? "probe" : "ignore";
+}
