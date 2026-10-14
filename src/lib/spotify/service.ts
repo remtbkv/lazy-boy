@@ -162,11 +162,11 @@ export class Service {
    *
    *  Spotify's GET /me/player/queue is forbidden for many apps (403), so we use the
    *  original skip-through trick: queue a rare sentinel track followed by the current
-   *  track, mute, then skip forward collecting each song until we reach the sentinel,
-   *  and finally skip past it back onto the re-queued current track and restore the
-   *  position + volume. Paced with small sleeps so fast skipping isn't rate-limited. */
+   *  track, mute, then skip forward collecting each song until the sentinel is followed
+   *  by the re-queued current track (a lone sentinel is a genuine queue entry), which
+   *  leaves playback back on the original song; restore the position + volume. Paced with small sleeps so fast skipping isn't rate-limited. */
   async saveQueue(): Promise<{ id: string; name: string; count: number }> {
-    const SENTINEL_ID = "6sVK7RXMHRGxAefiqEGEbP"; // "bittersweet" by $up1 — unlikely to be queued
+    const SENTINEL_ID = "6sVK7RXMHRGxAefiqEGEbP"; // "bittersweet" by $up1 — Rem plays it, so it may also be queued
     const SENTINEL_URI = `spotify:track:${SENTINEL_ID}`;
     const MAX = 100; // Spotify queues cap around 100
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -202,24 +202,18 @@ export class Service {
 
       const playingTrack = async () =>
         (await this.resources.currentlyPlaying())?.track ?? null;
-      let curr = await playingTrack();
-      let n = 0;
-      while (curr && curr.id !== SENTINEL_ID && n <= MAX + 5) {
-        if (n === MAX - 7) await sleep(10000); // let the API's queue view catch up
-        collected.push({ id: curr.id, uri: curr.uri });
-        n++;
+      // Skip once and wait for the track to actually change; nudge again if it stalls.
+      // DEADLINED: with repeat-one on the device, `next` replays the same id forever and
+      // this used to spin unboundedly at 1-2 Spotify calls per 150ms — a runaway call
+      // generator (audit 2026-08-19, T2.12). 15s of no movement = the walk is stuck; bail
+      // with what's collected (the catch below already saves partials).
+      const advance = async (from: Track): Promise<Track | null> => {
         await this.resources.nextTrack();
         await sleep(300);
-        // Wait for the track to actually change; nudge again if it stalls. DEADLINED:
-        // with repeat-one on the device, `next` replays the same id forever and this
-        // inner loop used to spin unboundedly at 1-2 Spotify calls per 150ms — a runaway
-        // call generator (audit 2026-08-19, T2.12). 15s of no movement = the walk is
-        // stuck; bail with what's collected (the catch below already saves partials).
-        const prevId = curr.id;
-        let next: Track | null = curr;
+        let next: Track | null = from;
         let nudgedAt = Date.now();
         const stuckAt = Date.now();
-        while (next && next.id === prevId) {
+        while (next && next.id === from.id) {
           if (Date.now() - stuckAt > 15_000) {
             throw new Error("queue walk stalled — same track keeps playing (repeat-one on?)");
           }
@@ -231,11 +225,27 @@ export class Service {
             next = await playingTrack();
           }
         }
-        curr = next;
+        return next;
+      };
+      let curr = await playingTrack();
+      let n = 0;
+      while (curr && n <= MAX + 5) {
+        if (curr.id === SENTINEL_ID) {
+          // The sentinel is a real song Rem owns and plays, so it alone doesn't mark the
+          // end: the end is the sentinel followed by the re-queued current track, and
+          // that skip has already put playback back on the original song.
+          const after = await advance(curr);
+          if (!after || after.uri === currentUri) break;
+          collected.push({ id: curr.id, uri: curr.uri });
+          n++;
+          curr = after;
+          continue;
+        }
+        if (n === MAX - 7) await sleep(10000); // let the API's queue view catch up
+        collected.push({ id: curr.id, uri: curr.uri });
+        n++;
+        curr = await advance(curr);
       }
-      // Skip past the sentinel back onto the re-queued current track, then restore.
-      await this.resources.nextTrack();
-      await sleep(300);
       await this.resources.seek(position);
     } catch (e) {
       // Spotify can refuse a player command (403 "Player command failed") on the
