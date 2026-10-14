@@ -63,7 +63,7 @@ describe("removeFromPlaylistAction", () => {
     state.removeCache = async () => {
       throw new Error("store down");
     };
-    const r = await actions.removeFromPlaylistAction("p1", "spotify:track:t1");
+    const r = await actions.removeFromPlaylistAction("p1", "spotify:track:t1", 0);
     expect(r).toEqual({ ok: true });
   });
 });

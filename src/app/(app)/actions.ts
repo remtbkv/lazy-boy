@@ -6,7 +6,7 @@ import { unstable_rethrow } from "next/navigation";
 import { auth, signIn, signOut, getValidAccessToken, spotifyAccessToken } from "@/lib/auth";
 import { getSpotify } from "@/lib/session";
 import { spotifyClient, SpotifyError, type Track } from "@/lib/spotify";
-import { intersect, keyOf, subtract } from "@/lib/spotify/domain";
+import { intersect, keyOf, reinsertPositions, subtract } from "@/lib/spotify/domain";
 import { runTask, taskDone } from "@/lib/tasks/registry";
 import { cleanPhase1, reconcileClean } from "@/lib/clean/run";
 import { syncLibrary } from "@/lib/sync/library";
@@ -18,6 +18,7 @@ import {
   findTrackWithPlaylists,
   getCleanBackupPref,
   getMeId,
+  getPlaylistSnapshot,
   getPlaylistTracks,
   getPlaylistTrackOrder,
   playedTracksInContext,
@@ -409,13 +410,61 @@ export async function saveToLikedAction(trackId: string): Promise<ActionResult> 
 export async function removeFromPlaylistAction(
   playlistId: string,
   uri: string,
+  position: number,
 ): Promise<ActionResult> {
   try {
     const sp = await getSpotify("action:removeFromPlaylist");
+    // Spotify's DELETE takes EVERY occurrence of a uri. When the playlist holds this song
+    // more than once, remove all and put the other copies back where they were (burn
+    // lazyboy-review 2026-10-03, P1) — but only against the list the user is looking at.
+    const order = (await getPlaylistTrackOrder(playlistId)).map((t) => t.uri);
+    const copies = order.filter((u) => u === uri).length;
+    let keep: number[] = [];
+    if (copies > 1) {
+      const changed = "This playlist changed on Spotify. The list is refreshed; try again.";
+      if (order[position] !== uri) {
+        revalidatePath(`/playlists/${playlistId}`);
+        return { ok: false, error: changed };
+      }
+      const [live, cachedSnap] = await Promise.all([
+        sp.playlist(playlistId),
+        getPlaylistSnapshot(playlistId),
+      ]);
+      // The cache drops local files and episodes, so its positions are not Spotify's.
+      if (live.trackCount !== order.length) {
+        return {
+          ok: false,
+          error: "This playlist has local files or episodes, so the other copy can't be put back in place. Remove it in Spotify.",
+        };
+      }
+      // A stale snapshot is normal right after this app's own edit; the positions still
+      // hold if the live list is the cached one.
+      if (!cachedSnap || live.snapshot !== cachedSnap) {
+        const tracks = await sp.playlistTracks(playlistId);
+        if (tracks.length !== order.length || tracks.some((t, i) => t.uri !== order[i])) {
+          await storePlaylistTracks(playlistId, tracks, live.snapshot);
+          revalidatePath(`/playlists/${playlistId}`);
+          return { ok: false, error: changed };
+        }
+      }
+      keep = reinsertPositions(order, uri, position);
+    }
     await sp.removeFromPlaylist(playlistId, uri);
+    try {
+      for (const at of keep) await sp.addItemsAt(playlistId, [uri], at);
+    } catch {
+      await removeCachedPlaylistTrack(playlistId, uri).catch(() => {});
+      revalidatePath(`/playlists/${playlistId}`);
+      return {
+        ok: false,
+        error: "Spotify removed every copy and putting the other one back failed. Re-add it in Spotify.",
+      };
+    }
     // Keep the cache in step. Spotify has already removed it, so a failed cache write must
     // not report the removal as failed; the next library sync heals the row.
-    await removeCachedPlaylistTrack(playlistId, uri).catch(() => {});
+    await removeCachedPlaylistTrack(playlistId, uri, keep.length ? position : undefined).catch(
+      () => {},
+    );
     revalidatePath(`/playlists/${playlistId}`);
     return { ok: true };
   } catch (e) {

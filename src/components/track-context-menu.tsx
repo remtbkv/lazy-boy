@@ -23,7 +23,7 @@ export function TrackContextMenu({
   x,
   y,
   onClose,
-  playlistId,
+  removeFrom,
   onRemoved,
   withPlay,
   playFrom,
@@ -34,9 +34,9 @@ export function TrackContextMenu({
   y: number;
   onClose: () => void;
   // When set (the track lives in one of the user's own playlists), the menu
-  // offers "Remove from this playlist".
-  playlistId?: string;
-  onRemoved?: (track: Track) => void;
+  // offers "Remove from this playlist" for the row at `position` (playlist order).
+  removeFrom?: { playlistId: string; position: number };
+  onRemoved?: () => void;
   // "Play now" (bare track, no context) — the search rows opt in.
   withPlay?: boolean;
   // Play-focused menu only (no Save to Liked / Share) — the search/day rows use this.
@@ -158,16 +158,16 @@ export function TrackContextMenu({
           onClick={() => run(() => saveToLikedAction(track.id), "Saved to Liked Songs")}
         />
       )}
-      {playlistId ? (
+      {removeFrom ? (
         <Item
         icon={<CircleMinus className="size-4" />}
         label="Remove from playlist"
         disabled={pending}
         onClick={() =>
           run(
-            () => removeFromPlaylistAction(playlistId, track.uri),
+            () => removeFromPlaylistAction(removeFrom.playlistId, track.uri, removeFrom.position),
             "Removed from playlist",
-            () => onRemoved?.(track),
+            () => onRemoved?.(),
           )
         }
         />

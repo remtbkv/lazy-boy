@@ -131,6 +131,12 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   identity the dedupe/clean features use (FEATURES § Track identity). Resume does
   exactly this: it matches a play to a playlist position by id first, then falls
   back to `(name, artist)`, so relinked plays still count.
+- **`DELETE /playlists/{id}/items` removes EVERY occurrence of a uri** (per-position
+  removal is gone). Removing one copy of a repeated song therefore means delete all,
+  then `addItemsAt` the others back. `removeFromPlaylistAction` does that only after
+  checking the cached list is the live one (snapshot, else a full list compare) and
+  refuses playlists holding local files or episodes, whose cached positions aren't
+  Spotify's. The page badges only the later copies (`duplicatePositions`).
 
 ## Architecture added recently
 

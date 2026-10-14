@@ -2146,15 +2146,21 @@ export async function getPlaylistTrackOrder(playlistId: string): Promise<Playlis
 }
 
 /** Drop one track from a playlist's cache (after a remove) so it doesn't reappear on
- *  the next render before the background refresh. */
-export async function removeCachedPlaylistTrack(playlistId: string, uri: string): Promise<void> {
+ *  the next render before the background refresh. With `position`, only that row goes
+ *  (one copy of a repeated track); without it, every row of the uri. */
+export async function removeCachedPlaylistTrack(
+  playlistId: string,
+  uri: string,
+  position?: number,
+): Promise<void> {
   const client = await getClient();
   await client.batch(
     [
       {
         sql: `DELETE FROM playlist_tracks
-              WHERE playlist_id = :pid AND track_id IN (SELECT id FROM tracks WHERE uri = :uri)`,
-        args: { pid: playlistId, uri },
+              WHERE playlist_id = :pid AND track_id IN (SELECT id FROM tracks WHERE uri = :uri)
+              ${position === undefined ? "" : "AND position = :pos"}`,
+        args: position === undefined ? { pid: playlistId, uri } : { pid: playlistId, uri, pos: position },
       },
       {
         // COMPACT the positions after the delete. diffPositions treats the cached array's

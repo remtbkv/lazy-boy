@@ -33,12 +33,13 @@ const DEFAULT_DIR: Record<Exclude<Sort, "original">, "asc" | "desc"> = {
 
 export function TrackList({
   tracks,
-  duplicateIds,
+  duplicatePositions,
   playlistId,
   canRemove = false,
 }: {
   tracks: Track[];
-  duplicateIds: string[];
+  // Indices into `tracks` of the later copies of a repeated song (never the first copy).
+  duplicatePositions: number[];
   // The playlist these tracks belong to; only passed to the menu (for "Remove
   // from this playlist") when it's one the user owns.
   playlistId?: string;
@@ -47,10 +48,12 @@ export function TrackList({
   const { playing, toggle, playOptimistic } = useNowPlaying();
   const currentId = playing?.track.id;
   const isPlayingNow = playing?.isPlaying ?? false;
-  const dupes = useMemo(() => new Set(duplicateIds), [duplicateIds]);
+  const dupes = useMemo(() => new Set(duplicatePositions), [duplicatePositions]);
   const [sort, setSort] = useState<Sort>("original");
   const [dir, setDir] = useState<"asc" | "desc">("asc");
-  const [menu, setMenu] = useState<{ x: number; y: number; track: Track } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; track: Track; pos: number } | null>(
+    null,
+  );
   // Spotify-ported row selection: click or right-click holds a wash on the row (see
   // den.css .den-rowstate) so the context menu's target is visible; outside click clears.
   const [selRow, setSelRow] = useState<string | null>(null);
@@ -67,9 +70,10 @@ export function TrackList({
     document.addEventListener("pointerdown", onDown);
     return () => document.removeEventListener("pointerdown", onDown);
   }, []);
-  // URIs removed this session — filtered out immediately so the row disappears
-  // without waiting on the server revalidation.
-  const [removed, setRemoved] = useState<Set<string>>(new Set());
+  // Rows (indices into `tracks`) removed this session — filtered out immediately so the row
+  // disappears without waiting on the server revalidation. By position, not uri: removing
+  // one copy of a repeated song keeps the others.
+  const [removed, setRemoved] = useState<Set<number>>(new Set());
   // Once the server list changes it's authoritative — drop the optimistic set, or a
   // track later re-added to the playlist would stay hidden until a full remount.
   // (Adjust-state-during-render, per React's "you might not need an effect".)
@@ -110,22 +114,23 @@ export function TrackList({
   }
 
   const sorted = useMemo(() => {
-    const base = removed.size ? tracks.filter((t) => !removed.has(t.uri)) : tracks;
+    const all = tracks.map((t, pos) => ({ t, pos }));
+    const base = removed.size ? all.filter((r) => !removed.has(r.pos)) : all;
     if (sort === "original") return base;
     const f = dir === "asc" ? 1 : -1;
     const arr = [...base];
     switch (sort) {
       case "title":
-        arr.sort((a, b) => f * a.title.localeCompare(b.title));
+        arr.sort(({ t: a }, { t: b }) => f * a.title.localeCompare(b.title));
         break;
       case "artist":
-        arr.sort((a, b) => f * a.artist.localeCompare(b.artist));
+        arr.sort(({ t: a }, { t: b }) => f * a.artist.localeCompare(b.artist));
         break;
       case "album":
-        arr.sort((a, b) => f * (a.album ?? "").localeCompare(b.album ?? ""));
+        arr.sort(({ t: a }, { t: b }) => f * (a.album ?? "").localeCompare(b.album ?? ""));
         break;
       case "recent":
-        arr.sort((a, b) => f * (a.addedAt ?? "").localeCompare(b.addedAt ?? ""));
+        arr.sort(({ t: a }, { t: b }) => f * (a.addedAt ?? "").localeCompare(b.addedAt ?? ""));
         break;
     }
     return arr;
@@ -168,7 +173,7 @@ export function TrackList({
         </div>
 
         <ul>
-          {sorted.map((t, i) => {
+          {sorted.map(({ t, pos }, i) => {
             const isCurrent = !!currentId && currentId === t.id;
             return (
             <li key={`${t.id}-${i}`} id={`t-${t.id}`} className="scroll-mt-24">
@@ -184,7 +189,7 @@ export function TrackList({
                   e.preventDefault();
                   e.stopPropagation(); // don't let the menu's own outside-click closer fire
                   selectRow(`${t.id}-${i}`);
-                  setMenu({ x: e.clientX, y: e.clientY, track: t });
+                  setMenu({ x: e.clientX, y: e.clientY, track: t, pos });
                 }}
               >
                 <span className="flex items-center justify-end text-right text-xs tabular-nums text-muted-foreground">
@@ -227,7 +232,7 @@ export function TrackList({
                       >
                         {t.title}
                       </span>
-                      {dupes.has(t.id) ? (
+                      {dupes.has(pos) ? (
                         <Badge variant="secondary" className="shrink-0 text-[10px]">
                           duplicate
                         </Badge>
@@ -257,8 +262,8 @@ export function TrackList({
           x={menu.x}
           y={menu.y}
           onClose={() => setMenu(null)}
-          playlistId={canRemove ? playlistId : undefined}
-          onRemoved={(t) => setRemoved((prev) => new Set(prev).add(t.uri))}
+          removeFrom={canRemove && playlistId ? { playlistId, position: menu.pos } : undefined}
+          onRemoved={() => setRemoved((prev) => new Set(prev).add(menu.pos))}
         />
       ) : null}
     </div>

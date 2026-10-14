@@ -60,3 +60,32 @@ export function findDuplicates(tracks: Track[]): Track[] {
   }
   return dupes;
 }
+
+/**
+ * Positions (playlist order) of the duplicate occurrences: every track after the first that
+ * shares an (artist, title) with an earlier one. The playlist page badges THESE rows, never
+ * the first copy, so "remove the duplicate" targets a copy the user can lose.
+ */
+export function duplicatePositions(tracks: Track[]): number[] {
+  const seen = new Set<string>();
+  const out: number[] = [];
+  tracks.forEach((t, i) => {
+    const k = keyOf(t);
+    if (seen.has(k)) out.push(i);
+    else seen.add(k);
+  });
+  return out;
+}
+
+/**
+ * Removing ONE copy of a repeated uri: Spotify's DELETE takes every occurrence, so the other
+ * copies go back afterwards. Given the playlist's uris before the remove, returns the insert
+ * positions for the kept copies, applied in order (each insert sees the earlier ones).
+ */
+export function reinsertPositions(uris: string[], uri: string, position: number): number[] {
+  const out: number[] = [];
+  uris.forEach((u, i) => {
+    if (u === uri && i !== position) out.push(i > position ? i - 1 : i);
+  });
+  return out;
+}

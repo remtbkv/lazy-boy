@@ -11,7 +11,7 @@ import {
   getStoredPlaylist,
   storePlaylistTracks,
 } from "@/lib/db";
-import { findDuplicates } from "@/lib/spotify/domain";
+import { duplicatePositions } from "@/lib/spotify/domain";
 import { formatListenTime } from "@/lib/format";
 import { SpotifyError, type Track, type Playlist } from "@/lib/spotify";
 import { PlaylistThumb } from "@/components/playlist-thumb";
@@ -128,7 +128,7 @@ export default async function PlaylistDetailPage({
           <>
             <TrackList
               tracks={cachedTracks}
-              duplicateIds={findDuplicates(cachedTracks).map((t) => t.id)}
+              duplicatePositions={duplicatePositions(cachedTracks)}
               playlistId={id}
               canRemove={isMine}
             />
@@ -192,11 +192,10 @@ async function Tracks({
   }
 
   await storePlaylistTracks(id, tracks, snapshot);
-  const duplicateIds = findDuplicates(tracks).map((t) => t.id);
   return (
     <TrackList
       tracks={tracks}
-      duplicateIds={duplicateIds}
+      duplicatePositions={duplicatePositions(tracks)}
       playlistId={id}
       canRemove={canRemove}
     />
