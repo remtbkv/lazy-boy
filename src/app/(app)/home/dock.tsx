@@ -13,6 +13,7 @@ import {
 } from "@/app/(app)/actions";
 import { PlaylistsSync } from "@/components/playlists-sync";
 import { writeCleanActive } from "@/lib/clean-progress";
+import { settleAction } from "@/lib/home-recovery";
 import { toast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import type { DockData } from "../history-actions";
@@ -47,7 +48,13 @@ const ACTIONS: {
 // The action dock. Desktop: a quiet row of text buttons — hover reveals the surface
 // (no standing chips). Mobile: a 3-wide grid of tiles sized for thumbs; tapping opens
 // a bottom sheet with the action's description readable on touch.
-export function ActionDock({ playlists, backupPref, syncedAt }: DockData) {
+export function ActionDock({
+  playlists,
+  backupPref,
+  syncedAt,
+  loadFailed = false,
+  onRetry,
+}: DockData & { loadFailed?: boolean; onRetry?: () => void }) {
   const [open, setOpen] = useState<ActionKey | null>(null);
   // Once the pill row is scrolled, the LEFT edge also clips a pill mid-letter — without a
   // fade there it read as the page itself being chopped (Rem, 2026-08-13). The left fade
@@ -68,6 +75,8 @@ export function ActionDock({ playlists, backupPref, syncedAt }: DockData) {
       });
       return;
     }
+    // The library fetch failed earlier: opening a sheet is the moment it's needed, so retry.
+    if (loadFailed) onRetry?.();
     setOpen(key);
   };
 
@@ -132,6 +141,8 @@ export function ActionDock({ playlists, backupPref, syncedAt }: DockData) {
           action={action}
           playlists={playlists}
           backupPref={backupPref}
+          loadFailed={loadFailed}
+          onRetry={onRetry}
           onClose={() => setOpen(null)}
         />
       ) : null}
@@ -166,7 +177,10 @@ function QueuePopover({
   }, []);
   const save = () => {
     start(async () => {
-      const r = await saveQueueAction();
+      // settleAction: a transport failure (deploy skew, dropped connection, a platform timeout
+      // on the 1–2 min walk) rejects, and a rejection inside a transition replaced the whole
+      // of Home with the error boundary (burn review 2026-10-03, U1). It becomes a toast.
+      const r = await settleAction(saveQueueAction());
       if (r.ok) toast.success(`Saved to "${r.name}"`);
       else toast.error(r.error);
       dismiss();
@@ -205,11 +219,15 @@ function ActionSheet({
   action,
   playlists,
   backupPref,
+  loadFailed,
+  onRetry,
   onClose,
 }: {
   action: (typeof ACTIONS)[number];
   playlists: Playlist[];
   backupPref: boolean;
+  loadFailed: boolean;
+  onRetry?: () => void;
   onClose: () => void;
 }) {
   // Ordered selections. For "subtract" both lists are live and the toggle decides
@@ -290,17 +308,19 @@ function ActionSheet({
 
   // The real Spotify flows. Merge names itself, and Clean reports progress through the
   // app-wide CleanProgressWatcher (see the layout) — so neither needs a step of its own.
+  // Every action is awaited through settleAction, so a transport failure is a toast instead
+  // of an error boundary (see QueuePopover).
   const confirm = () => {
     start(async () => {
       switch (action.key) {
         case "resume": {
-          const r = await resumePlaylistAction(picked[0]);
+          const r = await settleAction(resumePlaylistAction(picked[0]));
           if (r.ok) toast.success(`Resuming "${nameOf(picked[0])}"`);
           else toast.error(r.error);
           break;
         }
         case "clean": {
-          const r = await startCleanAction(picked[0], backupPref);
+          const r = await settleAction(startCleanAction(picked[0], backupPref));
           if (!r.ok) {
             toast.error(r.error);
             break;
@@ -317,22 +337,24 @@ function ActionSheet({
           break;
         }
         case "queue": {
-          const r = await saveQueueAction();
+          const r = await settleAction(saveQueueAction());
           if (r.ok) toast.success(`Saved to "${r.name}"`);
           else toast.error(r.error);
           break;
         }
         case "merge": {
-          const r = await mergeAction(picked); // click order is the merge order
+          const r = await settleAction(mergeAction(picked)); // click order is the merge order
           if (r.ok) toast.success(`Merged ${r.count} songs into "${r.name}"`);
           else toast.error(r.error);
           break;
         }
         case "subtract": {
           // Step one: answer the question. Nothing is written until you save below.
-          const r = await subtractPreviewAction(
-            picked[0],
-            others.map((id) => ({ id, name: nameOf(id) })),
+          const r = await settleAction(
+            subtractPreviewAction(
+              picked[0],
+              others.map((id) => ({ id, name: nameOf(id) })),
+            ),
           );
           if (r.ok) {
             setPreview({ kept: r.kept, overlap: r.overlap });
@@ -350,7 +372,7 @@ function ActionSheet({
     if (!preview) return;
     const name = `${nameOf(picked[0])} minus ${others.map(nameOf).join(" + ")}`.slice(0, 100);
     start(async () => {
-      const r = await saveCompareDiffAction(name, preview.kept.map((t) => t.uri));
+      const r = await settleAction(saveCompareDiffAction(name, preview.kept.map((t) => t.uri)));
       if (r.ok) toast.success(`Saved ${r.count} songs to "${name}"`);
       else toast.error(r.error);
       requestClose();
@@ -445,7 +467,18 @@ function ActionSheet({
           <div className="thin-scroll mt-4 min-h-0 flex-1 overflow-y-auto border-t border-border/60">
             {/* The library streams in just after mount (see DockLoader), so on a very fast
                 click it may not have landed yet. */}
-            {playlists.length === 0 ? (
+            {playlists.length === 0 && loadFailed ? (
+              <p className="px-5 py-6 text-sm text-muted-foreground">
+                Couldn&rsquo;t load your playlists.{" "}
+                <button
+                  type="button"
+                  onClick={onRetry}
+                  className="font-medium text-foreground underline-offset-2 hover:underline"
+                >
+                  Retry
+                </button>
+              </p>
+            ) : playlists.length === 0 ? (
               <p className="px-5 py-6 text-sm text-muted-foreground">Loading your playlists…</p>
             ) : null}
             {playlists.map((p) => {

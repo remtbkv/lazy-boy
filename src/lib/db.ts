@@ -14,6 +14,7 @@ import { createClient, type Client, type InStatement, type Row } from "@libsql/c
 import type { Track } from "@/lib/spotify/types";
 import { BACKUP_PREFIX, cleanedName } from "@/lib/clean/names";
 import { HANDOFF_SKIP_FRACTION } from "@/lib/handoff";
+import { captureHealth, type CaptureHealth } from "@/lib/capture-health";
 import { makeStoreFetch } from "@/lib/store-fetch";
 import {
   CALIBRATION,
@@ -1730,6 +1731,13 @@ async function readHistoryIndex(): Promise<HistoryIndex> {
 
 export async function getLastSync(): Promise<string | null> {
   return getMeta("last_sync");
+}
+
+/** Whether history is still being captured (capture-health.ts): the last harvest's age and
+ *  whether a Spotify token is stored at all. Two meta reads. */
+export async function getCaptureHealth(): Promise<CaptureHealth> {
+  const [lastSync, tokens] = await Promise.all([getLastSync(), getMeta(SPOTIFY_TOKENS_KEY)]);
+  return captureHealth(Date.now(), lastSync, tokens !== null);
 }
 
 // The once-a-day full context pass (unresolvedContextUris) is gated on this stamp;

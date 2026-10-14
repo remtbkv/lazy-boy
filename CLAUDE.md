@@ -88,6 +88,8 @@ ops/zenbook-meter/       the store meter deployed on the Zenbook (proxy on 8090 
 scripts/backfill-from-backstop.mjs  replay the Zenbook backstop recorder's captured plays
                          into the primary (the loss-repair path; recorder lives on the
                          Zenbook at ~/lazyboy-recorder, lazyboy-recorder.timer, every 15 min)
+scripts/import-extended-history.mjs  refill outage gaps from Spotify's Extended Streaming
+                         History export; both importers close with scripts/import-tail.mjs
 ```
 
 **Reuse before adding:** formatting → `lib/format.ts`; name search → `lib/filter.ts` (which
