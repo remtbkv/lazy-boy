@@ -8,7 +8,7 @@ import { useEffect } from "react";
 // moment. 2 min comfortably beats a song's length, so an open tab stays effectively
 // live. The server (/api/sync) decides whether a sync is actually due, so multiple tabs
 // and quick navigations collapse to one Spotify call. Times the app is closed are
-// covered by the GitHub Actions cron. Mounted once in the (app) layout.
+// covered by the Zenbook's 2-min timer on /api/cron/sync. Mounted once in the (app) layout.
 const POLL_MS = 2 * 60 * 1000;
 
 export function SyncOnLoad() {

@@ -11,6 +11,13 @@ import { buildDays, iso, type HistoryPayload } from "@/lib/history-days";
 import { judgeHandoff } from "@/lib/handoff";
 import { hanFold } from "@/lib/han-fold";
 import { useTabReset } from "@/lib/tab-reset";
+import {
+  persistableDay,
+  settleDayFetch,
+  settlePayloads,
+  type DaySettle,
+} from "@/lib/home-recovery";
+import { toast } from "@/lib/toast";
 import { addPlay, reconcilePlays, type Provisional } from "@/lib/optimistic-play";
 import { recordAppEvent } from "@/lib/metrics-client";
 import { IdentityTrackMenu } from "@/components/identity-track-menu";
@@ -309,10 +316,12 @@ export function DenHome({
     performance.mark("lb:history-ready");
   }, [memoryDays]);
 
-  // A past day's plays can never change — once fetched it's frozen history. So persist those
-  // to sessionStorage and they survive navigation entirely (no server round-trip on return).
-  // Today is deliberately NOT persisted (it grows as you listen), and the store is capped so
-  // it can't balloon: this is text only, a few KB a day.
+  // A day two or more days back can never change — once fetched it's frozen history. So persist
+  // those to sessionStorage and they survive navigation entirely (no server round-trip on
+  // return). Today and yesterday are deliberately NOT persisted: today grows as you listen, and
+  // yesterday is where late harvests and the backstop replay land — a persisted copy beat the
+  // live payload for the tab's life (burn review 2026-10-03, U2). The store is capped so it
+  // can't balloon: this is text only, a few KB a day.
   const DAY_STORE = "lb-days";
   const DAY_STORE_MAX = 20;
   // The store is BUILD-STAMPED: sessionStorage survives reloads — including the build-skew
@@ -338,8 +347,8 @@ export function DenHome({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const persistDay = (day: string, rows: TrackStats[]) => {
-    // `initialDay` is the most recent day with plays — treat it as live, everything older is frozen.
-    if (day === "all" || day >= initialDay) return;
+    // The server's own rule (db.ts FROZEN_AFTER_DAYS): only today-2 and older are frozen.
+    if (!persistableDay(day)) return;
     try {
       const raw = sessionStorage.getItem(DAY_STORE);
       const parsed = raw
@@ -409,7 +418,21 @@ export function DenHome({
 
   const select = (day: string) => {
     if (day === selected) return;
+    const prev = selected;
     setSelected(day);
+    // Grouped out of the payload in memory: no request, no pending state, this frame. It is
+    // deliberately NOT written into `cache` — the payload is the source of truth for these
+    // days, and a copy taken now would not see the plays a refresh patches into it later.
+    // Checked BEFORE `cache`: a cached copy (fetched, or restored from sessionStorage) can be
+    // older than the payload (burn review 2026-10-03, U2).
+    // The counter still moves, so a slower server day already in flight can't land on top.
+    const mem = fromMemory(day);
+    if (mem) {
+      dayReq.current++;
+      setDayPending(false);
+      setTracks(mem);
+      return;
+    }
     const hit = cache.current.get(day);
     if (hit) {
       // Advance the counter here too: without it, a slower server fetch already in flight
@@ -421,23 +444,22 @@ export function DenHome({
       setTracks(hit);
       return;
     }
-    // Grouped out of the payload in memory: no request, no pending state, this frame. It is
-    // deliberately NOT written into `cache` — the payload is the source of truth for these
-    // days, and a copy taken now would not see the plays a refresh patches into it later.
-    // The counter still moves, so a slower server day already in flight can't land on top.
-    const mem = fromMemory(day);
-    if (mem) {
-      dayReq.current++;
-      setDayPending(false);
-      setTracks(mem);
-      return;
-    }
     const req = ++dayReq.current;
     setDayPending(true);
+    // A failed fetch puts the highlight back on the day whose rows are still on screen —
+    // it used to leave the new card lit over the old rows with no message (U1).
+    const apply = (r: DaySettle<TrackStats[]>) => {
+      if (r.kind === "show") setTracks(r.rows);
+      if (r.kind === "restore") {
+        setSelected(r.selected);
+        toast.error("Couldn't load that day");
+      }
+    };
     fetchDay(day)
-      .then((rows) => {
-        if (dayReq.current === req) setTracks(rows);
-      })
+      .then(
+        (rows) => apply(settleDayFetch(req, dayReq.current, prev, { ok: true, rows })),
+        () => apply(settleDayFetch(req, dayReq.current, prev, { ok: false })),
+      )
       .finally(() => {
         if (dayReq.current === req) setDayPending(false);
       });
@@ -561,11 +583,12 @@ export function DenHome({
   // that on 2026-08-22 — /api/search/history was 500ing (store-fetch.ts) and every artist he
   // had played for months read "Never played".
   const [playsKnown, setPlaysKnown] = useState(true);
-  // When the history half may be retried. A failed half used to be permanent for the visit —
-  // the refs are the idempotence guard, so a null result stuck. Bounded so a run of keystrokes
-  // can't turn one failure into a request loop.
-  const histRetryAt = useRef(0);
-  const HIST_RETRY_MS = 30_000;
+  // When a failed half may be retried. A failed half used to be permanent for the visit —
+  // the refs are the idempotence guard, so a null result stuck (the library half until the
+  // burn review 2026-10-03, U1). Bounded so a run of keystrokes can't turn one failure into a
+  // request loop.
+  const retryAt = useRef(0);
+  const RETRY_MS = 30_000;
   // Where a query would be answered from right now. Only the perf readout reads it.
   const indexStatus = useRef<IndexStatus>("fallback");
 
@@ -575,9 +598,10 @@ export function DenHome({
     // hand back a new array identity, re-run the effect and call this again — a render loop
     // that pins the tab. One handler per pair of requests; a re-fetch only happens after a
     // ref is cleared (new plays landed).
-    // A history half that failed earlier is allowed one retry per window — otherwise a single
-    // 500 leaves the whole visit without play data (the 2026-08-22 outage).
-    if (histReq.current === null && libReq.current && Date.now() < histRetryAt.current) return;
+    // A half that failed earlier is allowed one retry per window — otherwise a single 500
+    // leaves the whole visit without play data (the 2026-08-22 outage) or without every
+    // never-played library song.
+    if ((!libReq.current || !histReq.current) && Date.now() < retryAt.current) return;
     if (libReq.current && histReq.current) return;
     if (!libReq.current) indexStatus.current = "fetching";
     libReq.current ??= fetchPayload<LibraryPayload>(
@@ -597,30 +621,18 @@ export function DenHome({
       // A refresh that found new plays drops the history request to force a re-fetch; ignore a
       // pair that was superseded while in flight.
       if (libReq.current !== lib || histReq.current !== hist) return;
-      // Both halves failed: nothing to match against, so queries go to the server. An earlier
-      // successful build is kept — a failed refresh should not empty the box.
-      if (!l && !h) {
-        indexStatus.current = "fallback";
-        histReq.current = null;
-        histRetryAt.current = Date.now() + HIST_RETRY_MS;
-        return;
-      }
-      // Both EMPTY is not an index either: a cold/half-built store answering 200 with
-      // `{tracks: []}` used to mint `entries = []`, which is truthy — every search then
-      // rendered "No songs match" for the visit with no fallback scheduled
-      // (audit 2026-08-19, T2.6). Empty payloads → server fallback, same as failure.
-      if (!l?.tracks.length && !h?.tracks.length) {
-        indexStatus.current = "fallback";
-        return;
-      }
-      indexStatus.current = "memory";
-      // The library half alone cannot answer "have I played this" — say so rather than
-      // rendering its silence as "never". Arm a retry; the history half is the one that moves.
-      setPlaysKnown(h !== null);
-      if (h === null) {
-        histReq.current = null;
-        histRetryAt.current = Date.now() + HIST_RETRY_MS;
-      }
+      // home-recovery.ts settlePayloads owns the rules: a failed half drops its ref and arms a
+      // retry; both failed or both EMPTY → server fallback (an empty set is truthy and used to
+      // render "No songs match" for the visit, audit 2026-08-19 T2.6), keeping any earlier
+      // successful build; the library half alone cannot answer "have I played this", so it
+      // says so rather than rendering its silence as "never".
+      const s = settlePayloads(l, h);
+      indexStatus.current = s.status;
+      if (s.clearLib) libReq.current = null;
+      if (s.clearHist) histReq.current = null;
+      if (s.armRetry) retryAt.current = Date.now() + RETRY_MS;
+      if (!s.build) return;
+      setPlaysKnown(s.playsKnown);
       setEntries(buildEntries(l, h));
       // The history half also feeds the day list (buildDays). Only set on success: a failed
       // history fetch must leave an earlier payload — and the days derived from it — standing.

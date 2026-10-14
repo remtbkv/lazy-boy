@@ -12,6 +12,7 @@ import {
   releaseLock,
   type SpotifyTokens,
 } from "@/lib/db";
+import { isOwnerSignIn } from "@/lib/owner";
 
 // Spotify banned `localhost` redirect URIs (Nov 2025): only the loopback IP literal
 // `http://127.0.0.1:PORT` is allowed over HTTP. But Next.js normalizes 127.0.0.1 ->
@@ -331,6 +332,11 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     }),
   ],
   callbacks: {
+    // Owner-only. Runs before jwt, so a refused account never reaches the token write below;
+    // Auth.js answers it with AccessDenied. See lib/owner.ts.
+    async signIn({ profile }) {
+      return isOwnerSignIn(profile?.id ?? undefined);
+    },
     async jwt({ token, account }) {
       const t = token as SpotifyToken;
       // Initial sign-in: stash tokens in the DB (the source of truth) and keep the

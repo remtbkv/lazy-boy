@@ -162,7 +162,9 @@ export async function startCleanAction(
 /** Start playing a playlist on the active device, like double-clicking it in Spotify.
  *  Shuffle is left at whatever the device is already set to. */
 export async function playPlaylistAction(playlistId: string): Promise<ActionResult> {
-  return playerControl((sp) => sp.playContext(`spotify:playlist:${playlistId}`));
+  return playerControl("action:playPlaylist", (sp) =>
+    sp.playContext(`spotify:playlist:${playlistId}`),
+  );
 }
 
 /** Delete (unfollow) one of the user's playlists, then drop it from the local store.
@@ -411,7 +413,9 @@ export async function removeFromPlaylistAction(
   try {
     const sp = await getSpotify("action:removeFromPlaylist");
     await sp.removeFromPlaylist(playlistId, uri);
-    await removeCachedPlaylistTrack(playlistId, uri); // keep the cache in step
+    // Keep the cache in step. Spotify has already removed it, so a failed cache write must
+    // not report the removal as failed; the next library sync heals the row.
+    await removeCachedPlaylistTrack(playlistId, uri).catch(() => {});
     revalidatePath(`/playlists/${playlistId}`);
     return { ok: true };
   } catch (e) {
@@ -454,10 +458,11 @@ function playbackError(e: SpotifyError): string {
 // Transport controls used by the now-playing card. All share the same player-error
 // handling, since that's the one expected failure on a personal player.
 async function playerControl(
+  source: string,
   fn: (sp: Awaited<ReturnType<typeof getSpotify>>) => Promise<void>,
 ): Promise<ActionResult> {
   try {
-    const sp = await getSpotify("action:removeFromPlaylist");
+    const sp = await getSpotify(source);
     await fn(sp);
     return { ok: true };
   } catch (e) {
@@ -470,7 +475,9 @@ async function playerControl(
 }
 
 export async function playerSetPlayingAction(play: boolean): Promise<ActionResult> {
-  return playerControl((sp) => (play ? sp.resumePlayback() : sp.pausePlayback()));
+  return playerControl("action:playerSetPlaying", (sp) =>
+    play ? sp.resumePlayback() : sp.pausePlayback(),
+  );
 }
 
 // Double-click a track in a playlist → play it within that playlist's context (so the
@@ -479,7 +486,9 @@ export async function playPlaylistTrackAction(
   playlistId: string,
   trackUri: string,
 ): Promise<ActionResult> {
-  return playerControl((sp) => sp.playContext(`spotify:playlist:${playlistId}`, trackUri));
+  return playerControl("action:playPlaylistTrack", (sp) =>
+    sp.playContext(`spotify:playlist:${playlistId}`, trackUri),
+  );
 }
 
 // "Pick up where you left off": start the chosen playlist on the active device at the

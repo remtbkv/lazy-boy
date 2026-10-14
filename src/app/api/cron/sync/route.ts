@@ -7,6 +7,7 @@ import {
   getHarvestGate,
   getLibraryScanAttemptAt,
   getLibrarySyncedAt,
+  getSpotifyTokens,
   ledgerSyncCall,
   pruneApiLog,
   pruneClientMetrics,
@@ -46,12 +47,15 @@ function safeEqual(a: string, b: string): boolean {
   return ab.length === bb.length && timingSafeEqual(ab, bb);
 }
 
-// Backstop sync, triggered by the schedulers: cron-job.org every 2 min, a second external
-// ~5-min pinger (measured in production logs 2026-08-06 — the GitHub Actions workflow that
-// used to be the 5-min source was deleted, so its identity is unconfirmed), and Vercel's
-// daily cron (vercel.json). Runs without a session using the stored token, so history stays
-// current even when the app hasn't been opened. Callers send `Authorization: Bearer
-// $CRON_SECRET`; anything else is rejected so the endpoint can't be triggered by randoms.
+// Backstop sync, triggered by the schedulers: the Zenbook's user timer
+// `lazyboy-cron-sync.timer` every 2 min (the working closed-app path) and Vercel's daily
+// cron (vercel.json). Two more callers only ever 401: the cron-job.org job, whose bearer
+// went stale at the 2026-08-10 CRON_SECRET rotation, and the Zenbook's root-level
+// `lazyboy-sync.timer` (the "second ~5-min pinger" of 2026-08-06), stale since the 07-01
+// rotation (burn lazyboy-review 2026-10-03, Z1/Z2). Runs without a session using the stored
+// token, so history stays current even when the app hasn't been opened. Callers send
+// `Authorization: Bearer $CRON_SECRET`; anything else is rejected so the endpoint can't be
+// triggered by randoms. Every holder of the secret is listed in docs/SECURITY.md.
 export async function GET(req: Request) {
   const secret = process.env.CRON_SECRET;
   // Fail closed: a missing secret must reject every caller, not wave them through. (An
@@ -59,9 +63,10 @@ export async function GET(req: Request) {
   if (!secret || !safeEqual(req.headers.get("authorization") ?? "", `Bearer ${secret}`)) {
     return Response.json({ ok: false, error: "forbidden" }, { status: 401 });
   }
-  // The daily Vercel cron doubles as a watchdog: re-enable the every-2-min cron-job.org
-  // pinger if it auto-disabled after a failure storm, so closed-app sync self-heals. Only
-  // Vercel's cron carries this header, so the 2-min pings themselves skip the check.
+  // The daily Vercel cron doubles as a watchdog: re-enable the cron-job.org job if it
+  // auto-disabled after a failure storm (it is no longer the working pinger; see above).
+  // Meant to fire only on Vercel's cron; Vercel does not send this header, so this block
+  // has not run since at least 2026-08-10 (QUEUE.md C2).
   if (req.headers.get("x-vercel-cron")) {
     // Each daily chore is isolated: a failure in one must not take down the tick (a 500
     // here feeds the external pinger's auto-disable — the exact storm the 429 branch
@@ -83,14 +88,22 @@ export async function GET(req: Request) {
   // Guarded: this runs OUTSIDE the try below, and a store hiccup inside the token read
   // used to escape as a 500 — feeding the external pinger's auto-disable, the exact storm
   // the 429 branch dodges (wave-2 audit, B5).
+  let tokenReadFailed = false;
   const token = await getValidAccessToken().catch((e) => {
     // Logged: a persistent store outage otherwise reads as an endless silent
     // "nobody signed in" (wave-3 adversarial review, F1).
     console.error("[cron] token read failed", e);
+    tokenReadFailed = true;
     return null;
   });
   if (!token) {
-    // Nobody signed in / refresh token dead / store hiccup — nothing to do, not an error.
+    // No stored token at all (signed out, or a dead refresh token cleared it): closed-app
+    // capture has STOPPED, and a 200 here let the pinger log success for weeks (burn review
+    // 2026-10-03, M1). 503 so the pinger's unit fails visibly. A store hiccup or a transient
+    // refresh failure still answers 200 — those heal on their own.
+    const signedOut =
+      !tokenReadFailed && (await getSpotifyTokens().then((t) => t === null, () => false));
+    if (signedOut) return Response.json({ ok: false, error: "no token" }, { status: 503 });
     return Response.json({ ok: true, skipped: "no token" });
   }
   // Getter for the longer-running work below — re-validates through the shared
@@ -155,7 +168,7 @@ export async function GET(req: Request) {
     return Response.json({ ok: true, added, library });
   } catch (e) {
     // A rate-limit is transient and self-heals — never surface it as a 5xx. An external
-    // scheduler (cron-job.org) auto-disables a job after N consecutive failures, so a
+    // scheduler like cron-job.org auto-disables a job after N consecutive failures, so a
     // 500 here on a passing Spotify throttle would take the whole closed-app sync offline.
     if (e instanceof SpotifyError && e.status === 429) {
       return Response.json({ ok: true, skipped: "rate-limited" });

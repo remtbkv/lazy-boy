@@ -287,7 +287,9 @@ all against a throwaway local store and scripted Spotify — zero real-backend c
 Independent-suite catches fixed this wave: timestamp-tie skip verdicts were arrival-order
 dependent (F1-F3, through to the all-time count); the reconcile grace window's two
 documented jobs were mutually unsatisfiable — replaced by count-baseline confirmation
-(basePlays), with prod evidence settling that Spotify stamps played_at at track START;
+(basePlays), with prod evidence settling that Spotify stamps played_at at track START
+[CORRECTION 2026-10-03: wrong — played_at is the play's END, measured on 13k production
+plays; burn lazyboy-review C1. basePlays confirmation does not depend on either];
 latestSource identity keying; enforced newest-first payload ordering; set-true idSetChanged;
 negative Retry-After; injective keyOf; future reload stamps; plus the wave-2-diff review
 round (clean lock release, resume stray-tap, source-side name clamp, per-attempt fetch

@@ -33,9 +33,9 @@ describe("reconcilePlays", () => {
   const T = Date.parse("2026-08-10T20:00:00Z");
 
   // ADJUDICATED 2026-08-20 (independent suite A1/A2): timestamp-grace confirmation was
-  // structurally unsound (Spotify stamps played_at at track START, and no scalar grace
-  // both rejects the previous play and accepts this one). Confirmation is now the TODAY
-  // count exceeding the mint-time baseline.
+  // structurally unsound (it leaned on played_at's convention, read then as START — real
+  // data later showed END, burn lazyboy-review C1). Confirmation is now the TODAY count
+  // exceeding the mint-time baseline, which holds under either.
   it("a repeat play is not swallowed: same count as at mint = unconfirmed", () => {
     // The previous play is already inside basePlays; the server still shows 1 → survive.
     const server = [{ ...row("Repeat", new Date(T - 40_000).toISOString()), plays: 1 }];
