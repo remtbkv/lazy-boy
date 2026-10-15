@@ -149,6 +149,94 @@ into a body of their own (01d O2), before the owner's history entry outgrows the
 
 ## 3. Data model: where every table and meta key lives
 
+### 3.1 Three kinds of database
+
+**A user database**, one per user: `tracks`, `plays`, `contexts`, `meta`, `playlists`,
+`playlist_tracks`, `saved_tracks`, exactly as `init()` creates them today (`db.ts:153-297`). A new
+user's database starts empty and gets its tables from `init()` on the first connection, the same
+way the dev file does. Uid 1's database is Turso `lazyboy`; uid N's is `lazyboy-u<N>`.
+
+**The app database**, `lazyboy-app`, new and small:
+
+```sql
+CREATE TABLE users (
+  id             INTEGER PRIMARY KEY,   -- uid; 1 = Rem
+  account_id     TEXT UNIQUE,           -- Spotify account_id; NULL until an invitee first signs in
+  spotify_id     TEXT NOT NULL UNIQUE,  -- what an invite names; refreshed at every sign-in
+  status         TEXT NOT NULL,         -- invited | active | needs_reconnect | disabled | deleting
+  admin          INTEGER NOT NULL DEFAULT 0,
+  session_epoch  INTEGER NOT NULL DEFAULT 0,
+  agreed_version TEXT,                  -- terms and privacy version accepted (M14)
+  agreed_at      INTEGER,
+  last_sign_in   INTEGER,
+  created_at     INTEGER NOT NULL
+);
+CREATE TABLE user_tokens (
+  uid        INTEGER PRIMARY KEY,       -- users.id
+  blob       TEXT NOT NULL,             -- "v1." + base64url(iv ‖ ciphertext ‖ tag), §4.3
+  expires_at INTEGER NOT NULL,          -- plaintext, so the cron sees who needs a refresh
+  granted_at INTEGER NOT NULL           -- last consent: the 6-month refresh-token clock (01e §2.1)
+);
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);   -- app-wide keys only, §3.2
+```
+
+This is 01e §5.2's sketch with three differences. The key is an integer uid with `account_id` as
+a unique column, so Spotify ids stay out of cache keys, ETags and browser storage (01a §8.4). There
+is no `env` column: dev gets an app database of its own (§8.2), so production's never holds a dev
+row. And the user's database is derived from the uid, so the row carries no URL.
+
+**The telemetry store**, the Zenbook's sqld after STORE_MIGRATION (§5 there): `api_log` and
+`client_metrics` each gain a nullable `user_id` (M10, an additive column `init()` can add);
+`usage_ledger` stays global.
+
+### 3.2 Every `meta` key
+
+01a §3's table lists every key kind the code writes. Each lands in one place:
+
+| key | today | in this design |
+|---|---|---|
+| `spotify_tokens`, `spotify_tokens_dev` | Rem's `meta`, plaintext (`db.ts:2511-2531`) | the token moves to `user_tokens`, encrypted. Both old rows stay untouched in Rem's database until the Phase 1 rollback window closes, then are deleted (§9) |
+| `lock:spotify_refresh` | one lease for everyone (`auth.ts:212`) | app `meta`, as `lock:spotify_refresh:<uid>` |
+| `spotify_cooldown_until` | Rem's `meta` (`db.ts:2376-2392`) | app `meta`, still one cooldown: Spotify's rate limit is per app and its quota per developer account (01f §1.4), so a ban is everyone's (01a D22) |
+| `played_at_convention` | written only by the dead daily block (`route.ts:90`) | app `meta`, computed from uid 1's plays by the daily route |
+| `me_id` | rewritten by every library sync (`db.ts:1804, 1819`) | the user's own database, unchanged. Only that user's own sync can write it now. The sign-in gate stops reading it (M13); `users.spotify_id` is the authority |
+| `lock:clean:<playlist>` | `actions.ts:130, 156` | the user's database, unchanged: per user and playlist by construction (01b C8 needs nothing more) |
+| `last_sync`, `write_seq`, `library_seq`, `slow_seq_pub`, `home_payload`, `alltime_stats`, `alltime_at`, `unique_song_count`, `contexts_full_check_at`, `playlists_synced_at`, `library_synced_at`, `library_scan_attempt_at`, `saved_synced_at`, `liked_total`, `liked_top_added_at`, `plsnap:<id>`, `user_tz_offset`, `player_last_active`, `rp_last_harvest`, `clean_backup_pref` | one global row each | the user's database, unchanged. These are 01a's D21 and D23 and the stored offset of D24: per user because each database has its own `meta` |
+| `pltracks_at:<id>` | written, never read (01a §3) | unchanged; deleting it is unrelated cleanup |
+| `last_sync_added` | dead since `1d43bc7` | left alone |
+| `user_tz` (new) | – | the user's database: the browser's IANA zone (§3.3) |
+| `probe` (new) | – | the user's database: last probed track id, progress and time, for harvesting on a track change (§6.2) |
+| `lock:tick` (new) | – | app `meta`: the cron's 90 s lease (§6.2) |
+| `rp_spend:<quota day>` (new, Phase 3) | – | app `meta`: the budget brake's counter (§6.4) |
+
+### 3.3 The time zone
+
+The Home payload is built on the write path, where there is no browser, so it buckets days with
+the offset `/api/sync` last stored, unless that offset differs from New York's current one by
+exactly 60 minutes, which it reads as a DST change no browser has reported yet
+(`payloadTzOffset`, `db.ts:1304-1311`; `HOME_TZ`, `db.ts:1270`). For a friend in Chicago the
+stored offset (−300 in CDT) differs from New York's (−240) by exactly 60, so their payload would
+be bucketed in New York's days. The same holds for Atlantic time. M17: `TimezoneCookie`
+(`src/components/timezone-cookie.tsx`) also publishes `Intl.DateTimeFormat().resolvedOptions().timeZone`,
+`/api/sync` stores it as `user_tz` in the user's database when it changes, and
+`rebuildHomePayload(uid)` computes the zone offset from `user_tz`, falling back to `HOME_TZ`. The
+DST heuristic then compares against the user's own zone. Rem's behaviour does not change.
+
+### 3.4 What a database per user costs in storage and schema work
+
+Storage: `tracks` is copied per user instead of shared. A friend with a library like Rem's
+starts near 3.3 MB (`tracks` 1.75 MB + `playlist_tracks` 1.45 MB, 01a §9.1) and grows ~35 KB a
+day at Rem's listening rate (01a §6). Five such users are under 100 MB against the free plan's
+5 GB. 01a §5's cross-user staleness of a shared catalog does not arise.
+
+Schema changes: an additive change runs through `init()` once per database per server process,
+as today. A non-additive one (a table rebuild) needs a script that loops over the databases with
+writers paused, the discipline 01a §8.6 describes, once per database. `init()` costs one
+`executeMultiple` plus seven small statements per database on a cold instance (`db.ts:153-297`);
+with five users the cron's cold instance pays that five times, in parallel [estimate: ~40 small
+schema statements per cold start; Rem's day had 28 cold starts, 01c §2.1]. A `schema_version`
+key that lets `init()` skip its DDL when current would remove it; it is optional.
+
 ## 4. Identity, sessions and per-user tokens encrypted at rest
 
 ## 5. Isolation: the enforcement points and the tests that prove them
