@@ -1186,4 +1186,74 @@ decisions. Phase 3 is the brake, then whatever the measurements ask for.
 
 ## 15. Decisions that are Rem's
 
+Each with the recommendation and its reason, grouped by the phase it blocks.
+
+**Now**
+
+1. **Phase 0**: rotate `AUTH_SECRET`, set `SPOTIFY_OWNER_ID` in Production, gate `logout`.
+   Recommend yes, before Oct 15, 8 PM: the second account's cookie acts as the owner until about
+   Nov 13 (01e F1), and the cost is one sign-in.
+2. **STORE_MIGRATION's four edits** (§8.3). Recommend yes: none changes the runbook's logic, and
+   edit 1 also removes today's preview exposure on the new store.
+
+**Before Phase 1**
+
+3. **The data model.** Recommend a database per user: Rem's data is not touched, no SQL statement
+   changes, and a forgotten scope is a compile error rather than another user's playlists
+   deleted (§2.2). A shared store with user columns is the alternative if friend features with
+   cross-user queries are coming soon (01a §12 decision 1).
+4. **The ceiling.** Recommend planning to five accounts, Rem included, and pointing anyone past
+   that to their own copy (§14 item 1). The dashboard's User Management list settles whether Rem
+   counts (§11.3).
+5. **If Spotify does not return `account_id`.** The design refuses the sign-in (§9.2 step 5).
+   Keying on the mutable Spotify `id` instead works for a handful of friends but can split a person
+   into two users if Spotify ever lets ids change (01e §5.5). Recommend deciding only if it
+   happens; Rem's first Phase 1 sign-in shows it.
+
+**Before Phase 2**
+
+6. **Turso plan.** Recommend Developer with overages before the first friend, $4.99 a month billed
+   yearly: the free plan's failure is a block on every query for every user until the 1st, and the
+   upgrade also gives Rem's own data ten days of point-in-time recovery instead of one (01f §6
+   decision 4). The alternative is Free with M24 and a monthly look at per-database usage (§12.4).
+7. **Vercel plan.** Recommend reading Active CPU first and staying on Hobby only under ~2 of 4
+   CPU-hours a month team-wide; otherwise Pro at $20 (01f §6 decision 3).
+8. **What "log out" means.** Recommend three actions: sign out (this browser), sign out everywhere
+   (the epoch), and disconnect (delete). Today one button stops capture and every device (§4.4).
+9. **Retention for friends.** Recommend: kept while connected; deleted within five days of a
+   disconnect or a revocation; deleted after twelve months without a sign-in. The twelve is the
+   number to choose; Spotify says not to store content indefinitely (01f §1.5).
+10. **An `invalid_grant` under six months after consent.** Recommend 01e §5.7's rule: treat it as a
+    revocation, stop at once, delete in five days unless the user reconnects; owner exempt. Keeping
+    the data is gentler and outside the Terms.
+11. **Friends' backups kept five days.** Recommend yes: deletion then reaches the backups without
+    bookkeeping; Rem's stay at 60 days.
+12. **The platform token in the runtime.** Recommend keeping it so in-app deletion destroys the
+    database at the request (§10.3); 01e §6 recommends removing it, and the cost of that is a
+    deletion script Rem has to remember within five days.
+13. **The privacy page, the terms, and derived metrics.** The text is Rem's to approve. Listened
+    time and skip verdicts are "derived listenership metrics" on a plain reading of Spotify's
+    policy (01f §1.5); recommend showing each user only their own until Rem decides about
+    comparisons.
+14. **The recorder.** Recommend Rem's alone, hourly (§6.5).
+
+**Before Phase 3**
+
+15. **Freshness under a shared quota.** Recommend the brake for every user, Rem included (§6.4).
+    Exempting the owner keeps his closed-app freshness at 2 minutes and leaves the friends ~300
+    calls a day between them on trip days; provisional plays avoid the brake for M-L work
+    (§14 item 3).
+16. **Finding out whether the quota is shared.** Recommend passive (§11.4) plus a question on
+    Spotify's developer forum. The active test risks Rem's own capture for up to ~12 hours
+    (01c §7 decision 3).
+17. **Friends' history imports.** Recommend not yet: a five-year import is ~4.2 MB of history body,
+    over the Data Cache's item limit on day one (01d §7 decision 2).
+
+**Independent of the phases**
+
+18. **The incident's plays in Rem's history** (§9.5). Recommend removing them, after a snapshot and
+    a look at the candidate list.
+19. **The search track** (S1-S3, §7.2). Recommend before mid-December, when the owner's history
+    entry would stop being cached.
+
 ## 16. Unknowns, risks, and what I ran
