@@ -103,11 +103,77 @@ Checked by: the two-user test suite in §6, which has to fail on purpose before 
 
 ## 2. The design on one page
 
-(the rule — per-user work proportional to what changed — the architecture, and what it replaces)
+**The rule: every recurring cost of a user is proportional to what changed (a new play, an edited
+playlist), never to what that user has stored.** A full scan survives only inside a bounded scope (one
+month of one user's plays, one playlist's members), in a rare repair event, or in the nightly backup.
+Today the opposite holds: the dominant reads re-scan a user's whole history on every listening
+session or every visit (§3), so cost grows with N × history × activity, and the owner alone is ~10
+weeks from the history payload's 2 MiB cache cliff (01d §3.2). Five mechanisms carry the rule:
+
+1. **A database per user, plus one app database** (Turso, one group, one group token). The app
+   database holds users, encrypted tokens, invites, the sync queue and the quota ledger; each user's
+   database holds today's seven core tables unchanged plus a `payloads` table. A statement can only
+   see the database it was sent to, Turso reports usage per database, and Rem's data stays in the
+   `lazyboy` database STORE_MIGRATION creates (§4, §11).
+2. **Derived data maintained by append on the write path.** Each play stores its listened time beside
+   its skip verdict; the all-time totals become an accumulator; the Home payload is patched in place;
+   history payloads become monthly segments stored in the user's database, the current month appended
+   to on every landed harvest; the library body is patched per changed playlist. A page visit reads
+   rows and never scans (§8).
+3. **A per-minute scheduler with a per-user due queue, leases and a quota governor.** Freshness signals
+   come from the player probe, a bucket Spotify has never rationed here; recently-played harvests are
+   rationed across users inside the developer account's daily budget; one user's failure stays in that
+   user's slot (§7).
+4. **Search from the browser's own copy**: segments under versioned, immutable URLs, kept in IndexedDB
+   per user and segment (STORE_MIGRATION phase E, with a finer key), day lists built on demand, and a
+   virtualized result list (§9).
+5. **Two independent pingers** (the Zenbook's timer and cron-job.org) behind the queue's lease, so
+   closed-app capture survives either one (§12).
+
+```
+browser ─► Vercel functions (iad1)
+             ├─ app DB, Turso `lazyboy-app`: users · user_tokens (AES-256-GCM) · invites ·
+             │        sync_state (due queue, leases, harvest state) · quota_ledger · meta (global)
+             ├─ user DBs, Turso, one per user, same group (Rem's is `lazyboy`):
+             │        tracks · plays (+listened_ms) · contexts · playlists (+snapshot_id) ·
+             │        playlist_tracks · saved_tracks · meta · payloads (segments, library, home)
+             └─ telemetry, Zenbook sqld via the Funnel, best effort, never awaited:
+                      api_log · client_metrics · usage_ledger, each with a nullable uid
+pingers: Zenbook timer (1 min) + cron-job.org (1 min) ─► /api/cron/sync, deduplicated by the lease
+Zenbook: telemetry · the owner's recorder (hourly) · nightly per-database backups, which also
+         recompute every derived value from the dump and flag drift
+```
+
+It replaces, in order of what it saves: the all-time full scan after every listening session; the
+Home payload's 16-day re-read per landed play; the history payload's full rebuild per visit, and with
+it the 2 MiB cliff; the whole-history day strip re-read on Home mount; the unique-song and library
+rebuilds per library change; the rescan's 110 serial snapshot reads; the daily contexts full pass; the
+second Spotify call on every idle tick; and a recently-played harvest on every playing tick.
 
 ## 3. Where one user's cost goes today
 
-(every per-user term with its measured cost and how it grows; which mechanism removes it)
+Rem's day, UTC Oct 14 [measured by the store meter, 01c §2]: 4,252,260 rows read, 13,480 written, 716
+cron ticks, 129 plays landed. Home was barely opened that day, so the two terms that scale with visits
+(rows 3 and 4) are near zero for Rem and would not be for a friend who keeps the app open.
+
+| # | term | trigger and cadence | rows read per run | rows that day | grows with | replaced by |
+|---|---|---|---|---|---|---|
+| 1 | all-time recompute: `orderedRealPlays` full scan + a `tracks` probe per row (`db.ts:854-869`) | after a landed harvest, at most every 10 min (`db.ts:577-583`), app open or not | ~51,000 | 2,244,004 (53%), 44 runs | stored plays: ~2.3 rows per play per run, so +~12,000 rows a day per day (01c §5.9) | accumulator over stored `listened_ms` (§8) |
+| 2 | Home payload rebuild: 16-day strip + the opening day (`db.ts:1315-1343`) | every landed harvest | ~7,500 | 954,265 (22%), 127 runs | plays per 16 days | patched in place from the harvest in hand (§8) |
+| 3 | history payload rebuild (`db.ts:1686-1730`) | a browser fetch after the slow marker moved | ~79,000 | 78,781, 1 run; ceiling 144 × 79,000 ≈ 11M with Home open all day (01c §6) | stored plays; hits the 2 MiB Data Cache limit in late December (01d §3.2) | monthly segments in the store, current month appended on write (§8, §9) |
+| 4 | whole-history day strip, `dailyStatsAction(100000)` prefetched on every Home mount (`den-home.tsx:373-384`), cached on `write_seq`, so the first mount after any landed play re-reads every real play | Home mounts after listening | ~43,500 [estimate: 14,511 real plays × ~3 rows for a `plays JOIN tracks`, READ_QUOTA "Measured reads"] | ~0 (no mounts) | stored plays × visits | built in the browser from segments that carry listened seconds (§9) |
+| 5 | unscoped orphan pass (`db.ts:724-751`) | the library's playlist id set moved, ~3 a week | ~5,100,000 as Turso counts it (01c §2.8) | 394,820 as the meter counted 3 runs | plays × members | lanes 1910-1911 scope it; kept scoped (§8) |
+| 6 | unique-song count (`db.ts:1969-1991`) | a library sync that changed anything; the daily Liked refetch always counts as a change (`sync/library.ts:76-80`) | ~39,000 | ~160,000, 4 runs | library members | counted inside the library body's build and patch (§8) |
+| 7 | library payload rebuild (`db.ts:1625-1684`) | a fetch after `library_seq` moved, which every list rewrite does | ~15,000 | 0-2 runs a day (ledger, 01d §2.2) | members | patched per changed playlist (§8) |
+| 8 | library rescan's snapshot reads (`sync/library.ts:65-66`) | every rescan, ~30 a day | ~110 serial one-key reads | ~3,500 round trips | owned playlists | one statement over a `snapshot_id` column (§7) |
+| 9 | daily contexts pass, `unresolvedContextUris` (`db.ts:646-667`) | once a day | ~43,000 [estimate: ~2 rows per contexted play, READ_QUOTA "Attribution": 14.1K at 7,194 plays] | one run | stored plays | a scan of the 114-row `contexts` table (§8) |
+| 10 | harvest that lands nothing (`db.ts:480-496`, `unseenContexts`) | 155 a day | ~215 | ~33,000 | – | diff against the previous batch's keys in sync state: 0 user-DB rows (§7) |
+| 11 | idle tick: token, two gate stamps | 436 a day | ~3 | ~1,300 | – | one claim statement for all due users (§7) |
+| 12 | orphan verdict for new plays | every landed harvest | ~130 | 16,528 | one playlist's size | kept: bounded (§8) |
+| 13 | nightly backup dump (STORE_MIGRATION phase D, after the cutover) | nightly | ~45,800 [estimate: the core row counts in 01a §2] | not yet running | every stored row | kept; an incremental form past 25 users (§10) |
+
+Spotify, same user per day [measured, deduplicated `api_log`, 01c §2.7]: player probes 1,035-1,303,
+recently-played 139-319 plus the recorder's 96, library ~127-175.
 
 ## 4. Data model: how every table and meta key gets a user
 
