@@ -1171,6 +1171,80 @@ L before the first friend.
 
 ## 18. Decisions that are Rem's
 
-## 18. Decisions that are Rem's
+Specific to this design, each with my recommendation:
+
+1. **Plan for five, and use 25 and 250 only for sizing.** Recommended: Spotify's policy allows no more
+   on one app and money does not change that (T1). One minute on the dashboard's User Management list
+   settles the count and whether you count toward it.
+2. **Do the single-user performance phase (P1) before any multi-user work.** Recommended: it removes
+   ~98% of your own store reads [estimate, §10.2: ~70,000 of 4.25M a day remain] and the late-December
+   cache cliff, whether or not anyone else ever signs in. P1b has a deadline: mid-December.
+3. **A database per user, or one shared database.** Recommended: per user (§4.1). No query can
+   silently become O(all users), each user's cost is measured by Turso, and your data stays where the
+   migration puts it. The shared store wins only if friend features that join across users become the
+   priority.
+4. **Closed-app freshness if the quota is shared.** Recommended: the governor (§7.4): 2-minute stored
+   freshness while one or two people listen like you, ~10 minutes at five, with what anyone sees on
+   screen unaffected. The alternative, server-side provisional plays, keeps 2 minutes for everyone at
+   medium-to-large cost (§17).
+5. **Turso's Developer plan before the second user.** Recommended, $4.99 a month billed yearly. Not for
+   capacity (five users use under 5% of the free plan) but because on a shared plan one regression
+   blocks every user's every query until the 1st, and August showed regressions happen (READ_QUOTA
+   "Where August actually went"). The alternative is staying free and watching the daily usage record,
+   which R6 keeps from alerting anyone.
+6. **Hobby or Pro on Vercel**, after reading Active CPU on the dashboard (01f decision 3). I could not
+   measure it.
+7. **The search target's network.** Recommended: 10 Mbit/s, with slow 4G a stated miss; meeting slow
+   4G takes the newest-first loading in §17 (M).
+8. **The all-time list grouped by song identity**, so a song Spotify relinked under two ids shows once
+   (§9.3). Recommended: yes; search already uses that identity.
+
+Carried from the overviews, unchanged by this design: retention for invited users and five-day backups
+for non-owners (01a decisions 2-3, 01e decision 4); what sign-out means (01e decision 2: sign out,
+sign out everywhere, disconnect); whether an `invalid_grant` under six months counts as a disconnect
+(01e decision 3); the recorder owner-only and hourly (01c decision 4); the derived-metrics policy risk
+(01f decision 6); F1 tonight (01e decision 1); and confirming the window of the Oct 14 incident's
+foreign plays so they can be removed before your history is labelled yours (01b E6, §13).
 
 ## 19. What I ran, and what I did not measure
+
+Nothing ran against the production store, the Zenbook, any Turso database or Vercel, and I took no
+measurements of my own. Every **[measured]** number above is an overview's measurement, cited with its
+source there; every design number is an **[estimate]** with its arithmetic beside it.
+
+- Read in full: the six overviews (`01a`-`01f`), `docs/STORE_MIGRATION.md`, `docs/READ_QUOTA.md`,
+  `docs/SECURITY.md`, `docs/ARCHITECTURE.md`, `docs/GOTCHAS.md`, the project's `CLAUDE.md`. Not read:
+  the other two designs, as the brief requires.
+- Code read, at `ac6f7fe`: `src/lib/db.ts` lines 1-1739 and 1925-1995, `src/lib/skip-rule.ts`,
+  `src/lib/harvest-gate.ts`, `src/lib/sync/history.ts`, `src/lib/sync/library.ts`,
+  `src/app/api/cron/sync/route.ts`, both `src/app/api/search/*/route.ts`,
+  `src/app/(app)/home/den-home.tsx` lines 366-390, 590-700 and 735-830,
+  `src/app/(app)/history-actions.ts` lines 60-80.
+- `git diff --stat ac6f7fe HEAD -- src scripts ops tests vercel.json next.config.ts package.json`:
+  empty, so the overviews' line numbers hold.
+- Vendor pages, fetched read-only about 10:15 PM on Oct 14: https://turso.tech/pricing (plans and
+  limits; no mention of archiving idle databases), https://docs.turso.tech/help/usage-and-billing (how
+  rows are counted; `BLOCKED` past a quota), https://docs.turso.tech/api-reference/databases/usage
+  (per-database usage), https://docs.turso.tech/api-reference/databases/create (seeding from another
+  database; name rules), https://docs.turso.tech/cli/group/tokens/create and
+  https://docs.turso.tech/api-reference/groups/create-token (a group token reaches any database in the
+  group; "cannot be revoked individually").
+
+Not measured, and what each would change:
+
+- **Whether the recently-played quota is the developer account's or each user's** (01c §4). It sets F
+  at five users (§7.4) and decides whether 25 or 250 could ever be complete.
+- **The player and library buckets' limits** and the development-mode rate limit's number.
+- **Vercel Active CPU** (01f §2.3): Hobby or Pro.
+- **Rem's plays per playlist context**, which size the scoped orphan pass (§10.1); one pass on the
+  Turso copy, read off Turso's usage before and after, would.
+- **Latency to many databases from one function**: R1 measures one database. An idle connection is
+  kept ~4 s, so most page loads open one in-region connection to the user's database; untimed.
+- **Whether deleting a Turso database deletes its point-in-time history** (§14).
+- **Real phones and real networks** (01d §8); every phone figure is 01d's 4× throttle on the Mac.
+- **How friends listen and use the app.** Every budget assumes a Rem-like listener; the app-heavy
+  visit counts are assumptions.
+- **Whether `/v1/me` returns `account_id`** to this development-mode app (01e §8); the first sign-in
+  after P2 settles it.
+- **Whether cron-job.org holds a one-minute schedule** reliably; it ran this route every 2 minutes
+  until Aug 10.
