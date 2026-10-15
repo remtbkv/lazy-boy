@@ -508,6 +508,85 @@ rewritten. That interacts with the five-day rule and is Rem's call (§12).
 
 ## 9. How the data scales with N users
 
+Five is the real ceiling for this app (01f §1.6). The 25 and 250 columns below answer the program's
+brief and assume, as a worst case, that every user listens like the owner.
+
+### 9.1 Storage
+
+[estimated from §6's measured per-user figures]
+
+| | per Rem-like user | N = 5 | N = 25 | N = 250 |
+|---|---|---|---|---|
+| core data today (owner: 11.87 MB incl. backfill) | 11.9 MB | 59 MB | 297 MB | 3.0 GB |
+| core growth per year (~35 KB/day) | 12.6 MB | 63 MB | 315 MB | 3.2 GB |
+| `api_log` at 30-day retention (~2,000 rows/day) | ~7 MB, flat | 36 MB | 180 MB | 1.8 GB |
+| `api_log` with retention broken, as today, per year | ~87 MB | 435 MB | 2.2 GB | 22 GB |
+
+A new user's first day is a library sync (their `tracks`, `playlists`, `playlist_tracks`, Liked Songs)
+and no history. The owner's library is 6,590 distinct track ids (1.75 MB of `tracks` at 265 B) plus
+1.45 MB of `playlist_tracks` [measured, S-Oct14], so a newcomer with a similar library starts near 3.3 MB
+and grows from there.
+Storage is not what binds; the retention fix (D32) is the one storage item that matters before more users
+arrive.
+
+### 9.2 Per-user query cost as N grows
+
+Measured locally (Mac, SQLite, no `ANALYZE`, as production), on N synthetic users each holding a copy of
+the owner's 22,040 plays, timing the per-user version of each query for one user in the middle; median of
+5 runs in ms [measured, §11]. "User-led" uses D4's indexes; "today's indexes" keeps the current ones and
+only adds `user_id = ?` to the WHERE clause.
+
+| query | user-led, N = 25 | user-led, N = 100 | today's indexes, N = 25 | today's indexes, N = 100 |
+|---|---|---|---|---|
+| history payload scan (`db.ts:1690`), 21,559 rows | 31.9 | 36.1 | 130.2 | 526.7 |
+| all-time list (`db.ts:998`), top 300 | 21.1 | 23.7 | 221.8 | 1,116.0 |
+| `orderedRealPlays` (`db.ts:856`), 14,511 rows | 16.5 | 17.8 | 98.6 | 435.8 |
+| day strip, 16-day window (`db.ts:1101`) | 2.0 | 2.1 | 13.0 | 56.5 |
+| `recordPlays` existing read (`db.ts:484`), 50 rows | 0.0 | 0.0 | 0.2 | 1.0 |
+
+With a user-led index the plan is `SEARCH … USING INDEX (uid=?)` and the time does not move from 25 to
+100 users. Without one the plan is a `SCAN` of every user's plays and the time grows with N (×4 from 25
+to 100). On a metered store the rows read grow the same way. A per-user database gets the left-hand
+columns without new indexes. These are local-file times; the remote store adds its round trip and
+transfer, which STORE_MIGRATION's R1 bounds.
+
+### 9.3 Reads and writes per user per month against Turso's free plan
+
+The free plan allows 500M rows read and 10M rows written a month, and exceeding either blocks every
+query until the month resets (READ_QUOTA "What rows read means"). Rows read are counted per
+organization, so both data models share one budget. Per Rem-like user, from the meter's measurements
+in STORE_MIGRATION §3:
+
+- a typical day reads ~1.6-1.9M rows (1,430,580 in the 21 hours from 9 PM Oct 12; 1.94M on the day the
+  history payload ran 23 times), ~49-58M a month;
+- the unscoped orphan pass reads ~5.1M rows per run, about three a week, ~65M a month (lanes 1910-1911
+  scope it to changed playlists);
+- the history payload rebuild reads ~50,500 rows per run, up to 144 runs on a heavy listening day
+  (~7.3M), which is why a heavy month reaches ~280M for one user;
+- writes are ~3,100 core rows a day, ~93K a month (telemetry writes stay on the Zenbook).
+
+[estimated] Five typical Rem-like users read ~570-615M a month with today's orphan pass
+(5 × (49-58M + 65M)), over the plan; ~245-290M with the pass scoped, under it but above STORE_MIGRATION's
+R4 bar of 50%. Five heavy months would be ~1.4B. Writes stay under 5% of the
+plan at five users.
+
+The read cost per user also grows with that user's history, without bound: the history payload reads
+~2.3 rows per stored play per rebuild (50,500 / 22,040), and the all-time recompute and orphan pass are
+linear too. At the owner's rate (~117 plays a day) a rebuild a year from now reads ~150K rows. Two
+data-model levers address this, and both are design choices for the next phase: make the history payload
+incremental (plays are append-mostly: a stored base plus the delta since its version, rebuilt from
+scratch only when a derived column such as `ctx_orphan` or `skipped` moves in old rows), and make the
+all-time totals an accumulator updated per landed play instead of a full scan (READ_QUOTA already names
+it as the "queued next lever").
+
+### 9.4 Background statements
+
+§4.2 estimates ~10,000-12,000 statements a day per user from the cron alone, whether or not the user
+opens the app; five users is ~60,000 a day, under one a second on average. Within that, the library
+sync's serial `plsnap:<id>` reads (110 per run for the owner, `sync/library.ts:65-66`) are the one
+pattern that multiplies round trips by playlists × users; reading the user's snapshot keys in one
+statement removes it. How the cron fans out across users is lane 01c's.
+
 ## 10. STORE_MIGRATION.md: what multi-user needs from it, and what should change before it runs
 
 ## 11. Measurement log and unknowns
