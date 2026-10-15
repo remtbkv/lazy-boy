@@ -1128,7 +1128,48 @@ their sessions and keeps their data; the owner guard can come back behind a flag
 
 ## 16. Costs
 
+Monthly, every user Rem-like. Vendor prices from 01f §2.2 and §4.2 and the Turso pricing page
+(fetched 2026-10-14).
+
+| | 5 users | 25 users (Spotify does not allow) | 250 users (Spotify does not allow) |
+|---|---|---|---|
+| Turso | Free, $0; or Developer at $4.99 billed yearly ($5.99 monthly) as insurance against a block (§18) | Free, $0 | Developer, $4.99-5.99 |
+| Vercel | Hobby, $0, if Active CPU fits (unmeasured); else Pro, $20 | invocations fit Hobby (~236,000); CPU unmeasured, so $0-20 | Pro, $20, with usage drawn from its $20 credit first; invocations ~$1 at $0.60 per million |
+| cron-job.org (second pinger) | $0 | $0 | $0 |
+| the Zenbook | $0; it runs anyway | $0 | $0 |
+| Spotify | $0; Rem's Premium is required for the app to work at all (01f §1.2) | | |
+| **total** | **$0-26** | **$0-26** | **~$25-30**, plus Active CPU beyond the credit |
+
+01f §5.3 priced today's code at $5-26 for five Rem-like users (Turso's free plan cannot hold their
+reads) and $93-161 at 250 (Vercel ~$68-132 of it, mostly Active CPU and provisioned memory estimated
+linearly from Rem's instance time). Here the tick is one invocation a minute of ~4-8 s at 250 users,
+~70 hours of instance time a month, ~150 GB-hours [estimate], instead of per-user rebuild work; page
+renders are the unmeasured remainder in both. Friends cannot be charged: lazyboy is a Streaming SDA,
+and Spotify permits no commercial use of one (01f §1.5).
+
+The engineering cost is the phases of §15: four M-sized single-user steps and one L, then an M-L and an
+L before the first friend.
+
 ## 17. Scorecard: each target met or missed, and the options where missed
+
+| target | met? | where | if missed: the options and what they cost |
+|---|---|---|---|
+| T1: five users | yes, at Spotify's cap | §1 | – |
+| T1: 25 and 250 | **no, on one Spotify app** | §1, §7.4, §10.4 | a grandfathered list, if the dashboard shows one (a one-minute read); each person running their own copy (01f option E: $0 hosting each, about an hour of setup each, their own Premium). Even with the cap lifted, the shared recently-played budget cannot keep 250 users complete, and their probes alone exceed the 30-second rate limit observed safe |
+| T2: first visit ≤ 2 s at 4×, 10 Mbit/s | yes for light, typical and heavy one-year users and for Rem (0.7-1.6 s); **no** for a heavy three-year user (~2.6 s) | §9.4 | one art and album dictionary per user (M, ~2.3 s); loading the library and the newest months first, with the box saying older history is still loading (M, usable in ~1.2 s) |
+| T2: slow 4G | **no** (Rem ~5.9 s) | §9.4 | the same newest-first loading: the library and the current month (~400 KB) usable in ~2.5 s, everything in ~6 s |
+| T2: repeat visit ≤ 300 ms | yes, ~80 ms | §9.4 | – |
+| T2: keystroke ≤ 50 ms at 4× | yes up to ~30,000 entries (Rem ~25-35 ms) | §9.4 | past that, a worker with precomputed one-letter candidates (M) |
+| T3: observed freshness | yes, ~1-2 s after an open | §7.8 | – |
+| T3: stored ≤ 2 min | yes for one or two Rem-like users; **~10-12 min at five** if the quota is shared | §7.4 | server-side provisional plays from the probe (01c §5.3 ii): 2-minute stored freshness for everyone at ~47 harvests a day each, for medium-to-large work (a provisional flag through the skip chain, the totals and the payloads, plus a reconciliation and its tests); or the quota proves per user and F stays at 2 |
+| T3: completeness | yes while either pinger runs | §7.8, §12 | – |
+| T4: reads ≤ 100,000, writes ≤ 2,500, growth ≤ 50 KB a day | yes: ~70,000 typical, ~1,800, ~40 KB | §10.2 | an incremental backup removes ~40,000 more reads |
+| T4: five users under 5% of Free | yes: reads 2-3%, writes 4.2%, storage 1.5% | §10.3 | – |
+| T4: 250 users under $10 a month of store | yes: Developer, $4.99-5.99 | §10.3 | – |
+| T5: no apartment machine on a request path or as the only capture trigger | yes | §12 | – |
+| T6: isolation | by construction, plus tests that do not exist yet | §6 | proven only once the two-user suite has failed against planted bugs and then passed |
+
+## 18. Decisions that are Rem's
 
 ## 18. Decisions that are Rem's
 
