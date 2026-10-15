@@ -272,7 +272,85 @@ falls back to `file:data/listens.db` (`src/lib/db.ts:127-128`) and fails every q
 (`:154-156`) with a bare EROFS [inference: Vercel functions can write only under `/tmp`]. Rehearse each
 phase's rollback on Rem alone inside its soak; it costs minutes and is the only test the cell gets.
 
-(more High findings follow)
+### 7. (High) There are no foreign plays to delete, and the plan's method would have missed back-dated ones
+
+**Evidence.** A step, a rollout row, a Phase 2 precondition and decision 10 rest on commit `044c9b6`'s
+line that "the cron recorded its plays into the owner's history" (§11.1-11.2, PLAN.md:1339,
+1346-1369; §13.1's "foreign plays" row; §11.4's "§11.2 is done"; §18 decision 10). No lane measured
+it. Tonight, read-only on the Zenbook (§4):
+- **Store against recorder.** The recorder captures with Rem's own grant every 15 minutes (01c §2.6),
+  and all 96 of its runs on Oct 14 finished with no error line in its journal. From Oct 13 00:00Z to
+  Oct 15 03:45Z the store and the recorder hold the same 264 plays: none in the store only, none in the
+  recorder only. Over the recorder's whole life (Aug 6 to Oct 15) the store-only plays are 54 on Aug 6,
+  before the recorder's first run, and 2 on Sep 9 and 4 on Sep 25, during recorder outages (Oct 3
+  review D2) when an open tab could still write through the Funnel [my reading]; none since Sep 25.
+- **Insertion order.** `plays.id` is an AUTOINCREMENT rowid, so it orders inserts. Of the 1,500 rows
+  inserted since the first Oct 1 play, none carries an earlier `played_at`; of the 267 since the first
+  Oct 13 play, one does, an Oct 12 play the recorder also holds.
+- **The library side.** Against the 08:40Z Oct 14 snapshot, taken before the second sign-in:
+  playlists 114 and 114, owned by `me_id` 110 and 110, `playlist_tracks` 7,400 and 7,400, Liked 48 and
+  49, `contexts` 114 and 117 with one row written during the incident (named, so no negative cache
+  left by the other account), `me_id` unchanged by sha256 prefix. The rewrites healed as 01b E6 said.
+
+The method also has a blind spot that would have mattered had those plays existed. §11.2 lists "the
+plays from the start of Oct 14 to Rem's first sign-in" (PLAN.md:1353-1354). A harvest on another
+account's token stores that account's last 50 plays with their own `played_at`
+(`src/lib/spotify/resources.ts:410` passes it through; `recordPlays` inserts out-of-order rows), so
+they can predate the incident by days and fall outside any `played_at` window. The insertion-order
+check finds them; the window does not.
+
+**Fix.** Replace §11.2's deletion with tonight's numbers and one re-check on the latest backup before
+Phase 2: the full-range recorder diff and the insertion-order query, both read-only (§4 has the
+scripts). Drop decision 10, the "foreign plays" row of §13.1 and the Phase 2 precondition, which
+removes the plan's one irreversible step on Rem's history. Keep the two checks in the plan as the
+method for any future cross-account write. This also retires review-completeness L5, whose copies do
+not exist.
+
+### 8. (High) 122 of Rem's plays exist only in the recorder's file, which nothing backs up, and the plan never replays them
+
+**Evidence.** The same comparison found 122 plays in the recorder and not in the store: 56 on Aug 9,
+60 on Aug 10 (the quick-tunnel outage, 01f §3.3) and 6 on Sep 8. They are the "122-play backfill" the
+Oct 3 review queued as D1, whose production run "is Rem's, after C1" (`.claude/QUEUE.md:16`); C1
+landed on Oct 14 (`afb21d1`), so nothing blocks it. Their only copy is
+`~/lazyboy-recorder/backstop.db` on the Zenbook: `backup.py` copies the store's file alone
+(`SRC = ~/lazyboy-sqld/data/dbs/default/data`, read tonight), and no other unit or script names the
+recorder's file. The plan says Rem's data "moves nowhere" (§0) and leans on the recorder as the
+loss-repair path (§7.9, §11.2) without scheduling the replay or protecting the file, on a box whose
+outage history finding 2 gives. Spotify's Extended Streaming History export could recover them too,
+days to weeks after Rem asks for it.
+
+**Fix.**
+- A seventh STORE_MIGRATION edit, for lane 1904: the nightly job also copies `backstop.db` (31 MB, one
+  file, kept 60 days like Rem's store).
+- Run D1 (`scripts/backfill-from-backstop.mjs`, which inserts only what is missing) after lane 1904
+  and before P2's fill, so the fill and the accumulator count those plays (finding 4). It writes
+  production data, so it is Rem's go-ahead; recommend yes: it adds only his own captured plays and was
+  run on a snapshot copy first ("166 inserted … re-run 0", QUEUE.md:16).
+- The Extended Streaming History import for Aug 30-Sep 9 (QUEUE.md:17) goes in the same slot when the
+  export arrives, or after P2 only once `importTailStmts` sets `alltime_dirty` (finding 4).
+
+### 9. (High) A token that fails to decrypt writes `needs_reconnect`, so one mis-set key stops every user's capture until each signs in
+
+**Evidence.** "A blob that fails to decrypt is no token: the user goes to `needs_reconnect`" (§5.3,
+PLAN.md:553-554), and the claim skips `needs_reconnect` (§7.2 step 1). A decrypt failure is almost
+never about one user: it is a deploy whose `TOKEN_KEYS` is wrong, truncated or missing an old key. The
+plan rotates that key by hand ("put a new key first and redeploy … drop the old key", §5.3) within
+five days of every friend's deletion, up to four times (§12.3, PLAN.md:1540-1543). One bad rotation
+marks every user `needs_reconnect` within a tick. Correcting the variable and redeploying does not
+undo the state, so closed-app capture stays off for each user until that user signs in again, and a
+friend who does not open the app loses every play past their last 50. §7.8 guards the 403 case ("never
+when every user failed the same way in one tick", PLAN.md:967) and no other. review-completeness L2
+covers losing the key and restoring across a rotation; this is the misconfiguration and the state it
+leaves behind.
+
+**Fix.** Treat a decrypt failure as the deployment's fault, not the user's: log it with the uid, skip
+that user's step or fail that request, and write no user state. If two or more users, or the admin,
+fail to decrypt in one tick, answer the Zenbook caller 503 and touch no rows. At cold start, decrypt
+one sentinel blob per configured key and refuse to serve if any fails, so a bad key breaks the deploy
+loudly. Known answer: a deploy with a wrong key leaves every user `active`, and capture resumes on the
+next correct deploy with no sign-in.
+
+(Medium and Low findings follow)
 
 ## 2. STORE_MIGRATION, from this lens
 
