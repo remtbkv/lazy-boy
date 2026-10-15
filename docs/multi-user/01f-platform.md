@@ -9,7 +9,7 @@ Status: complete, 2026-10-14.
 
 ## 0. Summary
 
-- **Spotify allows five users on this app, Rem included, and no path to more.** Development mode is
+- **Spotify allows five users on this app, Rem presumably among them, and no path to more.** Development mode is
   "Up to 5 authenticated Spotify users" (since Mar 9, 2026 for existing apps); extended quota mode
   takes only organizations with "at least 250k MAUs"; spreading users over several Client IDs breaks
   "You may not use more than one Security Code for each SDA". 25 and 250 users cannot be served from
@@ -19,7 +19,7 @@ Status: complete, 2026-10-14.
   app has hit, recently-played's daily budget, banned it at roughly 725-800 calls a day in August;
   Rem plus the recorder use ~325 a day now, so two Rem-like users fit at today's harvest rate.
   Whether the pool is really shared across users is the largest unknown in this plan (1.4).
-- **Vercel is Hobby, shared with three other projects.** lazy-boy uses ~2.7% of the invocations and
+- **Vercel is Hobby, shared with Rem's other projects.** lazy-boy uses ~2.7% of the invocations and
   ~5% of the memory allowance. Active CPU (4 hours a month) could not be read through any API; my
   estimate is 0.5-2.4 hours for lazy-boy alone, and overrunning any Hobby allowance stops it for up
   to 30 days. Hobby crons run once a day, so the 2-minute tick has to live off Vercel (2).
@@ -27,8 +27,9 @@ Status: complete, 2026-10-14.
   query waits ~46 s. It reboots for 6-8 minutes around 3 AM daily (0.47% of the meter's 48.5 hours),
   stalls besides, and its Funnel certificate expires Nov 8. After the Turso move, the remaining
   user-visible dependency is the 2-minute pinger, which is everyone's closed-app history capture (3).
-- **Turso's free plan holds Rem plus a few light users, not two Rem-like ones.** Rem alone projects to
-  35-56% of its 500M reads, and crossing the limit blocks every query for every user until the 1st.
+- **Turso's free plan holds Rem plus a few light users; two Rem-like users can exceed it in a heavy
+  month.** Rem alone projects to 35-56% of its 500M reads, and crossing the limit blocks every query
+  for every user until the 1st.
   Reads bind first on every plan, and nearly all of it is the history payload's full rebuild (4).
 - **Nothing in STORE_MIGRATION needs to change before Oct 15, 8 PM.** Before a second user's data
   arrives: a paid Turso plan or a cheaper rebuild, deletion that reaches the backups within Spotify's
@@ -91,12 +92,14 @@ Three consequences for this repo:
 - No fetched page says whether the owner counts toward the five. The wording ("Up to 5 authenticated
   Spotify users can use an app") counts users of the app, and Rem is one, so plan on Rem plus four.
   Unverified; the dashboard's User Management tab is the authority.
-- Grandfathering keeps only accounts already on the list on Mar 9. Whether this app has more than
-  five is visible only in the dashboard. The app behaves as a post-February app (the `/tracks`
-  playlist endpoints 403 here, `docs/GOTCHAS.md` "Spotify Web API — changed since model training
-  data"), but the Mar 9 update postponed endpoint changes only for existing apps, so this is weak
-  evidence of when the app was created, not proof. Rem can read both facts off the dashboard in a
-  minute.
+- Grandfathering keeps only accounts already on the list when the rules reached existing apps on
+  Mar 9. Whether this app has more than five is visible only in the dashboard. One hint: the `/tracks`
+  playlist endpoints 403 for this app (`docs/GOTCHAS.md`, "Spotify Web API — changed since model
+  training data"), and the Mar 9 update postponed endpoint changes for apps that existed before
+  Feb 11, which suggests this app was created after Feb 11 and has no grandfathered list. It is a
+  hint only: Spotify may since have retired `/tracks` for every app, and the repo's first commit
+  (2026-05-31) does not date the Spotify app, which the older prototype may have created. Rem can read
+  the list and its size off the dashboard in a minute.
 
 Two more dev-mode rules that bind every user at once:
 
@@ -177,10 +180,10 @@ proper functioning of your SDA" is listed under "Improper use" (Section IV).
 records six penalty episodes, Aug 12–17, every one lifting at 10:46–10:51 AM ET, "while the burst
 window was never close (peak 18 calls/30s against a per-30s limit)". Bucketing the snapshot's
 `api_log` the same way (quota day anchored at 14:51 UTC, as `getRecentlyPlayedQuotaWindows` does):
-the ban landed after **629, 635, 645, 656, 671 and 700** logged calls on Aug 11–16, plus the
-recorder's ~96 on the same Client ID, so the real budget was roughly **725–800 calls per quota day**
-for the whole app. Since the harvest gate shipped (Aug 17) the logged count has sat at 20–403 a day
-and there has been no 429 on that endpoint.
+in the six quota days that began Aug 11–16, the ban landed after **629, 635, 645, 656, 671 and 700**
+logged calls, plus the recorder's ~96 on the same Client ID, so the real budget was roughly
+**725–800 calls per quota day** for the whole app. Since the harvest gate shipped (Aug 17) the logged
+count has sat at 20–411 a day and there has been no 429 on that endpoint.
 
 **How that divides across users is the largest unknown in this plan.** The quota-modes text says the
 quota "limits the number of requests made through development mode apps that belong to a single
@@ -188,12 +191,13 @@ developer account", which reads as one pool for every user of the app. No page s
 nothing here has measured a second user. Under the documented reading:
 
 - recently-played: at today's gate a Rem-like user costs ~229 + 96 (recorder) ≈ 325 calls/day, so
-  the ~725–800 budget holds **two** such users. Five need the harvest down to ~145 calls per user per
-  day, under half of today's, or a cheaper trigger (for example, harvest once per ~40 played tracks,
-  counted from the player poll, since the endpoint holds the last 50: `docs/GOTCHAS.md`
-  "`recently-played` only returns the last 50 plays").
-- the player endpoints: ~1,734 calls/day per user (`cron-player-check`, 25,580 over 15 days) in a
-  bucket whose budget nobody has measured. Five users is ~8,700/day.
+  the ~725–800 budget holds **two** such users. Five fit only if together they stay under ~725, about
+  145 each with Rem's recorder counted in his share, under half of today's rate. A cheaper trigger
+  would do it: for example, harvest once per ~40 played tracks, counted from the player poll, since
+  the endpoint holds the last 50 (`docs/GOTCHAS.md`, "`recently-played` only returns the last 50
+  plays").
+- the player endpoints: ~1,700 calls/day per user (`cron-player-check`: 25,580 in the 15-day window)
+  in a bucket whose budget nobody has measured. Five users is ~8,500/day.
 - the 30-second rate limit: the cron tick would call the player endpoint for every user in the same
   second unless it spreads them; at 5 users that is 5-10 calls per tick against an observed safe
   peak of 18 per 30 s. It matters at 25 users and up, which dev mode does not allow anyway.
@@ -245,8 +249,8 @@ Developer Policy (15 May 2025).
   control a background Spotify application", which the queue, play, resume and skip actions do, so
   lazyboy is a Streaming SDA. Policy IV: "commercial uses are not permitted for SDAs" except limited
   ones for Non-Streaming SDAs, and the examples include "sale of access". Friends cannot be charged to
-  cover hosting. Donations are not addressed by Spotify's pages (Vercel's Hobby terms say "Asking for
-  Donations does not fall under commercial usage", section 2.2).
+  cover hosting. Donations are not addressed by Spotify's pages (Vercel's fair-use page says "Asking
+  for Donations does not fall under commercial usage", section 2.2).
 - **Link accounts by `account_id`, not `id`.** May 2026 changelog: "Use account_id rather than id when
   linking user accounts to your service, as it is stable and will not change over the lifetime of the
   account." The profile reference on `id`: "Do not use this field for account linking — use
@@ -257,6 +261,10 @@ Developer Policy (15 May 2025).
   dev-mode apps (migration guide, "User (from GET /me)": "country, email, explicit_content, followers,
   product"), and Section V forbids e-mailing users without consent obtained elsewhere. Account notices
   (a dead token, a deletion confirmation) have to appear in the app.
+- **Ask for less.** Section V: "You will only request the data you need to operate your SDA." The app
+  requests 13 scopes (`src/lib/auth.ts:31-45`), including `user-read-email` and `user-read-private`,
+  which the code does not use (`me()` maps `product` but no caller reads it,
+  `src/lib/spotify/resources.ts:108-121`); every new user would grant them. 01e owns the trim.
 - **Roadmap items the policy rules out**, for the record: "Do not use the Spotify Platform or any
   Spotify Content to train a machine learning or AI model or otherwise ingest Spotify Content into a
   machine learning or AI model" (Policy III) bears directly on the roadmap's AI playlists.
@@ -337,9 +345,9 @@ The rest that bears on this app:
 
 **Pro**, for comparison (https://vercel.com/docs/plans/pro-plan, "Last updated September 15, 2026";
 fair-use page for rates): "$20/month Pro platform fee", "1 deploying team seat included", "$20/month in
-usage credit"; then on demand, "Function Invocations $0.60 per 1,000,000", "Active CPU Starting at
-$0.128 per hour", "Provisioned Memory Starting at $0.0106 per GB-hr" (iad1 is $0.128 per CPU-hour on
-the function pricing page). Crons can run "Once per minute" with "Per-minute" precision, runtime logs
+usage credit"; then on demand, invocations at "$0.60 per 1,000,000 Invocations", Active CPU "Starting
+at $0.128 per hour", Provisioned Memory "Starting at $0.0106 per GB-hr" (iad1 is $0.128 per CPU-hour
+on the function pricing page). Crons can run "Once per minute" with "Per-minute" precision, runtime logs
 keep 1 day, and spend management can cap the bill.
 
 ### 2.3 Today's usage against them, and the per-user growth
@@ -352,7 +360,7 @@ share. Applying `lazy-boy`'s daily share to each day's total:
 | over 30 days | team | `lazy-boy` (estimated from shares) | Hobby allowance | `lazy-boy` share of it |
 |---|---|---|---|---|
 | successful invocations | 75,220 | ~27,500 (~916/day) | 1,000,000 | 2.7% |
-| function GB-hours (the API's `function_execution_successful_gb_hours`) | 23.9 | ~19.4 | 360 GB-hrs provisioned memory | 5.4% |
+| function GB-hours (the API's `function_execution_successful_gb_hours`, taken here as the provisioned-memory meter) | 23.9 | ~19.4 | 360 GB-hrs provisioned memory | 5.4% |
 | outgoing bandwidth | 555 MB | ~25 MB | 100 GB | ~0% |
 | errors / timeouts / throttles | 10 / 0 / 0 | – | – | – |
 
@@ -387,7 +395,7 @@ In order, for Rem-like users:
    the penalty is a month-long outage for everyone on the team, including the other projects.
 2. **The 2 MB Data Cache item cap**, per user rather than in total. The library payload is cached as
    one entry (`libraryIndexCached`, `src/lib/db.ts:1600-1612`). It was 1,638,540 B raw for Rem's
-   August library of 13,464 identities (`db.ts:1409-1412`), so a user with about a quarter more
+   August library of 13,464 identities (`db.ts:1409-1412`), so a user with a fifth to a quarter more
    library than that would silently stop being cached and pay a full rebuild on every fetch that
    misses the browser's ETag. Rem's library is smaller today (7,400 `playlist_tracks` rows in the
    snapshot vs 15,328 in August, BRIDGE.md). Per-user entries also share one LRU cache with the team's
@@ -407,7 +415,7 @@ from the included $20 credit first. Section 5 estimates what each tier would use
 ### 3.1 What runs there
 
 The Zenbook (hostname `ASUSZenbook`, Ubuntu under WSL on a Windows host, STORE_MIGRATION §1) holds
-every piece of production state and two of its schedulers. From BRIDGE.md and ARCHITECTURE.md
+every piece of production state, the 2-minute pinger and the backstop recorder. From BRIDGE.md and ARCHITECTURE.md
 ("The store lives on the Zenbook"), checked read-only over `ssh ubuntu` at 9:20 PM (section 7):
 
 | unit | does | read at 9:20 PM |
@@ -437,7 +445,7 @@ connection, has not been measured; if the relay holds the connection, "down" beh
 | every `(app)` page: `/home`, `/playlists`, `/playlists/[id]`, `/friends`, `/usage` | layout `auth()` (`src/app/(app)/layout.tsx:48`), whose jwt callback reads the token row (`src/lib/auth.ts:381`); then the page's own reads | the jwt callback swallows the failed read and keeps the session (`auth.ts:382-386`), then the page's reads throw: "An error occurred in the Server Components render", which is what Rem saw on Aug 9-10 (BRIDGE.md, "Funnel cutover") | ~46 s for the token read alone, ~46 s more per serial page read, until an error page or Vercel's 300 s cut-off |
 | `/api/now-playing` (every 6 s while a tab is visible) | the token read | `spotifyAccessToken()` swallows the error (`auth.ts:270-271`) and the route answers `{playing:null}` (`src/app/api/now-playing/route.ts:22-28`): the bar vanishes | each poll hangs |
 | `/api/sync`, `/api/search/*`, `/api/playlists/*`, server actions | reads and writes | fail; search's fallback is the server-side search, which needs the store too | hang |
-| sign-in | the owner guard reads `SPOTIFY_OWNER_ID` from env before the store (`src/lib/owner.ts:11`); the token write | succeeds: a failed token write keeps the tokens in the cookie for a later migration (`auth.ts:368-375`) | ~46 s on the write |
+| sign-in | the owner guard reads `SPOTIFY_OWNER_ID` from env before the store (`src/lib/owner.ts:11`); the token write | the sign-in itself completes, because a failed token write keeps the tokens in the cookie for a later migration (`auth.ts:367-375`); it then lands on a page that fails as above | ~46 s on the write, then as above |
 | `/api/cron/sync` | the token read | its 2-minute pinger runs on the Zenbook, so no tick arrives at all; the daily Vercel cron (07:00 UTC ±59 min) fails the read and answers 200 `skipped: "no token"` (`src/app/api/cron/sync/route.ts:96-112`) | same |
 | error recording | `onRequestError` awaits a `client_metrics` write for each failed request (`src/instrumentation.ts:14-25`) | fails fast | adds ~46 s per failed request |
 | backstop recorder, nightly backup | same box | stop | stop |
@@ -483,10 +491,10 @@ https://tailscale.com/docs/features/tailscale-funnel, fetched 9:18 PM):
 
 The bandwidth limits are not published, so whether five users' payload rebuilds fit is unknown. The
 cost of the hop is measured: `SELECT 1` takes 0.8 ms on the Zenbook's loopback and 40-210 ms median
-(58-840 ms p90) through the Funnel, growing with the Zenbook's load (STORE_MIGRATION §1). The last
-point bears on certificate repair: a retry loop that orders certificates too often can lock renewal
-out for a day and a half, which is why lane 1907's runbook backs up and orders once (STORE_MIGRATION
-§11).
+(58-840 ms p90) through the Funnel, growing with the Zenbook's load (STORE_MIGRATION §1). The Let's
+Encrypt limit bears on the certificate repair: a loop that orders certificates too often can lock
+renewal out for about a day and a half, which argues for lane 1907 ordering a fresh certificate once,
+as its runbook does, rather than retrying (STORE_MIGRATION §11).
 
 ### 3.5 What multi-user changes about it
 
@@ -502,7 +510,7 @@ out for a day and a half, which is why lane 1907's runbook backs up and orders o
   CPU-sensitive it is (26,436 ms vs 648 ms for the same scan, GOTCHAS "Never let the store compress
   with brotli"). Five users' payload rebuilds are five times the scans on that CPU.
 
-Ways to take the pinger off the Zenbook, cheapest first: a second, independent pinger on cron-job.org,
+Ways to stop closed-app capture depending on the Zenbook alone, cheapest first: a second, independent pinger on cron-job.org,
 the free service that ran this app's 2-minute job until Aug 10 (`.env.example`, "the every-2-min
 cron-job.org pinger"; its old job still holds a stale secret, SECURITY.md), with the route skipping a
 tick that lands within ~90 s of the last so Spotify calls do not double; or Vercel Pro's per-minute
@@ -546,8 +554,8 @@ the month-to-month price is the yearly price plus the "Save" figure printed besi
 > (same page)
 
 The org runs the free plan with "overages disabled" (STORE_MIGRATION §3), so the second quote is the
-operative one: August's block stopped every query for the rest of the month (READ_QUOTA.md, "What
-'rows read' means"). Turso does not price per user. A user costs their share of the org's reads,
+operative one: in August the block stopped every read for the rest of the month and production could
+render nothing (BRIDGE.md, opening paragraph). Turso does not price per user. A user costs their share of the org's reads,
 writes and storage, plus nothing per database: "Idle databases cost only storage".
 
 ### 4.3 Usage per user per month, from the meter
@@ -653,7 +661,7 @@ answer depends on who the users are.
 | Vercel invocations | ~6,000 browsing + 21,600 cron if ticks are per user | fewer browsing; the same 21,600 cron |
 | Vercel Active CPU | 0.5-2.4 CPU-hours (estimate, 2.3) | unknown, smaller |
 | Vercel provisioned memory | ~19.4 GB-hours (linear upper bound; fluid compute shares instances, so real growth is lower) | lower |
-| Spotify calls | ~2,116 a day + 96 from the recorder | ~1,734 a day: the player check runs for every user every tick, listening or not |
+| Spotify calls | ~2,116 a day + 96 from the recorder | ~1,700 a day: the player check runs for every user every tick, listening or not |
 
 "Users" below are Rem-like unless stated, which makes the totals an upper bound for today's code. The
 design lanes will change the dominant term (the history payload's rebuild), so these are prices for
@@ -680,7 +688,7 @@ credit, then on-demand rates (2.2); per-minute crons retire the Zenbook pinger.
 **E. Each person runs their own copy** (federated): per person, their own Spotify developer app (their
 own Premium required, 1.2), their own Vercel Hobby team, Turso Free and an external pinger. $0 hosting
 each, no multi-user code at all (each copy is today's single-user app), nothing shared between
-people, and a setup of roughly an hour per person plus Rem's support. It is the only option that goes
+people, and a setup of roughly an hour per person (my estimate) plus Rem's support. It is the only option that goes
 past five people on Spotify's terms.
 
 Arithmetic for D at the two larger sizes, all Rem-like users, using 2.2's rates and 5.1's per-user
@@ -702,7 +710,7 @@ Monthly, all users Rem-like (upper bound), today's code:
 | users | Spotify | Vercel | Turso | Zenbook | total |
 |---|---|---|---|---|---|
 | **5** | $0; the cap for one app | Hobby $0 if Active CPU fits (2.5-12 CPU-h vs 4; unmeasured), else Pro $20 | Free is over (0.65-1.4B reads) → Developer $4.99-5.99 | $0: pinger, recorder, backups, telemetry | **$5-26** |
-| 5 (Rem + 4 light) | $0 | Hobby likely, same CPU caveat | Free holds: ~170-320M reads, up to 64% of the plan on Rem's heavy month | $0 | **$0-20** |
+| 5 (Rem + 4 light) | $0 | Hobby likely, same CPU caveat | Free holds: ~165-320M reads, up to 64% of the plan on Rem's heavy month | $0 | **$0-20** |
 | **25** | **not possible on one app**; option E only | Pro $20 (usage inside the credit) | Developer $5.74-10.49 (yearly low end to monthly high end) | $0, or retired by Pro's cron | $26-31 if Spotify allowed it |
 | **250** | **not possible on one app**; option E only | Pro ~$68-132 | Scaler $24.92-29 | – | ~$93-161 if Spotify allowed it |
 | any N, option E | each person's own app | $0 each (Hobby) | $0 each (Free) | none | **$0**, plus each person's Premium and setup time |
