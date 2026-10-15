@@ -499,7 +499,7 @@ request reads one global token row, and the owner guard runs only at sign-in (`s
   action (01b S2). It is the only source of a uid for an entry point, and it merges the three gate
   strengths 01b §2.4 found into one rule.
 - **The browser** gets the uid rendered into the page by the `(app)` layout, for its storage keys
-  (§6.5). Nothing new goes on the `Session` type, whose fields Auth.js serves at
+  (§6.2 layer 6). Nothing new goes on the `Session` type, whose fields Auth.js serves at
   `GET /api/auth/session` (docs/SECURITY.md "Tokens never reach the browser").
 - **Home's gate runs before its reads**: the payload read needs the uid, so Home pays one sequential
   round trip it does not pay today (~15 ms at R1's target, I$). Decoding the cookie separately to
@@ -754,7 +754,7 @@ and sha256 file hashes of the other user's database before and after.
 | T9 | sign-in | an invite claimed once; a profile without `account_id` refused; a returning user found by `account_id` after their `id` changed; Y cannot claim X's invite |
 | T10 | every script | exits non-zero without `--user`; with `--user B` touches only B's file; the backstop replay refuses anyone but the admin |
 | T11 | the deletion job for B | B's next request has no session; B's token, queue and telemetry rows are gone; B's database destroyed (the Platform API mocked); A's hash unchanged; a second run is a no-op; the job refuses the admin, `lazyboy`, and any name that is not `lb-u-<uid>` with a matching `owner_uid` |
-| T12 | the Phase 2 migration on a local copy of a nightly backup, by hand (it needs Rem's data) | §11.3's checks |
+| T12 | the Phase 2 migration on a local copy of a nightly backup, by hand (it needs Rem's data) | §11.4 step 6's checks |
 
 Static checks, also in `npm test` (A §5.3): S1 `unstable_cache(` appears only in `user-cache.ts`; S2
 no `as Uid` outside `identity.ts`, whose minting helper only the gate, the claim and the script
@@ -876,13 +876,14 @@ A harvest is one recently-played call, which returns the last 50 plays. A user i
 | session tail | the first probe that finds playback stopped (today's `>=` rule, `src/lib/harvest-gate.ts:20-24`) | ~5 |
 | retry | a change-triggered harvest landed nothing new: Spotify may list a play a little after the player has moved on, so the next tick harvests once more (C §6.2) | unmeasured; Phase 3's soak counts it |
 | completeness | 25 track changes since the last harvest, whatever the brake says (B §7.4: half of the 50-play window) | 0 unless the brake holds a user above 25 changes |
-| backstop | 2 hours idle since the last harvest, for devices the probe cannot see (today hourly) | ~12 |
+| backstop | 2 hours idle since the last harvest, for devices the probe cannot see (today hourly; 50 plays is ~2.5-3 hours of nonstop listening, 01c §5.1) | ~7 |
 | open app | §7.6 | ~5 for Rem; more for an app-heavy friend |
 
-That is ~150 a day for a Rem-like user against 139-319 cron harvests plus the recorder's 96 today
-(01c §2.7). On Rem's day the tick harvested 280 times for 129 plays (01c §5.3); the rule predicts
-~160, a number Phase 3's soak checks on his own traffic before anyone shares the bucket. The decision
-is a pure function next to `shouldHarvest`, with known answers in `tests/harvest-gate.test.ts`.
+That is ~145-150 a day for a Rem-like user, before the retries, against 139-319 cron harvests plus
+the recorder's 96 today (01c §2.7). On Rem's day the tick harvested 280 times for 129 plays (01c
+§5.3); the rule predicts ~145 plus the retries, a number Phase 3's soak checks on his own traffic
+before anyone shares the bucket. The decision is a pure function next to `shouldHarvest`, with known
+answers in `tests/harvest-gate.test.ts`.
 
 ### 7.5 The fair-share brake
 
@@ -928,9 +929,9 @@ everyone else's share, so the brake trips earlier for friends.
   ends. One visible change for Rem: the forced refresh at a track change finds the stored row only
   after the next tick, up to ~2 minutes later, with the provisional row standing in until then.
 - **Now-playing** polls every 15 s mid-track instead of 6 s, keeping the end-of-track and focus polls
-  (01c §5.5): ~4-6 Spotify calls a minute per visible tab, so five users with a visible tab each stay
-  near 12-15 calls per 30 s, under the 18 seen safe. The chip already interpolates progress between
-  polls. It ships in Phase 3, measured on Rem's call log before a friend shares the rate window,
+  (01c §5.5): ~4-6 Spotify calls a minute per visible tab, so five users with a visible tab each make
+  ~10-15 calls per 30 s, plus ~2-3 from the ticks, at or under the 18 seen safe (the limit itself is
+  unpublished and higher). The chip already interpolates progress between polls. It ships in Phase 3, measured on Rem's call log before a friend shares the rate window,
   because a rate-limit 429 pauses every user's capture for its duration.
 
 ### 7.7 Library rescans
@@ -1548,7 +1549,7 @@ follow; **L** a design change or a mechanical edit across many files.
 | **P3** | segments with their manifest and version bumps, lazy days, fetch at mount, `history-ready` on the history half, ≤ 50 painted rows, phase E's store keyed per segment | P2 and lane 1906; **before mid-December** (the catalog split, 01d O2, is the stopgap if it slips) | every month's segment equals that month's slice of `readHistoryIndex()` on one snapshot; 01d's throttled harness meets S1-S3 at 4×; `history-ready` on `/usage` | revert; browsers re-download once | L |
 | **1**, owner only | `identity.ts` and the branded `Uid`; `requireUser()` on every entry point; `OWNER_UID` and epoch 0 on the cookie, cookies without a uid refused (Rem signs in once); `forUser` over `lazyboy` with the versioned open; `userCache` with owner stamps; keyed `cache()` boxes and module state; `playlistsCache` deleted; task owners; uid in ETags, URLs, bodies and storage keys; sign-out clearing storage; the token core in its own module with keyed maps and owner-carrying tokens, still reading the plaintext row; §6.4's harness and T1-T3, T7, T8, T10, S1-S6, each shown failing first | P3 | `npm test` and `npm run build` green; an adversarial review of the diff; then a week with zero isolation events, capture matching the recorder, Rem signed in | redeploy the previous build: it ignores the cookie's extra claim and the two `meta` keys | L |
 | **2**, owner only | `lazyboy-app`, `app-db.ts`, the users row, encrypted tokens, the one-statement identity check, T5, T6, T9; §11.4's steps | Phase 1's week, lane 1904, the foreign-play cleanup | §11.4 step 6, then three days | §11.4's rollback | M |
-| **3**, owner only | `sync_state` and the claim; the per-user step; the `/me/player` probe; track-change harvests with the retry, completeness at 25 and a 2-hour backstop; the owner alarm by caller; per-bucket cooldowns and the 429 `reason`; the uid on telemetry; the open-app rules; `refreshHistoryAction` off Spotify; now-playing at 15 s; the rescan changes; the brake's counter, counting but inert; T4; then the second pinger and the recorder hourly | Phase 2's soak | a week in which Rem's harvests come to his plays plus ~30 and the retries (~160 against 280 on Oct 14, 01c §5.3), every tick answers 200, the open app harvests only catch-ups, no play is first stored by a backstop while Rem was listening (the check on `/me/player` alone), the recorder diff is empty; the second pinger proven by stopping the Zenbook timer for ten minutes | disable the second pinger, then revert the route | M-L |
+| **3**, owner only | `sync_state` and the claim; the per-user step; the `/me/player` probe; track-change harvests with the retry, completeness at 25 and a 2-hour backstop; the owner alarm by caller; per-bucket cooldowns and the 429 `reason`; the uid on telemetry; the open-app rules; `refreshHistoryAction` off Spotify; now-playing at 15 s; the rescan changes; the brake's counter, counting but inert; T4; then the second pinger and the recorder hourly | Phase 2's soak | a week in which Rem's harvests come to his plays plus ~15 and the retries (~145 against 280 on Oct 14, 01c §5.3), every tick answers 200, the open app harvests only catch-ups, no play is first stored by a backstop while Rem was listening (the check on `/me/player` alone), the recorder diff is empty; the second pinger proven by stopping the Zenbook timer for ten minutes | disable the second pinger, then revert the route | M-L |
 | **4**, the first friend | `/join`, the terms pages, `invite.mjs`, the claim (`SIGNUPS=invite`); the log-out split; the deletion job; per-database backups; admin-only `/usage`; `owner.ts` removed; T11 | Phase 3's week, plus the gates in §13.2 | after a week: each user's scarce-bucket calls near §14.2's table; Turso's per-database usage near §8.6; no `QUOTA_EXCEEDED`; isolation events at zero; the friend confirms Home shows only their own plays | `status = 'disabled'` (sessions die and sync stops at once) or `SIGNUPS=owner`; the deletion job if they leave | M |
 | **P4** and the brake | the Home payload patch, the strip from segments, the `contexts` scan, one marker bump per batch; the fair-share brake switched on | Phase 4's week, **before the second friend** | patched payload = rebuilt payload after a day of synthetic harvests; the brake's boundary known answers; the usage drop on Turso | redeploy; the brake has a flag | M |
 | **5**, friends two to four | one person at a time, a week apart | P4 and the brake | each addition: the last week's recently-played spend plus the newcomer's expected share under ~426, or the brake tripping rarely; the read projection under 50% of the plan; Active CPU inside the plan | per friend, as in Phase 4 | S each |
