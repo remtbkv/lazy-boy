@@ -168,13 +168,126 @@ re-login fixes capture.
 
 ## 3. Caches and shared state, and whether each key separates users
 
+None of them does. Every cache below is keyed on content versions, days, offsets or ids, never on a
+person.
+
 ### 3.1 Next's Data Cache (`unstable_cache`)
+
+Seven entries, all in `src/lib/db.ts`. No entry carries `tags`, and nothing in `src/` calls
+`revalidateTag` (`grep`, section 9).
+
+| entry | defined | key parts | arguments (also in the key) | TTL | user in key |
+|---|---|---|---|---|---|
+| all-time list | `db.ts:983-994` | `["all-time-plays"]` | `limit`, slow marker | 3,600 s | no |
+| day strip | `db.ts:1082-1090` | `["daily-stats"]` | `offsetMin`, `days`, `write_seq` | 3,600 s | no |
+| one past day | `db.ts:1176-1180` | `["plays-by-day-frozen"]` | `day`, `offsetMin`, `write_seq` | 86,400 s | no |
+| today, yesterday | `db.ts:1181-1191` | `["plays-by-day-live"]` | `day`, `offsetMin`, `write_seq` | 3,600 s | no |
+| library payload | `db.ts:1600-1613` | `["library-index", "v1"]` | `library_seq`, shape | 86,400 s | no |
+| history payload | `db.ts:1615-1623` | `["history-index", "v2"]` | slow marker, shape | 86,400 s | no |
+| playlist grid | `db.ts:1906-1914` | `["stored-playlists"]` | `write_seq` | 3,600 s | no |
+
+How the key is built matters for the fix. In Next 16.2.6 (`package.json` pins `next` 16.2.6;
+`dist/server/web/spec-extension/unstable-cache.js:55` and `:82` in its npm tarball) the key is the
+callback's source text, the key parts, then `JSON.stringify(args)`. A user id therefore separates
+entries only when it is an argument or a key part. A wrapper that captures the id in a closure, such
+as `unstable_cache(() => readPlaylists(userId), ["stored-playlists"])`, has the same source text for
+every user and serves the first user's entry to all of them. A per-user version counter without the
+id in the key fails the same way whenever two users' counters hold the same value, which small
+integers do often.
+
+Two more properties carry over. The Data Cache outlives a deploy (`GOTCHAS.md` "The Data Cache
+OUTLIVES THE DEPLOY"), so adding the user to the keys must also move the shape tokens, or the first
+multi-user deploy could be handed single-user entries. And with no tags, an entry built from a deleted
+user's rows stays in the cache until its TTL runs out, up to 24 hours; purging on account deletion
+needs a per-user tag and a `revalidateTag` call.
+
 ### 3.2 Version markers and ETags
+
+The keys above move on three global counters in `meta`: `write_seq` (bumped by any write a cached
+read serves, `db.ts:345-360`, read once per request at `db.ts:402-416`), `library_seq` (playlist and
+Liked membership changes, `db.ts:374-383`) and the slow marker `slow_seq_pub` (a copy of `write_seq`
+republished at most every 10 minutes, `db.ts:1550-1596`). With one counter for everyone, any user's
+play moves every user's live keys and, within 10 minutes, every browser's history payload. That is a
+cost that grows with the number of users, not a leak: hit rates fall and payloads re-download for
+everyone after anyone listens. Per-user counters fix it, paired with the user id in every key
+(3.1).
+
+The two search routes turn the counters into ETags:
+
+| route | ETag | headers | 304 when |
+|---|---|---|---|
+| `/api/search/library` | `"lib-v1-<library_seq>-<UTC day>"` (`route.ts:39`) | `private, max-age=0, must-revalidate` (42) | `If-None-Match` equals it (45-47) |
+| `/api/search/history` | `"hist-v2-<slow marker>-<UTC day>"` (`route.ts:26`) | the same (29) | the same (31-33) |
+
+Neither tag names the user, and neither response sends `Vary`. On a shared browser profile (A signs
+out, B signs in) the HTTP cache still holds A's body under the same URL, and B's request revalidates
+with A's tag. With per-user counters and no user in the tag, equal counter values on the same day
+answer 304 and the browser shows A's library to B. `private` keeps CDNs out of it, not the browser.
+The tag needs an opaque per-user component.
+
 ### 3.3 Request-scoped boxes
+
+Three React `cache()` boxes take no arguments: the token box (`auth.ts:73-83`), the `write_seq` box
+(`db.ts:402-416`) and the ordered-plays scan (`db.ts:854-869`). They are safe while one request serves
+one user, which holds for every page, action and route above. A cron fan-out that handled several
+users inside one React request scope would hand the first user's box to the rest. The code's own
+comment says `cache()` is a pass-through outside a React request (`auth.ts:68-69`), which would cover
+a route handler, but I did not verify that for Next 16. The safe rule is to give every box the user
+id as its argument.
+
 ### 3.4 Module and `globalThis` state (the task registry included)
+
+Per-instance memory, shared by every request the instance serves (`GOTCHAS.md` "Per-instance server
+state is invisible across serverless instances").
+
+| state | where | two users, as written | needs |
+|---|---|---|---|
+| task store and running-promise maps | `src/lib/tasks/registry.ts:21-23`, `:70` | tasks have no owner (`registry.ts:9-18`); `/api/tasks/[id]` returns any id it finds (`route.ts:13-15`). Ids are `crypto.randomUUID()` (`registry.ts:27`), so the risk is an id that leaks, and two leak paths exist: `currentSyncId` below and the browser's `clean:active` (3.6) | an owner on each task, checked by the route; the cross-instance gap stays as ROADMAP Phase 3 describes |
+| `currentSyncId` | `src/lib/playlists-sync.ts:22`, `:50-54`, `:69` | one library sync per instance for everyone: B's kick while A's sync runs returns A's task id, B polls A's progress, and B's own library never syncs | one entry per user, or a per-user DB lock in its place |
+| `inflightRefresh` | `auth.ts:188-196` | `refreshShared(refreshToken)` ignores its argument while a refresh is in flight, so B awaits A's refresh and receives A's tokens | a map keyed by user |
+| `playlistsCache` | `src/lib/spotify/resources.ts:76-81`, `:89-104` | one entry per instance for 60 s, deliberately not keyed ("this is a single-user app", 76-79). A library sync for B within 60 s of A's on the same instance reads A's playlist list and stores it as B's library under B's `me_id` (`src/lib/sync/library.ts:40-50`) | key by user, or delete it; its only callers are `myPlaylistsAll` and `myPlaylists` (`resources.ts:125-135`) |
+| `cooldownUntil` and the persisted `spotify_cooldown_until` | `src/lib/spotify/client.ts:48`, `:157`, `:178`; `db.ts:2376-2392` | one user's 429 or ban holds back every user's calls | right only if Spotify's limit is per app; 01f owns that answer |
+| `uniqueRecomputeKickedAt` | `db.ts:1960-1965` | one throttle for every user's unique-song recompute | per user |
+| store client, `apiLogWrites` | `db.ts:133-146`, `:2601` | shared connection and a prune counter | ok |
+
 ### 3.5 Locks in `meta`
+
+`lock:spotify_refresh` (`auth.ts:212`, `:221`) is one lease for everyone. Under per-user token rows it
+would serialise every user's refresh behind one 30 s lease, and a loser would poll the global row
+(`waitForFreshToken`, `auth.ts:244-252`) for a token that is not its own. It needs the user in its
+name. `lock:clean:<playlistId>` (`actions.ts:130`, `:156`) is keyed by playlist only: two users
+cleaning the same collaborative playlist would block each other for the Phase-1 window. No leak, but
+`clean:<user>:<playlist>` is the right key.
+
 ### 3.6 Browser-side state
+
+| key | where | stamped with | two people on one browser profile |
+|---|---|---|---|
+| `lb-days` (sessionStorage) | `src/app/(app)/home/den-home.tsx:325-362` | build id | in the same tab after A signs out, B sees A's stored past days until the build changes |
+| `lb-nowplaying` (localStorage and a BroadcastChannel) | `src/components/now-playing-context.tsx:62-63`, `:240`, `:371-379`, `:407-415` | a 30 s age (`:70`) | a tab opened within 30 s of A's last poll paints A's song, which Home's play handoff can treat as live |
+| `clean:active` (localStorage) | `src/lib/clean-progress.ts:5-27`, polled at `src/components/clean-progress.tsx:52-57` | nothing | B's watcher polls A's clean task, alive up to 10 min after it ends (`registry.ts:42`), and shows its result |
+| HTTP cache of the search payloads | the two search routes | ETag | 3.2 |
+| `lb-ring:<image>`, `lb:metrics-session`, `lb-build-reload-at`, `lb-perf` | `src/app/(app)/chrome.tsx:202-255`, `src/lib/metrics-client.ts:57-87`, `now-playing-context.tsx:75`, `src/lib/search-perf.ts:6-26` | – | harmless |
+
+Sign-out clears none of them (`actions.ts:63-69`). The client Router Cache holds dynamic pages for
+30 s (`next.config.ts:23-25`), but sign-in is a full navigation through accounts.spotify.com, so
+nothing in it survives a change of user. The planned IndexedDB copy of the payloads joins this table
+(section 7).
+
 ### 3.7 Vercel-side surfaces: preview deployments, CDN
+
+No response that carries personal data can land in a shared cache: the data pages are dynamic
+(`force-dynamic` on Home, Playlists and Usage; the detail page reads cookies through `auth()`), the
+search payloads are `private`, and nothing in `src/` sets `public` or `s-maxage` (`grep`, section 9).
+The Data Cache (3.1) is the only shared server-side cache.
+
+Preview deployments are the wider surface. `vercel env ls` (section 9) shows `AUTH_SECRET`,
+`SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` and `AUTH_URL`
+set for Production and Preview alike, and `docs/STORE_MIGRATION.md` §3 says "Preview deployments use
+the production store." Vercel builds previews with `NODE_ENV=production`, so they also use the
+production token key (`db.ts:2511-2512`). A preview of any pushed branch reads and writes production
+data and refreshes the production token today; with many users it would do that for all of them.
+Whether Vercel Deployment Protection gates preview URLs on this project I did not check.
 
 ## 4. Entry points that would leak or mix data across users, as written
 
