@@ -341,7 +341,8 @@ inside Hobby's 1M. It matters for the Active CPU estimate, which 01f scaled from
 
 **Not a finding, a correction.** §10.2 edit 4 prices a per-table `count(*)` check at "~45,800 rows a
 night". On libSQL an unfiltered `count(*)` walks pages (158 reported for 15,852 rows, READ_QUOTA
-"Measured reads"), so it costs a few hundred. The edit stands on fidelity, not cost.
+"Measured reads"), so it costs a few hundred. Checking counts against the dump is still the better
+check, for fidelity.
 
 ## 2. The arithmetic at 5, 25 and 250 users
 
@@ -375,7 +376,7 @@ does.
 
 What binds, in the order the users arrive (my recomputation):
 
-1. **Spotify's allowlist at six.** Policy, not engineering.
+1. **Spotify's allowlist at six**, a policy limit no design changes.
 2. **Money switches, all small.** Hobby Active CPU somewhere between 2 and 25 users (unmeasured, the
    plan's Phase 0 read); Turso reads at R4's 250M bar at ~19 users (250M ÷ (0.44M × 30)) and at
    Free's 500M block at ~38, or at ~3 and ~6 if finding 2 is not fixed and app-heavy users leave "See
