@@ -252,9 +252,125 @@ Developer Policy (15 May 2025).
 ## 2. Vercel
 
 ### 2.1 Which plan the project is on, and how that was determined
+
+**Hobby.** Read-only REST calls with the Mac's Vercel CLI token (section 7):
+`GET /v2/teams/team_omHOXItW1PXTC6XJ6WBBv16M` returns `billing.plan = "hobby"`, `status = "active"`
+(team "remtbkv's projects"). `GET /v9/projects/prj_UA3749Btv0RiQPwuymee4MdZZ7HA` (`lazy-boy`)
+returns fluid compute on, `functionDefaultRegions: ["iad1"]`, `functionDefaultTimeout: 300`, memory
+type `standard`, and one cron, `/api/cron/sync` at `0 7 * * *` (`vercel.json`).
+
+The Hobby allowances are per team, and this team runs other projects. The usage API's per-project
+breakdown names `monitor`, `website` and `cheffing` next to `lazy-boy`; on 2026-10-13, `monitor` was
+65% of the team's function invocations and `lazy-boy` 31%. Every number in 2.2 is shared with them.
+
 ### 2.2 The limits that matter on that plan
+
+From https://vercel.com/docs/plans/hobby (fetched 9:17 PM; "Last updated September 14, 2026"),
+per month:
+
+| resource | Hobby included |
+|---|---|
+| Function Invocations | First 1,000,000 |
+| Active CPU | 4 CPU-hrs |
+| Provisioned Memory | 360 GB-hrs |
+| Fast Data Transfer | First 100 GB |
+| Fast Origin Transfer | First 10 GB |
+| CDN Requests | First 1,000,000 |
+
+What happens past one: "In most cases, if you exceed your usage limits on the Hobby plan, you will
+have to wait until 30 days have passed before you can use the feature again." For Active CPU or
+invocations that means every user's site is down for up to a month, a harder failure than Turso's,
+which resets on the 1st (section 4.2).
+
+The rest that bears on this app:
+
+- **Cron** (https://vercel.com/docs/cron-jobs/usage-and-pricing, "Last updated July 15, 2026"):
+  "Hobby accounts are limited to cron jobs that run once per day", and "Vercel cannot assure a timely
+  cron job invocation. For example, a cron job configured as 0 1 * * * (every day at 1 am) will
+  trigger anywhere between 1:00 am and 1:59 am." The 2-minute sync tick cannot live on Vercel on this
+  plan; it lives on the Zenbook (section 3).
+- **Functions** (https://vercel.com/docs/limits): "Maximum duration 300s (5 minutes) default and
+  max"; "Memory and CPU 2 GB / 1 vCPU default and max". Response bodies: "The maximum payload size for
+  the request body or the response body of a Vercel Function is 4.5 MB"
+  (https://vercel.com/docs/functions/limitations).
+- **Data Cache** (https://vercel.com/docs/caching/runtime-cache/data-cache): "Item size 2 MB (items
+  larger won't be cached)"; "On Hobby and Pro, all projects in your team share a single cache";
+  eviction is least-recently-used when the cache's storage limit is reached (the page gives no size).
+  Every `unstable_cache` entry in `db.ts` lives there.
+- **Logs and metrics**: runtime logs are kept 1 hour on Hobby (Hobby page). Observability queries
+  are refused: `vercel metrics vercel.function_invocation.count --since 1d` answers "Observability
+  Plus is required to run this query ... available on Pro and Enterprise plans."
+- **Use**: "Hobby teams are restricted to non-commercial personal use only"
+  (https://vercel.com/docs/limits/fair-use-guidelines, "Last updated September 14, 2026"), and "Asking
+  for Donations does not fall under commercial usage." Friends using it free is personal,
+  non-commercial use.
+
+**Pro**, for comparison (https://vercel.com/docs/plans/pro-plan, "Last updated September 15, 2026";
+fair-use page for rates): "$20/month Pro platform fee", "1 deploying team seat included", "$20/month in
+usage credit"; then on demand, "Function Invocations $0.60 per 1,000,000", "Active CPU Starting at
+$0.128 per hour", "Provisioned Memory Starting at $0.0106 per GB-hr" (iad1 is $0.128 per CPU-hour on
+the function pricing page). Crons can run "Once per minute" with "Per-minute" precision, runtime logs
+keep 1 day, and spend management can cap the bill.
+
 ### 2.3 Today's usage against them, and the per-user growth
+
+`GET /v2/usage?type=requests&from=2026-09-14&to=2026-10-14` (the one usage endpoint Hobby may call;
+`/v1/usage` answers "only available to Teams on the Pro or Enterprise plan", and `vercel usage`
+fails with "Costs not found (404)") gives team-wide daily totals plus each project's percentage
+share. Applying `lazy-boy`'s daily share to each day's total:
+
+| over 30 days | team | `lazy-boy` (estimated from shares) | Hobby allowance | `lazy-boy` share of it |
+|---|---|---|---|---|
+| successful invocations | 75,220 | ~27,500 (~916/day) | 1,000,000 | 2.7% |
+| function GB-hours (the API's `function_execution_successful_gb_hours`) | 23.9 | ~19.4 | 360 GB-hrs provisioned memory | 5.4% |
+| outgoing bandwidth | 555 MB | ~25 MB | 100 GB | ~0% |
+| errors / timeouts / throttles | 10 / 0 / 0 | – | – | – |
+
+About 720 of the 916 daily invocations are the 2-minute cron tick (one invocation per tick, 30 an hour);
+the other ~200 are Rem's own browsing, polls and syncs.
+
+**Active CPU is the number I could not get.** No API open to Hobby reports it (the usage endpoint's
+allowed types are `requests, monitoring, builds, edge, edge_group_by_project, artifacts, edge_config,
+log_drains, storage_*, cron_jobs, data_cache`, and none carries CPU). An estimate, labelled as one:
+19.4 GB-hours at 2 GB per instance is ~9.7 instance-hours a month, ~1.3 s of instance time per
+invocation. Active CPU counts only the time code runs, not I/O waits; a cron tick is mostly waiting on
+Spotify and the store, a Home render is the CPU-heavy case. At 5-25% of instance time, `lazy-boy`
+uses **roughly 0.5-2.4 of the team's 4 CPU-hours a month**, before `monitor` and the rest. Rem can
+read the real figure on the dashboard (team → Usage → Active CPU) in under a minute, and it should be
+read before any design commits to Hobby.
+
+Per added user, the growth that is not shared:
+
+- the cron tick's work: one Spotify player check per user per tick (720 a day each) plus the sync when
+  playing. If each user's tick is a separate invocation, +21,600 invocations a month per user; if one
+  invocation serves every user, the invocation count stays flat and its duration and CPU grow instead;
+- the user's own sessions: Rem's ~200 interactive invocations a day is the only measured profile;
+- the user's search payloads in the shared Data Cache (2.4).
+
 ### 2.4 Where multi-user meets a Vercel limit first
+
+In order, for Rem-like users:
+
+1. **Active CPU**, if per-user work scales linearly from today's estimate: 4 CPU-hours holds between
+   ~1.7 and ~8 Rem-like users at the two ends of the 0.5-2.4 band, less whatever `monitor` and the
+   other projects use. Five users may already be over. This is the limit to measure first, because
+   the penalty is a month-long outage for everyone on the team, including the other projects.
+2. **The 2 MB Data Cache item cap**, per user rather than in total. The library payload is cached as
+   one entry (`libraryIndexCached`, `src/lib/db.ts:1600-1612`). It was 1,638,540 B raw for Rem's
+   August library of 13,464 identities (`db.ts:1409-1412`), so a user with about a quarter more
+   library than that would silently stop being cached and pay a full rebuild on every fetch that
+   misses the browser's ETag. Rem's library is smaller today (7,400 `playlist_tracks` rows in the
+   snapshot vs 15,328 in August, BRIDGE.md). Per-user entries also share one LRU cache with the team's
+   other projects. The search overview (01d) owns the sizes.
+3. **Invocations**: ~1,000,000 / (21,600 + ~6,000) ≈ 36 users if every user's tick is its own
+   invocation; ~160 if one invocation serves all ticks and only browsing scales. Not binding at five.
+4. **Duration**: a single tick that serves every user must finish in 300 s; at today's ~1-2 s per
+   user done serially that is 150-300 users, more if parallel. Not binding at five.
+5. **The 4.5 MB response cap**: ~36,000 library songs per user at ~122 B each (`db.ts:1427-1429`).
+   Not binding for anyone like Rem.
+
+Pro removes the hard stops and the cron restriction for $20 a month, with the month's usage drawn
+from the included $20 credit first. Section 5 estimates what each tier would use.
 
 ## 3. The Zenbook: sqld behind a Tailscale Funnel, a single point of failure
 
