@@ -16,8 +16,8 @@ Status: complete.
 ## 0. Summary
 
 - **The store has no notion of a user.** Ten tables, 24.56 MB (core 11.87 MB, telemetry 12.69 MB), one
-  client, no foreign keys, no user column; all 243 `meta` rows are global, including the one plaintext
-  Spotify token row (§2, §3). All 74 async exports of `db.ts` are user-less (§7, D2).
+  client, no foreign keys, no user column; all 243 `meta` rows are global, including the plaintext
+  Spotify token rows (one for production, one for dev) (§2, §3). All 74 async exports of `db.ts` are user-less (§7, D2).
 - **The owner's data** [measured on the Oct 14 nightly backup]: 22,040 plays (14,511 real, 7,529
   backfill), ~115 real plays a day (median 113, p90 150, busiest 204), 15,859 tracks, 110 owned playlists
   with 7,404 members. Core data grows ~35 KB a day; `api_log` grows ~2,000 rows a day and its 30-day
@@ -35,8 +35,11 @@ Status: complete.
 - **Scaling: storage is not the limit, reads are** (§9). Measured locally, user-led indexes keep a
   per-user history scan at 32-36 ms from 25 to 100 users, against 130-527 ms without them. On Turso's
   free plan, five owner-like users read ~570-615M rows a month with today's orphan pass (over the 500M
-  limit) and ~245-290M with it scoped; per-user reads also grow with each user's history. An
-  incremental history payload and an all-time accumulator are the data-model levers.
+  limit) and ~245-290M with it scoped; per-user reads also grow with each user's history. The biggest
+  daily read is a full `plays` scan gated to once per 10 min that STORE_MIGRATION attributes to the
+  history payload; the code and the client metrics point to the all-time recompute instead, which runs
+  whenever a user listens, app open or not (§11.2). An all-time accumulator and an incremental history
+  payload are the data-model levers.
 - **STORE_MIGRATION: run it as planned and keep the multi-user schema out of it** (§10). Four small
   additions: archive the meter's pre-cutover logs, make the ledger's route-handler writes reliable or
   label it a lower bound, write the backup as a loop over databases, and re-check R4 at N users.
@@ -127,7 +130,7 @@ becomes. Line numbers are `db.ts` unless a file is named.
 | `lock:clean:<playlist id>` | `actions.ts:130`, released `actions.ts:156` | same | per Clean | per user and playlist |
 | `me_id` | `storePlaylists` 1804 / 1819, every library sync (≤ 48/day) | `getMeId` 2034 ← `owner.ts:11` (sign-in), `playlists/page.tsx:25`, `playlists/[id]/page.tsx:42`, `actions.ts:79`, `history-actions.ts:48`, `getLibraryTracks` 2297 | per page that marks "owned" playlists | removed: the session's user id replaces it |
 | `last_sync` | `recordPlays` 524-528, every harvest | `getLastSync` 1732 ← `api/sync/route.ts:28` (debounce); `getCaptureHealth` 1739 (Home, `/usage`) | every harvest (~250-330/day, §4) | per user |
-| `write_seq` | `writeSeqStmt` 348 in the batches at 522, 598, 1841, 1887, 2021, 2094, 2177, 2195, 2255; `bumpWriteSeq` 357 at 749, 819; scripts `backfill-scan.mjs:108`, `import-tail.mjs:65`, `migrate-skip-rule.mjs:104` | `readWriteSeq` 388 via `liveKey` 965 and `slowSeq` 1552: every LIVE cached read | on every write that lands data (each landed tick bumps 2-3 times) | per user (§5) |
+| `write_seq` | `writeSeqStmt` 348 in the batches at 522, 598, 1841, 1887, 2021, 2094, 2177, 2195, 2255; `bumpWriteSeq` 357 at 749, 819; scripts `backfill-scan.mjs:108`, `import-tail.mjs:65`, `migrate-skip-rule.mjs:104` | `readWriteSeq` 388 via `liveKey` 965 and `slowSeq` 1552: every LIVE cached read | on every write that lands data (a landed tick bumps three or four times: the insert batch, the new plays' orphan verdicts, their skip verdicts, and new contexts if any) | per user (§5) |
 | `library_seq` | `librarySeqStmt` 377 at 1887, 2022, 2094, 2178, 2196, 2255 | `getLibraryIndexVersion` 1528; `getUniqueSongCount` 1944; `recomputeUniqueSongCount` 1977 | when library membership changes | per user |
 | `slow_seq_pub` | `slowSeqInner` 1587 (at most every 10 min) | `slowSeq` 1566, 1578 ← `getAllTimePlays` 992, `getHistoryIndexVersion` 1594 | ≤ 144/day | per user |
 | `home_payload` (13-36 KB JSON) | `rebuildHomePayload` 1341 ← `sync/history.ts:106`, `home/page.tsx:63`, cron daily block `route.ts:83`; dropped by the import scripts | `getHomePayload` 1348 (every Home render); `hasHomePayload` 1362 (every harvest that landed nothing) | once per harvest that landed plays (~110-175/day) | per user, built in that user's zone |
@@ -185,7 +188,7 @@ table, returns or changes another user's rows. Line numbers are `db.ts`.
 | `recomputeOrphanFlags` `{playlistId}` | same UPDATE `AND context_uri = :uri`; SEARCH `idx_plays_context` | `storePlaylistTracks` 2109, `deletePlaylistFromDb` 2202 | per playlist whose cached tracks changed | **leak**: rewrites every user's plays from that playlist against one user's copy; add `user_id = ?` |
 | `recomputeOrphanFlags` `{}` (full) | same UPDATE over all plays; SCAN `plays` | `storePlaylists` 1897 when the playlist id set moved or the purge deleted rows | 0.2-0.4/day [measured, ledger `orphan_full_pass`]; 5,102,733 rows read at 21,950 plays (STORE_MIGRATION §3) | per user; it is the largest single read today and it scales with the whole table if left unscoped |
 | `recomputeSkipFlags` 780 | window from the last real play before the oldest pending one; SEARCH `idx_plays_played_at` + `idx_plays_skip_null`; then a batch of per-row UPDATEs | `recordPlays` 561 | each landed harvest | **leak / wrong data**: the gap chain orders ALL plays by time, so with two users a play's predecessor would be the other user's play and its listened time and skip verdict would be wrong. Every subquery needs `user_id = ?`; partial index `(user_id, played_at) WHERE skipped IS NULL` |
-| `orderedRealPlays` 854 | all real plays in time order; SCAN `plays` via `idx_plays_played_at` | `recomputeAllTimeStats` 1033 | ≤ every 10 min while plays land; daily heal (dead) | per user; same gap-chain hazard |
+| `orderedRealPlays` 854 | all real plays in time order; SCAN `plays` via `idx_plays_played_at` | `recomputeAllTimeStats` 1033 ← `maybeRecomputeAllTimeStats` 579 ← `recordPlays` 573, `sync/library.ts:100` | at most every 10 min while plays land (`db.ts:577-583`), so up to 6 per listening hour, app open or not; daily heal (dead) | per user; same gap-chain hazard. The closest match in the code for the meter's dominant scan (§11.2) |
 | `unseenContexts` 619 | `contexts WHERE uri IN (≤50)`; SEARCH PK | `sync/history.ts:60` | each harvest | per user with per-user `contexts` |
 | `unresolvedContextUris` 646 | DISTINCT over all plays with a context, LEFT JOIN `contexts`; SCAN `plays` | `sync/history.ts:60` | daily (`contexts_full_check_at`) [measured, ledger 1.0/day] | per user |
 | `recordContexts` 586 | upsert batch + `write_seq` | `sync/history.ts:85`; `api/now-playing/route.ts:45, 52` | when a new context appears | per user (a 403 for one user is not a 403 for another) |
@@ -199,7 +202,7 @@ table, returns or changes another user's rows. Line numbers are `db.ts`.
 | `readPlaysByDay` 1193 | day range on `idx_plays_played_at` + per-track source subquery | `rebuildHomePayload` 1331; `getPlaysByDay` 1186 ← `home/page.tsx:62`, `history-actions.ts:64, 173` | ~110/day [measured, ledger `day_plays`] | per user |
 | `rebuildHomePayload` 1315, `getHomePayload` 1348, `hasHomePayload` 1362 | the three reads above plus `meta.home_payload` | `sync/history.ts:106`; `home/page.tsx:63, 80` | rebuild per landed harvest; read per Home render; existence check per steady harvest | per user, in that user's time zone |
 | `readLibraryIndex` 1625 | SCAN `playlist_tracks` + `tracks` probes; SCAN `saved_tracks`; SCAN `playlists` | `getLibraryIndex` 1605 ← `api/search/library/route.ts:28, 49` | on `library_seq` change (cached) [measured, ledger 0.1-0.3/day, a lower bound] | per user; **leak** unscoped (every user's library in one payload) |
-| `readHistoryIndex` 1686 | SCAN `plays` via `idx_plays_played_at`, join `tracks`, LEFT JOIN `contexts` | `getHistoryIndex` 1620 ← `api/search/history/route.ts:21, 35` | on slow-marker change (≤144/day); the meter saw 23 runs and ~50,500 rows read per run on Oct 13 (STORE_MIGRATION §3) while the ledger recorded none that day | per user; **leak** unscoped |
+| `readHistoryIndex` 1686 | SCAN `plays` via `idx_plays_played_at`, join `tracks`, LEFT JOIN `contexts` | `getHistoryIndex` 1620 ← `api/search/history/route.ts:21, 35` | only when a browser asks for the payload and the slow marker moved: an open Home tab patches its copy in memory instead of re-fetching (`home/den-home.tsx:761-786`), so rebuilds follow Home page loads, not plays. Ledger: 0-2 a day Oct 7-13 [measured]. STORE_MIGRATION §3 attributes the meter's 23-a-day scan to this read; §11.2 explains why I doubt it | per user; **leak** unscoped |
 | `storePlaylists` 1763 | probe: SCAN `playlists`; rewrite tier: `DELETE FROM playlists`, re-insert, `DELETE FROM playlist_tracks WHERE playlist_id NOT IN (SELECT id FROM playlists)`, `DELETE FROM meta WHERE key LIKE 'plsnap:%' …` (SCAN `meta`) | `sync/library.ts:41` | each library sync; rewrite tier 2.9/day [measured, ledger] | **leak / data loss**: unscoped, one user's sync deletes every other user's playlists, their cached members and their snapshot keys. Every statement scoped |
 | `readStoredPlaylists` 1916 | SCAN `playlists` ORDER BY position | `getStoredPlaylists` 1911 ← `playlists/page.tsx:24`, `history-actions.ts:47` | per `/playlists` render and dock load (cached on `write_seq`) | per user |
 | `recomputeUniqueSongCount` 1969 | DISTINCT (artist, title) over members; SCAN `tracks` via `idx_tracks_artist_name`, probing `idx_pltracks_track` | `sync/library.ts:93`; `getUniqueSongCount` 1964 kick | when the library changed [measured, ledger 2.9-4.9/day] | per user; with a shared catalog the current plan walks every user's tracks, so drive it from the user's members |
@@ -316,9 +319,10 @@ short-lived serverless instance rarely reaches.
 **Writes.** The meter counted 11,136 rows written on Oct 13 (UTC), 8,072 of them `INSERT INTO api_log`
 (STORE_MIGRATION §3), so the core tables take ~3,100 rows written a day for one active user.
 
-**Reads.** The meter logged 1,430,580 rows read in the 21 hours from 9 PM Oct 12, and the history payload's
-plays scan (~50,500 rows per run, 23 runs) was 1.16M of a day's 1.94M (STORE_MIGRATION §3). The unscoped
-orphan pass reads 5,102,733 rows at 21,950 plays and ran about three times a week (same section).
+**Reads.** The meter logged 1,430,580 rows read in the 21 hours from 9 PM Oct 12, and one full `plays`
+scan (~50,500 rows per run, 23 runs) was 1.16M of a day's 1.94M (STORE_MIGRATION §3, which names it the
+history payload; §11.2 argues it is more likely the all-time recompute). The unscoped orphan pass reads
+5,102,733 rows at 21,950 plays and ran about three times a week (same section).
 
 **Where the owner's numbers stop being typical.** 7,529 of the 22,040 plays are backfill (one row per
 song of the pre-tracking library, `scripts/backfill-scan.mjs`), and they ride in the history payload, the
@@ -592,8 +596,11 @@ in STORE_MIGRATION §3:
   history payload ran 23 times), ~49-58M a month;
 - the unscoped orphan pass reads ~5.1M rows per run, about three a week, ~65M a month (lanes 1910-1911
   scope it to changed playlists);
-- the history payload rebuild reads ~50,500 rows per run, up to 144 runs on a heavy listening day
-  (~7.3M), which is why a heavy month reaches ~280M for one user;
+- one full `plays` scan of ~50,500 rows ran 23 times in a day; it is gated to once per 10 min, so a
+  heavy listening day can reach 144 runs (~7.3M), which is why a heavy month reaches ~280M for one user.
+  STORE_MIGRATION names it the history payload; if it is the all-time recompute, as §11.2 argues, it
+  runs whenever the user listens, app open or not, so across N users it scales with listening hours
+  rather than with app use, and phase E's browser cache does not reduce it;
 - writes are ~3,100 core rows a day, ~93K a month (telemetry writes stay on the Zenbook).
 
 [estimated] Five typical Rem-like users read ~570-615M a month with today's orphan pass
@@ -601,14 +608,14 @@ in STORE_MIGRATION §3:
 R4 bar of 50%. Five heavy months would be ~1.4B. Writes stay under 5% of the
 plan at five users.
 
-The read cost per user also grows with that user's history, without bound: the history payload reads
-~2.3 rows per stored play per rebuild (50,500 / 22,040), and the all-time recompute and orphan pass are
-linear too. At the owner's rate (~117 plays a day) a rebuild a year from now reads ~150K rows. Two
-data-model levers address this, and both are design choices for the next phase: make the history payload
-incremental (plays are append-mostly: a stored base plus the delta since its version, rebuilt from
-scratch only when a derived column such as `ctx_orphan` or `skipped` moves in old rows), and make the
-all-time totals an accumulator updated per landed play instead of a full scan (READ_QUOTA already names
-it as the "queued next lever").
+The read cost per user also grows with that user's history, without bound: that scan reads ~2.3 rows per
+stored play (50,500 / 22,040), and the history payload and the orphan pass are linear too. At the owner's
+rate (~117 plays a day) the same scan a year from now reads ~150K rows. Two data-model levers address
+this, and both are design choices for the next phase: make the all-time totals an accumulator updated
+per landed play instead of a full scan (READ_QUOTA already calls it the "queued next lever"), and make the
+history payload incremental (plays are append-mostly: a stored base plus the delta since its version,
+rebuilt from scratch only when a derived column such as `ctx_orphan` or `skipped` moves in old rows).
+Which one pays more depends on the attribution in §11.2.
 
 ### 9.4 Background statements
 
@@ -644,18 +651,18 @@ What the move already gives multi-user, from the data side:
 What I would change or add before Oct 15, 8 PM. All are small, none touches the cutover runbook, and
 each is the director's and Rem's call:
 
-1. **Archive the meter's pre-cutover logs (lane 1903 or 1904).** After the cutover the meter sees
-   telemetry only (STORE_MIGRATION §9), Turso reports one counter per database, and the ledger
-   undercounts: on Oct 13 the meter saw 23 history-payload rebuilds and the ledger recorded none (§4.1,
-   §11). The meter's per-statement `querylog/<day>.jsonl` files are the only exact per-path read record
-   of the owner's workload, and every multi-user budget will be built on them. Copy the last 14 days off
-   the Zenbook with the core snapshot. (Their retention on the Zenbook is not documented; I did not
-   check it.)
-2. **Make the ledger trustworthy, or label it a lower bound (phase A).** Item 4 keeps the existing
-   `void …catch()` call sites as they are. The ledger writes in route handlers that return right after
-   the read (`readHistoryIndex` `db.ts:1722`, `readLibraryIndex` `db.ts:1677`) are the ones being lost;
-   moving those into `after()`, as item 4 does for `/api/metrics`, would make per-path attribution
-   usable on Turso. If it stays as is, /usage should say the ledger is a lower bound.
+1. **Archive the meter's pre-cutover logs, and read one fact out of them (lane 1903 or 1904).** After the
+   cutover the meter sees telemetry only (STORE_MIGRATION §9) and Turso reports one counter per
+   database. The meter's per-statement `querylog/<day>.jsonl` files are the only exact per-path read
+   record of the owner's workload, and every multi-user budget will be built on them. Copy the last 14
+   days off the Zenbook with the core snapshot. (Their retention there is not documented; I did not
+   check it.) The fact: which SQL is the 23-a-day, ~50,500-row scan STORE_MIGRATION §3 calls the history
+   payload (§11.2). If it is the all-time recompute, phase E does not reduce the dominant read and R4's
+   heavy-day projection has a different lever.
+2. **Know which instrument to trust (phase A).** The ledger and `api_log` disagree by ~30% on harvests
+   (§4.1); both write fire-and-forget (`void …catch()`), which item 4 deliberately keeps. If the ledger
+   is to attribute reads per path on Turso, where nothing else does, its writes should go through
+   `after()` as item 4 does for `/api/metrics`; otherwise /usage should call it approximate.
 3. **Write the backup as a loop over databases (lane 1904).** Phase D backs up "Turso's core" as one
    database. Under the per-user-database recommendation it becomes N+1; a list of database names costs
    nothing now and saves a rewrite.
@@ -708,10 +715,22 @@ snapshots were deleted at the end: they hold the owner's listening history and b
 
 ### 11.2 Unknowns
 
+- **Which full scan dominates reads.** STORE_MIGRATION §3 says the history payload's plays scan ran 23
+  times in a day at ~50,500 rows, "rebuilt after every sync that lands a play". Three things point
+  elsewhere. In the code the history payload rebuilds only when a browser requests it with a new
+  version, and an open Home tab patches its copy instead of re-fetching (`home/den-home.tsx:761-786`);
+  nothing on the sync path calls `getHistoryIndex`. `client_metrics` in S-Oct14 records no Home page
+  view at all on Oct 13 (UTC), three on Oct 12, and the ledger's `history_payload` reader shows 0-2 runs
+  a day that week. And the read that does run after landed syncs, gated to once per 10 min, is the
+  all-time recompute (`orderedRealPlays`, `db.ts:854`): a full scan of 22,040 plays plus a `tracks`
+  probe for each of the 14,511 real ones, which is ~51,000 rows if each probe counts twice, the way
+  READ_QUOTA's calibration found joins counted ("about three per play"). The history payload would
+  count higher, since it probes `tracks` for 21,559 plays and `contexts` for most of them. I did not
+  read the meter's log, which names the SQL; §10 item 1 asks for it.
 - **How often things really run.** The ledger and `api_log` disagree on harvests (330.6 vs 254 a day,
-  Oct 7-13), and the meter saw 23 history-payload rebuilds on Oct 13 where the ledger recorded none.
-  Both instruments write fire-and-forget. The meter is exact, but I did not read it (it is on the
-  Zenbook); §4's cadences use the code's timers first and these figures as bounds.
+  Oct 7-13); both write fire-and-forget, and I do not know which loses writes. The meter is exact, but I
+  did not read it (it is on the Zenbook); §4's cadences use the code's timers first and these figures as
+  bounds.
 - **Turso's database count** per plan decides whether a database per user is free (01f §4.2, pending
   when this was written).
 - **Whether a shared catalog churns.** If two users' syncs see different fields for one track id
