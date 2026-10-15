@@ -174,7 +174,7 @@ browser ─► Vercel functions (iad1)
              │        playlist_tracks · saved_tracks · meta · payloads (segments, library, home)
              └─ telemetry, Zenbook sqld via the Funnel, best effort, never awaited:
                       api_log · client_metrics · usage_ledger, each with a nullable uid
-pingers: Zenbook timer (1 min) + cron-job.org (1 min) ─► /api/cron/sync, deduplicated by the tick lock
+pingers: Zenbook timer (even minutes) + cron-job.org (odd minutes) ─► /api/cron/sync, one tick lock
 Zenbook: telemetry · the owner's recorder (hourly) · nightly per-database backups, which also
          recompute every derived value from the dump and flag drift
 ```
@@ -240,9 +240,10 @@ public catalog rows, is stored once per user (4.2 MB for Rem, ~1 GB at 250 such 
 
 One group token reaches every database in the group ("a new token that can be used to connect to any
 database in the group", https://docs.turso.tech/cli/group/tokens/create, fetched 2026-10-14), so the
-runtime holds one store secret, as today. A user's database URL is derived from its name, so a request
-can open the user's database from the uid in its session cookie without a lookup, in parallel with
-the app database's identity check (§5).
+runtime holds one store secret, as today. A user's database URL is derived from its name, and the
+name rides the session cookie beside the uid (§5), so a request opens the user's database without a
+lookup, in parallel with the app database's identity check. The name cannot be derived from the uid,
+because Rem's database keeps the name `lazyboy` that STORE_MIGRATION gives it.
 
 ### 4.2 The app database (`lazyboy-app`)
 
@@ -374,8 +375,8 @@ model and the round-trip budget.
 
 **The session names the uid, and every request checks it in one statement.** At sign-in the jwt
 callback finds the user by `profile.account_id` (refusing a profile without one, 01e §5.5) and puts
-`uid` and `session_epoch` on the token, taken from the users row only. On every later request the
-callback runs one app-database statement through the request box:
+`uid`, `session_epoch` and `db` (the user's database name) on the token, taken from the users row
+only. On every later request the callback runs one app-database statement through the request box:
 
 ```sql
 SELECT u.status, u.session_epoch, u.db_name, u.schema_version, u.tz_zone, u.is_admin,
@@ -388,13 +389,13 @@ WHERE u.uid = :uid
 ```
 
 Primary-key probes only, ~4 rows read [estimate]. No `uid`, an unknown one, `disabled` or `deleting`,
-or a stale epoch returns `null`, which ends the session; this one rule closes F1 (01e §1, F1) and asks
-everyone to sign in once at rollout. `needs_reconnect` keeps a session that can read its stored history
+a stale epoch, or a `db` that differs from `u.db_name` returns `null`, which ends the session; this one
+rule closes F1 (01e §1, F1) and asks everyone to sign in once at rollout. `needs_reconnect` keeps a session that can read its stored history
 but makes no Spotify call (01b §2.4's recommendation). The same row carries what Home's chrome and
 capture banner need today from three separate reads (`home/page.tsx:78-83`: cooldown, capture health),
 so identity costs no round trip that today's token read does not already pay. The page's user-database
-reads start in parallel, from the uid in the decoded cookie, and nothing renders until both settle
-(01b S2).
+reads start in parallel, from the `db` in the decoded cookie (encrypted under `AUTH_SECRET`, so only
+the server can have written it), and nothing renders until both settle (01b S2).
 
 **Ciphertext bound to the uid.** AES-256-GCM, Node's built-in `crypto`, a random 12-byte IV per write,
 stored as `v1.<base64url(iv ‖ ciphertext ‖ tag)>`, associated data `lazyboy:tokens:<uid>:<env>`, keys in
@@ -419,8 +420,9 @@ and no Spotify call for a user without a row.
 ## 6. Isolation, and the tests that prove it
 
 **One way in.** `db.ts` stops exporting per-user functions that reach a module-level client. Each takes
-a `UserDb` first: a branded type wrapping that user's libSQL client, minted only by `forUser(uid)`,
-whose `uid` comes from `requireUser()` (the verified session, §5) or from the tick's state read (§7.2),
+a `UserDb` first: a branded type wrapping that user's libSQL client, minted only by `forUser()`,
+whose uid and database name come from `requireUser()` (the verified session, §5) or from the tick's
+state read (§7.2),
 never from request input and never from an ambient "current user" (01e §5.1 explains why
 AsyncLocalStorage is the wrong tool here). App-database and telemetry functions stay module-level. A
 call site that forgets the user does not compile. The client cache (`g.__listenDbReady`,
@@ -482,31 +484,39 @@ Isolation costs no round trip: the handle is a client object and the uid rides t
 
 ### 7.2 One tick a minute, any number of users
 
-Two pingers hit `/api/cron/sync` every minute: the Zenbook's timer (today every 2 minutes) and
-cron-job.org (§12). The tick:
+Two pingers hit `/api/cron/sync` every 2 minutes each, on alternate minutes: the Zenbook's timer on
+the even minutes (`OnCalendar=*:0/2`, in place of today's `OnUnitActiveSec=2min`, which drifts) and
+cron-job.org on the odd ones (§12). While both run, a tick runs every minute; on either alone, every
+2 minutes, today's cadence. The tick:
 
 1. Takes a global tick lock, a compare-and-set on app `meta` `lock:tick` with a 55 s lease, the
-   pattern `acquireLock` already uses (`db.ts:2541-2557`). The second pinger's hit in the same minute
-   loses it and returns at once. This is also the tick's store health check: if the app database
-   does not answer, the tick ends instead of letting each user wait out the store fetch's three
-   15-second attempts (`src/lib/store-fetch.ts:28-29`).
-2. Reads every user's sync state and token in one batch (`sync_state` joined to `user_tokens`;
-   one row per user, 250 rows at 250 users). Who is due is computed from the state: `active` users (a
-   play in the last 30 minutes) every 2 minutes and `idle` users every 5, offset by a hash of the uid
-   so users spread across the cycle. A user's state row is written only when something changed (a
-   track change, a state transition, a harvest, a failure).
+   pattern `acquireLock` already uses (`db.ts:2541-2557`). A hit that arrives while a tick holds it
+   (the pingers drifted together, or a tick overran) returns at once. This is also the tick's store
+   health check: if the app database does not answer, the tick ends instead of letting each user
+   wait out the store fetch's three 15-second attempts (`src/lib/store-fetch.ts:28-29`).
+2. Reads every user's sync state, token and database name in one batch (`sync_state` joined to
+   `users` and `user_tokens`; one row per user, 250 rows at 250 users). Who is due is computed from
+   the state: `active` users (a play in the last 30 minutes) every 2 minutes, `idle` users every 5
+   (every 2 while there are at most two users, which keeps today's cadence for Rem alone, §7.3),
+   offset by a hash of the uid so users spread across the cycle, and counted due 30 s early so a
+   late tick does not stretch a 2-minute interval to 4. A user's state row is written only when
+   something changed (a track change, a state transition, a harvest, a failure).
 3. Processes the due users concurrently (up to 16 at a time), each under its own 25 s deadline, with
    `Promise.allSettled`: refresh the token if under 60 s remain (§5), probe, harvest if the governor
    says so (§7.4), record (§8).
 4. Runs at most one due library rescan (up to 8 at 250 users), under its own deadline, after the
    harvests (§7.6).
-5. Answers 200 with per-user outcomes. Non-200 only when the tick could not run, or when the owner's
-   own capture is failing: the Zenbook timer's failed unit is Rem's only alarm today (01c §5.2).
+5. Answers 200 with per-user outcomes. Only the Zenbook's call, told apart by its own secret (§12),
+   can get a non-200: when the tick could not run, or when the owner's own capture is failing, since
+   the Zenbook timer's failed unit is Rem's only alarm today (01c §5.2). cron-job.org always gets
+   200, because it disables a job after a run of consecutive failures (the route's own comment,
+   `src/app/api/cron/sync/route.ts:174-176`), and a store outage or a dead owner token would otherwise switch off the second
+   pinger when it is most needed.
 
-Each pinger hit is one invocation: 2,880 a day whatever N is. Tick-lock writes: 2 per tick, 2,880 a
-day in total [estimate]. Wall time: the slowest due user, about 1-3 s at five users through Turso;
-at 250 users up to ~125 users fall due in a minute, ~0.5-1 s each at 16-way concurrency, ~4-8 s per tick
-[estimate]. The route sets `maxDuration = 60`; nothing under `src/app` sets one today, so the
+Each pinger hit is one invocation: 1,440 a day whatever N is (two pingers each running every minute
+would pay 2,880 for the same tick rate). Tick-lock writes: 2 per tick, 2,880 a day [estimate]. Wall
+time: the slowest due user, about 1-3 s at five users through Turso; at 250 users up to ~125 users fall
+due in a minute, ~0.5-1 s each at 16-way concurrency, ~4-8 s per tick [estimate]. The route sets `maxDuration = 60`; nothing under `src/app` sets one today, so the
 project's 300 s default applies (01f §2.1).
 
 ### 7.3 The probe
@@ -516,7 +526,11 @@ none (GOTCHAS "Player simulation"), where today's idle tick spends two (currentl
 `/me/player` on its 204; 01c §2.1). The probe records the track id, progress and `is_playing` in the
 user's state; a **track change** is a different track id, or the same track with progress gone
 backwards (a repeat). Calls per Rem-like user a day: ~9 h active at one per 2 min (270) plus ~15 h
-idle at one per 5 min (180), ~450 [estimate] against 1,035-1,303 today.
+idle at one per 5 min (180), ~450 [estimate] against 1,035-1,303 today. With one or two users, idle
+probes stay at one per 2 minutes, ~720 a day each: under today's spend, and the first play after an
+idle stretch then reaches the store as fast as it does today. From three users on, the 5-minute idle
+probe is what keeps five users' probes near 2,250 a day (§7.1); its cost is that the first play of a
+session can reach the store up to ~5 minutes after it ends while the app is closed (§7.8).
 
 ### 7.4 The harvest governor
 
@@ -534,23 +548,29 @@ A user is harvested (one recently-played call, the last 50 plays) when any of th
 harvest's keys in `sync_state.batch_keys`. Plays already seen cost nothing, so a harvest that brings
 nothing new reads and writes no user-database row (today ~215 rows read, §3 row 10); new plays go to
 §8.6's two batches. The `(track_id, played_at)` unique key stays the authority: a lost or stale key
-list only sends more candidates to §8.6, whose read batch finds the ones already stored.
+list only sends more candidates to §8.6, whose read batch finds the ones already stored. That holds
+only if the new keys are written after the plays: the state row goes last, once the user-database
+batch has committed, so a failure between the two re-sends candidates rather than dropping plays.
 
 **F is the governor's one knob.** Once a day the governor takes each user's measured harvests over
 the last week, projects what each would spend at a given F, and picks the smallest F (2, 5, 10, 15 or
 30 minutes) whose projected total fits 426, the 450 budget less the recorder's 24. Listening is not
 spread evenly across the day, so a projection beats pacing against a straight line, which would throttle
 a single listener during their own peak hours. A brake guards the projection: when the quota ledger
-(§4.2) shows 80% of 426 spent before the day's reset, F goes to 30 minutes until the reset. With one
+(§4.2) shows 80% of 426 spent before the day's reset, F goes to 30 minutes until the reset. The ledger
+is summed in memory and written as one upsert per bucket a tick or an open-app harvest touched, ~2,000
+writes a day whatever N is; now-playing polls are counted in `api_log` only. With one
 or two users F sits at 2 and closed-app capture is what it is today. If the passive experiment (01c
 §7.3) shows the quota is per user, the budget becomes per user and F stays at 2 for everyone.
 
-The arithmetic, per Rem-like user (9 h playing, ~130 plays, H1+H3+H4 ≈ 17 a day):
+The arithmetic, per Rem-like user (9 h playing, ~130 plays, H1+H3+H4 ≈ 17 a day). H5 is taken at its
+ceiling, 540 / F capped at one per play; a harvest waits for the next track change after F has passed,
+so real counts run somewhat lower:
 
 | F | H5 | per user | 1 user | 2 | 5 | 25 | 250 |
 |---|---|---|---|---|---|---|---|
 | 2 min | ~130 | ~150 | 150 ✓ | 300 ✓ | 750 ✗ | – | – |
-| 5 min | ~90 | ~107 | | | 535 ✗ | – | – |
+| 5 min | ~108 | ~125 | | | 625 ✗ | – | – |
 | 10 min | ~54 | ~71 | | | **355 ✓** | 1,775 ✗ | – |
 | 30 min | ~18 | ~35 | | | 175 ✓ | 875 ✗ | 8,750 ✗ |
 
@@ -592,8 +612,10 @@ and the uid, which is how the passive experiment learns whose calls a ban follow
   `sync_state.harvest_lock_until`, written only when a harvest starts), and harvests only by H4. Today it
   harvests whenever the last harvest is over a minute old (01c §2.4).
 - `refreshHistoryAction` stops calling Spotify and only reads the store (01c S6, §5.5).
-- Now-playing polls every 15 s mid-track, plus the existing end-of-track and visibility polls (01c
-  §5.5): at most ~4 calls a minute per visible tab. Five users with a visible tab each: ~10 per 30 s,
+- Now-playing asks `/me/player` alone, like the probe (an idle poll pays two calls today:
+  `currentlyPlaying()` and then its `/me/player` fallback on a 204), and polls every 15 s mid-track,
+  plus the existing end-of-track and visibility polls (01c §5.5): at most ~4 calls a minute per
+  visible tab. Five users with a visible tab each: ~10 per 30 s,
   plus ~1-2 from the ticks' probes (five active users probed every 2 minutes), about the planned 12.
 - The browser's instant handoff (`src/lib/optimistic-play.ts`, `handoff.ts`) is unchanged; it is what
   puts a finished track on screen the moment the tab sees it end.
@@ -609,7 +631,9 @@ and the uid, which is how the passive experiment learns whose calls a ban follow
 - **App open while listening.** A finished track appears at once as a provisional row; the stored row
   follows within F.
 - **App closed.** Stored lag is at most one probe interval (2 min while active) plus whatever of F has
-  not elapsed: ≤ ~2 minutes at F = 2, ≤ ~12 at F = 10.
+  not elapsed: ≤ ~2 minutes at F = 2, ≤ ~12 at F = 10. The one exception is the first play of a
+  session at three or more users: idle users are probed every 5 minutes then (§7.3), so that play can
+  land up to ~5 minutes after it ends, inside the ≤ 10-minute target that applies at five.
 - **Completeness.** H2 fires at 25 changes, H3 at 2 hours, H1 at every session end; at Rem's peak
   (~20 plays an hour, 01c §5.7), 25 plays take 75 minutes, so H5 fires first whenever F ≤ 30. No play is
   lost while a pinger runs.
@@ -668,7 +692,10 @@ unique count from the opening day's rows), the opening day's song rows (`plays`,
 `source`, or a new row from the fields in hand), and `allTime` from the accumulator. A new local day
 starts a fresh opening day from the plays in hand. Anything else falls back to today's rebuild: a play
 landing on a day other than the opening day (a late arrival, or the first harvest after midnight), an
-out-of-order insert, a time-zone change, a shape change. Cost: 1 row read instead of ~7,500, the same
+out-of-order insert, a time-zone change, a shape change, and any §8.3 event that touches a play in the
+payload's 16 days (a context name resolving, an orphan flip), which marks `home` dirty for the next
+harvest or the daily route. Today the rebuild after every landed play is what heals those two derived
+columns; a patched payload needs the explicit mark, or a stale "From" could sit in it for days. Cost: 1 row read instead of ~7,500, the same
 1 row written.
 
 ### 8.3 History segments, appended on write
@@ -957,7 +984,7 @@ count over it.
 
 | per month | 5 users | 25 users | 250 users | Hobby allows |
 |---|---|---|---|---|
-| invocations: ticks 86,400 + ~6,000 browsing a user (01f §2.3) | ~116,000 | ~236,000 | ~1.6M | 1M; Pro past it |
+| invocations: ticks 43,200 + ~6,000 browsing a user (01f §2.3) | ~73,000 | ~193,000 | ~1.54M | 1M; Pro past it |
 | Active CPU | unmeasured (01f: Rem alone 0.5-2.4 CPU-h estimated) | | | 4 CPU-h |
 | largest response | a segment, ≤ ~300 KB raw | | | 4.5 MB |
 
@@ -1035,11 +1062,13 @@ After STORE_MIGRATION no user request touches the Zenbook (its R2). What still r
 (01f §3.1, §3.4; lane 1907 repairs it). The design changes four things:
 
 1. **A second, independent pinger.** cron-job.org (free; it drove this route until Aug 10, 01f §3.5)
-   hits `/api/cron/sync` every minute beside the Zenbook's timer, also moved to every minute. The tick
-   lock (§7.2) makes a doubled minute cost one extra invocation and nothing else; either pinger alone
-   keeps every user's capture running. Vercel Pro's per-minute cron is the alternative if Pro is
-   bought for other reasons (01f §6, decision 5). Each caller can hold its own secret so either can be
-   rotated alone (01e §5.9).
+   hits `/api/cron/sync` every 2 minutes on the odd minutes, the Zenbook's timer on the even ones
+   (§7.2). The tick lock makes a collision cost one extra invocation and nothing else; either pinger
+   alone keeps every user's capture running at today's 2-minute cadence. Vercel Pro's per-minute cron
+   is the alternative if Pro is bought for other reasons (01f §6, decision 5). Each caller holds its
+   own secret, so either can be rotated alone (01e §5.9) and the route can tell them apart: only the
+   Zenbook's call ever gets a non-200, because cron-job.org switches a job off after a run of failures
+   (§7.2 step 5).
 2. **Quota protection lives on Turso.** The quota ledger and the per-bucket cooldowns sit in the app
    database, so the governor keeps working through a Zenbook outage.
 3. **Telemetry stays best effort**: one attempt, 4 s, never awaited (STORE_MIGRATION phase A). An
@@ -1195,7 +1224,7 @@ Monthly, every user Rem-like. Vendor prices from 01f §2.2 and §4.2 and the Tur
 | | 5 users | 25 users (Spotify does not allow) | 250 users (Spotify does not allow) |
 |---|---|---|---|
 | Turso | Free, $0; or Developer at $4.99 billed yearly ($5.99 monthly) as insurance against a block (§18) | Free, $0 | Developer, $4.99-5.99 |
-| Vercel | Hobby, $0, if Active CPU fits (unmeasured); else Pro, $20 | invocations fit Hobby (~236,000); CPU unmeasured, so $0-20 | Pro, $20, with usage drawn from its $20 credit first; invocations ~$1 at $0.60 per million |
+| Vercel | Hobby, $0, if Active CPU fits (unmeasured); else Pro, $20 | invocations fit Hobby (~193,000); CPU unmeasured, so $0-20 | Pro, $20, with usage drawn from its $20 credit first; invocations ~$1 at $0.60 per million |
 | cron-job.org (second pinger) | $0 | $0 | $0 |
 | the Zenbook | $0; it runs anyway | $0 | $0 |
 | Spotify | $0; Rem's Premium is required for the app to work at all (01f §1.2) | | |
