@@ -2222,6 +2222,13 @@ uid, as phase E is (§10.2 edit 3), so nothing is written twice.
   the open-app rules, the deletion job) are Opus lanes at high effort, each followed by an adversarial
   review lane in a fresh context before deploy, the pattern of lanes 1902, 1906 and 1911.
 - One branch per phase, rebased on `origin/main` before it pushes; one lane in `db.ts` at a time.
+- **Building ahead of a phase's turn.** A lane may start a later phase's work early on its own branch,
+  but only in new files (`identity.ts`, the token core's new module, `user-cache.ts`, the harness
+  additions under `tests/`) and in files no queued lane edits. Lanes 1901-1911 edit `db.ts`,
+  `store-fetch.ts`, the cron, metrics and search routes, `usage/page.tsx`, `instrumentation.ts`,
+  `vercel.json`, the `(app)` layout, Home's load path and the meter (STORE_MIGRATION §6, §10; §10.2
+  edit 3); P2 and P3 edit `db.ts`, the import scripts, the search routes and Home. Nothing from such a
+  branch merges before its phase's place in §13.3, and it rebases when that comes.
 - Each phase's lane updates the docs its change touches in the same branch: the `db.ts` header rule
   ("ONE client" becomes the client factory and `forUser`), `CLAUDE.md`, `docs/ARCHITECTURE.md`,
   `docs/GOTCHAS.md` (including its build-skew note, §10.2), `README.md` from Phase 2 (§12.1), and
@@ -2877,7 +2884,7 @@ does what the finding asks, or an equivalent named in the row; "partly" and "not
 
 Overlaps were merged where they ask for the same change (security R4 with completeness H2, security
 R6 with migration 5, security R7 with completeness H1, security R1 with migration 6); each row names
-its twin. Four findings changed a recommendation of the Oct 14 plan, not only its mechanics: an
+its twin. Four recommendations of the Oct 14 plan changed, not only their mechanics: an
 `invalid_grant` no longer destroys a friend's database at once (decision 21); a token-key rotation
 after each deletion is no longer recommended (decision 23); the canary is no longer optional, and the
 first friend waits a week behind it (decision 16); and the deletion of foreign plays is gone, since
@@ -2905,6 +2912,7 @@ quotes them; the other columns use §18's.
 | R15 smaller gaps | Fixed: the owner check is cached per (uid, `db_name`) with a T8 case; the uid goes on the session; with no uid in any path, `server-error` rows carry none and age out with the 30-day prune; S4 uses the TypeScript compiler API; `/usage` shows friends' rows aggregated by endpoint template; after one user's quota ban, one other user's harvest goes through before the cooldown goes app-wide | §4.5, §5.1, §6.2, §6.4, §7.8 |
 | R16 land Phase 0 before the next push | Taken into decision 1. The repo is public, `main` is 238 commits ahead of `origin/main` (1 AM Oct 15), and its reflog shows pushes at 7:05 AM on Oct 13 and 14 | §0, decision 1 |
 | §3 STORE_MIGRATION notes | Fixed: Phase 0 before lane 1903's flip; step 8's `lazyboy` token named as the one Phase 2 invalidates; lane 1903 step 11's expectation of fence hits from old deployments corrected (no Skew Protection on Hobby) | §10.2 |
+| §4 tests and checks to add | Added: T5, T6, T8 and T11 extended as listed; T13, T14 and T15 new; `private, no-store` asserted in T7; S4 by the TypeScript compiler API; the Phase 2 token check (§11.4 step 4); the deploy checklist as §13.2's old-builds gate and §13.5's rules | §6.4, §11.4, §13.2, §13.5 |
 
 ### 19.2 Performance and scale (`review-scale.md`)
 
@@ -2924,6 +2932,7 @@ quotes them; the other columns use §18's.
 | the `count(*)` correction | Taken with migration 12: the backup keeps its source counts | §10.2 |
 | §2 the arithmetic at 5, 25 and 250 | Added | §14.7 |
 | STORE_MIGRATION: copy `ping.log` | Added as optional for lane 1904 | §10.2 |
+| §3 two caveats: S3's render half is unmeasured; Safari deletes a site's IndexedDB after seven days without a visit | Taken: Phase 0 reads `paint=` on Rem's phone; S1 now says a friend who opens Lazy Boy in Safari less than weekly gets S2's numbers, a cost the `no-store` bodies of security R12 make certain | §9.1, §14.1 |
 
 ### 19.3 Uptime and migration (`review-migration.md`)
 
