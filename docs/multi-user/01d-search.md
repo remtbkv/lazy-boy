@@ -608,6 +608,50 @@ production-path timing of the full history build on Turso, which this document d
 
 ## 7. Decisions that are Rem's
 
+1. **Fix the 2 MiB cliff before late December, single-user, by doing monthly segments (O3) now?**
+   Recommendation: yes. It is needed for multi-user anyway, and the alternative is the O2 stopgap
+   followed by O3 later — two changes to the payload format and two browser-cache transitions instead
+   of one. The cost is priority against other work; if O3 cannot be scheduled by mid-December, ship
+   O2 by then.
+2. **Do friends get the history import and the catalog backfill?** Recommendation: not until segments
+   exist. A five-year import is a ~4.2 MB history body (§3.3), over the cache limit on day one and near
+   Vercel's 4.5 MB response cap, and it makes every first visit on a new device a multi-MB download.
+3. **Which phone and which network the search target is for.** Recommendation: a mid-tier Android
+   (the 4× rows) on a normal mobile connection, with slow 4G a stated miss for first visits by heavy
+   users (§5.2). Including slow 4G is possible but buys a cold-visit byte project (shared
+   dictionaries) that nothing else needs.
+4. **A limit on library size for other accounts.** Recommendation: no hard limit; per-playlist
+   chunks (O7) before anyone's library passes ~12,000 songs. A hard cap would be a product rule
+   enforced only to protect a cache size.
+
 ## 8. Unknowns and what I did not measure
+
+- **Production build time today.** A full scan is not a cheap read, so I ran none against the Zenbook
+  or Turso. §2.2's ~850 ms is a row-scaled estimate from Aug 22. STORE_MIGRATION's bench route will
+  measure it on Turso.
+- **Real phones.** Every phone figure is Chrome's CPU throttling on the Mac, which models neither a
+  phone's memory, its storage I/O (IndexedDB reads were measured on the Mac's SSD), nor its thermal
+  limits. Rendering per keystroke was not measured anywhere in this lane.
+- **Who opened Home on what.** `client_metrics` records no user agent, so the RUM split by device is
+  unknown, and only seven Home views are recorded since Sep 14. Whether Home use fell in
+  Sep-Oct or recording stopped is not established; the `/api/metrics` path was not checked.
+- **Compression on Vercel's edge** for these two routes (gzip or brotli) was not checked; §2.1 gives
+  both.
+- **The 304 rate.** Nothing counts 304s. §2.2's "each visit hours apart re-downloads both" comes from
+  how often the versions move and from the ledger's one-rebuild-per-visit pattern, not from a count.
+- **Why `library_seq` moves several times a day.** It stands at 603. The ledger shows 2-4 playlist-list
+  rewrites (`playlist_rewrite`, `storePlaylists`' delete-and-reinsert branch, `db.ts:1762-1800`) and
+  2-6 unique-song recomputes on the days they happen in Sep-Oct; each list rewrite moves the version
+  and costs every browser a full library download. Whether those rewrites reflect real changes was not
+  traced.
+- **Which statement the meter counted at ~50,500 rows** on Oct 13 (§2.2, §6 item 4): the meter log is
+  on the Zenbook and was not read.
+- **Vercel Data Cache size and eviction.** The docs state LRU eviction at "a fixed storage limit" shared
+  by every project in a Hobby or Pro team, without the size. 01f-platform owns the plan.
+- **The projection profiles in §3.3 and §4.2** (plays a day, library size, visits a day) are
+  assumptions about people who have not signed up.
+- **The 2 MiB check counts UTF-16 code units of the cache wrapper**, which for these bodies came out
+  1.3% (history) and 2.1% (library) above their UTF-8 bytes. A library heavier in CJK titles would sit lower per byte;
+  measured on the owner's mix only.
 
 ## Appendix: commands run
