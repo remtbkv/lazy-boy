@@ -9,15 +9,15 @@ Status: complete.
 
 ## 0. Summary
 
-The surface is 8 pages, 24 server actions and 12 route files. Every entry point checks *whether*
-someone is signed in and none checks *who*, because nothing can: the session cookie carries no
-Spotify id (Auth.js mints a random `sub` per sign-in and the app stores nothing else), every Spotify
-call takes the one global token row, and every store read is unscoped (section 1).
+The surface is 8 pages, 24 server actions and 12 route files. The entry points that check anything
+check *whether* someone is signed in; none checks *who*, because nothing can: the session cookie
+carries no Spotify id (Auth.js mints a random `sub` per sign-in and the app stores nothing else),
+every Spotify call takes the one global token row, and every store read is unscoped (section 1).
 
-With a second account signed in, as the code stands: 16 actions, 4 routes and one page call Spotify with
-whichever account's token is stored; all 7 Data Cache entries, both search ETags and the 3 version
-markers are keyed without a user; the cached playlist tracks are served by playlist id with no access
-check, so a private playlist is readable by anyone who knows its id; and two pieces of
+With a second account signed in, as the code stands: 16 actions, 4 routes and one page call Spotify
+with whichever account's token is stored; all 7 Data Cache entries, both search ETags and the 3
+version markers are keyed without a user; the cached playlist tracks are served by playlist id with
+no access check, so a private playlist is readable by anyone who knows its id; and two pieces of
 per-instance memory cross users outright. The in-flight token refresh hands A's tokens to B, and the
 60-second playlist-list cache makes B's library a copy of A's, which a cron that syncs users in turn
 would hit for every user after the first. Section 4 lists 26 entry points and shared states by root
@@ -36,7 +36,8 @@ Three things are wrong today, single-user (section 6). The browser that complete
 account's sign-in before the 8:41 PM guard still holds a session that acts as the owner, since the
 guard runs only at sign-in and `AUTH_SECRET` is listed as created 133 days ago: rotate `AUTH_SECRET`.
 `SPOTIFY_OWNER_ID` is set nowhere, so the guard trusts `meta.me_id`, which the incident flipped and
-library syncs rewrite: set it in Production. `logout` has no gate and deletes the token row: add one.
+only a library sync after Rem's next sign-in flips back: set it in Production, and confirm Rem has
+signed in since the incident. `logout` has no gate and deletes the token row: add one.
 
 `STORE_MIGRATION.md` need not wait (section 7). Three passages should change before Oct 15, 8 PM:
 §10 must define the per-user key for the browser's IndexedDB copy, since no user id reaches the
@@ -52,7 +53,7 @@ membership over a shared track cache (recommended, section 5, S9).
 ## 1. How a request learns who the user is today
 
 It doesn't. A request learns *that* someone is signed in, then acts on the one account whose tokens
-sit in the store. Three facts make that so.
+sit in the store.
 
 ### 1.1 The session cookie carries no Spotify id
 
@@ -200,8 +201,8 @@ Three strengths of gate are in use, and they disagree about a session whose Spot
    `/api/metrics`, `/api/tasks/[id]`. A dead-refresh session still reads everything stored.
 3. None: `logout` (`actions.ts:63-69`), `login`, `/api/build`. The cron routes use the secret.
 
-None of these checks *who*; all of them check *whether*. Multi-user needs one helper that every entry
-point calls first and that returns the session's Spotify id or refuses (section 5, S2). Whether a
+None of the three checks *who*. Multi-user needs one helper that every entry point calls first and
+that returns the session's Spotify id or refuses (section 5, S2). Whether a
 dead refresh token should block reading your own stored history is a product call; my
 recommendation is to allow reads and block only Spotify calls, since the history is the user's and a
 re-login fixes capture.
@@ -236,10 +237,12 @@ id in the key fails the same way whenever two users' counters hold the same valu
 integers do often.
 
 Two more properties carry over. The Data Cache outlives a deploy (`GOTCHAS.md` "The Data Cache
-OUTLIVES THE DEPLOY"), so adding the user to the keys must also move the shape tokens, or the first
-multi-user deploy could be handed single-user entries. And with no tags, an entry built from a deleted
-user's rows stays in the cache until its TTL runs out, up to 24 hours; purging on account deletion
-needs a per-user tag and a `revalidateTag` call.
+OUTLIVES THE DEPLOY"). Adding the user id as an argument moves every key by itself, since it changes
+both the wrapper's text and the arguments, so the first multi-user deploy cannot be served
+single-user entries; a payload whose return shape also changes still needs its shape token moved in
+the same commit. And with no tags, an entry built from a deleted user's rows stays in the cache until
+its TTL runs out, up to 24 hours; purging on account deletion needs a per-user tag and a
+`revalidateTag` call.
 
 ### 3.2 Version markers and ETags
 
@@ -422,8 +425,8 @@ forms; the in-flight refresh, the `spotify_refresh` lock, `waitForFreshToken` an
 `clearTokensIfStale` are all keyed by user (A1-A4).
 
 **S5. Cache keys that carry the user.** Every `unstable_cache` wrapper takes the user id as an
-argument, never through a closure (3.1); the version markers become per user (3.2); the shape tokens
-move in the same commit; a per-user tag makes deletion purgeable. Proof: today's test stub turns
+argument, never through a closure (3.1); the version markers become per user (3.2); a shape token
+moves whenever a cached read's return shape changes; a per-user tag makes deletion purgeable. Proof: today's test stub turns
 `unstable_cache` into a pass-through (`tests/stubs/next-cache.ts:4-10`), so the simulated environment
 cannot see a key collision at all. Replace it with a memo that builds keys the way Next 16.2.6 does
 (callback source + key parts + `JSON.stringify(args)`), and a two-user test then catches both the
@@ -500,13 +503,16 @@ Recommendation: (a) now, because it is one environment change; (b) as the first 
 environment (`vercel env ls`, all environments) nor `.env.local`, although `src/lib/owner.ts:7` says
 it is set in both. So the guard falls back to `meta.me_id` (`owner.ts:11`), which every library sync
 rewrites from whichever account's token is stored (`src/lib/sync/library.ts:40-50` → `db.ts:1804`,
-`:1817-1822`). Commit `044c9b6` records that `me_id` flipped during the incident. If no library sync
-has run with the owner's token since Rem signed back in, the guard today admits the second account
-and refuses Rem's next sign-in. The cron reaches the library sync only on ticks that harvest
-(`src/app/api/cron/sync/route.ts:144-146` returns before `:171`), at least hourly through the backstop, so
-`me_id` has most likely been restored, but I did not read it (it is production data). Fix: set
-`SPOTIFY_OWNER_ID` in Production and in `.env.local`. `tests/owner-signin.test.ts` already covers the
-case where the variable overrides a flipped `me_id`.
+`:1817-1822`). Commit `044c9b6` records that `me_id` flipped during the incident. It flips back only
+when Rem has signed in again *and* a library sync has run since; the cron reaches the library sync
+only on ticks that harvest (`src/app/api/cron/sync/route.ts:144-146` returns before `:171`), which is
+at least hourly through the backstop. If both have happened, the guard holds the right account by
+luck of ordering. If not, it admits the second account and refuses Rem's next sign-in, and if Rem has
+not signed in since the incident at all, the token row still holds the second account's token and the
+cron is still recording that account's plays into Rem's history. I did not read `me_id` or the token
+row (production data). Fix: set `SPOTIFY_OWNER_ID` in Production and in `.env.local`, and confirm
+Rem has signed in since the incident. `tests/owner-signin.test.ts` already covers the case where the
+variable overrides a flipped `me_id`.
 
 **E3. `logout` has no gate and deletes the token row.** `actions.ts:63-69` runs
 `clearSpotifyTokens()` for any caller. Its action id ships in the signed-in layout's client bundle
@@ -587,7 +593,8 @@ snapshot, which step 10's compare already handles, but there is no reason to tes
 - **Whether `AUTH_SECRET` changed since it was created.** `vercel env ls` shows creation age, not the
   last update, so an in-place overwrite would not show. Whether the second account's browser still
   holds its cookie is unknowable from here. E1's fix is the same either way.
-- **The current `meta.me_id`.** Not read; it is production data. E2 says how to make it not matter.
+- **The current `meta.me_id`, and whose token the row holds.** Not read; both are production data.
+  E2 says how to make them not matter.
 - **Action-id exposure.** I did not check whether any anonymous response references the signed-in
   layout's client chunk, which would let a stranger, not only a past session holder, find `logout`'s
   id (E3). Nor did I verify against a build that Next 16 leaves the two uncalled actions' ids out of
