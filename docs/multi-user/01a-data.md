@@ -755,7 +755,8 @@ snapshots were deleted at the end: they hold the owner's listening history and b
    §1.5). Recommendation: unlimited for your own history (it is your record, and the backfill and
    import scripts exist to make it complete), and a stated window for invited users, enforced by one
    indexed delete per user per day (§8.8). The length of the window is the decision.
-3. **Backups and deletion.** Today's snapshots keep 60 days offsite in one file. Recommendation:
+3. **Backups and deletion.** Each nightly snapshot is one file holding everything, kept 60 days
+   offsite. Recommendation:
    per-user backup files, so a deleted user's backups go with them inside Spotify's five-day window (01f
    §1.6); the alternative is a privacy policy that says deletion reaches backups within 60 days.
 4. **The backstop recorder.** It is your safety net against Zenbook outages and holds your token chain.
