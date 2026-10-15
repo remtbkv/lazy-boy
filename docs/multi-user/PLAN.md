@@ -1092,9 +1092,12 @@ today: the history body at ~3 rows per play plus the library on half of visits, 
 
 Against D1 (≤ 1.5M a heavy day): Rem meets it after P3 and with room after P4; an app-heavy Rem-like
 user needs P4. Against R4 at five users (≤ 250M a month): after P3, Rem plus four light friends is
-~92M (18% of the free plan) and Rem plus four app-heavy Rem-like friends a year in is ~258M (52%, at
-the bar); after P4 the second is ~64M (13%). Friends start with no history and no catalog rows, so a
-year in is where they arrive, not where they begin. §14.4 has the arithmetic.
+~92M (18% of the free plan), and Rem plus four app-heavy Rem-like friends at Rem's history size is
+~258M (52%, at the bar). The strip is the one per-visit term left that grows with history (~3 rows
+per real play per mount), so a year in, at ~42,000 plays each, the second case is ~337M (67%). After
+P4 it is ~64M (13%) at either size, because nothing left on a per-visit path grows with history.
+Friends start with no history and no catalog rows, so a year in is where they arrive, not where they
+begin. §14.4 has the arithmetic.
 
 Writes: ~3,000 core rows a day for Rem (01c §2.7), plus ~72 for tokens, ~900-1,440 for claims and
 releases (two rows per probe, 450-720 probes a day), and ~150 counter increments: ~4,100-4,700 a day,
