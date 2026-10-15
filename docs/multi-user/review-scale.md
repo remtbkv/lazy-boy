@@ -339,7 +339,56 @@ night". On libSQL an unfiltered `count(*)` walks pages (158 reported for 15,852 
 
 ## 2. The arithmetic at 5, 25 and 250 users
 
-(to fill)
+Spotify allows five accounts on this app (§1, 01f §1.2), so 25 and 250 exist only on a
+grandfathered list or a changed policy; past five the plan sends people to their own copies, which
+share nothing and scale without limit (01f §5.2 option E, which holds). The columns below answer the
+brief anyway, because they show what binds first if the cap ever moves. Every cell is an
+[estimate]. Users are Rem-like and app-heavy (~125 plays and ~9 hours of playback a day, Home
+visible ~3 hours), the upper bound; the plan's levers through P4 and this review's fixes to findings
+2 and 3 are applied unless a row says otherwise; the scarce bucket is read as shared, as the plan
+does.
+
+| resource | per user a day (basis) | 5 users | 25 users | 250 users | limit |
+|---|---|---|---|---|---|
+| allowlist places | 1 | 5 | 25 | 250 | **5** on one app (dev mode) |
+| scarce bucket, un-braked | ~145-165 harvests (§14.2), +~16 if the mid-session retry stays (finding 5) | ~745-830 | ~3,700-4,100 | ~37,000-41,000 | ~725-800 observed ban line; 450 planned |
+| scarce bucket at the brake's floor | ~35-40: 9 h × 2 batches + ~5 tails + ~7 idle backstops + ~5-10 open-app (§7.4-7.5) | ~505-560 (A §13.3), **holds** | ~875-1,000, **over the ban line: daily bans** | ~8,750-10,000, ~12× the line | the brake has no level below 30 minutes |
+| player bucket | 450-720 probes + 0-1,440 now-playing (finding 6) | ~2,250-10,800 | ~11,000-54,000 | ~112,000-540,000 | unknown; 1,336 the measured max day |
+| Spotify calls per 30 s | ~0.35 from the tick per active user (probe + harvest), 2-4 per visible tab, scans paced | ≤ ~25 | ~16-50 (5-10 tabs visible) | ~40-65 from ticks alone at a peak hour (100 active, 150 idle) | 56 measured without a 429; true limit unpublished |
+| Turso rows read | ~0.37-0.45M on a heavy day (§8.6 P4 column, finding 2 fixed) | ~64-70M a month (13-14%) | ~330M (66% of Free, over R4) | ~3.3B | Free 500M (R4 250M); Developer 2.5B |
+| same, finding 2 unfixed, "See all" open | +~2.2M | ~400M (79%) | ~2B | ~20B | as above |
+| Turso rows written | ~5,060-5,870 (finding 8), Liked fixed | ~0.8-0.93M a month (8-9%) | ~3.8-4.4M (38-44%) | ~38-44M | Free 10M (R4 1M); Developer 25M |
+| of which scheduling (claims and releases) | 1,350-2,160 | ~0.2-0.3M | ~1-1.6M | ~10-16M | – |
+| Turso databases | 1 | 7 (with `lazyboy-app` and the old `lazy-boy`) | 27 | 252 | Free 100 |
+| Turso storage | ~12 MB now, +12.6 MB a year (01a §9.1) | ~60-125 MB | ~0.3-0.6 GB | ~3-6 GB | Free 5 GB |
+| Vercel invocations | ~200 (Rem) to ~1,000 (app-heavy, finding 11); ticks 1,440 for the app | ~73,000-195,000 a month | ~0.19-0.79M | ~1.5-7.5M | Hobby 1M |
+| Vercel provisioned memory | ticks ~1,440 × ~2-3 s × 2 GB for the app; polls ~720 × ~0.4 s × 2 GB and other requests ~300 × ~1 s × 2 GB per user [upper bound: fluid compute shares instances] | ~100-110 GB-h a month (~30%) | ~300 GB-h (~85%) | ~2,500 GB-h (Pro, ~$27 on demand) | Hobby 360 GB-h |
+| Vercel Active CPU | unmeasured; 01f's top-down band 0.5-2.4 CPU-h per Rem-like user a month | 2.5-12 h | 12-60 h | 125-600 h | Hobby 4 h, team-wide |
+| tick concurrency | ~half the users due each minute | 2-3 steps | ~12 | ~125 steps and 125 user-database hosts in one invocation | 25-s deadline per step; 60-s `maxDuration` |
+| library rescans | ~32-48 wanted per active user (§7.7) | ~160-240 a day | ~800-1,200 | ~8,000-12,000 | **one per tick: 1,440 a day** |
+
+What binds, in the order the users arrive (my recomputation):
+
+1. **Spotify's allowlist at six.** Policy, not engineering.
+2. **Money switches, all small.** Hobby Active CPU somewhere between 2 and 25 users (unmeasured, the
+   plan's Phase 0 read); Turso reads at R4's 250M bar at ~19 users (250M ÷ (0.44M × 30)) and at
+   Free's 500M block at ~38, or at ~3 and ~6 if finding 2 is not fixed and app-heavy users leave "See
+   all" open; Hobby's provisioned memory near 25 app-heavy users, which §14.3 does not list; Turso
+   Free's 100 databases past 98 users. Pro is $20 a
+   month and Developer $4.99, so none of these is a wall.
+3. **The scarce bucket, under the shared reading.** At the brake's floor of ~35-40 harvests a user a
+   day, the app exceeds the 450 planning budget at ~12 Rem-like users and the ~725-800 ban line at
+   ~19-21, from where it is banned daily however the brake is tuned, and a heavy listener loses plays
+   during each ban. §14.3 calls this "closed-app freshness (each share of the scarce bucket is 426 ÷
+   N)"; past ~20 users it is completeness. Under the per-user reading it never binds.
+4. **Library rescans at ~30-45 active users** (1,440 a day ÷ 32-48 each): the "one user per tick"
+   rule (§7.2 step 3, §7.7) leaves libraries ~4 hours stale at 250. Several rescans per tick under
+   one shared deadline lifts it.
+5. **The 30-second window from the ticks alone around 200-250 users**, at the measured floor of 56
+   calls; spreading probes and slowing idle users further moves it.
+
+At five every row fits except the two unknowns the plan already gates on (Active CPU, quota pooling)
+and the player bucket (finding 6), which it does not.
 
 ## 3. What holds up
 
