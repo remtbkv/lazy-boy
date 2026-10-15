@@ -299,16 +299,16 @@ this section plans to ~60%, ~450 a day.
 
 | harvest policy (defined in 5.3) | recently-played calls a day, one Rem-like user | five such users | against ~450 |
 |---|---|---|---|
-| today: every 2-min tick while playing, the session tail, an hourly backstop | 139-319 (cron, measured) + 96 (recorder) | 1,200-2,100 with a recorder each; ~700-1,600 with only the owner's | over |
-| (i) harvest when the player probe sees the track change | ~117-130 plays + ~5 tails + 24 backstops ≈ 150 | ~750 (+96 for the owner's recorder) | over, ~1.7× |
+| today: every 2-min tick while playing, the session tail, an hourly backstop | 139-319 (cron, measured) + 96 (recorder) | 1,200-2,100 with a recorder each; ~800-1,700 with only the owner's | over |
+| (i) harvest when the player probe sees the track change | ~117-130 plays + ~5 tails + 24 backstops ≈ 150 | ~750 (+96 for the owner's recorder) | over, ~1.7× (1.9× with the recorder) |
 | (iii) one harvest per 15 min of playback | 9 h × 4 + 5 + 24 ≈ 65 | ~325 | fits |
 | (ii) provisional plays from the probe, one harvest per 30 min of playback | 9 h × 2 + 5 + 24 ≈ 47 | ~235 | fits, ~2× margin |
 
 Two smaller terms in the same bucket: each library rescan calls `/me` (`library.ts:40`), 32 a day for
 Rem, so ~160 a day at five users, for a value that never changes (the user's Spotify id); and the
 hourly backstop, 24 a day per user, which could be every 2 hours (12) because 50 plays is ~2.5-3 hours
-of nonstop listening. Dropping the rescan's `/me` and halving the backstop frees ~220 a day at five
-users, more than the whole of policy (ii).
+of nonstop listening. Dropping the rescan's `/me` and halving the backstop frees ~200 a day at five
+users, about what the whole of policy (ii) spends.
 
 Under the per-user reading every row fits, and the plan can keep today's policy.
 
@@ -419,14 +419,118 @@ One user's failure must cost that user's slot and nothing else:
 8. **Idempotent writes only.** §2.8 shows re-sent INSERTs happen on this path. A claim is a
    compare-and-set with an owner token, a counter is written as a value rather than incremented, and
    every insert has a natural key (`plays` already does). Writes that must outlive the response go
-   through `after()`, as `/api/playlists/sync` does (`route.ts:14-16`), not a bare `void`.
+   through `after()`, as `/api/playlists/sync` does (`src/app/api/playlists/sync/route.ts:14-16`),
+   not a bare `void`.
 9. **A new user's first rescan** (possibly hundreds of playlist pages) never runs inside the harvest
    deadline (S13, 5.6).
 ### 5.5 The open-app paths
+
+- **`/api/sync`** runs the same per-user step as the cron (5.2), under the same lease and the same
+  harvest policy, so an open tab gets an immediate catch-up on load and never spends more than the
+  policy allows. Today it harvests whenever the cron's gate is closed (2.4).
+- **`refreshHistoryAction`** stops calling Spotify and only re-reads the store. Today it harvests on
+  every call (S6). The browser's own provisional plays already cover the moment a track ends.
+- **`user_tz_offset`** becomes a per-user value written only when it changed; today every
+  `/api/sync` call writes it, before the debounce (`src/app/api/sync/route.ts:24-27`).
+- **Now-playing** needs a per-user cap of about 6 Spotify calls a minute to keep five users under
+  ~15 per 30 s. The simplest way: poll every 15 s instead of 6 while a track is mid-play, and keep the
+  existing end-of-track and visibility polls, which are what make a track change feel instant; the
+  chip already interpolates progress between polls. A user with two devices visible doubles it; a
+  short per-user server cache would fix that if it turns out to matter. Either way the cache or the
+  poll keys by user (01b covers the browser-side `lb-nowplaying` copy).
+
 ### 5.6 The library rescan
+
+- Per-user rows and stamps (01a D5-D7, D23) and a per-user rescan cadence: 30 min while active, every
+  2-3 hours idle. Today it rides the hourly backstop harvest when idle (2.1).
+- Drop `/me` from the rescan: the user's Spotify id is known from sign-in, and the display name can
+  refresh daily. Saves one scarce-bucket call per rescan (5.1).
+- Read every playlist's stored snapshot in one statement (a `snapshot_id` column on the user's
+  playlist rows, which the list probe already reads at `db.ts:1776-1782`) instead of ~110 serial
+  `getMeta` calls. That is ~110 round trips per rescan, about half the day's `meta` reads, and several
+  seconds of every rescan at the Funnel's 40-210 ms median round trip (STORE_MIGRATION §1).
+- No unkeyed `playlistsCache` on this path (S7).
+- Owned playlists only, as today (`library.ts:54`): dev mode returns playlist items "only for
+  playlists the user owns or collaborates on" (migration guide).
+- A new user's first rescan is the expensive one: one call per 50 playlists, one per 100 tracks of
+  every owned playlist, one per 50 liked songs. Rem's library (114 playlists, 7,400 cached
+  memberships, 48 liked) is ~150 calls; at the 150 ms pacing that is one to two minutes, too long to
+  share a tick with other users, so it runs one user per tick and resumes across ticks (the
+  per-playlist commit and the snapshot gate already make a re-run skip finished playlists).
+
 ### 5.7 The recorder and the loss floor
+
+During a capture outage of T hours a user loses every play beyond the newest 50 (GOTCHAS,
+"`recently-played` only returns the last 50 plays"). Rem averages ~117 plays a day and ~16-20 an hour
+while listening, so an outage that spans more than 2.5-3 hours of listening loses plays. Each user's
+floor is set by their own listening.
+
+The recorder protects only the owner, costs 96 scarce-bucket calls a day (a quarter to two-fifths of
+the app's spend in that bucket, 2.7), and runs on the same machine as the pinger, so the outages it
+was built for took it down too (the Oct 3 review, D2: Aug 30-Sep 2 and Sep 3-9, several hundred
+plays lost). After STORE_MIGRATION the store leaves the Zenbook but the pinger and the recorder stay
+(its §5 diagram), so a Zenbook outage still stops closed-app capture for every user.
+
+- (a) Keep the recorder owner-only and run it hourly: 24 calls a day instead of 96, and no play is
+  lost while it runs, since 50 plays outlast an hour of any listening.
+- (b) Add a second pinger off the Zenbook (the cron-job.org job and its `CRONJOB_*` env already
+  exist, BRIDGE.md). Safe only once the lease in 5.2 exists: the route has no debounce today
+  (`route.ts:60-185`), so two pingers would double every user's calls. Once the store is on Turso
+  this covers a dead Zenbook for every user.
+- (c) Retire the recorder's own calls and have the cron also write each harvest's raw response to a
+  second store (the Zenbook's telemetry store after the move). Every user gets a second copy at no
+  Spotify cost, but it is no longer independent of the app.
+
+Recommendation: (a) now, (b) when the due queue lands, (c) only if Rem wants a raw copy of every
+user's plays held on the Zenbook. Repairing a gap after the fact uses each user's own Extended
+Streaming History export, which each user has to request; the importer needs `--user` (S17).
+
 ### 5.8 Vercel: invocations and wall time
+
+- Invocations: one per pinger tick, 1,440 a day at one a minute, whatever N is, plus the open apps'
+  requests.
+- Wall time: the slowest user's step, since users run concurrently. Per user today, through the
+  Funnel: idle 1.1 s p50, a landed play 12.2 s p90, a landed play plus a rescan 29 s at worst (2.1).
+  STORE_MIGRATION's R1 target (p50 ≤ 15 ms per round trip, against the Funnel's 40-210 ms median)
+  shrinks the store's share of a landed tick (~30 round trips) from roughly 1-6 s to well under
+  1 s, and batching the rescan's snapshot reads (5.6) removes most of its ~130.
+- No `maxDuration` is set anywhere under `src/app` (grep), so the platform default applies; which
+  default this project runs with is 01f's (unverified here). A 25 s per-user deadline and one rescan
+  per tick keep a tick under a minute whatever the default.
+
 ### 5.9 Store reads and writes per user
+
+Against Turso's free plan after STORE_MIGRATION: 500M rows read and 10M written a month, and R4 asks
+for ≤ 50% and ≤ 10% projected from a heavy day (STORE_MIGRATION §2).
+
+**Per-user indexes are a precondition.** With a `user_id` column but no user-led index, each user's
+all-time recompute scans every user's plays, so the total grows with N × all plays, roughly N².
+01a D4's `(user_id, played_at)` makes each user's scan cost that user's plays only.
+
+Rem's sync path in Turso terms, per day: the all-time recompute 1.4-2.2M (Oct 13-14), the Home
+payload 0.6-1.0M, the harvest probes ~0.06M, the rescans' unique-song counts ~0.16M, and the unscoped
+orphan pass at ~5M a run (2.8) about three times a week (STORE_MIGRATION §3), ~2.2M a day averaged.
+That is ~4.5-5.6M a day, ~135-170M a month (27-34%), at today's history.
+
+| five Rem-like users | reads a month | of 500M |
+|---|---|---|
+| per-user scoped, nothing else changed | ~675-850M | over the plan |
+| + the orphan pass scoped to changed playlists (lanes 1910-1911), taken as ~10× cheaper | ~350-520M | over R4, at or over the plan |
+| + an incremental all-time accumulator | ~120-180M | 24-36%, inside R4 |
+| + the Home payload's strip updated in place on an append | well under 100M | |
+
+The all-time recompute also grows with history: ~2.3 rows per stored play per run, ~44 runs a day for
+Rem, ~117 new plays a day, so its daily cost rises ~12,000 rows every day. A year from now it is
+~6.6M a day for Rem alone. The accumulator (READ_QUOTA.md calls it "the queued lever") adds the new
+plays' listened time to the stored totals and re-derives only around an out-of-order insert, making
+the term proportional to new plays. No lane in STORE_MIGRATION builds it (§6).
+
+Light listeners cost far less: the strip read is about 16 days of that user's plays, and their
+recomputes are fewer.
+
+Writes: ~3,000 core rows a day for Rem (2.7), ~15,000 for five, ~0.45M a month (4.5% of 10M).
+`api_log` (~2,100 rows a day per user as logged, 4 rows written each) stays on the Zenbook under
+STORE_MIGRATION and needs the daily prune (01a D32).
 
 ## 6. STORE_MIGRATION: what multi-user needs, and what should change before it runs
 
