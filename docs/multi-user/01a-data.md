@@ -380,6 +380,132 @@ incorrect even for the user's own data.
 
 ## 8. What the data model needs for multi-user
 
+Lane 01f found that one Spotify app in development mode serves at most five accounts, Rem's included,
+and that extended quota mode is out of reach (01f-platform.md §1.2, §1.3, §1.6). This section is written
+for five users and says where a larger number would change an answer.
+
+### 8.1 Two ways to give every row a user
+
+**Row-level.** One store. `plays`, `playlists`, `playlist_tracks`, `saved_tracks` and `contexts` gain a
+user column that leads their keys and indexes; per-user `meta` keys move to a `user_meta` table; every
+per-user statement in §4.2 gains `user_id = ?`. Enforcement lives in application code.
+
+**Database per user.** One libSQL database per user holding today's seven core tables unchanged, plus
+one small app database for the user list, the token rows and the two global `meta` kinds. The
+connection is the scope: a statement can only see the database it was sent to.
+
+| | row-level | database per user |
+|---|---|---|
+| census items it leaves to fix | all of §7 | D1-D3, D20-D22, D24, D26-D38. D4-D19, D23 and D25 need no SQL change: whole-table statements are already per user, and the markers in each user's own `meta` are already per user |
+| failure if one scope is missed | another user's rows returned, rewritten or deleted (D12-D19) | not possible inside the per-user database; the residual risk moves to choosing the client (one place) and to the cache keys (D26, D27), which both models must fix |
+| the owner's data | rebuild four tables with a user column, re-key `meta`, move the token row (§8.6) | none: the owner's existing database becomes his user database; the token row moves to the app database |
+| per-user query cost | flat in N only with user-led indexes (§9.2 measures it) | each database holds one user's rows; today's indexes and plans apply unchanged |
+| backups, schema changes, clients | one of each | one per database: the nightly backup and every schema change loop over N+1 databases; the cron opens a client per user |
+| account deletion | a DELETE per table, plus telemetry rows | drop the database, plus telemetry rows |
+| shared catalog | `tracks` once (saves ~4 MB per Rem-sized library; nothing at five users) | `tracks` per user |
+| cross-user features (ROADMAP's friends) | SQL joins | two reads merged in code |
+| store limits | none new | Turso's database count per plan must allow N+1 (lane 01f §4.2; not checked here). The Zenbook's sqld would need namespaces, but after STORE_MIGRATION it holds only telemetry |
+
+**Recommendation: database per user, for this app at five users.** The reason is the failure each model
+leaves open. Row-level puts more than fifty statements in `db.ts` (my count from §4.2, plus the five
+import scripts) under one rule, "remember the user", and the census
+found the misses would not be cosmetic: one user's library sync deleting everyone's playlists (D12),
+skip verdicts computed from another person's previous play and then stored (D18), plays silently dropped
+on a timestamp collision (D17). A per-user database makes those statements correct without touching
+them, and it migrates Rem's data by not moving it. The costs are loops over at most six databases. Two
+facts would change this: if Turso's plan caps databases below six (01f), or if Rem wants cross-user
+features soon, where joins in one store are simpler. Rows-read quota is per organization on Turso either
+way, so the choice does not change §9.3's budget.
+
+The rest of §8 gives the row-level details as well, because the designs may weigh it differently.
+
+### 8.2 Which tables are per user
+
+- `tracks`: shareable in a row-level store. It holds public Spotify metadata keyed by Spotify track id and
+  no personal data on its own. Its cost is the cross-user staleness in §5.
+- `contexts`: per user. A name is what one user's token could resolve; a 403 for one account (a private
+  playlist, an account outside the allowlist) must not become everyone's negative cache for 30 days
+  (D25). It is 114 rows.
+- `playlists`, `saved_tracks`: per user by meaning (one person's library list and Likes).
+- `playlist_tracks`: per user. Sharing it by Spotify playlist id would save rows only when two users cache
+  the same playlist, and it would make every read an access question (may this user see this playlist?)
+  that the detail page does not ask today (D14). The library sync caches only owned playlists
+  (`sync/library.ts:54, 65`): S-Oct14 holds no cached members of the 4 followed playlists.
+- `plays`: per user.
+- Telemetry: global tables with a nullable user column (D11, D30-D32).
+
+### 8.3 `meta`
+
+Row-level: a separate `user_meta (user_id, key, value, PRIMARY KEY (user_id, key))`, not prefixed keys in
+`meta`. Deleting a user is one statement; the `LIKE 'plsnap:%' AND substr(key, 8)` purges
+(`db.ts:1875-1882`) become plain per-user filters; and `FROM meta` in the code then means a global key.
+Database per user: `meta` stays as it is inside each user database, and the app database keeps a global
+`meta` for `spotify_cooldown_until` and `played_at_convention`.
+
+Tokens belong in a table of their own in the app database in both models: sign-in has to find or
+create the user before anything else exists, the cron fan-out needs every user's expiry at once, and
+encryption at rest (lane 01e) wants one place to rotate keys.
+
+### 8.4 The user key
+
+A surrogate INTEGER user id, with the Spotify id as a unique column on the user row. Measured on 551,000
+cloned plays (25 copies of S-Oct14's), user-led indexes as in D4: **280 bytes per play with an INTEGER
+id, 432 with a 28-character text id** like the owner's Spotify id [measured locally, §11]. Today's
+single-user table is 275 B/play, so the integer costs 2% and the text 57%, because the key repeats in
+the row and in all six indexes. The surrogate also keeps Spotify ids out of cache keys and ETags. (In the
+database-per-user model only the app database and telemetry carry a user key.)
+
+### 8.5 Enforcement in one place
+
+Either model needs one function that turns a request into a user-scoped data handle, and no other way to
+reach per-user data. Concretely: `db.ts` stops exporting per-user functions at module level and exports
+`forUser(uid)` (row-level: functions that close over `uid` and add it to every statement and cache key;
+per-user databases: the same functions bound to that user's client). Callers get `uid` only from the
+server-verified session or, in the cron, from the user list. Global functions (the cooldown, telemetry,
+the user list) stay module-level. The census's D2 is this change; it touches every caller once.
+
+### 8.6 Migrating the owner's data, and replacing `init()`
+
+`init()` (`db.ts:153-297`) cannot carry this: it runs on any cold instance, concurrently, with writers
+live. Both models need a schema version (a `meta.schema_version` key) and a one-shot migration script
+run with writers stopped, the same discipline STORE_MIGRATION's cutover uses (pingers off, quiet,
+snapshot, verify; STORE_MIGRATION §8 steps 2-7). `init()` then only checks the version and refuses to
+serve a store that is behind.
+
+Row-level, on a snapshot copy first: create the user row (uid 1 = the owner); rebuild `plays`,
+`playlists`, `playlist_tracks`, `saved_tracks` and `contexts` with `user_id = 1` (SQLite: create new,
+copy, drop, rename, re-index; 22,040 plays is instant); move per-user `meta` keys into `user_meta`; move
+the token rows to the token table; drop `last_sync_added`, `pltracks_at:*` and `me_id`. Verify: per-table
+counts equal, `scripts/verify-derived.mjs` green with a per-user mode (D34), the 7,529 backfill plays and
+1,162 orphan flags and 481 skip verdicts unchanged.
+
+Database per user: create the app database with the user row and the token rows; leave the owner's
+database as it is apart from moving its token rows out; same verification on the token compare
+(STORE_MIGRATION §8 step 10's rule: the later `expiresAt` wins).
+
+### 8.7 Isolation tests the data layer needs
+
+The vitest harness (`tests/setup.ts`, a throwaway SQLite file per test file) is the right home. Seed two
+users with deliberately colliding data: the same track at the same `played_at`, the same playlist id in
+both libraries, the same context URI with a name for one and a 403 for the other. Then run every
+per-user function as user A and assert that user B's rows are byte-identical before and after, and
+that nothing user A reads contains a B-only marker value. Replace the `unstable_cache` passthrough stub
+(D29) with one that keys on the key parts plus the serialized arguments, so a call that forgets the user
+returns the other user's entry in the test. D17's collision and D18's interleaved timelines are the two
+cases most likely to slip past a review, so they deserve named tests.
+
+### 8.8 Deletion, export, retention
+
+What a user owns, per model: row-level, every row with their `user_id` in the five per-user tables,
+`user_meta`, their token row, and their telemetry rows (`client_metrics` carries song names; D30);
+database per user, their database plus the same app and telemetry rows. Lane 01f records Spotify's
+five-day deletion requirement and its "do not store Spotify Content indefinitely" term (01f §1.5,
+§1.6); the data model supports a retention window as one indexed range delete on `played_at` per user
+(and `recordPlays`' successor rule must then treat the oldest kept play as having no predecessor, as it
+already does for the first play). Backups: the nightly snapshots keep 60 days offsite (BRIDGE.md), so a
+deletion is complete only when the last snapshot holding the user ages out, or the snapshots are
+rewritten. That interacts with the five-day rule and is Rem's call (§12).
+
 ## 9. How the data scales with N users
 
 ## 10. STORE_MIGRATION.md: what multi-user needs from it, and what should change before it runs
