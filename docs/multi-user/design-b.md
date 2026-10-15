@@ -704,6 +704,96 @@ payload write that loses its compare-and-set anyway marks the row dirty for the 
 
 ## 9. Search: payloads, caching, and the budget for every step
 
+### 9.1 What the browser fetches
+
+- **The manifest rides the page.** Home's server render already reads the user's database for the
+  `home` row; the same batch reads the manifest (`kind, key, version, bytes` for every `payloads` row:
+  ~7 rows for Rem today, ~40 after three years), so the browser knows at first paint which segments
+  exist and which it lacks. No extra request.
+- **Segments by versioned URL**: `GET /api/search/seg/<kind>/<key>?v=<version>&s=<shape>`, served from
+  the session's uid only, one `payloads` row read by primary key, `Cache-Control: private,
+  max-age=31536000, immutable`. If the stored version has moved past the URL's (the current month after
+  a new play), the route answers with the current body, its version in a header, and `no-store`, so
+  nothing is cached under the wrong URL.
+- **The library body** comes the same way (`lib`), patched per playlist on the server (§8.4).
+- **The server fallback** (`searchHistory`'s `LIKE`, `db.ts:884-904`) answers only while nothing is in
+  memory; in a per-user database it scans one user's plays.
+
+### 9.2 Caching layers, from the device out
+
+1. **IndexedDB**, keyed `(uid, kind, key, version, shape)`: STORE_MIGRATION phase E with a per-segment
+   key (01d §6 item 3). Read on Home mount before any network request.
+2. **The browser's HTTP cache**: a segment URL never changes meaning, so a device never re-requests a
+   segment version it holds.
+3. **The user's database**: one row per segment the device lacks. A request never rebuilds anything
+   except a month marked dirty (§8.3), bounded at ~10,000 rows.
+
+**No Data Cache for payloads.** One store row costs ~15 ms at R1's target, and dropping the Data Cache
+for these bodies removes three problems at once: the 2 MiB item limit (01d §3.2), the cross-deploy
+shape hazard (GOTCHAS "The Data Cache OUTLIVES THE DEPLOY"), and per-user entries in an LRU cache that
+Rem's other Vercel projects share (01f §2.2). The Data Cache keeps only the three small per-user reads
+in §6, keyed by uid.
+
+### 9.3 What changes in the client
+
+- **Lazy days** (01d O6): a day's rows are built when the day is selected, by binary search on the
+  minute-ordered plays, instead of every day up front. That removes ~199 of the 264 ms the client
+  spends at 4× today (01d §2.3).
+- **The whole-history strip from the segments**: per-day totals from each play's listened seconds,
+  replacing the `dailyStatsAction(100000)` prefetch on mount (§3, row 4). The server path stays as the
+  fallback before segments land.
+- **The all-time list from the segments**: plays, last play and the latest play's source per song,
+  replacing `readAllTimePlays` (~25,000 rows per rebuild, READ_QUOTA "Sibling sweep"). It groups by
+  song identity where the server groups by track id, so a song Spotify relinked under two ids shows
+  once instead of twice: a visible change, and the same identity rule search already uses
+  (`db.ts:1403-1407`).
+- **A shorter result list**: the first ~50 rows painted, the rest on scroll (01d O6). Rendering up to
+  400 full rows is most of a keystroke's time today (01d §2.3).
+- **Narrowing**: a query that extends the previous one filters the previous matches, so only the first
+  keystroke scans the whole set.
+- **`history-ready` stops waiting for the library half** (`den-home.tsx:620`, 01d §1.4): the day list
+  needs only history.
+- A Web Worker only past ~30,000 entries (01d O6).
+
+### 9.4 The budget, step by step
+
+**First visit, empty browser cache, Rem today, 4× CPU, 10 Mbit/s.** Sizes and client times are
+measured (01d §2.1, §2.3, O3); network and server times are estimates.
+
+| step | time | basis |
+|---|---|---|
+| server render: identity (app DB) ∥ `home` + manifest (user DB), one round trip each, in parallel | ~15-30 ms of store time | R1 target, p50 ≤ 15 ms |
+| first paint → idle callback | ≤ 300 ms | after hydration; the 2 s timeout is only a ceiling |
+| all segment requests in parallel: identity + one row each | ~100-150 ms to first byte | a mobile round trip of 50-100 ms |
+| transfer: library 285 KB + history segments 798 KB gzipped | ~870 ms | 1.08 MB at 10 Mbit/s |
+| parse and build the search set | ~80 ms | 6.4 + 11.9 + 46.6 ms at 4× today, plus the segment merge |
+| build the selected day | < 5 ms | lazy days |
+| **search usable after first paint** | **~1.4 s** | target ≤ 2 s |
+
+| profile | gzipped bytes, cold | search usable [estimate] | ≤ 2 s? |
+|---|---|---|---|
+| light, 1 year (01d §3.3) | ~250 KB | ~0.7 s | yes |
+| typical, 1 year | ~700 KB | ~1.1 s | yes |
+| Rem today | ~1.08 MB | ~1.4 s | yes |
+| heavy, 1 year | ~1.3 MB | ~1.6 s | yes |
+| heavy, 3 years | ~2.35 MB | ~2.4 s | no; one art and album dictionary per user instead of per segment (−~30% of cold bytes, 01d §5.2) brings it to ~1.9 s |
+| Rem on slow 4G (1.6 Mbit/s) | ~1.08 MB | ~5.8 s | no; §17 |
+
+**Repeat visit**: IndexedDB read ~20 ms at 4× [measured, 01d O5] + building the set ~47 ms [measured]
++ the selected day < 5 ms: **~80 ms** against a 300 ms target. The manifest in the page then names the
+segments that moved, usually just the current month (≤ 113 KB gzipped, ~90 ms at 10 Mbit/s), patched
+in behind a usable box.
+
+**Keystroke at 4×.** Matching is ≤ 13.2 ms over Rem's set (the worst one-letter query, "e", 8,599
+hits; 01d §2.3), and rendering ≤ 50 rows instead of up to 400 brings painting to ~10-20 ms
+[estimate]: **~25-35 ms** against 50. At twice Rem's size (29,014 entries) one-letter matching is
+25.6 ms (01d §3.2), ~45 ms in all; at four times (58,028) it is 55.9 ms and needs the worker. Later
+keystrokes narrow the previous matches and cost a few milliseconds.
+
+**Server cost of a visit.** Today a visit after any listening can rebuild the history payload (~79,000
+rows), the library payload (~15,000) and the whole-history strip (~43,500). Here: identity ~4 rows,
+`home` and manifest ~8, one row per segment the device lacks: **≤ ~20 rows a visit** [estimate].
+
 ## 10. The store budget per user per day, and the plan that holds at 5, 25 and 250
 
 ## 11. The store choice, and what STORE_MIGRATION needs
