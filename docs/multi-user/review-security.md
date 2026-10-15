@@ -44,9 +44,11 @@ how §12.3 makes the vendor's copy of a deleted friend's token unreadable; `SIGN
 Two ways it bites:
 
 1. **Phase 0, on today's Hobby plan.** The deploy that rotates `AUTH_SECRET` misbehaves and someone
-   clicks Instant Rollback. The only target is the previous deployment, built with the old secret: the
-   incident's second account is signed in as Rem again, and if that build predates 8:41 PM Oct 14
-   there is no owner guard either, so that account's next sign-in overwrites the token row as on Oct 14.
+   clicks Instant Rollback. The only target is the previous deployment, which today is the owner-guard
+   build (production's current deployment, created Oct 14 at 8:40 PM per the project settings), built
+   with the old secret: the incident's second account is signed in as Rem again, with an ungated
+   `logout`. On Pro, one rollback further also removes the owner guard, and that account's next
+   sign-in overwrites the token row as on Oct 14.
 2. **After Phase 4, if the team moves to Pro** (§15 and decision 12 contemplate it). Every build
    between Phase 0 and Phase 1 shares the current `AUTH_SECRET`. A rollback to one of them puts
    single-user code in front of friends' valid cookies: a friend's next `GET /api/search/history`
@@ -69,9 +71,9 @@ Fix, all cheap:
 1. Rotate `AUTH_SECRET` again in Phase 1's deploy. Phase 1 already refuses every cookie without a uid,
    so Rem signs in once either way (§11.4); with a new secret no pre-Phase-1 build can decrypt a
    post-Phase-1 cookie, and a rollback across that boundary signs people out instead of letting them in.
-2. After Phase 0 has run a day, delete the production deployments built before the rotation, at
-   least those from before 8:41 PM Oct 14 (`vercel rm <url>`). Before Phase 4, delete every production
-   deployment built before Phase 1.
+2. Once Phase 0 has run a day, delete the production deployments built before the rotation
+   (`vercel rm <url>`), so no rollback can reach the old secret; a bad deploy is then fixed by a
+   rebuild. Before Phase 4, delete every production deployment built before Phase 1.
 3. Write the rollback rule into §13.1: rebuild the previous commit with today's environment; never
    Instant Rollback or promote across a phase boundary or a secret rotation.
 4. In Phase 2 step 1, invalidate the old `lazyboy` database token before minting the group token
@@ -243,7 +245,8 @@ or take decision 16's alternative and name the vendor's ten-day copy in the priv
 friend's backups there and on OneDrive. sqld and the meter run as systemd user units under the same
 account as the backup job, the recorder's `tokens.json` (Rem's grant) and rclone (01f §3.1). The meter
 on `:8090` is published through a Funnel whose hostname the public repo prints (01e §2.1), and it
-parses every request body before sqld checks the JWT (`ops/zenbook-meter/meter-proxy.mjs:33-48`).
+parses the body of every query POST it forwards, unauthenticated ones included, once sqld has
+answered (`ops/zenbook-meter/meter-proxy.mjs:110-145`).
 A per-database token would not narrow it, since the backup reads every database (A §2.1).
 
 Scenario: a flaw in the Funnel-facing meter or sqld gives a shell as that account; it reads the group
@@ -302,7 +305,8 @@ catches a stuck tab cheaply) and a per-uid token bucket on the player actions. A
 - **An unconditional write per tick.** Every tick stamps `app_meta.last_tick_at` (§4.2), and the
   route has no rate limit beyond its secret. A leaked `CRON_SECRET_EXT`, held by a third party, can
   call it as fast as it likes: at 100 calls a second that is ~8.6M writes a day [estimate] against the
-  free plan's 10M a month, after which every user's writes stop until the 1st (§14.5). Stamp
+  free plan's 10M a month, after which every write fails with `BLOCKED` until the 1st (Turso's
+  usage page, quoted in 01f §4.2; the org runs with overages disabled). Stamp
   conditionally (`… SET value = :now WHERE key = 'last_tick_at' AND value < :now − 20000`) and return
   200 at once when nothing changed; that is also the rate limit.
 - **Which routes each secret opens.** `CRON_SECRET_EXT` should open `/api/cron/sync` only, never the
@@ -351,16 +355,117 @@ hold these files off `origin` until it ships.
 
 ## 2. What holds up
 
-(to be filled)
+I tried to break each of these and could not; several I checked against production settings.
+
+- **A database per user, with the owner stamped inside it and checked on open.** The fifty-odd
+  whole-table statements of 01a §7.3 (D12-D19) are correct by construction, and a mapping slip
+  becomes a refused open instead of a leak (with R15's cache key). It is the strongest single choice
+  in the plan.
+- **The random uid that is never reused.** The restore argument against `AUTOINCREMENT` (§4.4) is
+  right, and the uid is not a credential, so it can sit in URLs and ETags. `Referrer-Policy:
+  strict-origin-when-cross-origin` (`next.config.ts`) keeps uid-bearing request paths out of the
+  Referer sent to Spotify's image CDN.
+- **The gate before the reads on Home**, and the rejection of B's parallel open from a cookie field
+  (§5.1): a second way to mint a user handle is exactly what the branded type exists to prevent.
+- **The token core.** A keyed in-flight refresh closes 01e A2, the one silent cross-user token leak in
+  today's code (`src/lib/auth.ts:188-196` ignores its argument while a refresh is in flight). Per-user
+  locks, tokens that carry their owner, AES-256-GCM with the uid as associated data (a moved
+  ciphertext fails to authenticate), removal of the cookie-held token paths (`auth.ts:367-374,
+  388-405`), and a decrypt failure that logs the uid and never the blob.
+- **Sign-in binding.** `account_id` as the link, refused when absent; the compare-and-set claim; two
+  independent gates, so a Spotify id that changed hands still has to be on Rem's dashboard list to get
+  past `/v1/me`; the profile fetched uncached; uid and epoch taken from the `users` row at sign-in.
+  Auth.js builds the sign-in token from the signing-in user alone (01e §5.6), so no fixation.
+- **The web basics already in place.** PKCE on the OAuth flow (01e §1.1); an httpOnly, Secure,
+  SameSite=Lax cookie; Next's same-origin check on server actions; no CORS headers; `X-Frame-Options:
+  DENY`. A `grep` for `dangerouslySetInnerHTML`, `innerHTML`, `insertAdjacentHTML`, `eval` and
+  `new Function` under `src/` finds only the static canonicalization script (`src/app/layout.tsx:44`),
+  and no `href` takes a value a stranger controls.
+- **Vercel settings, read for this review (§5).** Every secret in Production is already `sensitive`
+  (`AUTH_SECRET`, `CRON_SECRET`, `TURSO_AUTH_TOKEN`, `TURSO_DATABASE_URL`, `TURSO_PLATFORM_TOKEN`,
+  `SPOTIFY_CLIENT_*`, `CRONJOB_*`; only `AUTH_URL` is `encrypted`), so `vercel env pull` returns none of
+  them, which answers §16.2's open check on `TURSO_AUTH_TOKEN`. Git fork protection is on
+  (`gitForkProtection: true`), which answers 01e §8's question about pull requests from forks of the
+  public repo building with Preview's variables. Deployment Protection covers every deployment URL
+  (`all_except_custom_domains`). `SPOTIFY_OWNER_ID` is still absent from Production, so Phase 0's item
+  stands.
+- **The census of process state.** A `grep` for module-scope `let`, `new Map`, `new Set` and
+  `globalThis` under `src/` finds the plan's table and nothing else that holds user state
+  (`apiLogWrites`, `db.ts:2601`, is a counter). Fluid compute is on (`resourceConfig.fluid: true`), so
+  one instance serves concurrent requests from different users, which is what T4's "two users in one
+  invocation" models.
+- **The cron's secret check**: constant-time and fail-closed (`src/app/api/cron/sync/route.ts:45-66`).
+- **Deletion by destroying the database**, with T11's three refusals (the admin, `lazyboy`, a name or
+  owner mismatch) and backups that list only active users; R3 and R4 tighten its triggers, not its
+  shape.
+- **The recorder staying Rem's alone**, and the rule that every isolation test is first shown failing
+  against a planted bug.
 
 ## 3. STORE_MIGRATION, from this lens
 
-(to be filled)
+Nothing here argues for holding lanes 1901-1911. Of the plan's six edits (§10.2), edits 2, 4 and 5
+close live exposures (Preview on the production store; 13-scope grants in every backup; plaintext
+copies in scratch) and should go in before lane 1901; edit 3's opaque browser key is right. Three
+additions:
+
+1. **Phase 0 before lane 1903's flip** (R1, R16). Then the deployment a one-click rollback reaches
+   during the cutover was built after the rotation, and the push the lanes make does not publish
+   exposures that are still open.
+2. **Name the token Phase 2 retires.** Step 8 mints a full-access, no-expiry token for `lazyboy`
+   (STORE_MIGRATION §5, step 8). Record it as the credential Phase 2 invalidates before minting the
+   group token (R1, fix 4), and give dev a token of its own if dev is to keep one.
+3. **A correction for lane 1903's step 11.** It expects fence 503s from "old deployments" that "reload
+   to the new build through build-skew". Skew Protection is a Pro feature, the team is on Hobby (01f
+   §2.1), and today's production shows no pinning (§5): after the flip, old tabs reach the new
+   deployment, and old deployments are only reachable through protected URLs. Fence hits should come
+   from dev servers and scripts; an old deployment in the meter log means someone reached a protected
+   deployment URL, which is worth a look rather than a wait.
 
 ## 4. Tests and checks to add
 
-(to be filled)
+Each joins the plan's suite (§6.4) under its rule: written red first, shown failing against a planted
+bug, then green.
+
+| id | runs | must hold | from |
+|---|---|---|---|
+| T5 + | the identity read throwing; a cookie whose `auth_time` is 31 days old | no uid minted and the cookie left as it was; the old cookie refused | R6, R5 |
+| T6 + | a claim with `disabled`, `deleting` and `needs_reconnect` users due | none of them claimed | R2 |
+| T8 + | A opened, then B with its row pointing at A's file, in one process | B's open refused, logged, A's file unchanged | R15 |
+| T11 + | a token refresh for B finishing while B's deletion runs; then the daily sweep | no `user_tokens`, `sync_state` or lock row for B afterwards | R3 |
+| T13 | every cron route with no secret, a wrong one, and the other caller's | refused where the caller has no business; `CRON_SECRET_EXT` opens `/api/cron/sync` only | R14 |
+| T14 | `invalid_grant` for two users inside an hour; a refresh racing a sign-in | no deletion, an alert; the sign-in's tokens and `granted_at` survive | R4 |
+| T15 | `/api/metrics` with an `isolation` event; an owner mismatch while telemetry is down | the client's event refused; the server's event stored in `lazyboy-app` | R7 |
+| header | the segment and library routes | `Cache-Control: private, no-store` | R12 |
+| S4' | the TypeScript compiler API over `src/` | every mutated module-scope binding on the reviewed list | R15 |
+| one-off, Phase 2 | the `lazyboy` database token against a throwaway `lb-u-test` | 401 | R8 |
+| deploy checklist | each phase deploy and each secret rotation | no Instant Rollback or promote across it; pre-rotation production deployments deleted; Deployment Protection at Standard or stricter; on Pro, a Skew Protection Threshold set | R1 |
 
 ## 5. What I ran
 
-(to be filled)
+Oct 14, 11:39 PM to Oct 15, about 12:20 AM, on the Mac. Nothing wrote to the store, the Zenbook,
+Turso, Vercel or Spotify; the only file written in the repo is this one.
+
+- Read in full: `PLAN.md`, `01b-surface.md`, `01e-auth.md`. Read the parts that bear on this lens and
+  scanned the rest with `grep` for security terms: `01a` §7, `01c` §0, §3, §5.4, §5.7, `01d` §4,
+  `01f` §2.1, §3, §4.2; design A §2.1 and design C §8.1-8.2 on Turso tokens; GOTCHAS "Deployment skew +
+  stale tabs", "Architecture added recently" and "Production security"; STORE_MIGRATION §8 and its
+  rollback; `docs/quota-forensic/OLD_BUILD_COST.md`'s opening.
+- Code read: `src/lib/auth.ts`, `owner.ts`, `session.ts`, `tasks/registry.ts`, `playlists-sync.ts`,
+  `spotify/client.ts:1-120`, `handoff.ts`; `src/app/(app)/actions.ts:1-120`, `history-actions.ts`,
+  `layout.tsx`, `usage/page.tsx:80-95, 238-262`, `(auth)/login/page.tsx`; every route under
+  `src/app/api/` except `cron/usage-check`; `src/instrumentation.ts`; `next.config.ts`; `vercel.json`;
+  `ops/zenbook-meter/meter-proxy.mjs`. `grep` under `src/` for module-scope state and for HTML sinks.
+- Auth.js internals: the `@auth/core` 0.41.2 and `next-auth` 5.0.0-beta.31 tarballs lane 0221 kept in
+  `~/.claude/broke/scratch/lazyboy_mu/authjs_src_0221/`, extracted to a temporary directory (deleted at
+  the end); read `lib/actions/session.js`, `jwt.js` and `next-auth lib/index.js`.
+- Vercel, read-only, printing only the fields named: `vercel project inspect lazy-boy`; `vercel api
+  /v9/projects/lazy-boy` filtered to `ssoProtection`, `passwordProtection`, the skew fields (absent),
+  `gitForkProtection`, `deploymentExpiration`, `resourceConfig` and whether each production alias is a
+  `.vercel.app` or custom domain; `vercel api /v9/projects/lazy-boy/env` filtered to name, type and
+  target (no values).
+- Production app: one anonymous `GET /login`, which reads no store (no cookie means the session
+  action returns before the jwt callback). I counted `dpl=` markers in its HTML (0) and looked for a
+  `__vdpl` cookie (none) and for server-action ids (one, `login`'s).
+- Vercel's documentation, fetched Oct 15: `/docs/instant-rollback` and `/docs/skew-protection`.
+- `git status -sb`, `git log origin/main -- docs/multi-user` (empty), `git diff --stat ac6f7fe HEAD --
+  src scripts ops tests vercel.json next.config.ts package.json` (empty).
