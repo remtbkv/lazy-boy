@@ -648,4 +648,74 @@ the `handoff` beacon removes most of that whichever way the question is answered
 
 ## 11. Measurement log and unknowns
 
+### 11.1 What I ran
+
+Nothing ran against the production store, the Zenbook, Turso or Vercel. In order, on the Mac:
+
+1. `rclone lsl onedrive-backup:lazyboy-db`: lists the nightly snapshots (Aug 16 to Oct 14).
+2. `rclone copy` of `lazyboy-20261014-0840.db.gz`, `lazyboy-20260914-0840.db.gz` and
+   `lazyboy-20260816-0840.db.gz`, each into its own empty directory, then `gunzip -k`.
+3. Every query below with `sqlite3 "file:<snapshot>?immutable=1"`, read-only, no WAL or locks:
+   - `sqlite_master` (types, names, DDL); `count(*)` per table; `PRAGMA page_size / page_count /
+     freelist_count`; `SELECT name, count(*), sum(pgsize) FROM dbstat GROUP BY name`;
+   - `meta` keys grouped by prefix with `count(*)` and `sum(length(value))` (values never printed);
+   - `plays`: min/max `played_at`, counts by `context_type`, `skipped`, `ctx_orphan`; real plays per UTC
+     day joined to a calendar of every day Aug 14 to Oct 13 (zero days kept); per month; distinct track
+     ids and distinct `lower(artist), lower(name)` identities;
+   - `tracks` referenced by no play, member or Like; distinct library track ids (members ∪ Likes); owned
+     playlists (`owner_id` = `me_id`) and their `track_count` sum;
+   - `api_log` per UTC day (Sep 30 to Oct 13) and per `source` (Oct 7 to Oct 13); `client_metrics` per
+     day; `usage_ledger` per reader for Oct 7-13, Sep 14 to Oct 13, and every row from Oct 11;
+     `sqlite_sequence`;
+   - `EXPLAIN QUERY PLAN` for 37 statements copied from `db.ts` (§4.2).
+4. `sim.py`: a scratch SQLite file holding the S-Oct14 catalog plus N copies of its plays (uid 1..N) in
+   two schemas, D4's user-led indexes and today's indexes with no UNIQUE (so no index leads with the
+   user); `dbstat` bytes per play for 25 users with an INTEGER and a 28-character TEXT user id; then five
+   timed runs of each §9.2 query for user ⌈N/2⌉ at N = 25 and N = 100. The 1.08 GB file was deleted
+   after the run.
+
+The scripts (`census.sh`, `sizes.sh`, `growth.sh`, `ledger.sh`, `eqp.sh`, `callers.sh`, `sim.py`) are in
+`~/.claude/broke/scratch/lazyboy_mu/0221_data/bin/` for the review lanes to re-run. The downloaded
+snapshots were deleted at the end: they hold the owner's listening history and both token rows.
+
+### 11.2 Unknowns
+
+- **How often things really run.** The ledger and `api_log` disagree on harvests (330.6 vs 254 a day,
+  Oct 7-13), and the meter saw 23 history-payload rebuilds on Oct 13 where the ledger recorded none.
+  Both instruments write fire-and-forget. The meter is exact, but I did not read it (it is on the
+  Zenbook); §4's cadences use the code's timers first and these figures as bounds.
+- **Turso's database count** per plan decides whether a database per user is free (01f §4.2, pending
+  when this was written).
+- **Whether a shared catalog churns.** If two users' syncs see different fields for one track id
+  (market, language), `trackUpsertStmt` would rewrite the row back and forth. Row-level only; I found no
+  evidence either way, and the server sends no `Accept-Language`, which makes it less likely.
+- **Remote timings.** §9.2's numbers are a local file. Turso-era per-query times are lane 1902/1903's
+  bench (R1).
+- **The snapshot is a day old**, taken 4:40 AM Oct 14, and its last four hours of `api_log` are partial;
+  the per-day figures use the full days before it.
+- **`plays`' AUTOINCREMENT counter** reads 1,395,419 for 22,040 rows (S-Oct14 `sqlite_sequence`). Not
+  investigated; nothing uses `plays.id` as a cursor, so it does not affect the plan.
+- **The meter's log retention** on the Zenbook (§10, item 1): not checked.
+- Spotify's terms on storing Spotify content and derived listening metrics, and the per-developer
+  quota pooling, are lane 01f's (§1.4, §1.5); D22 and §8.8 depend on them.
+
 ## 12. Decisions that are Rem's
+
+1. **Data model: a database per user, or one shared store with a user column.** Technical, but it fixes
+   the migration risk and the ops load for the life of the feature. Recommendation: a database per user
+   at five users (§8.1): it removes the leak and wrong-data classes by construction, leaves your data
+   where it is, and makes deletion complete including backups. Revisit if Turso's plan caps databases
+   below six or if friend features (cross-user joins) become the priority.
+2. **Retention of other users' history.** Spotify's terms say not to store content indefinitely (01f
+   §1.5). Recommendation: unlimited for your own history (it is your record, and the backfill and
+   import scripts exist to make it complete), and a stated window for invited users, enforced by one
+   indexed delete per user per day (§8.8). The length of the window is the decision.
+3. **Backups and deletion.** Today's snapshots keep 60 days offsite in one file. Recommendation:
+   per-user backup files, so a deleted user's backups go with them inside Spotify's five-day window (01f
+   §1.6); the alternative is a privacy policy that says deletion reaches backups within 60 days.
+4. **The backstop recorder.** It is your safety net against Zenbook outages and holds your token chain.
+   Recommendation: keep it yours only (D35); covering other users means their refresh tokens on a laptop
+   in your apartment, which lanes 01e and 01f weigh.
+5. **Telemetry location** is already open in STORE_MIGRATION §4. The data layer's input (§10): with
+   other users, `client_metrics` holds their song names wherever it lives; dropping names from the
+   `handoff` beacon is worth doing either way.
