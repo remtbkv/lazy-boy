@@ -1324,10 +1324,9 @@ previous build, which ignores the column. Cost on Turso, once: ~45,000 rows read
 **Phase 1** (no app database yet) generates Rem's uid once and keeps it as a Production constant
 (`OWNER_UID`, not a secret). The jwt callback puts that uid and epoch 0 on the cookie when the signing-in
 profile passes today's owner guard; the identity check compares against the constants; cookies with
-no uid are refused, so Rem signs in once and the pre-guard sessions end for good. `forUser(OWNER_UID)`
-maps to `lazyboy` and, on its first open, finds `owner_uid` missing; the Phase 1 deploy step writes
-`owner_uid` and `schema_version` into `lazyboy.meta` beforehand. These two keys are the only writes
-Phase 1 makes to Rem's data.
+no uid are refused, so Rem signs in once and the pre-guard sessions end for good. Before the deploy,
+one step writes `owner_uid` and `schema_version` into `lazyboy.meta`, which the first open of
+`forUser(OWNER_UID)` then checks. Those two keys are the only writes Phase 1 makes to Rem's data.
 
 **Phase 2** (A §9.3, with C's and B's checks). Preconditions: Phase 1 has soaked; lanes 1903 and 1904
 are done; §11.2 is done; a fresh verified backup exists.
@@ -1349,8 +1348,8 @@ are done; §11.2 is done; a fresh verified backup exists.
    Pingers on; three ticks answer 200 with Rem's outcome `ok`.
 6. Verify, each a known answer that must match exactly: the seven tables' counts at or above the
    pre-migration counts and `max(played_at)` moving; `verify-derived.mjs` green; `lazyboy.meta`'s key
-   set equal to before, less nothing yet; Rem still signed in; the recorder diff over the pause empty.
-   This is test T12 run for real.
+   set unchanged (the moved keys go only in step 7); the blob decrypting to the plaintext row;
+   Rem still signed in; the recorder diff over the pause empty. This is test T12 run for real.
 7. A week later, delete the keys in §11.1's last row.
 
 **Rollback.** Before step 7: redeploy Phase 1, which reads the plaintext row; if a refresh happened in
