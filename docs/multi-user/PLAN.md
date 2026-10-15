@@ -149,7 +149,7 @@ Each design is strongest on its own angle and weakest where the others are stron
   stops there (~0.8M rows a heavy day, A §13.4), without counting the whole-history strip Home
   prefetches on every mount (B §3 row 4).
 - **B (performance first)** has the rule this plan adopts for cost, "a user's recurring cost follows
-  what changed, never what is stored" (B §2), and the measured finding with the most leverage: the
+  what changed, never what is stored" (B §2), and the measured finding that saves the most: the
   "From" verdict rewritten to start from the song's identity, which reads ~2.7 rows per play where
   today's walks up to ~411 (B §10.1; reproduced by this lane, §17). Its isolation rests on types and
   tests, with no runtime check, and it opens the user's database from a cookie field in parallel with
@@ -1726,7 +1726,7 @@ Rem-like users on today's policy would need ~800-1,700 a day (01c §5.1).
 | Turso databases | 1 | 6, plus the old `lazy-boy` | 100 on Free |
 | recently-played and `/me` calls | ~145-165 | held near 450-505 by the brake | ~725-800 observed; 450 planned |
 | player calls | ~720 with up to two users; ~450 from three on (idle probes every 5 minutes) | ~2,250 | unmeasured; ≤ ~2,500 planned |
-| Spotify calls per 30 s, at peak | – | ~2-3 from ticks, ~10 from five visible tabs | 18 seen safe |
+| Spotify calls per 30 s, at peak | – | ~2-3 from ticks, ~10-15 from five visible tabs | 18 seen safe; the limit itself is unpublished |
 | Turso rows read | ≤ 1.5M on a heavy day (§8.6) | 26-258M a month by profile and step (§14.4) | 500M (R4: 250M) |
 | Turso rows written | ~4,100-4,700 | ~0.63M a month | 10M (R4: 1M) |
 | Vercel invocations | ~200 browsing; the tick is 1,440 a day in total | ~73,000 a month | 1,000,000 (Hobby) |
@@ -1930,8 +1930,9 @@ Each with a recommendation and its reason, grouped by what it blocks.
    unlikely, your data does not move, and deletion reaches every copy inside Spotify's five days
    (§4.1, §12.3). Revisit only if friend features that join across users become the priority.
 8. **The single-user performance track before the multi-user phases** (P2, then P3 before
-   mid-December). *Recommend yes.* It cuts your own store reads on a heavy day from ~19M to ~1.5M rows
-   (§8.6) and removes the late-December cache cliff whether or not anyone else ever signs in.
+   mid-December). *Recommend yes.* With the predicate of decision 3 it cuts your own store reads on a
+   heavy day from ~19M to ~1.45M rows (§8.6), and it removes the late-December cache cliff, whether or
+   not anyone else ever signs in.
 9. **The search target's device and network**: a mid-tier phone (4× CPU) at 10 Mbit/s, with slow 4G a
    stated miss. *Recommend yes.* Meeting slow 4G on a first visit takes newest-first loading, an M-sized
    change nothing else needs (§14.1).
@@ -1941,10 +1942,10 @@ Each with a recommendation and its reason, grouped by what it blocks.
 
 **Before the first friend**
 
-11. **Turso's Developer plan with overages**, $4.99 a month billed yearly. *Recommend yes.* Not for
-    capacity (five users fit Free after P4) but because on Free one regression blocks every query for
-    every user until the 1st, as August showed; it also gives your data ten days of point-in-time
-    recovery and makes a deletion undoable for five days (§15).
+11. **Turso's Developer plan with overages**, $4.99 a month billed yearly. *Recommend yes, as
+    insurance*: five users fit Free after P4, but on Free one regression blocks every query for every
+    user until the 1st, as August showed, and Developer turns that into a bill. It also gives your data
+    ten days of point-in-time recovery and makes a deletion undoable for five days (§15).
 12. **Vercel Hobby or Pro.** *Recommend reading Active CPU first, and staying on Hobby only if the team
     uses under ~2 of its 4 CPU-hours a month*; an overrun stops every project on the team for up to 30
     days, and Pro ($20) turns it into a bill (01f §6.3).
