@@ -886,7 +886,8 @@ runs inline for a Disconnect or a removal and from the daily route for the rest 
    row, so every Spotify call stops.
 2. Destroy `lazyboy-u<uid>` through the Platform API.
 3. Delete the user's `api_log` and `client_metrics` rows on the telemetry store.
-4. Delete the user's backup files.
+4. Nothing for the backups: the nightly job stops finding the database, and the files it already
+   wrote age out within their five days (below).
 5. Delete the `users` row. `AUTOINCREMENT` keeps the uid, and with it the database name and any
    cache entry still keyed by it, from ever being reused (§3.1); those entries expire within 24
    hours and no session can name them (§5.2).
@@ -907,7 +908,9 @@ org settings, and in exchange a deletion cannot be forgotten. The alternative is
 `scripts/delete-user.mjs` with a five-day deadline and nothing to remind him. Rem's call (§15).
 
 **Backups** (M21) follow from §8.3 edit 3: one `(database, retention)` entry per database,
-`("lazyboy", 60 days)` as today, and `("lazyboy-app", 5 days)` and `("lazyboy-u<N>", 5 days)`.
+`("lazyboy", 60 days)` as today, and `("lazyboy-app", 5 days)` and `("lazyboy-u<N>", 5 days)`, with
+the friends' entries read each night from the app database's `users` table through the read-only
+group token, so a destroyed database drops out of the list on its own.
 Five-day retention makes deletion reach the backups by itself, inside Spotify's window, with no
 per-file bookkeeping (01a §8.8, 01e §5.8). The cost: a friend's data lost more than five days back
 cannot be restored from a backup; Turso's own point-in-time history still covers the last day (ten
