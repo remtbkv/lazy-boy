@@ -1361,6 +1361,129 @@ the claim (Phase 3 and later), because the old route has no lease and two pinger
 Spotify calls (C §9.4). Nothing else in Rem's database changed, so nothing else needs undoing.
 ## 12. Sign-up gating, privacy, deletion and backups
 
+### 12.1 Sign-up gating
+
+Two gates, both required (01e §5.4). **Spotify's allowlist** (the dashboard's User Management, five
+accounts at most) is what lets an account's token work at all; an account not on it completes OAuth
+and then gets a 403 from `/v1/me`, which `userinfo.ts` already routes to
+`/login?error=SpotifyNotRegistered`. **The app's invite row** is what the app can see, carries the
+cap, and lets Rem cut someone off without the dashboard. Every user's calls count against Rem's
+developer account (01c §4), so the gate is also the cost control.
+
+- **Invites** are made on the Mac: `scripts/invite.mjs --spotify-id <id>` (Spotify's `id` is in the
+  person's profile URL, so Rem can see it before they ever sign in). It refuses if active plus invited
+  users already number five (`--force` for a grandfathered list, if the dashboard shows one); inserts
+  the `users` row as `provisioning`, which reserves the uid; creates `lb-u-<uid>` in group `default`
+  with the platform token, applies the user schema and writes `owner_uid` and `schema_version`; sets
+  the row to `invited`; prints the join link and the reminder to add the person on the dashboard. A
+  crash leaves a `provisioning` row the script resumes or removes. Provisioning stays a script
+  because it happens four times, ever, at five users, and it keeps database creation out of the
+  sign-in path (A §10.1, B §14).
+- **`/join`** needs no session. It shows the privacy policy and the end-user agreement, which the
+  Developer Terms require before sign-up (§V, 01f §1.5); "I agree" sets a short-lived signed cookie
+  naming the terms version; then "Connect Spotify". The claim of §5.1 succeeds only with that cookie,
+  so nothing is stored for a person who has not agreed (A §10.2).
+- **`SIGNUPS=owner|invite`**: `owner` refuses everyone but the admin whatever the rows say. Phases 1-3
+  run with it, and it is Phase 4's one-variable way back (C §4.1).
+- **`status = 'disabled'`** ends the user's sessions at their next request (the identity check) and
+  their sync at the next claim, which skips users who are not `active`.
+- **Scopes** drop `user-read-email` and `user-read-private` (`src/lib/auth.ts:32-46`): development mode
+  returns no email, nothing reads `product`, and no request uses `market=from_token` (C §10.2). It
+  waits until a dev sign-in shows `/v1/me` still returns `account_id` with the smaller set, since no
+  fetched page says which scope the field needs, and takes effect at each user's next consent.
+- `src/lib/owner.ts` goes in Phase 4, after everything it guards against is gone (01c S18). Rem's
+  Premium subscription becomes a dependency of every user: "If the owner's Premium subscription lapses,
+  the app will stop working" (migration guide, quoted in 01f §1.2).
+
+### 12.2 Privacy
+
+- **Who sees what.** Each user sees only their own data; the plan has no cross-user feature. If the
+  roadmap's friends features come, the one sanctioned way to read another user's data would be a
+  single function, `forFriend(viewer, owner)`, that checks a consent table and opens the owner's
+  database read-only, so a cross-user read is one call a reviewer can find (A §11). A sketch, not part
+  of this build.
+- **The operator.** Rem holds the credentials and can technically read any user's database; the
+  privacy policy says so. The admin views show operational state per user (status, last success,
+  failures, quota spend, store usage per database) and telemetry without song names; there is no admin
+  view of anyone's listening.
+- **Telemetry** holds a uid, endpoint paths, timings and 429 reasons, no song names, for 30 days once
+  the daily route's prunes run (01a D32), and is deleted with the account.
+- **Derived metrics.** Listened time, skip verdicts and the all-time stats are "derived listenership
+  metrics" on a plain reading of the Developer Policy (01f §1.5). They are shown only to the person they
+  describe; comparisons between friends wait for Rem's decision (§18).
+- **Retention.** Rem's own history: kept indefinitely; it is his record, and the importers exist to
+  complete it. A friend's: kept while connected, deleted at a disconnect (§12.3) and after twelve
+  months without a sign-in (`users.last_sign_in`), so nobody's history is stored "indefinitely"
+  (Developer Terms §IV, 01f §1.5). The twelve months is Rem's number to choose.
+- **No e-mail.** Development mode returns no address and the policy forbids unsolicited mail (01f §1.5),
+  so every notice (a dead grant, a pending deletion) appears in the app.
+- **Breach duty.** A suspected breach goes to `security@spotify.com` within 24 hours (Data Protection
+  Appendix §9, 01f §1.5); the isolation events of §6.5 are the in-app tripwire most likely to surface
+  one.
+- **The policy text** is Rem's to write or approve. It needs at least: what is collected (Spotify account
+  and profile ids, display name, encrypted tokens, listening history, library, the stats derived from
+  them), where it is stored and by whom (Turso in AWS us-east-1; Vercel's iad1 functions; request
+  telemetry and backup staging on a laptop in Rem's apartment, through Tailscale; backups on OneDrive;
+  cron-job.org, which sees the cron secret and count-only replies), retention, how to disconnect and
+  delete, the operator's access, and the Developer Terms' minimum end-user terms (disclaimers, Spotify
+  as third-party beneficiary).
+
+### 12.3 Account deletion
+
+**Triggers**: the user's "Disconnect and delete" (the mechanism the Developer Policy requires, 01e
+§5.8); Rem removing a user; an `invalid_grant` within six months of `granted_at`, which most likely
+means the user revoked the app at Spotify (Rem's call, §18); and twelve months without a sign-in. All
+run one idempotent job, inline in `after()` for a disconnect or a removal and from the daily route for
+the rest and for retries. Before it touches anything, it refuses the admin, the database `lazyboy`,
+and any database that is not `lb-u-<uid>` for the departing uid with a matching `owner_uid`; test T11
+pins all three refusals.
+
+1. `status = 'deleting'` and `session_epoch + 1`, so every session dies; delete the `sync_state` row,
+   so the cron stops; delete the token row, so every Spotify call stops.
+2. Destroy `lb-u-<uid>` through Turso's Platform API.
+3. Delete the user's `api_log` and `client_metrics` rows on the telemetry store; if the Zenbook is
+   down, the daily route retries.
+4. Nothing for the backups: the nightly job copies only active users' databases and keeps a friend's
+   copies four days (§12.4), so the last one is gone by day four with no bookkeeping.
+5. Delete the `users` row last, so a crash midway leaves a row the job can find and finish. The uid is
+   never reused, so any cache entry still keyed by it (≤ 24 hours) cannot be served to anyone.
+6. The page tells the person to remove Lazy Boy at spotify.com/account/apps, since the app cannot
+   revoke a grant, and the response sends `Clear-Site-Data`.
+
+**Why destroy, not empty, and the five days.** Rows deleted inside a living database stay restorable
+through Turso's point-in-time recovery for 1 day on Free and 10 on Developer, which on Developer
+outlasts Spotify's five-day deletion term. A destroyed database leaves point-in-time recovery, and on
+paid plans "deleted databases can be restored for up to five days" (Turso's docs, quoted in A §2.1 and
+C §8.1). Destroyed at day 0, with friends' backups aging out by day 4, every copy is gone within five
+days under any reading of "in your possession or control", including the strict one C §10.3 worried
+about. The grace for an accidental revocation is Rem restoring by hand, from a backup at most four
+days old or from Turso's undelete, if the person reconnects and asks; otherwise they start empty.
+
+This settles the ambiguity 01e §5.7 left open (an earlier purge is irreversible, a later one is outside
+the Terms) without a waiting period: the destroy is immediate and the copies Rem already keeps provide
+the recovery window.
+
+The destroy needs `TURSO_PLATFORM_TOKEN` in the runtime (§5.5). 01e §6 recommends taking it out once a
+second user exists. The runtime already holds a group token that can read and drop every table, so the
+platform token adds the power to create and destroy databases, and a deletion then cannot wait on a
+laptop that is not always on. Keeping it, Production only and used by two functions, is the
+recommendation (A, C; Rem's call, §18).
+
+### 12.4 Backups
+
+STORE_MIGRATION phase D's nightly job (lane 1904) with edit 4 of §10.2, extended (C §10.3):
+
+- One `(database, retention)` entry per database: `("lazyboy", 60 days)` as today, `("lazyboy-app",
+  4 days)`, and `("lb-u-<uid>", 4 days)` for each friend whose status is `active`, read each night from
+  the app database through the read-only group token. A destroyed database, or one whose user is not
+  active, drops out of the list by itself.
+- Plaintext token and lock rows stripped from every copy before compression (until Phase 2's week is
+  over, `lazyboy` still holds them). `user_tokens` rows are ciphertext whose key never leaves Vercel,
+  so the app database's copies keep them and a restore keeps everyone signed in.
+- Integrity check and per-table counts against the dump; one file per database; a restore test of each
+  kind of database in lane 1904's restore drill.
+- The cost: a friend's data lost more than four days back cannot be restored from a backup; Turso's
+  point-in-time recovery covers the last day (ten on Developer). Rem's backups are unchanged.
 ## 13. Rollout in reversible phases
 
 ## 14. Each target, step by step, with its budget
