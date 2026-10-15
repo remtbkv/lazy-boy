@@ -2050,12 +2050,97 @@ Each with a recommendation and its reason, grouped by what it blocks.
 Every finding of the four reviews, what changed in this plan, and where. "Fixed" means the plan now
 does what the finding asks, or an equivalent named in the row; "partly" and "not taken" say why.
 
+Overlaps were merged where they ask for the same change (security R4 with completeness H2, security
+R6 with migration 5, security R7 with completeness H1, security R1 with migration 6); each row names
+its twin. Two findings changed a recommendation of the Oct 14 plan, not only its mechanics: an
+`invalid_grant` no longer destroys a friend's database at once (decision 21), and a token-key
+rotation after each deletion is no longer recommended (decision 23).
+
 ### 19.1 Security (`review-security.md`)
+
+| finding | disposition | where |
+|---|---|---|
+| R1 (High) a rollback brings back old secrets and pre-isolation code | Fixed, with migration 6. `AUTH_SECRET` rotates again in Phase 1's deploy; production deployments built before each rotation are deleted a day after it, and all pre-Phase-1 ones before the canary; one rollback recipe (revert the merge and push; Instant Rollback never across a secret rotation or the Phase 1, 2 and 4 boundaries); Phase 2 invalidates the `lazyboy` database token before minting the group token; Deployment Protection read in Phase 0 and kept as a gate; on Pro, Skew Protection off or a threshold at every phase deploy | §5.4, §5.5, §11.4, §13.1, §13.2, §13.5 |
+| R2 disabling a user does not stop their sync | Fixed. The lifecycle status lives on `users` alone (`sync_state` keeps scheduling states only); the claim joins `users` and leases only `active` users; T6 gains the case | §4.2, §7.2, §6.4 |
+| R3 a refresh racing deletion writes the token back | Fixed. Token writes are conditional on a live owner; the job re-deletes token, queue and lock rows after the lease window and asserts none remain; the daily chores sweep rows with no `users` row; T11 races a refresh against the job | §5.2, §12.3, §7.11, §6.4 |
+| R4 one `invalid_grant` wave destroys every friend; an expiry can read as a revocation | Fixed, with completeness H2, and the recommendation changed: an `invalid_grant` stops calls and keeps the data; a second refresh at least 10 minutes later confirms it; two or more users, or the admin, within 24 hours is an app-wide incident that deletes nothing; a single confirmed case alerts Rem and deletes on day 4 unless the person reconnects. `granted_at` changes only when a write carries a new refresh token, and refresh writes compare-and-set on the blob they read | §5.2, §5.4, §12.3, decision 21 |
+| R5 sessions renew through `/api/auth/session` | Fixed. An `auth_time` claim set at sign-in only; the jwt callback refuses a cookie 30 days after it. Decision 1 corrected: the pre-guard browser stays signed in as Rem until `AUTH_SECRET` rotates, not until Nov 13 | §5.1, §5.4, §6.4 T5, decision 1 |
+| R6 the identity check's failure mode | Fixed, with migration 5: allowed, refused or unavailable; unavailable keeps the cookie, mints no uid, and `requireUser()` answers a retryable error | §5.1, §6.4 T5 |
+| R7 the isolation tripwire is forgeable and lost with the Zenbook | Fixed, with completeness H1. The server writes isolation events, awaited, to an `events` table in `lazyboy-app` (Phase 2 on; in Phase 1, with one user, telemetry and `console.error`); `/api/metrics` refuses reserved event names and takes the uid from the session; the health check reads the table | §4.2, §6.5, §7.10 |
+| R8 the platform token in `.env.local` | Fixed. It lives in the macOS Keychain, read by the scripts only; dev gets a fresh `lazyboy`-only token in Phase 2, checked to get a 401 from a throwaway `lb-u-test` | §5.5, §11.4 |
+| R9 the production token key leaves Vercel | Fixed. Phase 2's runtime encrypts Rem's row on its first tick; the daily chores re-encrypt blobs under an old key; a rollback flag has the runtime write the plaintext row back. Rotation after each deletion is dropped from the recommendation, so the only copy outside Vercel is the password-manager backup | §5.3, §11.4, decision 23 |
+| R10 the Funnel-facing Zenbook holds a read credential for every friend | Fixed as a gate before the canary: sqld and the meter run under their own Unix account with no read access to the backup directory, the rclone config or the recorder. An ops change, Rem's go | §13.2, decision 27 |
+| R11 irreversible actions need only a session | Fixed. Removing and disabling a user run only from `scripts/user.mjs` on the Mac; "Disconnect and delete" needs a typed confirmation and a sign-in within the last 10 minutes (`auth_time`) | §5.4, §12.3 |
+| R12 immutable segment URLs leave a year of history in a shared browser | Fixed. Segments and the library body are `private, no-store`; IndexedDB is the repeat-visit store; the uid leaves the URL path, since the server takes the user from the session. Cost: a device without the IndexedDB copy (Safari after seven days away) pays a first visit | §6.2, §9.1, §14.1 |
+| R13 now-playing and the player actions have no server bound | Fixed. A per-uid memo on `/api/now-playing` (~5 s) and a per-uid token bucket on the player actions, both in-process | §6.2, §6.6, §7.6 |
+| R14 cron hardening | Fixed. The tick stamp is a compare-and-set that doubles as the rate limit; `CRON_SECRET_EXT` opens `/api/cron/sync` and `/api/cron/health` only; cron-job.org gets a bare `{"ok":true}`; T13 | §5.5, §7.2, §6.4 |
+| R15 smaller gaps | Fixed: the owner check is cached per (uid, `db_name`) with a T8 case; the uid goes on the session; with no uid in any path, `server-error` rows carry none and age out with the 30-day prune; S4 uses the TypeScript compiler API; `/usage` shows friends' rows aggregated by endpoint template; after one user's quota ban, one other user's harvest goes through before the cooldown goes app-wide | §4.5, §5.1, §6.2, §6.4, §7.8 |
+| R16 land Phase 0 before the next push | Taken into decision 1. The repo is public, `main` is 225 commits ahead of `origin/main`, and its reflog shows pushes at 7:05 AM on Oct 13 and 14 | §0, decision 1 |
+| §3 STORE_MIGRATION notes | Fixed: Phase 0 before lane 1903's flip; step 8's `lazyboy` token named as the one Phase 2 invalidates; lane 1903 step 11's expectation of fence hits from old deployments corrected (no Skew Protection on Hobby) | §10.2 |
 
 ### 19.2 Performance and scale (`review-scale.md`)
 
+| finding | disposition | where |
+|---|---|---|
+| 1 (High) the scarce bucket's ceiling is probes; the brake is off for the first friend; its ¾ step cannot fire | Fixed. The brake is on from Phase 4 with N = 2; each user is capped at their share (426 ÷ N) per quota day, then slowed to 15-minute batches alone; at 426 everyone moves to 30. The ¾ step is gone. §14.2 recomputed: five Rem-like users get 2 minutes for ~60% of a heavy day, then 30 | §7.5, §14.2, §13.1 |
+| 2 (High) an open Home tab re-reads the strip and today's rows on every marker move | Fixed in P4: `refreshHistoryAction` answers from the patched payload and ignores widths over 14; the expanded strip is built from segments; the image-only rescan stops bumping `write_seq`. §8.6 gains the term | §7.6, §8.4, §8.6 |
+| 3 (High) a friend's Liked Songs rewrite every row and re-page the list | Fixed in Phase 3: `position` leaves the diff, Liked is fetched from the newest until a stored row appears, background pages are paced, and a resumable cursor replaces the 500-page throw | §7.7, §13.1 |
+| 4 cron-job.org's 30-second timeout | Fixed. The tick replies within 20 s and hands any unfinished step to `after()`; the claim gets one short attempt | §7.2 |
+| 5 Spotify lists ~13% of plays late | Fixed. The mid-session retry is dropped and one retry runs ~5 minutes after a session ends; F2 restated as p50 ~1 min, p95 ~5 min; lane 1904 may copy `ping.log` daily so the soak can re-measure | §1, §7.4, §14.2, §10.2 |
+| 6 the player bucket leaves out now-playing | Partly. Player calls are counted per user from `api_log` (no store write); the now-playing memo shares one call per user per window; polling drops to 15 s mid-track from the first friend; §7.8 gains the refusal row with a 30-minute fallback harvest; Phase 5 gates on player-call volume. Not taken: a per-user cap kept in the store, which would cost a write per call (~1,000 a user a day) before any player limit has been seen | §7.6, §7.8, §13.1 |
+| 7 the 30-second reference is 56 calls, not 18 | Fixed | §7.1, §7.6, §14.3 |
+| 8 writes undercounted | Fixed. `probe` is written only when the track or play state changes and `idx_sync_due` is dropped at N ≤ 5; D3 recounted: ~4,500-5,000 rows a Rem-like user a day with both, ~5,100-5,900 without | §4.2, §7.3, §8.6, §14.4 |
+| 9 segments do not bring an import inside S2 | Fixed. Imports wait for newest-first loading and yearly segments for closed years as well as segments (decision 30) | §9.4, §14.1 |
+| 10 a cold Home pays two serial round trips | Fixed. The owner check rides the first read's batch; I$ restated with the cold-process handshake | §4.5, §14.6 |
+| 11 an app-heavy user's invocations are ~5× the figure | Fixed in §14.3 | §14.3 |
+| the `count(*)` correction | Taken with migration 12: the backup keeps its source counts | §10.2 |
+| §2 the arithmetic at 5, 25 and 250 | Added | §14.7 |
+| STORE_MIGRATION: copy `ping.log` | Added as optional for lane 1904 | §10.2 |
+
 ### 19.3 Uptime and migration (`review-migration.md`)
 
+| finding | disposition | where |
+|---|---|---|
+| 1 (High) restores have no runbook | Fixed. The per-process client map is keyed by `db_name` and compared with the `db_name` every identity read and claim returns; roles come from `users`, never the string `lazyboy`; a random `store_epoch` in each database's `meta` goes into every version token; a restore runbook per kind of database; a rehearsal before the canary | §4.2, §4.5, §6.2, §9.1, §12.5, §13.2 |
+| 2 (High) the Zenbook stays the only frequent pinger for weeks | Fixed. An interim second pinger after lane 1904, with a 90-second guard in today's route (decision 8); a resolver on the Zenbook outside Tailscale (decision 9); §14.5 restated with the August-September outages | §7.9, §13.1, §14.5 |
+| 3 (High) the new derived state is read-modify-write | Fixed. Totals and month counts advance in SQL, conditioned on the insert's `changes()` in the same batch; the Home payload patch compare-and-sets on a version and marks itself dirty on a lost race; the daily chores recompute the totals and month counts from the stored columns and log any drift | §8.3, §8.4, §9.1, §7.11 |
+| 4 (High) the unfenced fill, rollback windows and the import scripts | Fixed. `listened_ms IS NULL` on a counted play is pending and filled by the pass that rules skips; `importTailStmts` sets the dirty mark and bumps the months it wrote; the two queued imports run before P2's fill | §8.3, §11.3 |
+| 5 (High) the identity read has no failure branch | Fixed, with security R6. The browser clears its storage only on a 401 that carries a signed-out marker; "`lazyboy-app` unavailable" added to §14.5 | §5.1, §6.2, §14.5 |
+| 6 (High) rollbacks name no mechanism | Fixed, with security R1: one recipe, environment changes additive or explained, a boot check that names a missing store variable, each rollback rehearsed in its phase's soak | §13.1, §13.5 |
+| 7 (High) there are no foreign plays | Fixed. §11.2 replaced by the measurement and a re-check on the latest backup before Phase 2; decision 10, the rollout row and the Phase 2 precondition dropped | §11.2, §13.1, §18 |
+| 8 (High) 122 of Rem's plays exist only in the recorder's file | Fixed. Edit 7 backs up `backstop.db` nightly; a one-off copy now (decision 6); the replay after lane 1904 and before P2 (decision 7) | §10.2, §11.3, §13.1 |
+| 9 (High) one mis-set key strands every user | Fixed. A decrypt failure writes no user state; two or more in a tick, or the admin's, answers the Zenbook caller 503; each key's sentinel blob is decrypted at cold start | §5.3, §7.8 |
+| 10 the daily route is one invocation a day | Fixed. `daily_at` stamp; a tick runs overdue chores under a lease; the Vercel cron at 09:00 UTC; the telemetry deletion retried every tick until it succeeds | §7.11, §10.2 |
+| 11 "gone by day four" needs the backup job to finish | Fixed. Prune first, per database, logged; the deletion's five-day check reads the log; a Mac fallback | §12.4 |
+| 12 edit 4 drops the source check | Fixed. Source counts kept | §10.2 |
+| 13 R2's fault injection is never re-run | Fixed. An exit check of Phases 1, 3 and 4a, and static check S7 | §6.4, §13.1 |
+| 14 the last-resort daily Vercel entry | Fixed. `/api/cron/sync` keeps its daily entry beside `/api/cron/daily` | §10.2, §14.5 |
+| 15 the heavy day is the incident day | Fixed as a note: the "today" column's orphan term is inflated by the incident; the columns from P1 on are unaffected | §1, §8.1, §8.6 |
+| 16 three runbook lines | Fixed: no quiet window for the fill; named `meta` keys checked; capture health stays on `lazyboy.meta` until Phase 3 | §11.3, §11.4 |
+| §2 check Production's variables after edit 2 | Fixed | §10.2 |
+
 ### 19.4 Completeness and product (`review-completeness.md`)
+
+| finding | disposition | where |
+|---|---|---|
+| H1 the alarms reach nobody | Fixed. `/api/cron/health`, called hourly by a cron-job.org job with failure e-mail, from Phase 1; lifting STORE_MIGRATION's R6 for the multi-user phases is decision 14 | §7.10, §10.2, decision 14 |
+| H2 automatic deletion on `invalid_grant` | Fixed, with security R4. A `deleted` state kept for five days answers a returning sign-in and leaves room for a restore script; Phase 0 probes whether a sign-in mints a new refresh token | §5.4, §12.3, §13.1 |
+| H3 a database newer than the code; dev migrating production | Fixed. A `min_reader` version; DDL only from production code and `scripts/migrate.mjs`; any other process refuses to apply steps | §4.5 |
+| H4 the first two-user run is a friend's | Fixed. Phase 4 splits: a canary week (4a) with exit checks that can fail, then the first friend (4b) | §6.5, §13.1, decision 16 |
+| M1 T3 cannot see nested server components | Fixed. A static check plus moving `Tracks`' fetch into the gated page body; a fixture registry per entry point; layouts in the glob | §6.4 |
+| M2 T1 lacks a positive control | Fixed. Fixtures with positive controls, a logical dump in place of file hashes, the journal mode pinned, planted bugs kept as a permanent self-test | §6.4 |
+| M3 `SIGNUPS=owner` freezes nobody inside; no incident runbook | Fixed. From Phase 2 it refuses non-admin uids at the identity read and the claim; `scripts/user.mjs`; an incident runbook | §5.1, §12.1, §13.6 |
+| M4 what a friend gets | Fixed. §12.6, reused as the invite text; Premium's 403 worded; the e-mail address in the policy | §12.2, §12.6 |
+| M5 five lifecycle gaps | Fixed: `removed` alarms after 7 days; `dormant` after 60 days without a sign-in; backups for every user not pending deletion; an export on the disconnect page; `invite.mjs --revoke` and a 14-day expiry | §12.1, §12.3, §12.4 |
+| M6 P4's exit check skips the dirty-mark events | Fixed | §13.1 |
+| M7 no bootstrap for an empty install | Fixed. `npm run setup` provisions the app database, the owner row and the owner's database; a harness test boots from nothing | §12.1, §6.4 |
+| L1 T12 cannot rehearse the token step | Fixed. A synthetic token row | §6.4 |
+| L2 key rotation and restores | Fixed. Rotation only on suspected compromise, done in the runtime, followed by an app-database backup; both costs of a lost key stated | §5.3, §12.4 |
+| L3 the twelve-month clock is a sign-in clock | Fixed. `auth_time` forces a sign-in at least every 30 days; T5 pins the coupling | §5.4, §6.4 |
+| L4 two Phase 3 exit checks read data nothing records | Fixed. Each harvest tags its trigger in `api_log.source` | §7.4 |
+| L5 the foreign-play cleanup leaves copies | Retired by migration 7, except the advice to ask the second account's owner to remove the app | §11.2 |
+| L6 Phase 3 changes Rem's app before any friend | Fixed. The 15-second poll and the 2-hour idle backstop wait for the first friend; Liked stays daily through the incremental fetch; the one change left in Phase 3 is decision 15 | §7.4, §7.6, §7.7, decision 15 |
+| L7 decision 8 states no cost | Fixed (decision 12) | §18 |
+| §2 R6 binds the cutover only; a restore brings back no token | Fixed | §10.2, §12.4 |
 
 ## 20. What the revision ran
