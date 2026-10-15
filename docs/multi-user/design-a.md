@@ -847,7 +847,140 @@ today (01c §5.8); the per-user deadline keeps a tick under a minute whatever th
 
 ## 7. Search: per-user payloads and caching
 
+Search keeps today's model: the browser holds the user's library and history and filters them on
+every keystroke with no request (`den-home.tsx:497-524`, 01d §1). What changes is how the history
+reaches the browser, which 01d showed has to change for Rem alone: the history body is 1.79 MB raw,
+86.6% of the Data Cache's 2 MiB item limit, and crosses it around late December 2026, after which
+every Home open rebuilds it with a full plays scan and nothing reports it (01d §3.2). This design
+takes 01d's remedy and keys every piece of it per user.
+
+### 7.1 What the browser fetches
+
+- **A manifest**, `GET /api/search/manifest`: `{ u, shape, library: v, catalog: v, months: [[month,
+  v, plays], …] }`, a few hundred bytes, `private, no-store`. One store read in the user's
+  database.
+- **The history in monthly segments** (01d O3), one body per (user, UTC month) in today's tuple
+  format, plus the catalog rows as their own segment, since they never change and are 58% of
+  today's body (01d §2.1): `GET /api/search/h/<hk>/<month>?v=<v>`, `private,
+  max-age=31536000, immutable`. A segment rebuild reads one month through `idx_plays_played_at`,
+  ~10,000 rows at most for Rem against ~65,000 for today's whole body (01d O3).
+- **The library**, one body per user as today (`GET /api/search/l/<hk>?v=<library_seq>`, immutable
+  per version), split per playlist later, when a library passes ~12,000 songs (01d O7).
+- **A delta at visit start** (01d O4): the plays newer than the newest minute the browser holds,
+  ~50 rows; today's `refreshHistoryAction` read, made a scoped GET.
+- **Phase E's IndexedDB copy** stores segments under `(hk, kind, segment, version)`, so a repeat
+  visit paints search from disk before the network (STORE_MIGRATION §10, 01d O5).
+- **Lazy days** (01d O6): a day's rows are built when the day is selected, by binary search on the
+  minute bounds, instead of all 21,559 plays up front, which is 199 of today's 264 ms of client work
+  at 4× CPU (01d §2.3).
+
+**Segment versions** are per-month counters in the user's own `meta` (`seg_seq:<YYYY-MM>`), bumped
+by the writes that can change a closed month: inserts (their `played_at`), the orphan pass (`UPDATE
+… RETURNING played_at`), a context name resolving (its plays' months, through `idx_plays_context`),
+a track re-tag (through `idx_plays_track`), and an out-of-order insert re-opening its neighbours'
+skip verdicts. 01d O3 weighs this against an immutable-facts layout and leans to the counters;
+so do I, because each bump site gets a known-answer test (write to an old month: that month's
+version moves and no other does), and in a per-user database a missed bump is a stale month for one
+user, never someone else's month.
+
+### 7.2 Isolation in the search path
+
+Everything in §2.6 applies; the search path is where it matters most, because it is the one place
+that sends whole libraries and histories, and the only one with immutable caching.
+
+- The server takes the user from the session and builds from the session's database. The `hk` in a
+  segment or library path selects nothing; it is compared with the session's and a mismatch is a
+  404 (T3c, T7).
+- Every body carries `u: hk`, and the client discards a body whose `u` is not the page's.
+- Every server-side entry goes through `userCache` (uid in the key parts and arguments, the owner
+  stamp checked on return, tag `u:<uid>`).
+- ETags and URLs carry `hk` and never a Spotify id (01d §4.3 test 6).
+- The server fallback while payloads load, `searchHistory`'s `LIKE` (`db.ts:884-904`), runs in the
+  user's database, so it cannot surface another user's songs (01d §4.1).
+- The in-memory delta patch (`history-actions.ts:140-161` → `den-home.tsx:766-780`) reads the
+  user's own newest plays. Today it reads the newest plays of the whole table, and phase E would
+  persist anything it patched in (01d §4.1), so this one is a leak that would outlive the request.
+
+### 7.3 Server caching with N users
+
+Each entry is one user's. With segments, an entry is one month (~300 KB raw for a 100-plays-a-day
+month, 01d O3), so no user's entry approaches the 2 MiB limit however long their history grows, and
+a history import (01d §3.3: ~4.2 MB as one body today) becomes many bounded months. Vercel's Data
+Cache is one least-recently-used store shared by every project on the team (01f §2.2), so one
+user's entries can evict another's; the cost of an eviction is one month's rebuild, ~4,500-10,000
+rows, which is the isolation that matters here: slower, never someone else's. At five users the
+footprint is small: 01d §4.2 estimates ~260 MB written a day for 25 typical users under today's
+whole-body design and far less with segments.
+
+### 7.4 Order of work
+
+01d §5.2's order, with the isolation pieces placed:
+
+1. **Now, single-user, before December:** lazy days and segments with the catalog as its own segment
+   (or 01d O2, the catalog split alone, as a stopgap if segments cannot land by mid-December). Rem
+   needs this whether or not anyone else ever signs in.
+2. **Phase 1:** the `hk` in URLs, ETags and bodies; `userCache`; T2, T3 and T7 red, then green.
+3. **STORE_MIGRATION phase E** storing segments under `(hk, kind, segment, version)`, plus the
+   visit-start delta.
+4. **Later:** the library per playlist and a Web Worker, when a library passes ~12,000 songs or the
+   phone measurement of §13.2 fails.
+
 ## 8. The store, and what STORE_MIGRATION should change
+
+### 8.1 The store
+
+**Turso, one database per user, one app database, in group `default` (`aws-us-east-1`).** The
+reasons are §2.1's; the alternatives, briefly:
+
+- *One Turso database with a `user_id` column*: the design 01a §8.2-8.6 specifies in full, and the
+  one that leaves isolation to more than fifty statements (§2.1).
+- *Postgres or Supabase with row-level security*: isolation in the database, at the price of
+  rewriting the SQLite SQL and abandoning STORE_MIGRATION (§2.1).
+- *sqld namespaces on the Zenbook*: sqld can host several databases, but every user path would stay
+  on the laptop that STORE_MIGRATION exists to take off them (its §1, R2).
+
+One fact for the longer term: Turso's pricing page carried a banner at 10:11 PM today, "Turso is
+joining Supabase to give every agent its own database". I did not read further; plans and prices
+may change. The exposure is small, because each user's data is a plain SQLite database that dumps
+to a file (the nightly backups are exactly that, §8.3), so a move to any libSQL or SQLite host is
+a copy and a URL change per user.
+
+### 8.2 What multi-user needs from STORE_MIGRATION, and gets
+
+- **The user paths off the Zenbook** (R2): target A's first half rests on it.
+- **`lazyboy` becomes Rem's user database as it stands**: the cutover is schema-preserving (its §8
+  steps 4-7), and this design changes nothing in the seven tables, so Rem's data never moves again
+  (§9).
+- **The telemetry split** (its §6 items 1-3) is where `api_log` and `client_metrics` get their
+  `user_id` (§3.4).
+- **The daily route** (its §6 item 7) brings back retention for `api_log` and `client_metrics` and
+  lands Turso's real usage in the ledger daily: per database, once there are several (§2.1).
+- **Phase E** (lanes 1905-1906) is the browser cache §7.1 builds on.
+
+### 8.3 What should change before it runs (Oct 15, 8 PM)
+
+Nothing in the cutover itself. Six small edits, all already recommended by an overview, each worth
+making because doing it later means doing it twice; none blocks lane 1901:
+
+1. **§10 (lane 1905): key IndexedDB by an opaque key the `(app)` layout renders**, a constant until
+   phase 1 ships the real `hk`; stamp each stored body with it; give the store interface a `(key,
+   kind, segment, version)` key. Today no user id reaches the browser at all (01b §7 item 1, 01d §6
+   item 3, 01e §6 item 3).
+2. **§8 step 9: flip Production only**, and give Preview no store variables, so no branch's code can
+   read or migrate the new store (01b §7 item 2).
+3. **§9 (lane 1904): write the backup as a loop over a list of databases, one file per database**
+   (01a §10 item 3), so per-user files exist from the first friend on and a deletion can remove
+   them (§12); **and strip `spotify_tokens%` and `lock:%` rows from the backup copies** until
+   phase 2 moves the tokens out (01e §6 item 1).
+4. **§6 item 7: write `/api/cron/daily` as a loop over users**, one user today (01c §6 item 3).
+5. **§3 and R4: name the all-time recompute, not the history payload, as the dominant read, and give
+   R4 a growth term** (01c §6 items 1-2; 01a §11.2 and 01d §2.2 reach the same reading). It decides
+   which lever comes next (§13.4).
+6. **§6 item 8: derive the fence's table list from the schema** rather than writing it out, so new
+   tables are fenced without anyone remembering to (01b §7 item 3).
+
+Ordering after it: phase 2's token move lands after lane 1903's cutover and 1904's aftercare,
+because the runbook compares one plaintext token row on both stores (its §8 steps 10 and 16; 01b §7).
 
 ## 9. Migrating Rem's data with nothing lost
 
