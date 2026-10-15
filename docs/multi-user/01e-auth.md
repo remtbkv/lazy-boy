@@ -675,12 +675,15 @@ What N users need:
 - Deleting data. Spotify's Developer Policy: "when a user disconnects their Spotify account or otherwise
   expresses an intent to prevent your SDA from accessing their data, you agree to delete and no longer
   request or process any of that user's personal data" (https://developer.spotify.com/policy, fetched
-  2026-10-14). An explicit in-app Disconnect is that intent: delete at once. An `invalid_grant` is
-  ambiguous (revocation, Spotify-side invalidation, or expiry). My recommendation: on `invalid_grant`,
-  stop all processing for that user immediately (no token, no calls), keep the data, show the reconnect
-  prompt, and purge after a fixed time without reconnecting; exempt the owner. The length of that window
-  is Rem's call (§7); the policy's literal text has no grace period, and an immediate purge on an
-  ambiguous signal destroys history irreversibly.
+  2026-10-14). The Developer Terms put a clock on it: "discontinue accessing the applicable Spotify
+  Personal Data and delete the applicable Spotify Personal Data in your possession or control within
+  five (5) days" (Data Protection Appendix §5, as quoted in 01f-platform.md §1.5). An explicit in-app
+  Disconnect is that intent: delete at once. An `invalid_grant` is ambiguous, and `granted_at` splits
+  it. Under six months, treat it as a disconnect: stop all processing at once (no token, no calls),
+  tell the user on their next visit, and delete within five days unless they reconnect first. At six
+  months it is an expiry: stop processing, keep the data, mark `needs_reconnect`. The owner is exempt.
+  Whether Rem wants the five-day deletion on an ambiguous signal is his call (§7); an earlier purge is
+  irreversible, a later one is outside the Terms.
 
 ### 5.8 Account deletion
 
@@ -691,11 +694,14 @@ What N users need:
   telemetry that gains a user column), delete lock rows, and delete the `users` row last, so a crash
   midway leaves a row the job can find and finish.
 - Tell the user to remove Lazy Boy at spotify.com/account/apps; the app cannot revoke the grant.
-- Backups keep deleted data until they age out: 14 days on the Zenbook and 60 on OneDrive
-  (`backup.py:16`), plus Turso's own retention after the migration. The privacy policy should say so.
-  With §5.3 the deleted user's tokens in those backups are ciphertext.
-- Per-user encryption keys for crypto-shredding would make backup copies unreadable at deletion. That
-  is more machinery than five users justify.
+- Backups are the hard part. They keep data 14 days on the Zenbook and 60 on OneDrive
+  (`backup.py:16`), plus Turso's own retention after the migration, and the Terms' five-day deletion
+  clock (§5.7) covers data "in your possession or control". Options, cheapest first: split the backup
+  by user once tables carry one, keeping the owner's rows on today's retention and everyone else's for
+  at most five days; or shorten all retention to five days; or per-user data keys, destroyed at
+  deletion (crypto-shredding), which is more machinery than five users justify. I would take the
+  split. With §5.3 a deleted user's tokens in any backup are ciphertext either way. 01f §1.5 reaches
+  the same conclusion from the Terms' side.
 
 ### 5.9 Session-less paths acting for N users
 
@@ -774,20 +780,22 @@ out of the Vercel runtime when the second user arrives; it serves `/usage` and a
    the owner guard stops depending on what `me_id` holds.
 2. **What "log out" means:** today it stops capture and signs out every device. Recommend splitting
    it into sign out, sign out everywhere, and disconnect (§5.6).
-3. **Data after an ambiguous `invalid_grant`:** recommend stopping all processing at once and purging
-   after 30 days without a reconnect, owner exempt (§5.7). The policy's literal reading is an
-   immediate purge; 30 days is my judgment of the balance against destroying history on a signal that
-   can also mean Spotify-side invalidation.
-4. **The recorder:** recommend owner-only (§5.9).
-5. **Token rows out of the backups:** recommend yes (§6 item 1).
-6. **Encryption at rest with a Vercel-held key:** recommend yes, before the second user signs in;
+3. **Data after an `invalid_grant`:** recommend treating one that arrives under six months as a
+   disconnect (stop at once, delete within the Terms' five days unless the user reconnects), and one at
+   six months as an expiry (stop, keep the data), owner exempt (§5.7). The alternative, keeping data
+   on every ambiguous signal, is gentler on users and outside the Terms.
+4. **Backups with other people's data:** recommend splitting them by user, owner on today's
+   retention, everyone else five days at most (§5.8).
+5. **The recorder:** recommend owner-only (§5.9).
+6. **Token rows out of the backups:** recommend yes, now (§6 item 1).
+7. **Encryption at rest with a Vercel-held key:** recommend yes, before the second user signs in;
    no KMS (§5.3).
-7. **Who may sign up:** recommend an app-side invite list next to Spotify's allowlist, capped at what
+8. **Who may sign up:** recommend an app-side invite list next to Spotify's allowlist, capped at what
    development mode allows (five, §5.4). Whether to seek extended quota for more is 01f's question and
    Rem's.
-8. **Dev against the production store:** recommend moving dev to a local or separate store once a
+9. **Dev against the production store:** recommend moving dev to a local or separate store once a
    second user exists (§5.9).
-9. **`TURSO_PLATFORM_TOKEN` in the runtime:** recommend removing it with the second user (§6).
+10. **`TURSO_PLATFORM_TOKEN` in the runtime:** recommend removing it with the second user (§6).
 
 ## 8. Unknowns and what I did not verify
 
