@@ -1,16 +1,21 @@
 # Multi-user lazyboy: the plan
 
-Lane 0223_lb_mu_synthesis of the multi-user planning program, Oct 14, 2026. Planning only: nothing
-here changed code, data, the Zenbook store, Turso or Vercel. It synthesizes the six overviews
-(`01a-data.md` to `01f-platform.md`, cited as 01a §n and so on) and the three designs (`design-a.md`,
-`design-b.md`, `design-c.md`, cited as A §n, B §n, C §n). Code line numbers are against `ac6f7fe`,
-which the overviews cite; `git diff --stat ac6f7fe HEAD -- src scripts ops tests vercel.json
-next.config.ts package.json` is empty at `7e0c5b1`. Every number is **[measured]** with its source or
-**[estimate]** with its arithmetic. §17 lists everything this lane ran.
+Lane 0223_lb_mu_synthesis wrote this plan on Oct 14, 2026. Lane 0225_lb_mu_revise revised it on Oct 15
+to answer the four reviews (`review-security.md`, `review-scale.md`, `review-migration.md`,
+`review-completeness.md`, cited as security R1, scale 1, migration 1, completeness H1 and so on); §19
+lists every finding and what changed. Planning only: nothing here changed code, data, the Zenbook
+store, Turso or Vercel. It synthesizes the six overviews (`01a-data.md` to `01f-platform.md`, cited as
+01a §n and so on) and the three designs (`design-a.md`, `design-b.md`, `design-c.md`, cited as A §n,
+B §n, C §n). Code line numbers are against `ac6f7fe`, which the overviews cite; `git diff --stat
+ac6f7fe HEAD -- src scripts ops tests vercel.json next.config.ts package.json` is empty at `3800c73`.
+Every number is **[measured]** with its source or **[estimate]** with its arithmetic. §17 lists what
+the first lane ran, §20 what the revision ran.
 
-Status: complete, Oct 14, 2026.
+Status: revision in progress, Oct 15, 2026. Sections not yet revised still read as on Oct 14.
 
-## 0. Summary
+## 0. For Rem: the plan on one screen
+
+(Being rewritten from the reviews; the Oct 14 summary follows until it is replaced.)
 
 - **Targets (§1).** Five accounts, Rem included: Spotify's development mode allows five per app and no
   path to more, so the brief's 25 is out of reach; past five, people run their own copies. No path
@@ -2039,3 +2044,18 @@ Each with a recommendation and its reason, grouped by what it blocks.
 25. **If Spotify does not return `account_id`** to this app (Phase 0's dev sign-in shows it first).
     *Recommend deciding then.* Keying on the mutable Spotify `id` works for a handful of friends but can
     split one person into two users if Spotify ever lets ids change (01e §5.5, C §15 decision 5).
+
+## 19. Review disposition
+
+Every finding of the four reviews, what changed in this plan, and where. "Fixed" means the plan now
+does what the finding asks, or an equivalent named in the row; "partly" and "not taken" say why.
+
+### 19.1 Security (`review-security.md`)
+
+### 19.2 Performance and scale (`review-scale.md`)
+
+### 19.3 Uptime and migration (`review-migration.md`)
+
+### 19.4 Completeness and product (`review-completeness.md`)
+
+## 20. What the revision ran
