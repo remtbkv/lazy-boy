@@ -14,7 +14,7 @@ someone is signed in and none checks *who*, because nothing can: the session coo
 Spotify id (Auth.js mints a random `sub` per sign-in and the app stores nothing else), every Spotify
 call takes the one global token row, and every store read is unscoped (section 1).
 
-With a second account signed in, as the code stands: 14 actions and 4 routes call Spotify with
+With a second account signed in, as the code stands: 16 actions, 4 routes and one page call Spotify with
 whichever account's token is stored; all 7 Data Cache entries, both search ETags and the 3 version
 markers are keyed without a user; the cached playlist tracks are served by playlist id with no access
 check, so a private playlist is readable by anyone who knows its id; and two pieces of
