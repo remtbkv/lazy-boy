@@ -551,6 +551,204 @@ token. Vercel KMS only signs; AWS KMS brings the AWS dependency Rem ruled out (0
 
 ## 6. Isolation: enforcement in one place, and the tests that prove it
 
+### 6.1 The mistakes it has to survive
+
+The incident that started this program shows the shape of the risk: one global token row, so a
+second account's sign-in turned every request and every cron tick into that account's, and its plays
+were recorded into Rem's history (commit `044c9b6`, 01b §1.2). The overviews found how wide the
+single-user assumption runs (01a §7, 01b §4, 01e §4). A §1 sorts the ways a multi-user build could
+leak into thirteen classes, which this plan keeps:
+
+| # | class | where an instance exists today |
+|---|---|---|
+| M1 | a store statement that forgets the user | 01a D12-D19: more than fifty statements in `db.ts`, five import scripts |
+| M2 | a user id taken from request input | none yet; the natural bug once ids exist |
+| M3 | a read before, or without, the gate | `/home` reads in the gate's `Promise.all` (`home/page.tsx:78-83`, 01b E5); `logout` has no gate (01b E3) |
+| M4 | a cache key without the user, or with it captured in a closure Next cannot see | all seven `unstable_cache` entries (01a §5); Next 16.2.6 keys on the callback's source, the key parts and the arguments only (01b §3.1) |
+| M5 | process state shared across users | `inflightRefresh`, `playlistsCache`, `currentSyncId`, argument-less `cache()` boxes (01b §3.3-3.4) |
+| M6 | the wrong Spotify token for the user | 01b A1-A6, 01e A2 |
+| M7 | browser state that outlives a change of user | ETags with no user; `lb-days`, `lb-nowplaying`, `clean:active` (01b §3.6) |
+| M8 | background work that mixes users | a cron fan-out over today's code (01c S3, S7, S8) |
+| M9 | a wrong mapping from a user to their storage | new in any multi-user design: provisioning, restore or migration mistakes |
+| M10 | the shared tables and the operator's views of them | `/usage` shows everyone's telemetry (01b B8) |
+| M11 | scripts and dev servers writing production data with no user | 01a D33, D38 |
+| M12 | a sign-in bound to the wrong account | linking on Spotify's mutable `id` (01e §5.5); an invite claimed twice |
+| M13 | one user spending a quota every user shares | Turso's org-wide rows read, Spotify's per-account quota, Vercel's team allowances (01f §1.4, §2.2, §4.2) |
+
+The rule: every class meets at least one layer that makes the mistake impossible to write or
+harmless when written, and at least one that detects it (a test in `npm test`, or a runtime check
+that refuses and logs). M13 differs in kind: no code makes a shared quota private, so the plan
+bounds each user's share (§6.6, §7.5).
+
+### 6.2 The layers
+
+1. **A database per user** (§4.1). A whole-table statement such as `storePlaylists`' `DELETE FROM
+   playlists` (`db.ts:1848-1883`), the gap chains of `recomputeSkipFlags` (`db.ts:780-822`) or
+   `recordPlays`' dedupe read (`db.ts:484-496`) is already correct when the table is one user's; 01a
+   §8.1 counts what that removes (census items D4-D19, D21, D23, D25). A routing mistake becomes a
+   wrong-database error, never a corrupted shared table. *Stops M1.*
+2. **A uid only three functions can mint.** `type Uid = string & { readonly [brand]: "Uid" }` in a new
+   `src/lib/identity.ts`. `requireUser()` mints one from the session (§5.1), `claimDueUsers()` from the
+   rows it just leased (§7.2), `scriptUser(argv)` from a required `--user` checked against `users`.
+   A plain string from a path, a query or a body does not compile where a `Uid` is wanted, and
+   `npm run build` type-checks. *Stops M2 and M3: a read needs a `Uid`, so no read runs before the
+   gate, which also ends the anonymous reads on `/home` (01b E5).*
+3. **One handle per user, and databases that name their owner.** `db.ts` stops exporting per-user
+   functions; its 74 async exports (01a D2) split into `forUser(uid): UserStore` (today's functions
+   bound to the user's client and passing the uid into every cache key), `src/lib/app-db.ts` (every
+   statement on the app database, a short list a reviewer can read in one sitting, A §2.7) and the
+   telemetry client. `forUser` gets its client from a per-process map filled from `users.db_name`
+   through one URL template; an unknown uid throws and nothing ever falls back to a default URL
+   (C §2.2). The first open runs §4.5's statement and refuses a database whose `owner_uid` is not the
+   uid it was opened for. *Stops M9 and the residue of M1: no module-level function is left that
+   could run against "the" database.*
+4. **Caches, process state and background work** (A §2.4):
+   - `userCache` in `src/lib/user-cache.ts` is the only caller of `unstable_cache`. It builds
+     `unstable_cache(fn, ["u", uid, ...keyParts], { revalidate })` and calls it as `fn(uid, ...args)`,
+     so the uid separates entries twice over and a closure-captured id has no way in. It stores
+     `{ o: uid, v: value }` and checks `o` on every return; a mismatch logs an `isolation` event and
+     returns the right user's data uncached. That check is what turns a key mistake into a slow
+     request in production, including the case no unit test sees: a Preview build writing entries
+     under keys production reads, which 01b §8 could not rule out. The seven wrappers
+     (`db.ts:983, 1082, 1176, 1181, 1600, 1615, 1906`) move onto it; the shape tokens stay in the key
+     parts. Moving every key also strands every single-user entry at the first deploy (01b §3.1).
+   - No cache tags. A deleted user's entries expire within 24 hours (`FROZEN_TTL_S`, `db.ts:958`) and
+     no session can name a deleted uid, which is never reused (C §5.2).
+   - The three `cache()` boxes (`auth.ts:73`, `db.ts:402`, `db.ts:854`) take the uid as their
+     argument, so whether `cache()` is active in a route handler (01b §3.3, unverified) stops
+     mattering.
+   - Module state:
+
+     | state | where | becomes |
+     |---|---|---|
+     | in-flight refresh | `auth.ts:188-196` | `Map<Uid, Promise<Tokens>>`, plus the token-owner assertion (§5.2) |
+     | playlist-list cache | `src/lib/spotify/resources.ts:76-104` | deleted: it saves a second `/me/playlists` read within 60 s, and keyed or not it is the one cache that would store A's library as B's (01b A6) |
+     | running library sync | `src/lib/playlists-sync.ts:22, 50-54` | `Map<Uid, string>` |
+     | unique-song throttle, store-size memo | `db.ts:1960`, `db.ts:2887` | per uid |
+     | Spotify cooldown | `src/lib/spotify/client.ts:48`; `app_meta` | app-wide by bucket, on purpose (§4.3) |
+     | task registry | `src/lib/tasks/registry.ts:21-23` | each task records its owner; `/api/tasks/[id]` answers 404 to anyone else (01b S7) |
+
+   - Background work receives everything it may touch as arguments: the cron's per-user step gets the
+     `Uid`, its `UserStore`, a token getter bound to that uid and its deadline (§7.2). *Stops M4, M5,
+     M8.*
+5. **Spotify credentials that carry their owner** (§5.2-5.3): the associated data binds a ciphertext
+   to its row, the owner field binds a token object to its user, locks and in-flight maps are keyed
+   by uid, and the profile fetch at sign-in is never cached. *Stops M6, and M12 with §12.1.*
+6. **The browser** (A §2.6, with the random uid of §4.4 in place of A's HMAC):
+   - ETags become `"lib-<shape>-<uid>-<version>-<day>"` and `"hist-<shape>-<uid>-<version>-<day>"`
+     (today `src/app/api/search/library/route.ts:39`, `history/route.ts:26`). Per-user counters are
+     small integers that collide across users (01a §5), so without the uid a shared browser profile
+     could get a 304 for the previous user's body.
+   - Immutable segment URLs carry the uid in the path (§9.1), because an immutable response is never
+     asked for again; the server compares the path's uid with the session's and answers 404 on a
+     mismatch, and it builds every body from the session's database, never from the path.
+   - Every payload carries `u: uid`, and the client drops any body, from the network, the HTTP cache
+     or IndexedDB, whose `u` is not the page's.
+   - Storage keys are prefixed with the uid: `lb-days`, `lb-nowplaying`, `clean:active`, phase E's
+     IndexedDB store, and the `lb-nowplaying-leader` Web Lock and BroadcastChannel names, so two
+     users' tabs in one browser neither read nor relay each other's state (01b §3.6).
+   - Sign-out clears that storage in the browser before the sign-out form submits (sign-out is a
+     server action, 01b §7 item 1), and the response sends `Clear-Site-Data: "cache", "storage"` where
+     the browser honours it; the client-side clear is the one relied on. *Stops M7.*
+7. **The shared remainder.** `app-db.ts` holds every statement on the app database; the handful that
+   take no uid (sign-in's lookup and claim, the cron's claim, the admin list, the global keys) are
+   cross-user by design and each has a test (T6). `/usage` and any admin page require `is_admin`,
+   set by the migration for Rem and never derived from `me_id` (01b E2). Telemetry rows gain the uid,
+   `handoff` beacons send a track id instead of "artist — title" (01a §10). Scripts take a required
+   `--user`, and the backstop replay refuses anyone but the admin, since the recorder captures only
+   Rem (01c §5.7). Preview gets no store variables; dev reaches only Rem's database and local files
+   (§5.5). *Stops M10 and M11.*
+
+### 6.3 Every class against the layers
+
+| class | prevents | detects |
+|---|---|---|
+| M1 a statement forgets the user | a database per user | T1: user B's database file hash unchanged by every call made as A |
+| M2 an id from request input | the branded `Uid` | static S2 (no casts); T3: A's identifiers in B's request return B's data or a 404 |
+| M3 a read before the gate | a read needs a `Uid` | T3: every entry point with no session refuses before any user database opens |
+| M4 a cache key without the user | `userCache` | T2 with equal counters; the owner stamp at runtime |
+| M5 shared process state | keyed maps; the deleted cache | static S4; T4 (two users in one invocation) |
+| M6 the wrong token | per-user rows, locks and maps | the token-owner assertion at runtime; T5 (Spotify scripted per bearer) |
+| M7 browser state across users | uid in keys, ETags, URLs and bodies | T7 |
+| M8 background work mixing users | a per-user step with explicit arguments | T4 |
+| M9 a wrong user-to-database mapping | random uids; names written once | the owner check on every open; T8 |
+| M10 shared tables and operator views | `app-db.ts`'s fixed list; the admin flag | T6; T3 for `/usage` as a non-admin |
+| M11 scripts and dev on production | required `--user`; dev's credentials; Preview without store variables | T10 |
+| M12 a sign-in bound to the wrong account | `account_id` link, compare-and-set claim, uncached profile read | T9 |
+| M13 a shared quota | server-held limits (§6.6), the fair-share brake (§7.5), plan choices (§15) | per-database usage and per-user `api_log` on `/usage` |
+
+### 6.4 The tests
+
+They run in the existing simulated environment (`npm test`: vitest against throwaway SQLite files and
+a scripted `fetch`, `tests/setup.ts`), touching no store, no Spotify and no Vercel. Each is written
+red first, and each is shown failing against a planted bug before it is trusted (B §6): a test that
+has never failed proves nothing.
+
+**What the harness gains** (A §5.1): three database files per test file (`app.db`, `u1.db`, `u2.db`),
+created by the production provisioning code so provisioning is under test too; a two-user seed with
+deliberate collisions (the same track at the same `played_at`, D17; the same playlist id with
+different members, D14; the same context URI named for one user and negative-cached for the other,
+D25; interleaved timelines, D18; equal `write_seq`, `library_seq` and `slow_seq_pub`), with a marker
+string (`A-only-…`, `B-only-…`) in every text column; a faithful `unstable_cache` stub keyed the way
+Next 16.2.6 keys (`fn.toString()`, the key parts, `JSON.stringify(args)`) in place of today's
+pass-through (`tests/stubs/next-cache.ts:4-10`), which can see no collision at all; a scripted Spotify
+that answers per bearer token and logs which bearer each call carried; a session switch (the
+`vi.mock("@/lib/auth")` pattern of `tests/now-playing-route.test.ts:13-16`); an open counter per uid;
+and sha256 file hashes of the other user's database before and after.
+
+| id | runs | must hold |
+|---|---|---|
+| T1 | every method of `UserStore`, enumerated from the object so a new method is covered automatically, as A then as B | the other user's file hash unchanged; no other-user marker in any return value |
+| T2 | the seven cached reads as A then B with equal counters; then a forged entry under B's key stamped with A | B never sees an A marker; the forged entry is refused, B's data served uncached, an `isolation` event logged |
+| T3 | every page, every `"use server"` export and every route handler, found by globbing `src/app`: with no session; as B; as B with A's identifiers in the input (playlist id, task id, A's uid in a segment path); `/usage` as non-admin B | refused with zero user-database opens; no A marker anywhere and A's file unchanged, every Spotify call on B's bearer; B's data or a 404, never A's; refused. Exempt by a named list: `/`, `/login`, `/join`, `/api/build`, `/api/auth/*`, `/api/cron/*` |
+| T4 | one cron tick with A and B due, both tokens expired; then A failing three ways (403 "not registered", `invalid_grant`, a hang past the deadline); then library syncs for A and B within 60 s on one instance | each database gets only its own plays; one refresh per user; A's lock does not delay B; B's outcome `ok` whatever A does; the reply is 200 with both outcomes; each user's own playlist list stored (the `playlistsCache` trap) |
+| T5 | the token core | 01e's six known answers (§5.2) |
+| T6 | the app-database functions that take no uid | a claim never returns a leased user or the same user to two concurrent claims; an invite is claimed once; only listed global keys are accepted |
+| T7 | the search routes and the client storage module (behind a storage interface, as STORE_MIGRATION §10 plans) | equal versions give A and B different ETags; B with A's ETag gets 200 and B's body; a segment path with A's uid under B's session is 404; a stored body whose `u` is not the page's is discarded; sign-out empties the store |
+| T8 | a users row pointing B at A's database file; a database at the wrong schema version | B's open refuses before any read or write, logged, A's hash unchanged; the wrong version refuses that user only |
+| T9 | sign-in | an invite claimed once; a profile without `account_id` refused; a returning user found by `account_id` after their `id` changed; Y cannot claim X's invite |
+| T10 | every script | exits non-zero without `--user`; with `--user B` touches only B's file; the backstop replay refuses anyone but the admin |
+| T11 | the deletion job for B | B's next request has no session; B's token, queue and telemetry rows are gone; B's database destroyed (the Platform API mocked); A's hash unchanged; a second run is a no-op; the job refuses the admin, `lazyboy`, and any name that is not `lb-u-<uid>` with a matching `owner_uid` |
+| T12 | the Phase 2 migration on a local copy of a nightly backup, by hand (it needs Rem's data) | §11.3's checks |
+
+Static checks, also in `npm test` (A §5.3): S1 `unstable_cache(` appears only in `user-cache.ts`; S2
+no `as Uid` outside `identity.ts`, whose minting helper only the gate, the claim and the script
+helper import; S3 no per-user function exported from `db.ts` at module level, and `app-db.ts`'s
+exports match a snapshot a reviewer sees change; S4 every top-level `let`, module-scope `new Map(`
+and `globalThis` write under `src/` is on a reviewed allowlist saying how it is keyed; S5 every
+`fetch` to Spotify sets `cache: "no-store"` or goes through `src/lib/spotify/client.ts`; S6 every
+`localStorage`, `sessionStorage`, IndexedDB, `BroadcastChannel` and Web Lock name is built by the
+uid-prefixing helper.
+
+### 6.5 In production
+
+- **Isolation events.** The owner check on open, the cache stamp, the token-owner assertion and the
+  segment path check each log an `isolation` event (to `client_metrics`, with the uid and a code, no
+  data), counted at the top of `/usage` for the admin. The expected count is zero; anything else is
+  a bug with its code path attached, and a candidate for Spotify's 24-hour breach notice (01f §1.5).
+- **An adversarial review** of each multi-user phase's diff in a fresh context, told to find a
+  cross-user path, before it deploys (the pattern of lanes 1902 and 1906).
+- **A canary account** is optional (§18): a second Spotify account Rem controls, signed in on another
+  browser through Phase 4's first week. It holds one of the five places while it exists.
+
+### 6.6 Budgets one user could spend for everyone
+
+Separate databases isolate data, not budgets (C §5.5). Four are shared: Turso's rows read (per
+organization), Spotify's quota (per developer account), Spotify's 30-second rate limit (per app) and
+Vercel Hobby's Active CPU (per team, and an overrun stops every project for up to 30 days, 01f §2.2).
+
+- **Spotify's scarce bucket is spent only by the server**: the claim (§7.2), the open-app rules
+  (§7.6), the library scan's server gate (`src/lib/playlists-sync.ts:45-48`) and the brake (§7.5). No
+  client call can make the app harvest more often than they allow.
+- **Client-chosen scans are bounded**: `dailyStatsAction` accepts any width up to 100,000 days and
+  every distinct width is a fresh scan and a new cache entry (`history-actions.ts:68-72`); it accepts
+  only the one value the client sends (`den-home.tsx:379`). `searchPlaysAction` runs an unindexable
+  `LIKE` per call (`db.ts:884-904`); ten a minute per user per instance, the rest refused.
+  `/api/playlists/[id]/tracks` gets the same per-user limit (01b S13).
+- These stop a bug or a stuck tab from running away; they do not stop a determined invited user, who
+  can spread calls across instances. The answer to that is `status = 'disabled'`, which takes effect
+  on that user's next request.
+
 ## 7. Sync fan-out inside Spotify's limits
 
 ## 8. Store cost: the write path and the read levers
