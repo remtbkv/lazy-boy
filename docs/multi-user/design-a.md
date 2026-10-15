@@ -724,6 +724,127 @@ proves, red first (§14's order), as the repo's rules require for non-trivial lo
 
 ## 6. Sync fan-out within Spotify's limits
 
+01c designed the fan-out (its §5); this design adopts it and adds what isolation asks of it: each
+user's step can touch only that user, one user's failure costs only that user's slot, and one
+user's listening cannot spend the shared Spotify budget until everyone is banned.
+
+### 6.1 What binds
+
+- **Five users at most** (target U).
+- **Recently-played has a daily budget**, observed at roughly 725-800 calls a quota day for the
+  whole app in August's bans, and Spotify documents the development-mode quota as one pool per
+  developer account (01f §1.4, 01c §4; one changelog sentence says "a user's quota", so this is the
+  largest unknown in the plan). Planning budget, as 01c §5.1 sets it: **450 a quota day**, 60% of
+  the observed ban line. `/me` appears to share the bucket (01c §4), which is one reason the rescan
+  stops calling it (§6.6).
+- **The player endpoints** have never been limited; Rem's cron alone spends ~1,035-1,303 calls a
+  day on them (01c §2.7). Their limit is unmeasured.
+- **The 30-second rate limit** is per app and unpublished; 18 calls in 30 s have passed without a 429
+  (01f §1.4).
+
+### 6.2 The tick
+
+One invocation a minute from the pingers (§6.7), whatever N is, as 01c §5.2 recommends:
+
+1. **Claim.** `claimDueUsers` leases every user whose `next_probe_at` has passed, in one `UPDATE …
+   RETURNING uid` on the app database, with a lease owner (the tick's id) and `lease_until = now +
+   50 s`. This is also the tick's store health check: if it fails, the tick ends at once (01c §5.2
+   step 1). A user leased by an overrunning tick is not due, so two ticks never work on one user.
+2. **Step, per user, concurrently**, under `Promise.allSettled` and a 25-second deadline each. The
+   step function receives everything it may touch as arguments: the `UserId`, its `UserStore`, a
+   token getter bound to that uid, and the deadline. It probes the player, applies the harvest
+   policy (§6.3-6.4), records plays into that user's database, and finishes by releasing its lease
+   with a compare-and-set on the lease owner, so a step that outlived its lease writes nothing to
+   the queue. Writes into the user's database are idempotent by natural key (plays by `(track_id,
+   played_at)` within the user's own table), so a step that ran twice records nothing twice (01c
+   §5.4 item 8).
+3. **At most one library rescan**, for one user, outside the harvest deadlines (§6.6).
+4. **Answer 200 with a per-user outcome list** (codes, no data), and non-200 only when step 1
+   failed or the owner's own capture has stopped, which is Rem's only alarm today (01c §5.2 step 4).
+
+Users spread across the minute by `hash(uid) mod 60` on their due times, so five users' probes do not
+land in the same second (01c §5.2).
+
+### 6.3 Harvest policy, and what it does for freshness
+
+All users harvest **on a track change** (01c §5.3 policy (i)): the step keeps the last probe's track
+and progress in the user's own `meta` and harvests when the track changed, a track restarted, or
+playback stopped. That is at most one harvest per play, any change a probe missed is inside the 50
+plays returned, and the store stays within ~2 minutes of the track's end, which is target F. It
+costs ~140 recently-played calls a day for a Rem-like listener with the idle backstop moved from
+hourly to every two hours (01c §5.1), and ~60 for a light one (40 plays a day).
+
+### 6.4 A fair share of the scarce bucket
+
+A shared budget couples users: under the documented reading, one person's heavy day can get every
+user's capture banned until about 10:50 AM (01f §1.4). No code can make the bucket private, so the
+design decides who slows down first:
+
+1. Every user starts the quota day on track-change harvests. The app database counts each user's
+   recently-played calls for the quota day (`sync_state.rp_calls`, reset at the day boundary 01f
+   §1.4 measured, 14:51 UTC).
+2. When the whole app's count reaches **¾ of 450**, any user above an equal share (450 ÷ N) moves to
+   **one harvest per 15 minutes of playback** for the rest of the quota day.
+3. When the whole app reaches **450**, every user moves to **one per 30 minutes of playback**.
+4. In every mode a user is harvested as soon as the probe has counted 40 track changes since their
+   last harvest, so nobody loses a play to Spotify's 50-play window, and the backstop runs every two
+   hours while idle.
+5. Opening the app always gets one on-load harvest, at most once per 15 minutes per user once the
+   app is past 450, so what a person sees when they look is current within seconds.
+
+Light listeners are never slowed; the heaviest is slowed first; the app's total stays near the
+planning budget. If the passive check of 01c §7.3 finds the quota is per user after all, `450`
+becomes a per-user number and everyone stays on track-change harvests (01c §5.1: under the per-user
+reading every policy fits).
+
+What this costs in freshness, with the arithmetic in §13.3: Rem plus four light friends stay on
+track-change harvests for nearly the whole day; five Rem-like listeners do for about the first 60%
+of each listening day and then land within 30 minutes while the app is closed.
+
+### 6.5 Failure isolation
+
+01c §5.4's list, which this design keeps whole: the per-user deadline; per-user tokens, locks and
+refresh; a 403 "not registered" read from the body and the user marked `removed`; `invalid_grant`
+marking `needs_reconnect` (01e §5.7); every user failing the same way at once read as the owner's
+Premium lapsing, backed off as one; 429s split by reason, so a `QUOTA_EXCEEDED` cools only its
+bucket; a store failure ending the tick in step 1; idempotent writes; and a new user's first rescan
+kept out of the harvest deadline. Each state lives in that user's `sync_state` row, so one user's
+`backoff` or `removed` never changes another's schedule.
+
+### 6.6 The open app, now-playing and the rescan
+
+- **`/api/sync`** runs the same per-user step under the same lease, so a visible tab and the cron
+  never harvest one user twice in a minute; today an open tab harvests whenever the cron's gate is
+  closed (01c §2.4). The browser's zone is written only when it changes (today on every call,
+  `src/app/api/sync/route.ts:24-27`).
+- **`refreshHistoryAction`** stops calling Spotify and only re-reads the user's store; today it
+  harvests on every call with no debounce (`src/app/(app)/history-actions.ts:133`, 01c S6). The
+  browser's own provisional plays already cover the moment a track ends.
+- **Now-playing** polls every 15 s mid-track instead of 6 s, keeping the end-of-track and focus
+  polls (01c §5.5), so five users with a visible tab each stay near the 18-per-30-seconds rate that
+  has passed without a 429.
+- **The library rescan**: one user per tick, resumable across ticks (it already commits per
+  playlist), every 30 minutes while active and every 2-3 hours idle; it stops calling `/me`, whose
+  answer (the user's Spotify id) is known from sign-in; and it reads all of a user's playlist
+  snapshots in one statement instead of ~110 serial `getMeta` reads (01c §5.6).
+
+### 6.7 Pingers and the recorder
+
+- **A second pinger off the Zenbook**: the cron-job.org job that ran until Aug 10, re-keyed (its
+  `CRONJOB_*` settings exist, 01f §3.5), offset a minute from the Zenbook timer. The lease makes a
+  double tick harmless, which is why it waits for phase 3 (01c §5.7 b). With both up the app ticks
+  every minute; with either down, every two.
+- **The recorder** stays Rem's alone and runs hourly instead of every 15 minutes, 24 calls a day in
+  the scarce bucket instead of 96 (01c §5.7 a; 01e §5.9). Extending it to friends would put their
+  refresh tokens in a plain file on a laptop.
+
+### 6.8 What it costs Vercel
+
+One cron invocation a minute, 1,440 a day, flat in N, plus the open apps' requests (01c §5.8). A
+tick lasts as long as its slowest user's step, under the 25-second deadline; at R1's target a
+landed play's ~30 store round trips take well under a second (01c §5.8). No `maxDuration` is set
+today (01c §5.8); the per-user deadline keeps a tick under a minute whatever the default.
+
 ## 7. Search: per-user payloads and caching
 
 ## 8. The store, and what STORE_MIGRATION should change
