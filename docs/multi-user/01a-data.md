@@ -299,6 +299,85 @@ their first months every per-user full scan is a fraction of the owner's.
 
 ## 7. Census: every single-user assumption in the data layer
 
+Sizes as in lane 2201's census (`01-current-system.md` §2): **S** = a key or a filter in one place;
+**M** = a function's contract or a table's key changes, with callers to follow; **L** = a design change, a
+schema migration over live data, or a loop that must fan out per user. Ids are for the designs and the
+plan to cite. "Leak" means another user's data is returned or changed; "wrong" means the answer is
+incorrect even for the user's own data.
+
+### 7.1 Identity
+
+| id | where | assumption | multi-user needs | size |
+|---|---|---|---|---|
+| D1 | `meta.me_id`: written `db.ts:1804, 1819`; read `db.ts:2034` ← `owner.ts:11`, `playlists/page.tsx:25-30`, `playlists/[id]/page.tsx:42`, `actions.ts:79`, `history-actions.ts:48-53`, `db.ts:2297` | the store has one Spotify account, recorded by the last library sync | the request's user id replaces it everywhere; `owner.ts` then needs `SPOTIFY_OWNER_ID` or an admin flag on a user row, not `me_id` | M |
+| D2 | all 74 async exports of `db.ts` | no function takes a user | every per-user function takes the user; better, one scoped handle (`forUser(id)`) is the only way to reach per-user tables, so a call site cannot omit it (§8.5) | L |
+| D3 | `auth.ts:291-454`; `home/page.tsx:87` | the session carries a display name and no user id the data layer uses | a server-trusted user id per request (the signed JWT's Spotify id, never client input); lane 01e | M |
+
+### 7.2 Tables with no user column
+
+| id | table | today | multi-user needs | size |
+|---|---|---|---|---|
+| D4 | `plays` (`db.ts:168-178`) | UNIQUE `(track_id, played_at)`; five indexes, none user-led | `user_id NOT NULL`; UNIQUE `(user_id, track_id, played_at)`; indexes `(user_id, played_at)`, `(user_id, track_id)`, `(user_id, context_uri)`, partials `(user_id, played_at) WHERE skipped IS NULL` and `(user_id, id) WHERE ctx_orphan IS NULL`. A table rebuild in SQLite | L |
+| D5 | `playlists` (`db.ts:184-191`) | PK `id` | PK `(user_id, id)`; `position` is per user by nature | L |
+| D6 | `playlist_tracks` (`db.ts:192-204`) | PK `(playlist_id, position)` | PK `(user_id, playlist_id, position)`, index `(user_id, track_id)` (§8.2 weighs a shared cache) | L |
+| D7 | `saved_tracks` (`db.ts:205-209`) | PK `track_id` | PK `(user_id, track_id)` | M |
+| D8 | `contexts` (`db.ts:176`) | PK `uri`; one negative cache for everyone | PK `(user_id, uri)` | M |
+| D9 | `meta` (`db.ts:183`) | one key space | global `meta` for the two global kinds; `user_meta (user_id, key, value, PK (user_id, key))` for the rest (§8.3) | L |
+| D10 | `tracks` (`db.ts:159-167`) | one catalog | stays shared (§8.2); the cost is the cross-user staleness in §5 "Invalidation across users", bounded at a day | — |
+| D11 | `api_log`, `client_metrics` (`db.ts:210-242`) | no user | nullable `user_id` | S |
+
+### 7.3 Statements with no user scope
+
+| id | where | effect with two users, unchanged | needs | size |
+|---|---|---|---|---|
+| D12 | `storePlaylists` rewrite tier, `db.ts:1848-1883` | **leak, data loss**: `DELETE FROM playlists` and the two purges remove every other user's playlists, cached members and snapshot keys on each of one user's list changes | every statement `WHERE user_id = ?` | M |
+| D13 | `deletePlaylistFromDb` `db.ts:2188-2205`; `removeCachedPlaylistTrack` `db.ts:2151-2184`; `upsertStoredPlaylist` `db.ts:2009-2028` | **leak, data loss**: act on a playlist id across users | scope by user | S each |
+| D14 | `getPlaylistTracks` 2120, `getPlaylistTrackOrder` 2137, `getStoredPlaylist` 1994, `getPlaylistSnapshot` 2115; `playlists/[id]/page.tsx:42-46` reads by id with no ownership check | **leak**: any signed-in user reads any cached playlist by id, including another user's private one | scope by user | S each |
+| D15 | `findTrackWithPlaylists` playlist half, `db.ts:2467-2473` | **leak**: names other users' playlists in the track menu | join the user's playlists | S |
+| D16 | whole-table reads: `readLibraryIndex` 1625, `readHistoryIndex` 1686, `readAllTimePlays` 996, `readStoredPlaylists` 1916, `getLibraryTracks` 2286, `recomputeUniqueSongCount` 1969, `searchHistory` 884, `playedTracksInContext` 2405, `unresolvedContextUris` 646, `storeSavedTracks`' read 2214 | **leak**: everyone's rows in one user's payload, list or count | `WHERE user_id = ?` with a user-led index; `recomputeUniqueSongCount` rewritten to drive from the user's members, since its current plan walks the whole catalog | M |
+| D17 | `recordPlays` dedupe read, `db.ts:484-496` | **wrong**: another user's play of the same track at the same instant marks this user's play as existing, and the insert is skipped | scope the read and the UNIQUE (D4) | S |
+| D18 | gap chains: `recomputeSkipFlags` 780-822, the successor reset 549-557, `orderedRealPlays` 854-869, `readDailyStats` 1092-1148, `checkPlayedAtConvention` 1044-1065, and `scripts/import-tail.mjs` | **wrong**: each play's listened time and skip verdict come from the previous play in time across ALL plays, so interleaved users corrupt each other's verdicts and totals; the verdicts are then stored | every chain per user | M |
+| D19 | orphan predicate `db.ts:700-709` and `recomputeOrphanFlags` 724-751 | **wrong**: a play is judged against any user's cached copy of the playlist; the `{playlistId}` scope rewrites every user's plays from it | predicate within the play's user; scopes carry the user | M |
+
+### 7.4 Global keys and markers
+
+| id | where | assumption | multi-user needs | size |
+|---|---|---|---|---|
+| D20 | token row `db.ts:2504-2531`; refresh lock `auth.ts:212`; logout's clear `actions.ts:67` | one token chain; signing out clears THE row | per-user token rows (encrypted, lane 01e), per-user lock names, logout clears only the caller's row | M |
+| D21 | markers `write_seq`, `library_seq`, `slow_seq_pub` (`db.ts:345-416`, `1550-1596`) | one content version for the whole store | per user. With a global marker every user's play moves every user's cache keys and payload ETags: at 25 users like the owner (~2,900 plays a day) the slow marker would republish every 10 min all day and every user's history payload would rebuild up to 144 times a day | M |
+| D22 | `spotify_cooldown_until` `db.ts:2376-2392`, honoured at `sync/history.ts:34`, `playlists-sync.ts:35`, `home/page.tsx:81` | one ban for everything | stays global for app-wide 429s (Spotify's rolling limit is per app; lane 01f to confirm). An endpoint quota that turns out to be per user (recently-played's daily quota was only ever observed with one user, `db.ts:2653-2664`) would need a per-user key, or one user's ban stops everyone's sync | S |
+| D23 | the per-user stamps and payloads of §3 (harvest gate, sync stamps, Liked signals, `home_payload`, `alltime_*`, `unique_song_count`, `plsnap:*`, `contexts_full_check_at`, `user_tz_offset`, `last_sync`) | one user's state | `user_meta` rows | M |
+| D24 | `HOME_TZ = "America/New_York"` `db.ts:1270`; `user_tz_offset` written by every `POST /api/sync` (`api/sync/route.ts:24-27`) before its debounce | one time zone; the last browser to post wins | per-user offset and a per-user home zone; with two users in different zones each post would re-bucket the other's Home payload | S |
+| D25 | negative context cache `db.ts:606-609`, `api/now-playing/route.ts:47-55` | a 403 is a 403 for everyone | per-user `contexts` (D8): one user's 403 (a private playlist, an account outside the allowlist) must not hide the name from the owner for 30 days | S with D8 |
+
+### 7.5 Caches and process state
+
+| id | where | multi-user needs | size |
+|---|---|---|---|
+| D26 | seven `unstable_cache` entries (§5 table) | the user id as an explicit argument of each | M |
+| D27 | ETags `api/search/library/route.ts:39`, `api/search/history/route.ts:26` | a user component (keyed hash) | S |
+| D28 | `seqBox` `db.ts:402`, `orderedRealPlays` `db.ts:854`, `uniqueRecomputeKickedAt` `db.ts:1960`, `storeSizeMemo` `db.ts:2887` | keyed by user | S each |
+| D29 | `tests/stubs/next-cache.ts` passthrough | a keyed stub so isolation tests can see a cross-user cache hit | S |
+
+### 7.6 Telemetry
+
+| id | where | multi-user needs | size |
+|---|---|---|---|
+| D30 | `/usage` (`usage/page.tsx:245-255`) renders `api_log`, the ledger, `client_metrics` (song names in `handoff` rows, error text) and Turso's org usage | admin only; account deletion must reach `client_metrics` and any user-tagged `api_log` rows | S |
+| D31 | `api_log` has `source` but no user | nullable user column, so a 429 or a quota ban is attributable to a user's sync | S |
+| D32 | `api_log` retention not enforced (§6) | the daily route (STORE_MIGRATION phase A item 7) before N users multiply ~2,000 rows a day each | S |
+
+### 7.7 Scripts, ops, migration
+
+| id | where | assumption | multi-user needs | size |
+|---|---|---|---|---|
+| D33 | `scripts/backfill-from-backstop.mjs`, `import-extended-history.mjs`, `import-tail.mjs`, `backfill-scan.mjs`, `migrate-skip-rule.mjs` | they write `plays`, re-open verdicts, bump the global `write_seq` and drop the global `home_payload` | a required `--user`; every statement scoped; per-user chains (D18) | M |
+| D34 | `scripts/verify-derived.mjs`, `scripts/bench-reads.mjs` | whole-table reads | per-user mode | S |
+| D35 | backstop recorder (`~/lazyboy-recorder`, own token chain), `backup.py` | one account | the replay targets the owner's user id; whether the recorder covers other users is a product and security call (it would hold their refresh tokens on the Zenbook); lanes 01c and 01e | M |
+| D36 | the meter's core fence (STORE_MIGRATION phase A item 8) | a fixed list of core tables | new tables (`user_meta`, a users table, token rows) classified as core | S |
+| D37 | `init()` `db.ts:153-297` | schema changes are additive and idempotent, run by any cold instance | a versioned one-shot migration run with writers fenced (§8.6) | M |
+| D38 | dev servers on `.env.local` write the production store (GOTCHAS) | the developer is the owner | a dev server signed in as anyone writes that user's production rows; STORE_MIGRATION step 15 re-points `.env.local` at production again | S |
+
 ## 8. What the data model needs for multi-user
 
 ## 9. How the data scales with N users
