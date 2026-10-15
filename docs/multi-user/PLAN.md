@@ -2985,3 +2985,42 @@ quotes them; the other columns use §18's.
 | §2 R6 binds the cutover only; a restore brings back no token | Fixed | §10.2, §12.4 |
 
 ## 20. What the revision ran
+
+Lane 0225_lb_mu_revise, on the Mac, Oct 15, in two sessions. The first ran from 12:14 AM until its
+seat's usage ran out at 12:49 AM (`~/.claude/broke/scratch/lazyboy_mu/mu_dispatch.log`) and revised
+§0, §1, §3-§14, §19 and most of §2.3. The second ran from 12:49 AM to about 1:15 AM: it committed the
+rest of §2.3, rewrote §15, §16 and §18, added §13.4's rule for building ahead of a phase and two
+disposition rows, made the corrections listed below, and wrote this section.
+
+Nothing ran against the production store, the Zenbook, Turso, Vercel or Spotify. No number in the
+revision is a new measurement: each is quoted from the four reviews with their attribution, or is
+arithmetic on numbers already in the plan, marked [estimate]. Nothing was written except this file and
+scratch files in `~/.claude/broke/scratch/lazyboy_mu/0225_revise/` (section drafts, text-replacement
+helpers and the checker below), deleted at the end.
+
+The second session ran:
+
+- Read in full: the four reviews, this plan, `docs/STORE_MIGRATION.md`, `docs/GOTCHAS.md` and the
+  project's `CLAUDE.md`; 01b §6 (E1-E5) for decision 1.
+- `git diff --stat ac6f7fe HEAD -- src scripts ops tests vercel.json next.config.ts package.json`:
+  empty at `fbe0c30` and at `c6c9c07`, so the code line numbers still hold.
+- `git rev-list --count origin/main..main` (238), `git reflog show origin/main` (pushes at 7:05 AM on
+  Oct 13 and 14) and `git log origin/main -- docs/multi-user` (empty) for decision 1; `git log -1` of
+  `1ac38fa` and `afb21d1`, and `git show HEAD:.claude/QUEUE.md` beside the working copy's lines 16-17,
+  for the replay's citations.
+- A citation check: a script opened 90 of the plan's code and doc citations at their cited lines and
+  looked for the text the plan attributes to each. 74 matched on a keyword. The other 16 were printed
+  and read, and all hold: the code names a helper (`writeSeqStmt()`, `bumpWriteSeq()`, `liveKey()`,
+  `getMeId()`, `getLikedSignals()`) or a variable where the check looked for a literal.
+- §8.6's columns re-summed against scale §3's re-sum of the Oct 14 table plus the two rows the
+  revision added (the open tab, the daily heal).
+
+What the check changed: §8.6's totals (today ~19.1M and ~20.1M, not ~19.2M and ~20.2M; Rem after P3
+and P4 ~1.53M and ~0.39M, not ~1.52M and ~0.38M) and the cells of §14.3-14.4 that follow from them;
+§0's "claims users one at a time", which §7.2's single claim contradicts; the dropped foreign-play
+decision named by its Oct 14 number, since today's decision 10 is the five-account cap; "undeletable"
+in §12.3, which read as its opposite; the replay's "166 inserted" sourced to an uncommitted queue line
+as well as to the commit. Two gaps found on the way, neither in a review, are closed where they live:
+a status write is a compare-and-set, so a returning sign-in and the deletion job cannot both win
+(§4.2), and §5.4's 10-minute confirmation refresh names who makes it, since the claim never leases a
+`needs_reconnect` user (§5.4).
