@@ -401,6 +401,154 @@ storage does not bind (01f §4.4).
 
 ## 5. Identity, sessions and per-user tokens encrypted at rest
 
+Today nothing on the server can say which Spotify account a session belongs to: Auth.js mints a
+random `sub` at every sign-in and the app stores no id on the token (01b §1.1, 01e §1.3-1.4), every
+request reads one global token row, and the owner guard runs only at sign-in (`src/lib/auth.ts:344-347`).
+01e §5 designed the replacement; all three designs adopt it, and so does this plan, with the uid of
+§4.4 as the session claim.
+
+### 5.1 The session names its user
+
+- **Sign-in** (`signIn` callback). The profile comes from `/v1/me` with `cache: "no-store"` (A §2.5:
+  the one fetch whose cached answer would bind one person's sign-in to another's account). Then, in
+  order: a 403 "not registered" goes to `/login?error=SpotifyNotRegistered` as today; a profile with
+  no `account_id` is refused and logged, never keyed on `id` instead (01e §5.5); a `users` row with
+  that `account_id` signs in if `active` or `needs_reconnect` (refreshing `spotify_id` if it
+  changed) and is refused if `disabled` or `deleting`; otherwise the sign-in must claim an invite,
+  which needs the terms cookie of §12.1:
+  ```sql
+  UPDATE users SET account_id = :aid, status = 'active', claimed_at = :now, last_sign_in = :now,
+         terms_version = :tv, terms_accepted_at = :now
+  WHERE status = 'invited' AND spotify_id = :sid AND account_id IS NULL
+  RETURNING uid
+  ```
+  One row back signs in as that uid; none is AccessDenied, worded "this app is invite-only".
+  `SIGNUPS=owner` refuses everyone but the admin row whatever the rows say: Phases 1-3 run with it,
+  and it is Phase 4's one-variable way back (C §4.1). `userinfo.ts` today maps every non-2xx from
+  `/v1/me` to "not registered" (`src/lib/spotify/userinfo.ts:33-36`), so a passing 429 would tell an
+  invited friend they are not allowed; it narrows to a 403 (C §10.1).
+- **The jwt callback's sign-in branch** writes the encrypted token row for that uid with
+  `granted_at = now`, and puts `uid` and `ep` (the session epoch) on the cookie from the `users` row,
+  never from the incoming cookie or the profile alone, which is what keeps session fixation out
+  (01e §5.6). The two paths that park Spotify tokens inside the cookie when the store write fails
+  (`auth.ts:367-374`, `388-405`) go: a token in a cookie is bound to no user row and invisible to the
+  cron, so a sign-in that cannot write its row fails visibly and is retried (01e A18).
+- **Every later request** reads identity, token, capture health and the cooldown in one app-database
+  statement, through a React `cache()` box keyed by uid (it replaces `tokenBox`, `auth.ts:73-83`):
+  ```sql
+  SELECT u.status, u.session_epoch, u.is_admin, u.db_name,
+         t.blob, t.expires_at, s.state, s.last_ok_at, s.last_harvest_at,
+         (SELECT value FROM app_meta WHERE key = 'cooldown:recently-played') AS rp_cooldown
+  FROM users u
+  LEFT JOIN user_tokens t ON t.uid = u.uid
+  LEFT JOIN sync_state  s ON s.uid = u.uid
+  WHERE u.uid = :uid
+  ```
+  Primary-key probes only, ~4 rows read [estimate]. The callback returns `null`, which signs the
+  request out, when the cookie has no `uid` (every cookie minted before Phase 1, which closes 01e F1
+  for good), the uid is unknown, the status is not `active` or `needs_reconnect`, or `ep` is not
+  `session_epoch`. One round trip, as today's token read is (01e §5.1), and it also carries what
+  Home's chrome reads separately today (B §5).
+- **`requireUser()`** (server-only) wraps `auth()` and returns the branded uid with `{ admin,
+  canCallSpotify }`, or refuses: a redirect for a page, a 401 for a route, `{ ok: false }` for an
+  action (01b S2). It is the only source of a uid for an entry point, and it merges the three gate
+  strengths 01b §2.4 found into one rule.
+- **The browser** gets the uid rendered into the page by the `(app)` layout, for its storage keys
+  (§6.5). Nothing new goes on the `Session` type, whose fields Auth.js serves at
+  `GET /api/auth/session` (docs/SECURITY.md "Tokens never reach the browser").
+- **Home's gate runs before its reads**: the payload read needs the uid, so Home pays one sequential
+  round trip it does not pay today (~15 ms at R1's target, I$). Decoding the cookie separately to
+  start the read in parallel (B §5, 01b S2) is held in reserve for a badly missed R1; it is a second
+  way to mint a user handle, and 15 ms is under 1% of S2's budget.
+
+### 5.2 Tokens per user
+
+The token core (`refreshAccessToken`, `coordinatedRefresh`, `waitForFreshToken`, `clearTokensIfStale`,
+`getValidAccessToken`, the in-flight map) leaves `auth.ts` for a module with no `next-auth` import,
+so the simulated environment can run it; today no test can load `auth.ts` (01e §2.7, A21).
+
+| today | plan | why |
+|---|---|---|
+| `inflightRefresh`, one promise per instance (`auth.ts:188-196`) | `Map<Uid, Promise<Tokens>>` | shared, user B's concurrent refresh joins user A's and receives A's tokens: the one change in the census that leaks silently (01e A2) |
+| `acquireLock("spotify_refresh")` (`auth.ts:212`) | `lock:spotify_refresh:<uid>` in `app_meta` | a shared lease makes B wait up to ~32 s for a token nobody is refreshing (01e A4) |
+| `get/set/clearSpotifyTokens()` on `meta` (`db.ts:2514-2531`) | `getTokens(uid)`, `setTokens(uid, t)`, `clearTokens(uid)` on `user_tokens` | 01e A1, A5 |
+| `getValidAccessToken()`, `refreshingToken()`, the library task's getter (`auth.ts:278-289`, `actions.ts:46-57`, `playlists-sync.ts:61-65`) | each takes the uid; a background task binds it at creation | 01e A16 |
+| `clearTokensIfStale` (`auth.ts:170-181`) | the same rule within one user's row | the fresh-token veto carries over unchanged (01e §2.5) |
+| a decrypted token is a bare object | `{ uid, accessToken, refreshToken, expiresAt }`; `setTokens` asserts `t.uid === uid`; the Spotify client asserts the token's uid is the caller's and tags every call with it in `api_log` | a future refactor that shares a promise or cache across users fails an assertion on the first mixed call instead of acting on someone else's account (A §2.5); one compare per call |
+
+Six known answers come first (01e §5.2): two users refreshing concurrently in one process each end
+with their own token, one token-endpoint call each; A holding the lock does not delay B;
+`invalid_grant` for A clears A's row only; A's ciphertext in B's row fails to decrypt; a cookie with
+no uid, an unknown uid, a disabled user or a stale epoch yields no session; no row means no Spotify
+call. Write load: about 24 refreshes per active user a day, each a lock acquire, a row write and a
+release, ~72 rows per user a day [estimate, 01e §5.2].
+
+### 5.3 Encryption at rest
+
+01e §5.3's scheme, adopted as written by all three designs:
+
+- AES-256-GCM from `node:crypto`, a random 12-byte IV per write, stored as
+  `v1.<base64url(iv ‖ ciphertext ‖ tag)>` where `v1` names the key; both tokens in one blob.
+- Associated data `lazyboy:tokens:v1:<uid>`: a ciphertext copied into another user's row fails to
+  authenticate, so write access to the app database without the key cannot graft a victim's grant
+  onto the attacker's account. A checked this with the scheme itself (A §17).
+- Plaintext columns: `uid`, `expires_at`, `granted_at`.
+- Keys in `TOKEN_KEYS="v2:<base64 32 bytes>,v1:<…>"`, a Vercel Secret ("write-only after saving"),
+  Production only; the first key writes, reads pick by prefix. Dev has its own key and its own app
+  database, so the production key never sits in `.env.local`. Rotation: put a new key first and
+  redeploy; active rows re-encrypt at their next refresh, about hourly; a one-off script does the
+  rest; drop the old key when no blob carries its prefix. A copy in Rem's password manager is the
+  backup; losing the key costs every user one sign-in and nothing else.
+- A blob that fails to decrypt is no token: the user goes to `needs_reconnect`, and the log line
+  carries the uid, never the blob.
+- Cost: 1.67 µs to decrypt and 2.67 µs to encrypt a 450-byte blob [measured by A on the Mac, A §17.1],
+  against a ~15 ms round trip.
+
+It protects every copy of a token outside the Vercel runtime: Turso's backups and point-in-time
+history, the nightly dumps on the Zenbook and OneDrive, scratch copies, a dev machine, a leaked store
+token. Those matter more than usual here because Spotify does not rotate this app's refresh tokens
+(unchanged across two weeks of hourly refreshes) and documents a six-month lifetime, so a copy is a
+live 13-scope credential for months (01e F2). It does not protect against code running in production,
+which holds the key, or a holder of `AUTH_SECRET`, who can drive the app as any user without seeing a
+token. Vercel KMS only signs; AWS KMS brings the AWS dependency Rem ruled out (01e §5.3).
+
+### 5.4 Sign-out, revocation and expiry
+
+- **Three actions instead of today's one** (01e §5.6; Rem's call, §18): *sign out* clears this
+  browser's cookie and its stores, and capture continues; *sign out everywhere* bumps
+  `session_epoch`; *disconnect and delete* runs the deletion job (§12.3) and tells the user to remove
+  Lazy Boy at spotify.com/account/apps, since the app cannot revoke a grant. Today's `logout` deletes
+  the only token row, which stops capture and signs out every device (`actions.ts:63-69`).
+- **Sessions stay a fixed 30 days**, never renewed (01e §1.4). Every sign-in passes Spotify's consent
+  screen (`show_dialog`, `auth.ts:322`), which restarts the six-month refresh-token clock, so an
+  active user never reaches it. The epoch is the server-side kill switch; `AUTH_SECRET` rotation is
+  the everyone-out switch.
+- **`invalid_grant`** clears that user's token row and sets `needs_reconnect`; the cron stops calling
+  Spotify for them and nobody else is touched (01e §5.7). `granted_at` tells the two causes apart:
+  under six months it was most likely revoked, and the plan treats it as a disconnect (§12.3,
+  decision in §18); at six months it expired, and the data stays. The owner is exempt from any
+  automatic deletion.
+- A 401 on a token the store believes fresh zeroes that user's `expires_at`, so the next call
+  refreshes and finds a revocation within seconds rather than within the hour (01e §5.7).
+- **A dead grant and the pages**: a `needs_reconnect` session keeps today's behaviour, the page gates
+  send it to `/login` (`auth.ts:406-409`), and the six history actions and two search routes that
+  check only for a session today move onto `requireUser()`, which applies the same rule (C §15
+  decision 20). 01b §2.4 recommends a read-only mode instead; with §12.3 deleting a friend's data on a
+  revocation, the read-only state would mostly show data that is being deleted. Rem's call (§18).
+
+### 5.5 Secrets, by environment
+
+| secret | Production | Preview | dev (`.env.local`) | what it unlocks once friends exist |
+|---|---|---|---|---|
+| `AUTH_SECRET` | rotated in Phase 0 | its own value (C M0a) | its own | minting a cookie that names any uid |
+| `TOKEN_KEYS` | Secret | none | a dev key | decrypting every grant |
+| Turso group token, read-write | Secret | none | none | every user's data (group tokens "cannot be revoked individually", B §19) |
+| Turso group token, read-only | – | – | – (Zenbook backup job) | reading every user's data |
+| `lazyboy` database token | – | – | yes, so dev reaches Rem's data only (C §8.2) | Rem's data; invalidation is group-wide, so a leak rotates all three Turso tokens |
+| `TURSO_PLATFORM_TOKEN` | runtime, used by two functions only: the deletion job's destroy and the daily usage read (§12.3) | none | yes, for the invite and migrate scripts | creating and destroying databases |
+| `CRON_SECRET` (Zenbook) and `CRON_SECRET_EXT` (cron-job.org) | both | none | the Zenbook's | running ticks; each rotates alone, and the route knows which caller may get a non-200 (§7.2) |
+| `SPOTIFY_CLIENT_SECRET` | unchanged | unchanged | unchanged | refreshing any refresh token it finds |
+
 ## 6. Isolation: enforcement in one place, and the tests that prove it
 
 ## 7. Sync fan-out inside Spotify's limits
