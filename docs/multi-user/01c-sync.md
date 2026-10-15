@@ -89,8 +89,8 @@ tables: ~8 for the `plays` row and its index entries (1,032 for 129 inserts), th
 `meta` rows when the all-time gate is open: about 15-20 rows.
 
 The all-time recompute is the largest single read the app makes, and it grows with history: its
-cost per run is ~2.3 rows per stored play (21,965 plays that day), and the 10-minute gate lets it
-run up to 144 times a day.
+cost per run is ~2.3 rows per stored play (~22,000 that day, 7,529 of them backfill rows it scans
+and skips, 01a §2), and the 10-minute gate lets it run up to 144 times a day.
 
 ### 2.3 The library rescan
 
@@ -186,6 +186,33 @@ was 8,472 (63%), `usage_ledger` 618; the core tables took ~3,000.
   (STORE_MIGRATION §3) and were not read.
 
 ## 3. Single-user assumptions on the background paths
+
+The data layer's census (01a §7, ids D1-D38) covers every unscoped table, statement and `meta` key
+these jobs touch, and 01b §3.4 / 01e §5 cover the unkeyed process state. This table is what is
+specific to running the background work, with the overlapping ids named. "Fan-out" means one
+invocation processing several users at once, the shape §5 recommends; it turns several latent
+collisions into hourly ones.
+
+| id | where | today | with several users, unchanged | needs |
+|---|---|---|---|---|
+| S1 | `/api/cron/sync` control flow, `route.ts:95-172` | one token, one gate, one harvest, one library per invocation | the route can only ever serve the account whose token is in `meta.spotify_tokens` | a loop over due users with per-user state (§5.2) |
+| S2 | the tick's statuses, `route.ts:103-111, 173-184` | 503 when the one token is gone; 500 on any non-429 error | one user's revoked token, de-allowlisting (a 403) or Spotify 5xx fails the tick for everyone and fails the pinger's unit | 200 with per-user outcomes; non-200 only when the tick itself could not run (§5.4) |
+| S3 | `getValidAccessToken()`, `auth.ts:278-289`; `inflightRefresh`, `auth.ts:188-196` | no user argument; one in-flight refresh per instance | in a fan-out, two users whose tokens expire together share one refresh promise and one gets the other's tokens (01e A2, 01b §3.4). Hourly, near certain | per-user accessor and a map of in-flight refreshes keyed by user; per-user lock name (01a D20) |
+| S4 | in-memory `cooldownUntil`, `src/lib/spotify/client.ts:48, 157, 178`; persisted `spotify_cooldown_until`, `db.ts:2376-2392` | one window for every endpoint; the 429 body is never read | a recently-played quota ban (a per-bucket event) also stops every user's player probe and library rescans; a rate-limit 429 correctly stops everyone | classify the 429 by `error.reason` (`QUOTA_EXCEEDED` vs a rate limit, §4) and key the cooldown by bucket; keep it app-wide (01a D22) |
+| S5 | harvest gate `player_last_active` / `rp_last_harvest`, `db.ts:2364-2374`; `last_sync`, `db.ts:524-528` | one account's playback state | user B's playing tick opens the gate for everyone; `/api/sync`'s 60 s debounce reads another user's stamp | per-user stamps (01a D23) |
+| S6 | `refreshHistoryAction` harvest, `history-actions.ts:133` | harvests on every call, no debounce, no gate | each user with a visible Home tab spends up to ~30 recently-played calls an hour from the shared pool (§4) | route it through the same per-user gate, or stop it calling Spotify (§5.5) |
+| S7 | `playlistsCache`, `src/lib/spotify/resources.ts:74-81` | one 60 s entry per instance, unkeyed by design | a fan-out rescanning B within 60 s of A on the same instance stores A's playlists as B's library (01b §3.4) | key by user, or drop it from the background path |
+| S8 | `currentSyncId` and the token getter, `src/lib/playlists-sync.ts:22, 50-54, 61-65` | one library task per instance, refreshing the one global token | B's kick returns A's task; B's scan would run on A's token (01e A17) | keyed by user, getter bound to the user |
+| S9 | `storePlaylists` rewrite, `db.ts:1848-1883` | delete-all and purge on the one library | one user's list change deletes every other user's playlists and cached members (01a D12) | per-user rows; purge shared rows only when no user lists them |
+| S10 | gap chains in `recomputeSkipFlags`, the successor reset, `orderedRealPlays`, `readDailyStats` | the predecessor is the previous play in the whole table | another user's play becomes the predecessor: wrong skip verdicts and listened time, no error anywhere (01a D18) | every chain within one user |
+| S11 | `recordPlays` dedupe and UNIQUE `(track_id, played_at)`, `db.ts:174, 484-516` | key without a user | two users in a Spotify Jam can end the same track in the same millisecond; the second user's play is silently ignored (01a D4, D17) | `(user_id, track_id, played_at)` |
+| S12 | negative context cache, `src/lib/sync/history.ts:67-85`, `db.ts:586-638` | a 403 is cached for everyone | B's 403 on A's private playlist hides its name from A's own syncs, because `unseenContexts` then treats it as seen, until the 30-day recheck (01a D8, D25) | positive names shared, negative rows per user |
+| S13 | maybeSyncLibrary inside the tick, `route.ts:171` | the one library rides the harvest tick | a new user's first full scan (hundreds of playlist pages at 150 ms pacing) sits inside a tick other users are waiting on | rescans outside the harvest deadline, one user per tick, resumable (they already commit per playlist) |
+| S14 | the daily block, `route.ts:71-91` (dead today, QUEUE.md C2) | global heal, payload rebuild, convention check | heals one user's totals, rebuilds one payload; `checkPlayedAtConvention` (`db.ts:1044-1065`) chains several users' plays and can report a false inversion | per-user loop in STORE_MIGRATION's `/api/cron/daily` (§6) |
+| S15 | capture health, `db.ts:1738-1741`, `src/lib/capture-health.ts:17-26` | one `last_sync`, one token presence; the banner tells the reader to "check the Zenbook pinger" | every user sees the owner's capture state | per-user state from the due queue (§5.2); the pinger hint for the owner only |
+| S16 | the recorder, `~/lazyboy-recorder/recorder.py` | one token chain (shared with `spotify_tokens_dev`, review L1), no user column | covers the owner only; covering others means their refresh tokens in a plain file on the Zenbook and 96 calls a day each (01a D35, §5.7) | owner-only, or retired in favour of a dual-write (§5.7) |
+| S17 | the scripts, `scripts/` | write `plays` and re-open verdicts with no user; `backfill-from-backstop.mjs:73-76` reads every play to build its existing set | a replay inserts the owner's plays with no owner and re-opens other users' verdicts (01a D33, D34) | a required `--user`, every statement scoped |
+| S18 | the owner guard, `src/lib/owner.ts:11-14`, `src/lib/auth.ts:344-347` | refuses every account but `SPOTIFY_OWNER_ID` | the one thing keeping S1-S17 harmless today | removed last, after everything above ships |
 
 ## 4. Spotify's limits, which bound N
 
