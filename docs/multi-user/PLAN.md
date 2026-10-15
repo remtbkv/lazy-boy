@@ -11,7 +11,7 @@ ac6f7fe HEAD -- src scripts ops tests vercel.json next.config.ts package.json` i
 Every number is **[measured]** with its source or **[estimate]** with its arithmetic. §17 lists what
 the first lane ran, §20 what the revision ran.
 
-Status: complete, Oct 15, 2026, 1:10 AM. Every section is revised; §19 accounts for every finding.
+Status: complete, Oct 15, 2026, 1:05 AM. Every section is revised; §19 accounts for every finding.
 
 ## 0. For Rem: the plan on one screen
 
@@ -2989,7 +2989,7 @@ quotes them; the other columns use §18's.
 
 Lane 0225_lb_mu_revise, on the Mac, Oct 15, in two sessions. The first ran from 12:14 AM until its
 seat's usage ran out at 12:49 AM (`~/.claude/broke/scratch/lazyboy_mu/mu_dispatch.log`) and revised
-§0, §1, §3-§14, §19 and most of §2.3. The second ran from 12:49 AM to 1:10 AM: it committed the
+§0, §1, §3-§14, §19 and most of §2.3. The second ran from 12:49 AM to 1:05 AM: it committed the
 rest of §2.3, rewrote §15, §16 and §18, added §13.4's rule for building ahead of a phase and two
 disposition rows, made the corrections listed below, and wrote this section.
 
