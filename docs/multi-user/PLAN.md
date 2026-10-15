@@ -944,6 +944,162 @@ harvest records the lag of the plays it lands (`now − played_at`); the daily r
 
 ## 8. Store cost: the write path and the read levers
 
+A database per user changes no user's read cost: each pays what Rem pays today for a history of the
+same size (C §7.1), and the rows read are counted once for the whole Turso organization. Turso's free
+plan blocks every query for every user when a month's reads pass 500M (01f §4.2), so the per-user
+cost is what decides whether five users fit. This section is the single-user performance track (P1-P4
+in §13); every lever in it pays off for Rem alone.
+
+### 8.1 Where one user's reads go today
+
+Rem's Oct 14, from the store meter's per-statement log (01c §2.2-2.8), with the orphan passes in
+Turso's terms (the meter counts an `UPDATE`'s correlated subqueries at ~1/40 of what Turso billed for
+the same work, 01c §2.8):
+
+| term | trigger | rows per run | that day |
+|---|---|---|---|
+| all-time recompute: `orderedRealPlays`, a full ordered `plays` scan with a `tracks` probe per row (`db.ts:854-869`) | after a landed harvest, at most every 10 minutes (`db.ts:577-583`), app open or not | ~51,000, growing ~2.3 rows per stored play | 2.24M, 44 runs (53% of the meter's 4.25M) |
+| Home payload rebuild: the 16-day strip and the opening day (`db.ts:1315-1343`) | every landed harvest | ~7,500 | 0.95M, 127 runs |
+| unscoped orphan pass (`db.ts:724-751`) | the library's playlist id set moved | ~5.1M on Turso's terms | 3 runs: ~15M on Turso's terms (0.39M as the meter counted) |
+| unique-song count (`db.ts:1969-1991`) | a library sync that changed anything | ~39,000 | 0.16M, 4 runs |
+| history payload rebuild (`db.ts:1686-1730`) | a browser fetch after the slow marker moved | ~79,000 | 1 run; up to ~11M on a day Home stays open (01c §6 item 1) |
+| whole-history strip, `dailyStatsAction(100000)` on every Home mount (`den-home.tsx:374-384`), re-read after any landed play | Home mounts after listening | ~43,500 [estimate, B §3] | ~0 that day |
+| ticks and harvests that land nothing | 591 a day | ~3 and ~215 | ~0.06M |
+
+STORE_MIGRATION §3 attributes the ~50,500-row daily scan to the history payload; it is the all-time
+recompute (01c §2.2 separated the two by their logged SQL prefixes, and 01a §11.2 and 01d §2.2 reached
+the same reading). The difference matters for which lever comes next: phase E's browser cache does not
+touch the all-time recompute, which runs whenever plays land, app open or not, and grows ~12,000 rows
+a day for every day of history (01c §5.9).
+
+### 8.2 P1: the "From" verdict starts from the song (inside lanes 1910-1911)
+
+The stored verdict `plays.ctx_orphan` asks whether a play's song is among the members of the playlist
+it was played from. Today's predicate (`ORPHAN_PREDICATE`, `db.ts:700-709`) answers by walking that
+playlist's members and probing `tracks` for each, so it costs about twice the playlist's size for every
+play it judges (B §10.1). The rewrite starts from the play's own `tracks` row, finds the tracks that
+share its identity through `idx_tracks_artist_name`, then their memberships through
+`idx_pltracks_track`, filtered to the playlist; `CROSS JOIN` pins that loop order, because SQLite's
+planner otherwise picks the member walk. No column, index or migration is added.
+
+This lane re-ran B's two scripts on the Mac's Aug 11 copy (`data/replica.db`, opened `immutable=1`;
+§17) [measured]:
+
+- both predicates give the same verdict on all 7,572 plays: 764 orphans each, 0 differ;
+- the rewrite's plan is `SEARCH me USING INDEX sqlite_autoindex_tracks_1 (id=?)`, `SEARCH tm USING
+  INDEX idx_tracks_artist_name`, `SEARCH plm USING INDEX idx_pltracks_track (track_id=?)`;
+- over the 6,801 plays from a cached playlist, today's form walks 411.3 rows per play on average (max
+  2,256); the rewrite matches 2.7 (max 7).
+
+[estimate] A landed play's verdict goes from ~130 rows to ~5-10 as Turso counts index and table
+visits; a full pass at today's 22,040 plays from ~5.1M to ~0.1-0.2M; and a pass scoped to one busy
+playlist (300 members, 3,000 plays from it) from ~900,000 to ~15,000-30,000. Lanes 1910-1911 scope
+the pass to the playlists that changed; with today's predicate a scoped pass on a busy playlist still
+costs plays × members, and the meter would hide it (01c §2.8). Shipping the rewrite with the scoping
+makes both cheap. Before it ships, lane 1910 re-runs the equality check on a current backup copy
+(the Aug 11 copy predates the catalog backfill and two months of plays) and pins it with a
+known-answer test; one pass of each form on the Turso copy, read off Turso's usage before and after,
+settles the real counts (01c §8).
+
+### 8.3 P2: listened time stored per play, and the all-time totals as an accumulator
+
+- **`plays.listened_ms`** is written beside `skipped`. Both come from the same gap: `isSkip` and
+  `listenedMs` take the previous play's `played_at`, this play's, and the duration
+  (`src/lib/skip-rule.ts:33-46`). For a tail append, the common case, the predecessor is the newest
+  stored play, one indexed read in the harvest's read batch, so both values are computed in JS and
+  written with the insert (B §8.1). That also retires the post-insert `recomputeSkipFlags` round
+  trips for tail appends.
+- **The accumulator** is `allTimeStats` (`skip-rule.ts:58-74`) applied one play at a time: for a
+  counted play (real, not skipped), `plays + 1`, `durationMs + listened_ms`, `since` kept, and
+  `uniqueTracks + 1` when no earlier counted play of that track id exists (an `EXISTS` on
+  `idx_plays_track`). It equals the chain walk because `listened_ms` is the value the walk computes.
+- **Non-append events keep today's path.** An out-of-order insert (the backstop replay, an import, a
+  late play inside the 50-play window) re-opens its successor and rules it from its predecessor
+  (`db.ts:547-561`), now rewriting its `listened_ms` too, and sets `alltime_dirty`; a duration change
+  on a played track (`sync/library.ts:94-101`) re-rules that track's plays and their successors
+  through `idx_plays_track`. A dirty flag makes the next tick recompute the totals from the stored
+  columns: one scan of that user's plays, without the `tracks` probes, only on those events.
+- **One-time fill on Rem's database**: one chain walk in JS with the same pure function (~45,000 rows
+  read, ~14,500 written [estimate, B §8.1]), verified by `SUM(listened_ms)` over counted plays equal
+  to `alltime_stats.durationMs` on the same snapshot, and by `scripts/verify-derived.mjs` extended
+  with a `listened_ms` check.
+- **Effect**: 2.24M rows on Oct 14 become a few thousand a day, and the only read that grew every day
+  stops growing (D2). The all-time card also stops lagging a listening session by up to 10 minutes.
+
+P2 comes before the history segments (P3) so the segment tuple can carry each play's listened
+seconds from its first version (§9.1), which is what lets P4 move the whole-history strip into the
+browser without a second shape change.
+
+### 8.4 P4: the Home payload patched in place, and three smaller terms
+
+Before the second friend (§13), or earlier if Turso's per-database usage at the first friend's month
+says so:
+
+- **The Home payload** is patched from the harvest in hand instead of rebuilt (B §8.2). The harvest's
+  read batch includes the `home_payload` row; JS applies the new plays to that day's entry in the
+  strip (plays, `durationMs` from `listened_ms`, the unique count from the opening day's rows), to the
+  opening day's song rows, and to the all-time totals from the accumulator; a new local day starts a
+  fresh opening day. Everything else falls back to today's rebuild: a play landing on a day other
+  than the opening day, an out-of-order insert, a time-zone or shape change, and any derived-column
+  event that touches a play in the payload's 16 days (a context name resolving, an orphan flip), which
+  marks the payload dirty. Today the rebuild after every landed play is what heals those two derived
+  columns; a patched payload needs the explicit mark or a stale "From" could sit in it for days.
+  ~7,500 rows read per landed play become ~1, and a landed tick's ~30 round trips become ~3.
+- **The whole-history strip** is built in the browser from the segments, which carry each play's
+  listened seconds (B §9.3), replacing the `dailyStatsAction(100000)` prefetch on every Home mount;
+  the server path stays as the fallback before the segments land.
+- **The daily contexts pass** scans the `contexts` table for negative rows due a recheck (114 rows for
+  Rem) instead of a full `plays` scan (`unresolvedContextUris`, `db.ts:646-667`); never-seen contexts
+  already arrive through the per-batch check (`unseenContexts`, `db.ts:619-638`), and the import
+  scripts register their own (B §8.5).
+- **One write-marker bump per landed batch**, where a landed tick bumps two or three times today
+  (`db.ts:522, 749, 819`).
+
+### 8.5 Left for later, each with the measurement that would bring it in
+
+B goes further, and its levers are sound; five users do not need them yet, and each adds write-path
+code with its own drift risk.
+
+| lever | B § | brings it in |
+|---|---|---|
+| history segments materialized in the user database and appended on write, instead of rebuilt on demand | §8.3 | the hot month's rebuilds showing up in Turso's per-database usage, or S2 missing on a cache miss |
+| the library body patched per changed playlist, the unique count kept in the same pass | §8.4 | a user's library past ~12,000 songs (01d O7), or library rebuilds in the usage |
+| a harvest that brings nothing new reading zero rows, by diffing against the previous batch's keys | §7.4 | the brake tripping often enough that steady harvests matter |
+| an incremental nightly backup | §10.3 | more users than Spotify allows; not at five |
+| the all-time list built in the browser and grouped by song identity | §9.3 | a product decision: relinked songs would show once instead of twice |
+
+### 8.6 What it adds up to
+
+Rows read on a heavy day (§1's definition) per user, Turso's terms, after each step. The terms that
+move are §8.1's; "search" is the payload rebuilds a Home visit triggers after listening (~72,000 rows
+today: the history body at ~3 rows per play plus the library on half of visits, 01d §2.2, §4.2;
+~13,000 with segments: the current month to date plus the library half). Every figure is an
+[estimate] built from the measured per-run costs above.
+
+| term | today | P1 | P2 | P3 | P4 |
+|---|---|---|---|---|---|
+| all-time recompute | 2.24M | 2.24M | ~0.005M | ~0.005M | ~0.005M |
+| Home payload | 0.95M | 0.95M | 0.95M | 0.95M | ~0.03M |
+| orphan verdicts: new plays + library changes | 0.017M + 15.3M | ~0.001M + ≤ 0.05M | same | same | same |
+| unique-song count | 0.16M | 0.16M | 0.16M | 0.16M | ~0.12M |
+| ticks, harvests, rescans, identity, claims | ~0.08M | ~0.08M | ~0.08M | ~0.08M | ~0.08M |
+| daily contexts pass | 0.04M | 0.04M | 0.04M | 0.04M | ~0 |
+| nightly backup dump (with §10.2's count-check edit) | 0.05M | 0.05M | 0.05M | 0.05M | 0.05M |
+| search, 2 visits (Rem) / 8 visits (an app-heavy user) | 0.14M / 0.58M | same | same | 0.03M / 0.10M | same |
+| whole-history strip, 2 / 8 mounts | 0.09M / 0.35M | same | same | same | 0 |
+| **total, Rem (2 visits)** | **~19.1M** | **~3.8M** | **~1.57M** | **~1.45M** | **~0.36M** |
+| **total, an app-heavy Rem-like user (8 visits)** | **~19.8M** | **~4.5M** | **~2.26M** | **~1.79M** | **~0.44M** |
+
+Against D1 (≤ 1.5M a heavy day): Rem meets it after P3 and with room after P4; an app-heavy Rem-like
+user needs P4. Against R4 at five users (≤ 250M a month): after P3, Rem plus four light friends is
+~92M (18% of the free plan) and Rem plus four app-heavy Rem-like friends a year in is ~258M (52%, at
+the bar); after P4 the second is ~64M (13%). Friends start with no history and no catalog rows, so a
+year in is where they arrive, not where they begin. §14.4 has the arithmetic.
+
+Writes: ~3,000 core rows a day for Rem (01c §2.7), plus ~72 for tokens, ~900-1,440 for claims and
+releases (two rows per probe, 450-720 probes a day), and ~150 counter increments: ~4,100-4,700 a day,
+inside D3's 5,000 [estimate]. Five users: ~0.63M a month, 6% of the free plan's 10M, inside R4's 10%.
+`api_log`, ~1,000 Spotify calls a user a day after Phase 3, stays on the Zenbook.
 ## 9. Search: per-user payloads, caching and the phone budget
 
 ## 10. The store, and STORE_MIGRATION (lanes 1901-1911)
