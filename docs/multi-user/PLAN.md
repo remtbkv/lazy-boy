@@ -1193,6 +1193,79 @@ segments: a five-year import is a ~4.2 MB history body today, over the item limi
 Vercel's 4.5 MB response cap (01d §3.3, §7 decision 2).
 ## 10. The store, and STORE_MIGRATION (lanes 1901-1911)
 
+### 10.1 The store
+
+Turso, one database per user plus `lazyboy-app`, all in group `default` in `aws-us-east-1`, the region
+of Vercel's iad1, which is where STORE_MIGRATION puts Rem's data (its §4-5). One group token reaches
+every database in the group (`turso group tokens create`, quoted in A §2.1 and C §8.1), so the runtime
+holds one store secret, as today. The alternatives:
+
+- **One Turso database with a `user_id` column**: the model 01a §8.2-8.6 specifies in full, which leaves
+  isolation to more than fifty statements (§4.1).
+- **Postgres with row-level security**: isolation in the database, at the price of rewriting
+  `db.ts`'s SQLite dialect (3,212 lines: `INSERT OR IGNORE`, `date(played_at, '±N minutes')`, partial
+  indexes) and abandoning STORE_MIGRATION the day after it runs (A §2.1).
+- **sqld namespaces on the Zenbook**: every user path stays on the laptop the migration exists to take
+  them off (STORE_MIGRATION §1, R2), and namespace routing through the Funnel is untried (C §8.1).
+- **A small VPS**: a machine to patch and back up for about the price of Turso's Developer plan;
+  STORE_MIGRATION §4 rejected AWS hosting on cost.
+
+One risk to note: Turso's pricing page carried a banner on Oct 14, "Turso is joining Supabase to give
+every agent its own database" (A §8.1). Plans and prices may change. Each user's data is a plain
+SQLite database that the nightly backup already dumps to a file, so a move to another libSQL or SQLite
+host is a copy and a URL change per user.
+
+### 10.2 What multi-user needs from STORE_MIGRATION, and what should change before it runs
+
+**None of lanes 1901-1911 should wait.** The cutover moves today's single-user schema to Turso as it
+is and flips the env under code that expects it, with "flip the env back" as its rollback (STORE_MIGRATION
+§8). The database it creates, `lazyboy`, becomes Rem's user database unchanged, so nothing in this plan
+wants the move to do anything differently, and folding any multi-user schema into it would turn a
+reversible move into a migration (01a §10). Every overview and all three designs say the same. What the
+plan takes from the move: the user paths off the Zenbook (A1 rests on R2); R1's round trip, which
+every latency in §14 assumes; phase A's telemetry client, where `user_id` is added; the daily route,
+home of the per-user chores, the usage read and the deletion job's retries; lanes 1910-1911's scoped
+orphan pass; phase E's browser copy.
+
+**Six edits before Oct 15, 8 PM**, each small and none touching the cutover's logic; each is the
+director's and Rem's call (§18 decision 2):
+
+| # | where | edit | why | from |
+|---|---|---|---|---|
+| 1 | §3 and R4 (doc) | name the all-time recompute, not the history payload, as the ~50,500-row scan that dominates reads; give R4 a growth term (~12,000 rows a day more for every day of history at today's 44 runs, 01c §5.9) and note that R4 holds for one user and the multi-user plan re-checks it at N | it decides which lever comes next (P2, §8.3) and what lane 1908's outcome check should watch | 01a §11.2, 01c §6 items 1-2, 01d §6 item 4; A, B, C |
+| 2 | §8 step 9 (lane 1903) | flip Production only, and delete Preview's `TURSO_*` variables | as written it carries today's preview exposure to the new store: a preview's `init()` would run a branch's schema against production, and any preview could read every row (01b §3.7, E4). `origin` has only `main`, so nothing depends on previews | 01b §7 item 2, 01e §6 item 4; A, B, C |
+| 3 | §10 (lane 1905) | key IndexedDB by an opaque user key the `(app)` layout renders, a constant until Phase 1's uid replaces it; stamp each stored body with it; make the store's key `(userKey, kind, segment, version, shape)`; clear the store in the browser when the sign-out form submits | no user id reaches the browser today (01b §1.1), and the lane would otherwise reach for the email, the random `sub` or `me_id`, each wrong in its own way; the segment dimension now saves a second migration of browser data when P3 lands | 01b §7 item 1, 01d §6 item 3, 01e §6 item 3; A, B, C |
+| 4 | §9 (lane 1904) and lane 1909's archive | write the backup as a list of `(database, retention)` pairs, starting with `("lazyboy", 60 days)`; strip the `spotify_tokens%` and `lock:%` rows from every copy before it is compressed; check the counts against the dump itself rather than `count(*)` on Turso | a list costs nothing now and saves a rewrite; every copy today holds live 13-scope grants valid up to six months (01e F2); a `count(*)` per table reads every row a second time, ~45,800 rows a night at Rem's size. The cutover's own snapshot keeps the token rows (R5) | 01a §10 item 3, 01e §6 item 1, B §11.3 item 3, C §8.3 |
+| 5 | lane 1903's last step | delete the plaintext scratch copies on the Mac: the core snapshot (both token rows) and the mode-600 copy of `.env.local` (every secret) | the same exposure as edit 4 | 01e §6 item 2, C §8.3 |
+| 6 | lanes 1910-1911 | ship the identity-first orphan predicate with the scoping, after re-running the equality check on a current backup copy | the scoped pass with today's predicate still costs plays × members on a busy playlist; the rewrite makes it ~5-10 rows a play (§8.2) | B §10.1, §11.3 item 4; reproduced here |
+
+**Considered and not recommended before the move**: deriving the Zenbook fence's table list from
+`init()` (01b §7 item 3), because the multi-user tables live in new databases that no pre-multi-user
+deployment knows, so the hand-written list stays complete (C §8.3); writing `/api/cron/daily` as a
+loop over users now (01c §6 item 3), because Phase 1 threads the uid through every caller anyway, so
+the lane should just write each chore as a function of one user's store; an accumulator lane inside
+the migration (01c §6 item 2), which is P2 here, queued after lane 1911; and shipping the uid claim
+before lane 1905 (01e §6 item 3), since edit 3's constant gives 1905 the same interface without
+moving auth work in front of the cutover. Two free additions for lane 1904, optional: copy the meter's
+per-statement logs (`~/lazyboy-sqld/querylog/*.jsonl`) with 1909's archive, the only exact per-path
+record of the single-user workload (01a §10 item 1); and compare `api_log`'s row count with its
+distinct count for a day, since phase A's one-attempt telemetry client is a free test of 01c §2.8's
+hypothesis that 25-30% of rows are re-sent INSERTs.
+
+**Ordering after the move.** Phase 2's token table lands after lanes 1903 and 1904, because the
+cutover compares one plaintext token row on both stores (STORE_MIGRATION §8 steps 10 and 16; 01b §7),
+and R5's "Rem stays signed in" rests on it. Phase 1's branch is cut after lane 1911 merges: the
+orphan scoping and the mechanical edit both rewrite `storePlaylists` and `recomputeOrphanFlags`, and
+both at once would make a merge nobody can review (C §11.2). If R1 fails and the move stops
+(STORE_MIGRATION §2), multi-user waits: on the Zenbook it fails A1 by construction.
+
+**STORE_MIGRATION §4's open question**, whether the three log tables move to Turso too: from the
+multi-user side, keep them on the Zenbook (§18 decision 4). Telemetry becomes personal data with a
+deletion duty wherever it lives, which the user column handles in both places (01a §10). On Turso,
+five users' `api_log` would be ~0.6M rows written a month even after Phase 3's call cuts (~1,000 calls
+a user a day, ~4 rows written per insert counting index entries, 01c §2.1) [estimate], which with the
+~0.63M core writes of §8.6 passes R4's 10% write bar. On the Zenbook the cost is `/usage`'s log
+sections during an outage and a dependency on the Funnel certificate that lane 1907 renews.
 ## 11. Migrating Rem's data with nothing lost
 
 ## 12. Sign-up gating, privacy, deletion and backups
