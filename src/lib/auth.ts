@@ -13,6 +13,7 @@ import {
   type SpotifyTokens,
 } from "@/lib/db";
 import { isOwnerSignIn } from "@/lib/owner";
+import { SPOTIFY_NOT_REGISTERED, spotifyUserinfo } from "@/lib/spotify/userinfo";
 
 // Spotify banned `localhost` redirect URIs (Nov 2025): only the loopback IP literal
 // `http://127.0.0.1:PORT` is allowed over HTTP. But Next.js normalizes 127.0.0.1 ->
@@ -300,6 +301,9 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     strategy: "jwt",
     maxAge: 30 * 24 * 60 * 60, // 30 days
   },
+  // A failed sign-in lands on /login with ?error=<code>, which the page explains, never on
+  // Auth.js's generic error page.
+  pages: { error: "/login" },
   providers: [
     Spotify({
       clientId: process.env.SPOTIFY_CLIENT_ID,
@@ -317,6 +321,9 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         // the dialog makes a fresh login grant the current full SCOPES.
         params: { scope: SCOPES, redirect_uri: CALLBACK_URL, show_dialog: "true" },
       },
+      // Read /v1/me ourselves: an account outside the dev-mode allowlist gets a plain-text 403
+      // that Auth.js's JSON parse turned into a "server configuration" error. See userinfo.ts.
+      userinfo: { url: "https://api.spotify.com/v1/me", request: spotifyUserinfo },
       // Force the same loopback redirect_uri in the token exchange (Auth.js would
       // otherwise send the normalized `localhost` one, which Spotify rejects).
       [customFetch]: async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -335,6 +342,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     // Owner-only. Runs before jwt, so a refused account never reaches the token write below;
     // Auth.js answers it with AccessDenied. See lib/owner.ts.
     async signIn({ profile }) {
+      if (profile?.id === SPOTIFY_NOT_REGISTERED) return "/login?error=SpotifyNotRegistered";
       return isOwnerSignIn(profile?.id ?? undefined);
     },
     async jwt({ token, account }) {
