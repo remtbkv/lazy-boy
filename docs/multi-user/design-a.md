@@ -554,9 +554,10 @@ The census of 01a §2-3, with where each item goes:
 | `api_log`, `client_metrics` | telemetry store, plus nullable `user_id` | the column; deletion deletes by it (§12) |
 | `usage_ledger` | telemetry store, unchanged | global; per-user store usage comes from Turso's per-database numbers instead (§2.1) |
 
-What changes in `db.ts`'s SQL: nothing in the seven tables' statements. The token, lock and
-cooldown functions (`db.ts:2504-2565`, `2376-2392`) move to `app-db.ts`; the scripts gain
-`--user`.
+What changes in `db.ts`'s SQL: nothing in the seven tables' statements. The token functions, the
+refresh lock and the cooldown (`db.ts:2504-2531`, `2376-2392`) move to `app-db.ts`; the lock
+primitive itself (`db.ts:2541-2565`) serves both databases, since the clean lock stays in the user's
+own `meta`; the scripts gain `--user`.
 
 ### 3.4 Telemetry
 
@@ -1387,8 +1388,8 @@ built, never who can reach it.
 | phase | what ships | exit check | how it is undone |
 |---|---|---|---|
 | **0, now** (no multi-user code) | rotate `AUTH_SECRET`, Preview gets its own (01b E1, 01e F1); set `SPOTIFY_OWNER_ID` in Production and `.env.local` (01b E2); gate `logout` (01b E3); STORE_MIGRATION with §8.3's six edits; lazy days and history segments before December (§7.4); measure S3's render at 4× (§13.2); read Vercel's Active CPU and the allowlist (§16); the foreign-row cleanup after lane 1904 (§9.2) | Rem signed in on the new secret; STORE_MIGRATION's own R1-R6; the cleanup's `verify-derived` green | env changes and deploys revert; the cleanup restores from its snapshot |
-| **1, identity and isolation scaffolding** (single-user) | `UserId` and the gate on every entry point; `uid: 1`, `ep: 0` on the cookie for the owner, cookies without a uid refused (Rem signs in once, which is F1's lasting fix); `forUser(1)` over today's one database (the uid-to-database map and the epoch are constants until phase 2), `owner_uid = 1` written; `userCache` with owner stamps; keyed React boxes and module state; `playlistsCache` removed; task owners; `hk` in ETags, URLs, bodies and storage; the token core out of `auth.ts`; tests T1-T3, T5, T7, T8 and S1-S6 green with a simulated uid 2 | the suite green; a week of production with zero isolation events and capture unchanged (play counts against the recorder) | revert the deploy: old code ignores the extra cookie claim and the two new `meta` keys |
-| **2, the app database and the tokens** (single-user) | `lazyboy-app`; users row 1; the token encrypted into `user_tokens`; the jwt callback's one join (§4.2); the steps of §9.3 | §9.3 step 7 | §9.3's rollback |
+| **1, identity and isolation scaffolding** (single-user) | `UserId` and the gate on every entry point; `uid: 1`, `ep: 0` on the cookie for the owner, cookies without a uid refused (Rem signs in once, which is F1's lasting fix); `forUser(1)` over today's one database (the uid-to-database map and the epoch are constants until phase 2), `owner_uid = 1` written; `userCache` with owner stamps; keyed React boxes and module state; `playlistsCache` removed; task owners; `hk` in ETags, URLs, bodies and storage; the token core out of `auth.ts`, with its in-flight map keyed and tokens carrying their owner; tests T1-T3, T7, T8 and S1-S6 green with a simulated uid 2 | the suite green; a week of production with zero isolation events and capture unchanged (play counts against the recorder) | revert the deploy: old code ignores the extra cookie claim and the two new `meta` keys |
+| **2, the app database and the tokens** (single-user) | `lazyboy-app`; users row 1; the token encrypted into `user_tokens`; the jwt callback's one join (§4.2); the steps of §9.3; test T5 | §9.3 step 7 | §9.3's rollback |
 | **3, the sync queue** (single-user) | `sync_state` with claims and leases; the per-user step; cooldowns per bucket; the fair-share counters (inert at one user); `/api/sync` through the step; `refreshHistoryAction` off Spotify; now-playing at 15 s; the rescan changes; then the second pinger; the recorder hourly; tests T4, T6 | a week of capture matching the recorder, no harvest doubled by two pingers | revert the route code; disable the second pinger |
 | **4, the first friend** | the invite script, `/join` with the policy and agreement, the claim (§10); disconnect and deletion (§12); one backup file per database; admin-only `/usage`; `owner.ts` removed; Preview without store variables and dev on local files, both confirmed; the Turso plan decided (§16) before the friend's first sync; tests T9-T11; an adversarial review of the whole change | a week with one friend: isolation events at zero, the friend's quota spend visible per user (`api_log.user_id`), no ban | set the friend `disabled` (their sessions die and their sync stops at once); if they leave, the deletion job |
 | **5, up to five** | one friend at a time | each after a week without a quota ban and with isolation events at zero, read against 01c §7.3's passive quota check | per user, as phase 4 |
@@ -1420,8 +1421,8 @@ design change), so the director can turn them into lanes:
 
 | phase | size | the big pieces |
 |---|---|---|
-| 1 | L | `db.ts`'s 74 exports behind `forUser`, with every caller touched once (01a D2); the gate on 8 pages, 24 actions and 12 routes (01b §2); `userCache`; the test harness, T1-T3, T5, T7, T8 and S1-S6 |
-| 2 | M | `app-db.ts`, the token core extracted and encrypted, the migration script |
+| 1 | L | `db.ts`'s 74 exports behind `forUser`, with every caller touched once (01a D2); the gate on 8 pages, 24 actions and 12 routes (01b §2); `userCache`; the test harness, T1-T3, T7, T8 and S1-S6 |
+| 2 | M | `app-db.ts`, the token rows encrypted, the migration script, T5 |
 | 3 | M-L | 01c §5's queue, step and policies |
 | 4 | M | invite, join and claim; deletion; the backup loop; admin gating |
 
