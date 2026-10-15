@@ -1092,10 +1092,11 @@ today: the history body at ~3 rows per play plus the library on half of visits, 
 
 Against D1 (≤ 1.5M a heavy day): Rem meets it after P3 and with room after P4; an app-heavy Rem-like
 user needs P4. Against R4 at five users (≤ 250M a month): after P3, Rem plus four light friends is
-~92M (18% of the free plan), and Rem plus four app-heavy Rem-like friends at Rem's history size is
+~94M (19% of the free plan), and Rem plus four app-heavy Rem-like friends at Rem's history size is
 ~258M (52%, at the bar). The strip is the one per-visit term left that grows with history (~3 rows
 per real play per mount), so a year in, at ~42,000 plays each, the second case is ~337M (67%). After
-P4 it is ~64M (13%) at either size, because nothing left on a per-visit path grows with history.
+P4 it is ~64-70M (13-14%) at either size, because nothing left on a per-visit path grows with
+history.
 Friends start with no history and no catalog rows, so a year in is where they arrive, not where they
 begin. §14.4 has the arithmetic.
 
@@ -1705,8 +1706,10 @@ assumptions [estimate, the same per-run costs applied to each profile's history 
 Each cell is (Rem's day + 4 × the friend's day) × 30 against the free plan's 500M. The light and
 typical friends' biggest term after P3 is the whole-history strip (~3 rows per real play per Home
 mount), which is why P4 ships before the second friend: it is the one per-visit read left that grows
-with each user's history. On the Developer plan (2.5B included) every cell is under 14% with no work
-at all (01f §4.2), which is why §15 recommends it as insurance rather than as capacity.
+with each user's history. On the Developer plan (2.5B included, 01f §4.2) the largest cell is 13.5%,
+and even today's code at five Rem-like users on an average day (~1B a month [estimate: 5 × ~6.7M ×
+30, §8.6's today column with the orphan passes averaged]) fits with no block, which is why §15
+recommends it as insurance rather than as capacity.
 
 **D3**: ~4,100-4,700 rows written per Rem-like user a day (§8.6), ~0.63M a month at five, 6% of the
 free plan. **Growth**: ~35 KB of core data a day for a Rem-like user (01a §6), ~12 KB for a light one;
