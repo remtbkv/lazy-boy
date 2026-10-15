@@ -117,11 +117,11 @@ The scope travels as an explicit argument. Every per-user function in `db.ts` ta
 first parameter and gets its connection from `getClient(uid)`, so a call site that forgets the
 user does not compile. The parameter's type is a branded `Uid` (a number TypeScript will not
 accept from anywhere else) that only `requireUser()`, the cron's user list and the test helpers
-mint, so a stray number does not compile either. The edit is large and mechanical: 74 exported async functions in `db.ts`,
-54 `getClient()` sites inside it, and about 235 call lines elsewhere in `src/` plus about 300 in
-`tests/` [measured: grep over `774bb21`; the call-line counts are upper bounds, since a grep for
-`name(` also catches same-named methods in other modules]. `tsc --noEmit` is the oracle for
-whoever makes it, which suits a mechanical lane.
+mint, so a stray number does not compile either. The edit is large and mechanical: 74 exported
+async functions in `db.ts`, 54 `getClient()` sites inside it, and about 235 call lines elsewhere
+in `src/` plus about 300 in `tests/` [measured: grep over `774bb21`; the call-line counts are
+upper bounds, since a grep for `name(` also catches same-named methods in other modules].
+`tsc --noEmit` is the oracle for whoever makes it, which suits a mechanical lane.
 
 The smaller-diff alternative, an ambient user in `AsyncLocalStorage` set at each of the ~45 entry
 points, is rejected. React renders the Server Components a page returns from its own work loop,
@@ -148,7 +148,7 @@ the section with the detail, or for Phase 0 to the overview finding.
 
 | id | change | size | phase | detail |
 |---|---|---|---|---|
-| M0a | rotate `AUTH_SECRET` in Production and Preview (ends every session minted before the owner guard, the second account's included) | config | 0 | 01b E1, 01e F1 |
+| M0a | rotate `AUTH_SECRET`, with different values in Production and Preview (ends every session minted before the owner guard, the second account's included) | config | 0 | 01b E1; 01e F1 and 01e §3.1 |
 | M0b | set `SPOTIFY_OWNER_ID` in Production (the guard runs on the stored `me_id` today) | config | 0 | 01b E2, 01e §1.2 |
 | M0c | `logout` checks the session before it clears the token row | S | 0 | 01b E3 |
 | M1 | the app database and `src/lib/app-db.ts`: users, user_tokens, app-wide meta; the identity read, the user list, the Spotify cooldown, the refresh lock | M | 1 | §3, §4 |
@@ -171,7 +171,7 @@ the section with the detail, or for Phase 0 to the overview finding.
 | M18 | browser storage stamped with the uid and cleared on sign-out | S | 2 | §5.3 |
 | M19 | a second pinger on cron-job.org | config | 2 | §6.5 |
 | M20 | Preview and dev cannot reach friends' databases | config | 2 | §8.2 |
-| M21 | backups loop over databases; friends' and the app database's files kept five days | S | 2 | §10.3 |
+| M21 | backups loop over Rem's database, the app database and active friends' databases; the last two kinds kept four days | S | 2 | §10.3 |
 | M22 | a daily recently-played budget brake: past a threshold, one harvest per user per 30 min of playback | S-M | 3 | §6.4 |
 | M23 | library rescans stop calling `/me`; the recorder runs hourly | S + config | 2 | §6.4 |
 | M24 | read levers if the projection needs them: the all-time recompute gate 10 → 60 min, then an incremental accumulator | S, then M | 3 | §12.4 |
@@ -186,10 +186,12 @@ S1-S3.
 
 ### 2.4 What stays exactly as it is
 
-- Every SQL statement in `db.ts`, and the schema of user data.
+- Every SQL statement in `db.ts` that reads or writes user data, and the schema of user data.
+  Only the telemetry tables gain columns, two nullable ones (M10).
 - Rem's data: no copy, no table rebuild, no rewrite. The only row that moves is his token, and its
   original stays in place until the rollback window closes (§9).
-- The harvest, skip, orphan, Home payload and search payload logic, now run per user.
+- The sync, skip, orphan, Home payload and search payload code, now run per user. What changes
+  is when a harvest happens (M8, M9), not what it does.
 - The scripts. They already take a database URL (`backfill-from-backstop.mjs --db`, STORE_MIGRATION
   §8 step 13); pointed at a user's database they are scoped to that user.
 - STORE_MIGRATION's lanes 1901-1911, apart from four small edits (§8.3).
@@ -320,8 +322,9 @@ design follows 01e §5.1, with an integer uid in place of the `account_id` as th
   `/login` (`auth.ts:406-409`). It is one round trip, as today's token read is (01e §5.1).
 - **`requireUser()`**, server-only, wraps `auth()` and returns `{ uid }`, or redirects a page,
   answers 401 to a route and `{ ok: false }` to an action (01b S2). It refuses a session that
-  carries `error`, the rule the page gates apply today, so the three gate strengths 01b §2.4
-  found become one (§15 decision 20). It is the only source of `uid` for an entry point. The session exposes `user.id = uid`; that integer is public by design
+  carries `error`, the rule the page gates apply today, so the two session gates 01b §2.4 found
+  (with and without that check) become one (§15 decision 20). It is the only source of `uid` for
+  an entry point. The session exposes `user.id = uid`; that integer is public by design
   (`GET /api/auth/session` serves whatever the session holds, `docs/SECURITY.md` "Tokens never
   reach the browser") and is also the browser's storage key (§5.3).
 
@@ -477,11 +480,11 @@ user's entry in a test instead of passing silently (01a D29, 01b S5).
 | `isolation/store.test.ts` | Seeds users 1 and 2 with deliberately colliding data: the same track at the same `played_at` (D17), interleaved timelines (D18), the same playlist id in both libraries (D12-D14), one context URI resolved for 1 and negative-cached for 2 (D25). Runs every exported per-user function as user 1. User 2's database file has the same sha256 before and after, and nothing user 1 reads contains a user-2 marker string. |
 | `isolation/cache.test.ts` | Users 1 and 2 with equal `write_seq`, `library_seq` and slow seq. Every cached read for 1, then for 2: 2 gets 2's rows. User 2's request carrying user 1's ETag answers 200 with 2's body. |
 | `isolation/routes.test.ts` | Mocks `@/lib/auth` to return user 2's session (the pattern `tests/now-playing-route.test.ts:13-16` uses), calls every route handler and server action, and finds no user-1 marker in any response and every write in user 2's file. |
-| `isolation/structural.test.ts` | Parses `db.ts` with the TypeScript compiler API (a dev dependency already): every export outside a named allowlist (telemetry, ledger) takes `uid` first, and no call site in `src/` passes a numeric literal as a uid outside `getClient` and the setup script. Calls every `"use server"` export and route handler with no session and asserts a refusal before `getClient` is called (01b S2's structural test). |
+| `isolation/structural.test.ts` | Parses `db.ts` with the TypeScript compiler API (a dev dependency already): every export outside a named allowlist (telemetry, ledger) takes a `Uid` first, and nothing in `src/` casts to `Uid` outside the functions that mint it (`requireUser()`, the cron's user list) and the setup script. Calls every `"use server"` export and route handler with no session and asserts a refusal before `getClient` is called (01b S2's structural test). |
 | `get-client.test.ts` | An unmapped uid throws; uid 2 never resolves to uid 1's URL; dev's file fallback is one file per uid. |
 | `tokens.test.ts` | 01e §5.2's six known answers: two users refresh concurrently in one process and each ends with their own token, one token-endpoint call each; user 1 holding the lock does not delay user 2; `invalid_grant` for 1 clears only 1's row; 1's ciphertext pasted into 2's row fails to decrypt; a cookie with no uid, an unknown uid, a disabled user or a stale epoch yields `null`; no row means `null` and no Spotify call. |
 | `cron-fanout.test.ts` | Three users: 1 playing, 2 answering `invalid_grant`, 3 answering 403 "not registered". One tick stores 1's play, marks 2 `needs_reconnect` and 3 `disabled`, answers 200 with three outcomes; a second tick inside 90 s does nothing. A tick inside the lease with `?alarm=owner` answers 503 when uid 1 has no token row and 200 when it has one. |
-| `open-app-harvest.test.ts` | With a fresh `probe` stamp, `/api/sync` and `refreshHistoryAction` make no Spotify call except a load catch-up after 15 minutes without a harvest; with a stale stamp they harvest under today's 60 s debounce. |
+| `open-app-harvest.test.ts` | With a tick started in the last 5 minutes, `/api/sync` and `refreshHistoryAction` make no Spotify call except a load catch-up after 15 minutes without a harvest; with no recent tick they harvest under today's 60 s debounce. |
 | `deletion.test.ts` | Deleting user 2 removes their database (Platform API mocked), their app rows and their telemetry rows; user 1's file hash is unchanged. Asking the job to delete uid 1, or a database name outside `lazyboy-u<N>` with N ≥ 2, is refused before any Platform API call. |
 | `bounds.test.ts` | `dailyStatsAction` with any width other than the one the client sends reads nothing; past the per-user limit, user 1's fallback searches are refused while user 2's are served. |
 | browser check (manual, one real session) | Sign in, load Home, sign out: IndexedDB, `lb-days` and `lb-nowplaying` are empty and the next payload request carries no `If-None-Match` (01d §4.3 test 5). |
@@ -549,10 +552,11 @@ line.
 user (01c §5.2):
 
 1. **Lease.** `acquireLock("tick", 90_000)` on the app database, never released, so it expires
-   on its own. If it is held, the tick answers 200 `{skipped: "leased"}`: that is the second
-   pinger's tick landing inside the first one's window. If the app database cannot be reached,
-   the tick ends at once instead of letting five users each wait out the store fetch's three
-   15-second attempts (`src/lib/store-fetch.ts:28-29`); nothing could be recorded anyway.
+   on its own; its row also tells the open app when the last tick ran (M9, §6.3). If it is held,
+   the tick answers 200 `{skipped: "leased"}` (the owner alarm in step 4 aside): that is the
+   second pinger's tick landing inside the first one's window. If the app database cannot be
+   reached, the tick ends at once instead of letting five users each wait out the store fetch's
+   three 15-second attempts (`src/lib/store-fetch.ts:28-29`); nothing could be recorded anyway.
 2. **Users.** One read of the active users and their token rows (≤ 5 rows).
 3. **Steps.** `Promise.allSettled` over the users, each under its own 25 s deadline. A step is
    today's route body (`src/app/api/cron/sync/route.ts:95-172`) with the uid threaded through:
@@ -625,14 +629,17 @@ S15): a friend cannot act on it.
   keeps Home visible through an 8-hour workday would spend ~240 scarce-bucket calls a day, more
   than three light friends' whole days in §6.4.
 - **M9: one helper for both, `openAppHarvest(uid, reason)`.** It harvests in two cases. When the
-  user's `probe` stamp is over 5 minutes old, the cron has stopped probing this user (both
-  pingers down, or the user's step failing), and the helper falls back to today's behaviour,
-  60 s debounce included. On a load or a return to the tab (`SyncOnLoad` sends `reason=load` on
-  those calls, not on its 2-minute timer) it harvests once if the last harvest is over 15 minutes
-  old, a catch-up for the devices the probe cannot see; that is at most four an hour. Otherwise
-  both paths read the store and nothing else. The cron already stores a finished play within
-  ~2 minutes (§12.3), so harvesting from the tab adds no freshness, and the browser's provisional
-  play covers the moment a track ends, as it does today (`src/lib/optimistic-play.ts`,
+  cron has stopped, it falls back to today's behaviour, 60 s debounce included; "stopped" means
+  the tick lease (`lock:tick` in the app database, written by every tick that runs, §6.2) shows
+  no tick started in the last 5 minutes, which is both pingers down or every tick failing before
+  its steps. On a load or a return to the tab (`SyncOnLoad` sends `reason=load` on those calls,
+  not on its 2-minute timer) it harvests once if the last harvest is over 15 minutes old, a
+  catch-up for the devices the probe cannot see; that is at most four an hour. Otherwise both
+  paths read the store and nothing else. Reading the lease costs one app-database statement and
+  adds no write. A single user's failing step is not covered by the fallback; the cron retries it
+  every tick and that user's capture health shows it (§6.2). The cron already stores a finished
+  play within ~2 minutes (§12.3), so harvesting from the tab adds no freshness, and the browser's
+  provisional play covers the moment a track ends, as it does today (`src/lib/optimistic-play.ts`,
   `src/lib/handoff.ts`). The one visible change: the forced refresh at a track change finds the
   stored play only after the cron's next tick, up to ~2 minutes later, and the provisional row
   stands in until then.
@@ -1031,8 +1038,8 @@ not as a lawyer.
 - **What the privacy page says**: what is stored (plays from recently-played, playlist and Liked
   membership, playlist and context names, and derived listened time and skip verdicts); where
   (Turso in AWS us-east-1, Vercel's iad1 functions, request telemetry on a laptop in Rem's
-  apartment, backups on Rem's OneDrive); who can read it (Rem, as operator, has technical access to
-  every user's data through the store's tokens, and nobody else does); how long (while connected;
+  apartment, backups on Rem's OneDrive); who can read it (Rem, as operator, can read every user's
+  data through the store's tokens; the services above host it); how long (while connected;
   deleted within five days of disconnecting or of Spotify revoking access; after twelve months
   without a sign-in, §10.3); how to disconnect (in the app, and at spotify.com/account/apps).
 - **Telemetry** (M10): `api_log` carries call metadata only; `client_metrics` carries page timings
@@ -1046,14 +1053,17 @@ not as a lawyer.
 - **Scopes**: drop `user-read-email` and `user-read-private` (`src/lib/auth.ts:32-46`). Development
   mode returns no email, nothing reads `product`, and no request uses `market=from_token` (grep).
   It takes effect at each user's next consent, which is every sign-in (`show_dialog`,
-  `auth.ts:322`).
+  `auth.ts:322`). Do it after Rem's Phase 1 sign-in has shown `account_id` arriving, and check
+  on a dev sign-in that `/v1/me` still returns it with the smaller set: no fetched page says
+  which scope, if any, the field needs.
 
 ### 10.3 Account deletion and backups (M15, M21)
 
 **Triggers.** A user's Disconnect; Rem removing a user; an `invalid_grant` that arrives less than
 six months after `granted_at`, which most likely means the user revoked the app at Spotify (01e
-§5.7: stop processing at once, delete in five days unless they reconnect); and twelve months
-without a sign-in. The last two are Rem's calls (§15).
+§5.7 says stop processing at once and delete within the Terms' five days unless they reconnect;
+this design deletes after four, so the deletion and the last backup copy both land inside the
+five); and twelve months without a sign-in. The last two are Rem's calls (§15).
 
 **The job**, idempotent, so a crash part-way leaves a row it can find and finish (01e §5.8). It
 runs inline for a Disconnect or a removal and from the daily route for the rest and for retries.
@@ -1067,8 +1077,9 @@ not `lazyboy-u<N>` with N ≥ 2, and `deletion.test.ts` pins both refusals (§5.
    row, so every Spotify call stops.
 2. Destroy `lazyboy-u<uid>` through the Platform API.
 3. Delete the user's `api_log` and `client_metrics` rows on the telemetry store.
-4. Nothing for the backups: the nightly job stops finding the database, and the files it already
-   wrote age out within their five days (below).
+4. Nothing for the backups: the nightly job copies only `active` users' databases, so it stopped
+   at the first sign of a revocation or at the Disconnect, and the files it already wrote age out
+   within four days (below).
 5. Delete the `users` row. `AUTOINCREMENT` keeps the uid, and with it the database name and any
    cache entry still keyed by it, from ever being reused (§3.1); those entries expire within 24
    hours and no session can name them (§5.2).
@@ -1089,13 +1100,16 @@ org settings, and in exchange a deletion cannot be forgotten. The alternative is
 `scripts/delete-user.mjs` with a five-day deadline and nothing to remind him. Rem's call (§15).
 
 **Backups** (M21) follow from §8.3 edit 3: one `(database, retention)` entry per database,
-`("lazyboy", 60 days)` as today, and `("lazyboy-app", 5 days)` and `("lazyboy-u<N>", 5 days)`,
-with the friends' entries read each night from the app database's `users` table through the
-read-only group token, so a destroyed database drops out of the list on its own. Five-day
-retention makes deletion reach the backups by itself, inside Spotify's window, with no per-file
-bookkeeping (01a §8.8, 01e §5.8). The cost: a friend's data lost more than five days back cannot
-be restored from a backup; Turso's own point-in-time history still covers the last day (ten on
-Developer). Rem's data and backups are unchanged.
+`("lazyboy", 60 days)` as today, and `("lazyboy-app", 4 days)` and `("lazyboy-u<N>", 4 days)`,
+with the friends' entries read each night from the app database's `users` table, for users whose
+status is `active`, through the read-only group token. A destroyed database, or one waiting out a
+revocation's grace, drops out of the list on its own. Short retention makes deletion reach the
+backups by itself, inside Spotify's window, with no per-file bookkeeping (01a §8.8, 01e §5.8).
+Four days rather than five leaves room for the nightly schedule: a copy written the night before
+a deletion is pruned before the fifth day ends. The cost: a friend's data lost more than four days
+back cannot be restored from a backup, and a friend in `needs_reconnect` has no new backups until
+they reconnect; Turso's own point-in-time history still covers the last day (ten on Developer).
+Rem's data and backups are unchanged.
 
 ## 11. Rollout in reversible phases
 
@@ -1112,10 +1126,12 @@ minutes. Rem's data is written by the app's ordinary SQL in every phase and by n
 
 ### 11.1 Phase 0: close today's exposures
 
-- **M0a**: a new `AUTH_SECRET` (`openssl rand -base64 32`, type Secret) in Production and
-  Preview, then a redeploy. Every session ends, including the second account's, which otherwise
-  keeps acting as the owner until about Nov 13 (01e F1). Nothing in `src/` reads the secret, so
-  the token row, the cron and the recorder are untouched (01b E1).
+- **M0a**: a new `AUTH_SECRET` (`openssl rand -base64 32`, type Secret) in Production and a
+  different one in Preview, then a redeploy. Every session ends, including the second account's,
+  which otherwise keeps acting as the owner until about Nov 13 (01e F1). Nothing in `src/` reads
+  the secret, so the token row, the cron and the recorder are untouched (01b E1). Two values,
+  because today Preview holds Production's secret, so any preview build can mint a cookie
+  Production accepts (01e §3.1, §5.10); once sessions name a uid, that cookie could name anyone.
 - **M0b**: `SPOTIFY_OWNER_ID` in Production and `.env.local`. The guard then stops depending on
   `meta.me_id`, which a library sync rewrites from whatever token is stored (01b E2;
   `tests/owner-signin.test.ts:33-38` pins the precedence).
@@ -1165,7 +1181,9 @@ Gates, all before the invite:
   page says (01f §1.2), and the dashboard is the authority.
 - The Turso plan decided (§15).
 - **The second pinger proven**: stop the Zenbook timer for ten minutes and watch ticks from
-  cron-job.org land plays; restart it and watch the lease turn one of the two into no-ops.
+  cron-job.org land plays; restart it and watch the lease turn one of the two into no-ops, with
+  the Zenbook's leased replies still 200 in `~/lazyboy-cron/ping.log` while uid 1 has a token
+  (the 503 side is `cron-fanout.test.ts`'s, §5.4).
 - **Deletion proven** on a throwaway invite: create the row and its database, run the job, and
   see the database gone from `turso db list` and the rows gone.
 - Rem's decisions on the privacy page, retention, log-out and `invalid_grant` (§15).
@@ -1403,9 +1421,9 @@ Each with the recommendation and its reason, grouped by the phase it blocks.
 
 **Now**
 
-1. **Phase 0**: rotate `AUTH_SECRET`, set `SPOTIFY_OWNER_ID` in Production, gate `logout`.
-   Recommend yes, before Oct 15, 8 PM: the second account's cookie acts as the owner until about
-   Nov 13 (01e F1), and the cost is one sign-in.
+1. **Phase 0**: rotate `AUTH_SECRET` (a different value for Preview), set `SPOTIFY_OWNER_ID` in
+   Production, gate `logout`. Recommend yes, before Oct 15, 8 PM: the second account's cookie
+   acts as the owner until about Nov 13 (01e F1), and the cost is one sign-in.
 2. **STORE_MIGRATION's four edits** (§8.3). Recommend yes: none changes the runbook's logic, and
    edit 1 also removes today's preview exposure on the new store.
 
@@ -1438,10 +1456,11 @@ Each with the recommendation and its reason, grouped by the phase it blocks.
    disconnect or a revocation; deleted after twelve months without a sign-in. The twelve is the
    number to choose; Spotify says not to store content indefinitely (01f §1.5).
 10. **An `invalid_grant` under six months after consent.** Recommend 01e §5.7's rule: treat it as a
-    revocation, stop at once, delete in five days unless the user reconnects; owner exempt. Keeping
-    the data is gentler and outside the Terms.
-11. **Friends' backups kept five days.** Recommend yes: deletion then reaches the backups without
-    bookkeeping; Rem's stay at 60 days.
+    revocation, stop at once, delete unless the user reconnects; owner exempt. This design deletes
+    after four days so the backups also clear inside the Terms' five (§10.3). Keeping the data is
+    gentler and outside the Terms.
+11. **Friends' backups kept four days, and taken only while a friend is active.** Recommend yes:
+    deletion then reaches the backups without bookkeeping; Rem's stay at 60 days.
 12. **The platform token in the runtime.** Recommend keeping it so in-app deletion destroys the
     database at the request (§10.3); 01e §6 recommends removing it, and the cost of that is a
     deletion script Rem has to remember within five days.
@@ -1505,10 +1524,10 @@ Each with the recommendation and its reason, grouped by the phase it blocks.
   functions that mint it, the routes test runs as user 2, where a hard-coded uid 1 returns user
   1's marker strings and fails, and the cron test checks each user's play lands in that user's
   file.
-- **The open app trusts the cron's probe stamp** (M9). While the stamp is fresh the open app does
-  not harvest, even if the cron's harvests for that user are failing after a successful probe.
-  For a quota ban that is right, since harvesting from the tab would deepen it; for other errors
-  the cron retries every tick and capture health shows the stall (§6.2).
+- **The open app trusts the cron** (M9). While ticks are running the open app does not harvest,
+  even if the cron's step for that one user keeps failing. For a quota ban that is right, since
+  harvesting from the tab would deepen it; for other errors the cron retries every tick and the
+  user's capture health shows the stall (§6.2).
 - **One token reads everything.** Production's group token reaches every user's data. It should
   be a Secret-type variable, write-only after saving (01e §5.3); I did not check the type of
   today's `TURSO_AUTH_TOKEN`. With the platform token also in the runtime (§10.3), code execution
