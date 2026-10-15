@@ -22,7 +22,7 @@ Status: complete, 2026-10-14.
   capture trigger.
 - **The rule: a user's recurring cost follows what changed, never what is stored (§2).** Today Rem's
   store reads 4.25M rows a day, half of it one full `plays` scan repeated 44 times (§3). With this
-  design ~70,000 [estimate], two-thirds of that the nightly backup (§10.2).
+  design ~75,000 [estimate], about 60% of that the nightly backup (§10.2).
 - **How (§4-§9).** A Turso database per user plus an app database; listened time stored per play and
   the all-time totals kept as an accumulator; the Home payload patched in place; history as monthly
   segments stored in the user's database and appended to on write, which also removes the 2 MiB cache
@@ -913,16 +913,17 @@ rescans). Everything is an estimate built from the measurements cited in §3, §
 | tick state: the user's state and token rows on every tick | ~2,900 | §7.2 step 2 |
 | token refreshes | ~70 | §5 |
 | library rescans, ~23 × ~230 (the list probe reads 228 rows today, 01c §2.3) | ~5,300 | §7.6 |
-| changed playlists, ~3 a day: cached positions, a scoped orphan pass at ~5 rows per play from that playlist, the body patch | ~3,000-20,000 | §8.4, §10.1 |
+| changed playlists, ~3 a day: cached positions, a scoped orphan pass at ~5-10 rows per play from that playlist, the body patch | ~3,000-20,000 | §8.4, §10.1 |
 | Home visits, ~20 rows each: Rem ~5 a day, an app-heavy friend ~30 | ~100-600 | §9.4 |
 | daily chores: the `contexts` scan; the played-at convention check (owner only, ~2,400) | ~100-2,500 | §8.5 |
 | dirty months rebuilt, 0-2 a day at ≤ ~10,000 each | ~0-20,000, typically ~5,000 | §8.3 |
 | totals recomputed after an out-of-order insert, about weekly | ~3,000 averaged | §8.1 |
-| nightly backup dump of the user's database | ~45,800 | §3, row 13 |
-| **total** | **~65,000-100,000, typically ~70,000** | target ≤ 100,000 |
+| nightly backup dump of the user's database, checked against the dump itself (integrity check, derived values recomputed) rather than by `count(*)` on Turso, which would read every row a second time | ~45,800 | §3, row 13 |
+| **total** | **~63,000-103,000, typically ~75,000** | target ≤ 100,000 |
 
-Today [measured, 01c §2.7]: 4,252,260. Two-thirds of what remains is the backup, which every other
-design pays too; without it the user's own work is ~20,000-55,000 rows a day. The only terms that grow
+The top of the range needs every rare term at its maximum on the same day. Today [measured, 01c §2.7]:
+4,252,260. About 60% of what remains is the backup, which every other design pays too; without it the
+user's own work is ~17,000-57,000 rows a day. The only terms that grow
 with stored history are the backup (+~117 rows a day per day) and the scoped orphan passes (plays per
 playlist); neither is on a request or sync path.
 
@@ -957,10 +958,10 @@ $4.99 a month billed yearly ($5.99 monthly), unlimited databases, 2.5B read, 25M
 
 | per month | 5 users | 25 users | 250 users |
 |---|---|---|---|
-| rows read | 10.5M: 2.1% of Free | 52M: 10% | 525M: 105% of Free, 21% of Developer |
-| rows read, heavy days (~100,000 a user) | 15M: 3% | 75M: 15% | 750M: 30% of Developer |
+| rows read | 11.3M: 2.3% of Free | 56M: 11% | 563M: 113% of Free, 23% of Developer |
+| rows read, worst-case days (~103,000 a user) | 15.5M: 3.1% | 77M: 15% | 773M: 31% of Developer |
 | rows written | 0.42M: 4.2% of Free | 1.5M: 15% | 13.6M: 136% of Free, 54% of Developer |
-| storage, today's histories | 78 MB: 1.6% | 390 MB: 7.8% | 3.9 GB: 78% of Free, 43% of Developer |
+| storage, today's histories | 75 MB: 1.5% | 375 MB: 7.5% | 3.75 GB: 75% of Free, 42% of Developer |
 | storage growth a year | +73 MB | +365 MB | +3.7 GB |
 | databases (users + app + template) | 7 | 27 | 252: over Free's 100 |
 | **cheapest plan that holds** | **Free** | **Free** | **Developer**, $4.99-5.99 a month |
@@ -969,9 +970,9 @@ Five users sit under 5% of the free plan's reads, writes and storage (T4), and u
 databases. At 250 the free plan fails on writes,
 database count and reads; on Developer every dimension sits at or under 54%, and past its allowances
 it bills $1 per million writes and $1 per billion reads instead of blocking. Replacing the nightly full
-dump with an incremental one (plays since the last backup through `(played_at)`, the small tables
-weekly) would take 250 users' reads to ~36-88% of Free, which still leaves writes and the database
-count over it.
+dump with an incremental one (plays since the last backup through `(played_at)`, ~130 rows, and the
+other tables weekly, ~3,400 a day averaged) would take 250 users' reads to ~31-91% of Free, which
+still leaves writes and the database count over it.
 
 ### 10.4 Spotify and Vercel at the same sizes
 
@@ -1041,7 +1042,9 @@ Nothing blocks the cutover, and none of these touches its runbook:
    touch it; §8.1's accumulator does.
 2. **Phase E's store key** gains the segment dimension now, so segments arrive without a second
    migration of browser data (01d §6 item 3).
-3. **Phase D's backup** loops over database names and strips token rows (01a §10, 01e §6).
+3. **Phase D's backup** loops over database names and strips token rows (01a §10, 01e §6). Its count
+   check ("counts equal to Turso's", STORE_MIGRATION §9) is better made against the dump itself: a
+   `count(*)` per table on Turso reads every row a second time, ~45,800 rows a night at Rem's size.
 4. **Lanes 1910-1911** should ship §10.1's rewritten predicate with the scoping, or ahead of it. On the
    Aug 11 copy it gives the same verdict on every play and matches ~2.7 rows per play where today's
    walks up to ~411, which takes a full pass from ~5.1M rows to ~0.1-0.2M [estimate] with no schema
@@ -1253,8 +1256,8 @@ an L before the first friend.
 | T3: observed freshness | yes, ~1-2 s after an open | §7.8 | – |
 | T3: stored ≤ 2 min | yes for one or two Rem-like users; **~10-12 min at five** if the quota is shared | §7.4 | server-side provisional plays from the probe (01c §5.3 ii): 2-minute stored freshness for everyone at ~47 harvests a day each, for medium-to-large work (a provisional flag through the skip chain, the totals and the payloads, plus a reconciliation and its tests); or the quota proves per user and F stays at 2 |
 | T3: completeness | yes while either pinger runs | §7.8, §12 | – |
-| T4: reads ≤ 100,000, writes ≤ 2,500, growth ≤ 50 KB a day | yes: ~70,000 typical, ~1,800, ~40 KB | §10.2 | an incremental backup removes ~40,000 more reads |
-| T4: five users under 5% of Free | yes: reads 2-3%, writes 4.2%, storage 1.6% | §10.3 | – |
+| T4: reads ≤ 100,000, writes ≤ 2,500, growth ≤ 50 KB a day | yes on a typical day: ~75,000 read, ~1,800 written, ~40 KB; a worst-case day, every rare term at its maximum, reads ~103,000 | §10.2 | an incremental backup removes ~42,000 reads a day |
+| T4: five users under 5% of Free | yes: reads 2-3%, writes 4.2%, storage 1.5% | §10.3 | – |
 | T4: 250 users under $10 a month of store | yes: Developer, $4.99-5.99 | §10.3 | – |
 | T5: no apartment machine on a request path or as the only capture trigger | yes | §12 | – |
 | T6: isolation | by construction, plus tests that do not exist yet | §6 | proven only once the two-user suite has failed against planted bugs and then passed |
@@ -1267,7 +1270,7 @@ Specific to this design, each with my recommendation:
    on one app and money does not change that (T1). One minute on the dashboard's User Management list
    settles the count and whether you count toward it.
 2. **Do the single-user performance phase (P1) before any multi-user work.** Recommended: it removes
-   ~98% of your own store reads [estimate, §10.2: ~70,000 of 4.25M a day remain] and the late-December
+   ~98% of your own store reads [estimate, §10.2: ~75,000 of 4.25M a day remain] and the late-December
    cache cliff, whether or not anyone else ever signs in. P1b has a deadline: mid-December.
 3. **A database per user, or one shared database.** Recommended: per user (§4.1). No query can
    silently become O(all users), each user's cost is measured by Turso, and your data stays where the
