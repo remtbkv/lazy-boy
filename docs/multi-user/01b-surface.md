@@ -354,24 +354,24 @@ Spotify account, or A's history captures B's listening.
 |---|---|---|---|---|
 | A1 | sign-in | `auth.ts:352-362` → `db.ts:2514-2516` | each sign-in overwrites the one token row; the cron and every request then run as the newest signer | a token row per Spotify user, keyed by `account.providerAccountId`, written for that user only |
 | A2 | every `getSpotify()` caller: 14 actions in 2.2, the cold path of `/playlists/[id]`; and the routes that call `spotifyAccessToken()` directly: `/api/sync`, `/api/now-playing`, `/api/playlists/[id]/tracks`, `startLibrarySync` | `session.ts:13-18`, `auth.ts:270-272`, `auth.ts:74-78` | the token comes from the global row, whoever's session asked | the token looked up by the session's user id; a session without one refused |
-| A3 | `startCleanAction`, `deletePlaylistAction`, `startLibrarySync`, `/api/cron/sync` | `actions.ts:46-57`, `auth.ts:278-289`, `playlists-sync.ts:61-65`, `cron/sync/route.ts:96`, `:115-119` | background getters refresh and return the global token | `getValidAccessToken(userId)`; the getter closes over the user id |
+| A3 | `startCleanAction`, `deletePlaylistAction`, `startLibrarySync`, `/api/cron/sync` | `actions.ts:46-57`, `auth.ts:278-289`, `playlists-sync.ts:61-65`, `src/app/api/cron/sync/route.ts:96`, `:115-119` | background getters refresh and return the global token | `getValidAccessToken(userId)`; the getter closes over the user id |
 | A4 | every `auth()` that refreshes; every background refresh | `auth.ts:170-181`, `:188-196`, `:204-238`, `:244-252` | one in-flight refresh per instance answers whoever asks; one lock; losers poll and clear the global row | the in-flight map, the lock name, the poll and the stale-clear all keyed by user |
 | A5 | `logout` | `actions.ts:63-69` | no gate; deletes the one token row, stopping capture for the stored account | a gate; delete only the caller's row, if anything (section 5, S11) |
-| A6 | library sync from the cron, `startLibrarySync`, `deletePlaylistAction`'s resync, a cold clean | `spotify/resources.ts:80-104` via `sync/library.ts:40-50` | within 60 s on one instance, B's sync reads A's playlist list and stores it as B's library; a sequential cron fan-out hits it for every user after the first | key the cache by user, or remove it |
+| A6 | library sync from the cron, `startLibrarySync`, `deletePlaylistAction`'s resync, a cold clean | `src/lib/spotify/resources.ts:80-104` via `src/lib/sync/library.ts:40-50` | within 60 s on one instance, B's sync reads A's playlist list and stores it as B's library; a sequential cron fan-out hits it for every user after the first | key the cache by user, or remove it |
 
 **B. Reading another user's stored data.**
 
 | # | entry points | file:line | as written | needs |
 |---|---|---|---|---|
-| B1 | `/home` | `home/page.tsx:78-88`, `:56-67`; `db.ts:1315-1357` | one `meta.home_payload` row for everyone, built in one zone | a payload per user, built in that user's zone |
-| B2 | `/api/search/library`, `/api/search/history` | `search/library/route.ts:21-52`, `search/history/route.ts:15-38`; `db.ts:1600-1730` | one library and one history payload; global cache keys and ETags | per-user payloads, the user id as a cache-key argument, a per-user ETag component |
-| B3 | `/playlists`, `dockDataAction` | `playlists/page.tsx:23-29`, `history-actions.ts:44-57`; `db.ts:1906-1923` | one stored library and `me_id` | per-user library membership and owner id |
-| B4 | `/playlists/[id]`, `subtractPreviewAction`, `removeFromPlaylistAction`, `resumePlaylistAction` | `playlists/[id]/page.tsx:41-46`; `actions.ts:237-246`, `:420`, `:567-570`; `db.ts:2120-2146` | the track cache is read by playlist id with no access check, so any user who knows an id reads a private playlist someone else cached | serve the shared cache only for a playlist in the caller's own library rows; anything else fetches live with the caller's token |
+| B1 | `/home` | `src/app/(app)/home/page.tsx:78-88`, `:56-67`; `db.ts:1315-1357` | one `meta.home_payload` row for everyone, built in one zone | a payload per user, built in that user's zone |
+| B2 | `/api/search/library`, `/api/search/history` | `src/app/api/search/library/route.ts:21-52`, `src/app/api/search/history/route.ts:15-38`; `db.ts:1600-1730` | one library and one history payload; global cache keys and ETags | per-user payloads, the user id as a cache-key argument, a per-user ETag component |
+| B3 | `/playlists`, `dockDataAction` | `src/app/(app)/playlists/page.tsx:23-29`, `history-actions.ts:44-57`; `db.ts:1906-1923` | one stored library and `me_id` | per-user library membership and owner id |
+| B4 | `/playlists/[id]`, `subtractPreviewAction`, `removeFromPlaylistAction`, `resumePlaylistAction` | `src/app/(app)/playlists/[id]/page.tsx:41-46`; `actions.ts:237-246`, `:420`, `:567-570`; `db.ts:2120-2146` | the track cache is read by playlist id with no access check, so any user who knows an id reads a private playlist someone else cached | serve the shared cache only for a playlist in the caller's own library rows; anything else fetches live with the caller's token |
 | B5 | `dayTracksAction`, `dailyStatsAction`, `allTimePlaysAction`, `searchPlaysAction`, the reads in `refreshHistoryAction` | `history-actions.ts:60-195`; `db.ts:884-1225` | one plays table, global cache keys | plays scoped by user, the user id in every key (3.1) |
 | B6 | `trackMenuAction` | `actions.ts:360-391`; `db.ts:2432-2480` | lists every stored playlist that holds the song, with names | only the caller's playlists |
 | B7 | `resumePlaylistAction` | `actions.ts:567-570`; `db.ts:2405-2425` | the resume point comes from every stored play of that context | the caller's plays only |
-| B8 | `/usage` | `usage/page.tsx:244-254` | operator telemetry: everyone's opens, error text, Spotify call counts | owner-only (an admin check against `SPOTIFY_OWNER_ID`) |
-| B9 | `/api/tasks/[id]`, `/api/playlists/sync` | `tasks/[id]/route.ts:13-15`; `playlists-sync.ts:22`, `:50-54` | tasks have no owner, and the instance's one running-sync id is handed to any caller | an owner on each task, checked on read; one running sync per user |
+| B8 | `/usage` | `src/app/(app)/usage/page.tsx:244-254` | operator telemetry: everyone's opens, error text, Spotify call counts | owner-only (an admin check against `SPOTIFY_OWNER_ID`) |
+| B9 | `/api/tasks/[id]`, `/api/playlists/sync` | `src/app/api/tasks/[id]/route.ts:13-15`; `playlists-sync.ts:22`, `:50-54` | tasks have no owner, and the instance's one running-sync id is handed to any caller | an owner on each task, checked on read; one running sync per user |
 | B10 | the browser: `lb-days`, `lb-nowplaying`, `clean:active`, cached search bodies | 3.6, 3.2 | on a shared browser profile, the next person sees the previous one's days, song, clean result or library | user-stamped storage, cleared on sign-out; a per-user ETag |
 
 **C. Writing into shared state.** Mostly integrity and cost, not disclosure, but each of these makes a
@@ -380,15 +380,15 @@ later read wrong for someone.
 | # | entry points | file:line | as written | needs |
 |---|---|---|---|---|
 | C1 | library sync, `merge`/`clean`/`saveQueue`/`saveCompareDiff`, `deletePlaylistAction` | `db.ts:1763-1900` (`storePlaylists` replaces the whole table with one user's list and purges the others' track caches at 1868-1883), `actions.ts:77-84`, `db.ts:2188-2205` | one user's sync deletes everyone else's library rows; a new playlist lands in everyone's grid; an unfollow removes the row for everyone | library membership per user, separate from the shared playlist metadata |
-| C2 | `/playlists/[id]` cold path, `/api/playlists/[id]/tracks`, `subtractPreviewAction`, `removeFromPlaylistAction`, `resumePlaylistAction`, library sync | `playlists/[id]/page.tsx:194`, `playlists/[id]/tracks/route.ts:29`, `actions.ts:244`, `:445`, `:574`, `sync/library.ts:69` | whoever fetches last writes the shared track cache; Spotify can return different track ids for the same song depending on the reader's market (`GOTCHAS.md` "The same song carries different track ids") | a decision: cache per user, or share by `(playlist, snapshot)` and accept the relinking risk |
-| C3 | `/api/sync`, `refreshHistoryAction`, `/api/cron/sync` | `sync/route.ts:24-31`; `sync/history.ts:34-36`; `cron/sync/route.ts:129-163` | one 60 s debounce on `last_sync`, one tz offset, one harvest gate: A's sync can skip B's | debounce, tz and harvest gate per user |
+| C2 | `/playlists/[id]` cold path, `/api/playlists/[id]/tracks`, `subtractPreviewAction`, `removeFromPlaylistAction`, `resumePlaylistAction`, library sync | `src/app/(app)/playlists/[id]/page.tsx:194`, `src/app/api/playlists/[id]/tracks/route.ts:29`, `actions.ts:244`, `:445`, `:574`, `src/lib/sync/library.ts:69` | whoever fetches last writes the shared track cache; Spotify can return different track ids for the same song depending on the reader's market (`GOTCHAS.md` "The same song carries different track ids") | a decision: cache per user, or share by `(playlist, snapshot)` and accept the relinking risk |
+| C3 | `/api/sync`, `refreshHistoryAction`, `/api/cron/sync` | `src/app/api/sync/route.ts:24-31`; `src/lib/sync/history.ts:34-36`; `src/app/api/cron/sync/route.ts:129-163` | one 60 s debounce on `last_sync`, one tz offset, one harvest gate: A's sync can skip B's | debounce, tz and harvest gate per user |
 | C4 | every write that bumps a marker | `db.ts:345-416`, `:1550-1596` | one user's write moves every user's cache keys and ETags | per-user markers (3.2) |
 | C5 | `tzOffsetMinutes()`, `rebuildHomePayload` | `src/lib/tz.ts:8-17`; `db.ts:1265-1270`, `:2336-2343` | a request without the tz cookie, and every payload rebuild, takes the last tz any browser published | a tz per user |
 | C6 | `startCleanAction`, `dockDataAction` | `db.ts:2397-2400` | one clean-backup preference | per user |
-| C7 | `/api/metrics`, `instrumentation.ts` | `metrics/route.ts:16-50`; `src/instrumentation.ts:10-29` | telemetry rows carry no user | fine behind an owner-only `/usage`; a user column only if per-user speed matters |
+| C7 | `/api/metrics`, `instrumentation.ts` | `src/app/api/metrics/route.ts:16-50`; `src/instrumentation.ts:10-29` | telemetry rows carry no user | fine behind an owner-only `/usage`; a user column only if per-user speed matters |
 | C8 | `startCleanAction` | `actions.ts:130`, `:156` | lock key `clean:<playlistId>` | `clean:<user>:<playlist>` |
-| C9 | every Spotify call | `spotify/client.ts:48`; `db.ts:2376-2392` | one user's rate-limit ban holds back every user | per app or per user, depending on how Spotify counts (01f) |
-| C10 | `/api/now-playing`, the history sync | `now-playing/route.ts:36-55`; `sync/history.ts:56-85`; `db.ts:586-604` | context names are shared; a 403 for A stores a negative entry that hides the name from B, who may have access, for 30 days | keep resolved names shared, keep negative entries per user |
+| C9 | every Spotify call | `src/lib/spotify/client.ts:48`; `db.ts:2376-2392` | one user's rate-limit ban holds back every user | per app or per user, depending on how Spotify counts (01f) |
+| C10 | `/api/now-playing`, the history sync | `src/app/api/now-playing/route.ts:36-55`; `src/lib/sync/history.ts:56-85`; `db.ts:586-604` | context names are shared; a 403 for A stores a negative entry that hides the name from B, who may have access, for 30 days | keep resolved names shared, keep negative entries per user |
 
 ## 5. What the surface needs for multi-user
 
@@ -407,7 +407,7 @@ browser"). The browser gets an opaque per-user key instead (S6).
 point in section 2. Every read takes the id as an argument (S3), so no read can run before the gate.
 Home keeps its single parallel wave this way: the id comes from decoding the cookie, which needs no
 store round trip, so the user-scoped payload read can start alongside the token check in `auth()` as
-it does today (`home/page.tsx:78-83`), provided nothing renders until both finish. Proof: a
+it does today (`src/app/(app)/home/page.tsx:78-83`), provided nothing renders until both finish. Proof: a
 structural test that imports every `"use server"` module and route handler, calls each export with no
 session, and asserts it refuses before the store is touched.
 
@@ -499,11 +499,11 @@ Recommendation: (a) now, because it is one environment change; (b) as the first 
 **E2. The owner guard has no fixed owner in production.** `SPOTIFY_OWNER_ID` is in neither the Vercel
 environment (`vercel env ls`, all environments) nor `.env.local`, although `src/lib/owner.ts:7` says
 it is set in both. So the guard falls back to `meta.me_id` (`owner.ts:11`), which every library sync
-rewrites from whichever account's token is stored (`sync/library.ts:40-50` → `db.ts:1804`,
+rewrites from whichever account's token is stored (`src/lib/sync/library.ts:40-50` → `db.ts:1804`,
 `:1817-1822`). Commit `044c9b6` records that `me_id` flipped during the incident. If no library sync
 has run with the owner's token since Rem signed back in, the guard today admits the second account
 and refuses Rem's next sign-in. The cron reaches the library sync only on ticks that harvest
-(`cron/sync/route.ts:144-146` returns before `:171`), at least hourly through the backstop, so
+(`src/app/api/cron/sync/route.ts:144-146` returns before `:171`), at least hourly through the backstop, so
 `me_id` has most likely been restored, but I did not read it (it is production data). Fix: set
 `SPOTIFY_OWNER_ID` in Production and in `.env.local`. `tests/owner-signin.test.ts` already covers the
 case where the variable overrides a flipped `me_id`.
@@ -512,14 +512,14 @@ case where the variable overrides a flipped `me_id`.
 `clearSpotifyTokens()` for any caller. Its action id ships in the signed-in layout's client bundle
 (`src/app/(app)/chrome.tsx:7`, `:335`), so anyone who has had a session can invoke it, the E1 browser
 with one click. The effect: closed-app capture stops and the cron answers 503 "no token"
-(`cron/sync/route.ts:103-111`) until Rem signs in again. Plays are not lost while the Zenbook
+(`src/app/api/cron/sync/route.ts:103-111`) until Rem signs in again. Plays are not lost while the Zenbook
 recorder runs on its own token chain (`docs/ARCHITECTURE.md`, "The history's loss floor"). Fix: a
 session check at the top of the action, independent of multi-user.
 
 **E4. Preview deployments would run on the production store.** Section 3.7. No preview exists today;
 the first pushed branch creates one.
 
-**E5. Anonymous requests to `/home` cost four store reads.** `home/page.tsx:78-83` runs the payload
+**E5. Anonymous requests to `/home` cost four store reads.** `src/app/(app)/home/page.tsx:78-83` runs the payload
 read, the cooldown read and the two capture-health reads (`db.ts:1738-1741`) in the same
 `Promise.all` as the gate, against `docs/SECURITY.md`'s own rule ("The gate must not sit in a
 `Promise.all` with the reads either, or they run anyway"). Nothing leaks: the page redirects before it
