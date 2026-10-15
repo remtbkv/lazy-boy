@@ -627,7 +627,7 @@ owner:
 
 | id | change | effect | size |
 |---|---|---|---|
-| S1 | fetch the payloads at mount instead of after `requestIdleCallback` (2 s timeout) or, where that is missing, an 800 ms `setTimeout` (`src/app/(app)/home/den-home.tsx:657-675`) | on Safari, which takes the timeout path per the code's own comment, a first visit loses 800 ms before the first byte is requested | S |
+| S1 | fetch the payloads at mount instead of after `requestIdleCallback` (2 s timeout) or, where that is missing, an 800 ms `setTimeout` (`src/app/(app)/home/den-home.tsx:665-676`) | on Safari, which takes the timeout path per the code's own comment, a first visit loses 800 ms before the first byte is requested | S |
 | S2 | build a day's rows when the day is selected (01d O6): plays arrive newest first, so a day is one contiguous run found by binary search | 199 of the client's 264 ms at 4× CPU go away [measured, 01d §2.3]; `history-days.ts` already has known answers against `getPlaysByDay` | S-M |
 | S3 | the 7,529 catalog rows in a body of their own, versioned only by the backfill script and cached long in the browser (01d O2) | the history entry drops from 86.6% to 37.1% of the limit and the next crossing moves to about 10.7 months out [measured, 01d §5.1]; 58% of what is re-downloaded after each listening session goes away | M |
 
@@ -648,6 +648,95 @@ read cost of rebuilds is in §12.4.
 The step-by-step phone budget is in §12.2.
 
 ## 8. The store: Turso, a database per user, and STORE_MIGRATION
+
+### 8.1 Why Turso, and what it has to provide
+
+The design starts where STORE_MIGRATION ends: core data on Turso `lazyboy` in `aws-us-east-1`,
+the region Vercel's iad1 runs in, and telemetry on the Zenbook (STORE_MIGRATION §4-5). Every new
+database goes in the same group. Keeping multi-user on the Zenbook's sqld instead would fail T5
+by construction (every user down at the 3 AM reboot and in every host stall, 01f §3.3, §3.5), and
+a database per user there would need sqld namespaces and per-namespace routing through the
+Funnel, which nobody has tried on this box.
+
+What the model needs from Turso, checked against Turso's documentation on Oct 14 (fetched with
+`curl` at about 10:08-10:10 PM; §16):
+
+- **Enough databases.** The free plan includes 100 (01f §4.2, from the pricing page). This design
+  uses six: `lazyboy`, `lazyboy-app`, `lazyboy-u2` to `-u5`. The old `lazy-boy` makes seven.
+- **One credential for all of them.** "You can create a new token that can be used to connect to
+  any database in the group using the command: turso group tokens create <group-name> [flags]",
+  with `-r, --read-only` and `-e, --expiration` (never, or days)
+  (https://docs.turso.tech/cli/group/tokens/create). Production holds one full-access group token;
+  the backups use a read-only one.
+- **Schema without a Turso feature.** Multi-DB Schemas, Turso's shared-schema mechanism, "is now
+  deprecated for all new users" (https://docs.turso.tech/features/multi-db-schemas). Nothing here
+  needs it: `init()` already creates and migrates the schema on each client's first use.
+- **Rows read counted per organization**, so six databases share one 500M budget (01a §8.1, 01f
+  §4.2-4.3). The model neither helps nor hurts the budget; §12.4 sizes it.
+- **Recovery and deletion semantics.** "Free plan users can restore to any point in time within
+  the last 24 hours. Developer, Scaler, and Pro users can restore to any point in time within the
+  last 10, 30, or 90 days", and "PITR restores an existing database — it cannot bring back a
+  database that was deleted. On paid plans, deleted databases can be restored for up to five days"
+  (https://docs.turso.tech/features/point-in-time-recovery). §10.3 builds deletion on this: a
+  friend's data leaves by destroying their database, never by emptying it.
+- **Creating a database** is a Platform API or CLI call with `TURSO_PLATFORM_TOKEN`
+  (https://docs.turso.tech/api-reference/databases/create), which the Mac's `.env.local` and
+  Vercel Production already hold (01e §3.1). The invite script runs on the Mac.
+
+### 8.2 Credentials per environment (M20)
+
+| environment | app database | user databases | notes |
+|---|---|---|---|
+| Production | `lazyboy-app`, through the group token | all, through the group token | `TOKEN_KEYS` (Secret); `TURSO_PLATFORM_TOKEN` for deletion (§10.3) |
+| Preview | none | none | no store variables at all, so a preview fails on its first store read instead of running a branch's `init()` against production (01b §3.7, E4) |
+| dev (`.env.local`) | a local file, `data/app.db`, holding Rem's user row and his dev grant | uid 1 → `TURSO_DATABASE_URL` with `lazyboy`'s own database token; uid ≥ 2 → local files | dev never holds the group token, so a dev server cannot reach a friend's data (01e §5.9, 01a D38) |
+| tests | a temp file | temp files | §5.4 |
+
+A database token created for `lazyboy` alone (STORE_MIGRATION §8 step 8) reaches only Rem's data,
+which is what dev already does today against the Zenbook. Rotating the group token
+(`turso group tokens invalidate`) would also kill that database token, so the two should be
+rotated together.
+
+### 8.3 STORE_MIGRATION: what this design needs from it, and four edits before it runs
+
+**Run it as planned and first, with no multi-user schema in it.** Every overview says so (01a §10,
+01b §7, 01c §6, 01d §6, 01e §6, 01f §4.5), and this design adds a reason of its own: the cutover
+creates the database that becomes uid 1's, unchanged, so nothing about multi-user wants the move
+to do anything differently. The token table lands after the cutover, so R5's single-row token
+compare stays correct as written (01b §7).
+
+What the design takes from it: the core data on Turso (Phase 1 starts after lane 1903's R1-R5 pass
+and lane 1904's aftercare); phase A's telemetry client, which is where `user_id` is added (M10);
+phase A item 7's `/api/cron/daily`, the home of the per-user daily chores and the deletion job;
+lanes 1910-1911's scoped orphan pass, a precondition for Phase 2 because the unscoped pass reads
+~5M rows on Turso per run and ran three times on Oct 14 (01c §2.8); and phase E's browser copy.
+
+If R1 fails and the move stops (STORE_MIGRATION §2), multi-user waits. On the Zenbook the design
+would fail T5 and need sqld namespaces (§8.1).
+
+Four edits, each small, none touching the cutover runbook's logic; each is the director's and
+Rem's call:
+
+1. **§8 step 9: flip Production only, and delete Preview's two store variables.** As written it
+   flips Production and Preview, which carries today's preview exposure to the new store (01b E4,
+   §7 item 2; 01e §6 item 4). No branch other than `main` exists on `origin` (01b §3.7), so nothing
+   depends on previews.
+2. **§10: name the user key.** Phase E keys IndexedDB by "the signed-in user's id", which does not
+   exist until Phase 1 (01b §1.1). The passage should name a value the `(app)` layout renders, a
+   constant until Phase 1 swaps in the uid; the clear-on-sign-out has to run in the browser on the
+   sign-out form's submit, since sign-out is a server action (01b §7 item 1); and the store's key
+   should be `(uid, kind, version)` so a third body or a segment needs no second migration of
+   browser data (01d §6 item 3).
+3. **§9: backups as a list of databases, with token rows stripped.** `backup.py` takes
+   `(database, retention)` pairs, starting with `("lazyboy", 60 days)`, and deletes the `meta`
+   rows matching `spotify_tokens%` and `lock:%` from each copy before it compresses it. The first
+   costs nothing now and saves a rewrite (01a §10 item 3); the second removes six months of live
+   13-scope credentials from 60 days of OneDrive files today (01e F2, §6 item 1). The cutover's own
+   snapshot keeps the rows (R5).
+4. **§3: name the dominant read correctly.** The ~50,500-row scan that ran 23 times on Oct 13 is
+   the all-time recompute (`orderedRealPlays`, `db.ts:854-869`), not the history payload; 01a
+   §11.2, 01c §2.2 (from the meter's per-statement log) and 01d §2.2 found it independently. R4's
+   headroom arithmetic stands; which lever comes next changes (M24, §12.4).
 
 ## 9. Migrating Rem's data with nothing lost
 
