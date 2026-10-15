@@ -1105,6 +1105,92 @@ inside D3's 5,000 [estimate]. Five users: ~0.63M a month, 6% of the free plan's 
 `api_log`, ~1,000 Spotify calls a user a day after Phase 3, stays on the Zenbook.
 ## 9. Search: per-user payloads, caching and the phone budget
 
+Search keeps today's model: the browser holds the user's library and history and filters them on
+every keystroke with no request (`den-home.tsx:497-524`, 01d §1). Two things change. Every key, URL,
+ETag and stored copy carries the uid (§6.2 layer 6). And the history stops being one body, for a
+reason that applies to Rem alone: it is 1.79 MB raw, 86.6% of the Data Cache's 2 MiB item limit, and
+crosses it around late December 2026, after which every Home open rebuilds it with a full plays scan
+and nothing reports it (01d §3.2: Next 16.2.6 skips caching an item over the limit and only warns, in
+runtime logs that age out within the hour). The step-by-step phone budget is §14.1.
+
+### 9.1 What the browser fetches (P3)
+
+- **The manifest rides the page.** Home's server render already reads the user's database for the
+  Home payload; the same batch reads the manifest (each segment's key, version and play count, a few
+  hundred bytes; B §9.1), so the browser knows at first paint which segments it lacks. No extra
+  request.
+- **History in monthly segments** (01d O3): one body per (user, UTC month), plus the 7,529 catalog rows
+  as a segment of their own, since they never change and are 58% of today's body (01d §2.1). Each is
+  self-contained in today's tuple format with one field added: a play becomes `[trackIdx, minute,
+  sourceIdx, listenedS]`, so the browser can build any day's totals (B §8.3), at ~4 bytes a play.
+  The URL is `/api/search/h/<uid>/<segment>?v=<version>&s=<shape>`, served `private,
+  max-age=31536000, immutable`. The server takes the user from the session, answers 404 when the path's
+  uid is not the session's, and builds from the session's database through `userCache`, keyed by
+  segment, version and shape; a miss reads one month through `idx_plays_played_at`, ~3 rows a play,
+  at most ~10,000 rows for Rem's busiest month (01d O3). If the month's version has moved past the
+  URL's (the current month after a new play), the route answers the current body with its version in
+  a header and `no-store`, so nothing is cached under the wrong URL (B §9.1).
+- **The library**, one body per user as today, `/api/search/l/<uid>?v=<library_seq>&s=<shape>`,
+  immutable per version; split per playlist when a library passes ~12,000 songs (01d O7, §8.5).
+- **A delta at visit start** (01d O4): the plays newer than the newest minute the browser holds, ~50
+  rows, today's `refreshHistoryAction` read made a scoped GET.
+- **Phase E's IndexedDB copy** stores bodies under `(uid, kind, segment, version, shape)`, so a repeat
+  visit paints search from disk before the network (STORE_MIGRATION §10, 01d O5).
+
+**Segment versions** are per-month counters in the user's `meta` (`seg_seq:<YYYY-MM>`), bumped by
+every write that can change a closed month (A §7.1, B §8.3):
+
+| event | how its months are found |
+|---|---|
+| a play inserted, in order or not, and the successor it re-opens | their `played_at` |
+| `ctx_orphan` flips after a playlist's membership moved | `UPDATE … RETURNING played_at` on the scoped pass |
+| a context name resolves or changes | `SELECT DISTINCT substr(played_at, 1, 7) … WHERE context_uri = ?` on `idx_plays_context` |
+| a played track's name, artist, art, album or duration changes | the same on `idx_plays_track` |
+| the backstop replay, a history import, the catalog backfill | the scripts bump the months they wrote, and `catalog` |
+
+Each bump site gets a known-answer test: write to an old month, and that month's version moves and no
+other does. The manifest's play count per month lets the client catch a missed insert bump (its
+stored copy's count differs) and refetch. A missed bump on a derived column leaves a stale "From"
+label or name in that month until its next bump, the same failure class as a missed `write_seq` bump
+today (`db.ts:337-340`), and for one user only. Moving the shape token re-fetches every segment, the
+escape hatch for a bug in this list.
+
+### 9.2 What changes in the client
+
+- **Lazy days** (01d O6): plays arrive newest first, so a day is one contiguous run found by binary
+  search on the minute bounds, built when the day is selected instead of every day up front. That
+  removes 199 of the client's 264 ms at 4× [measured, 01d §2.3] and makes the rest independent of
+  history length; `history-days.ts` is pure and already known-answer tested against `getPlaysByDay`.
+- **Fetch at mount, parse at idle.** Today the requests start after `requestIdleCallback` (up to 2 s)
+  or, on Safari, an 800 ms timer (`den-home.tsx:665-676`), so a first visit loses that time before the
+  first byte (C §7.2). The requests start at mount; the parse and build still run in an idle callback
+  once the bodies land, because yielding to hydration is why the code waits today
+  (`den-home.tsx:655-664`).
+- **`history-ready` stops waiting for the library half** (`den-home.tsx:620`, 01d §1.4): the day list
+  needs only the history.
+- **A shorter result list**: the first ~50 rows painted and the rest on scroll; rendering up to 400
+  complete rows is most of a keystroke's time today (01d §2.3, O6). A query that extends the previous
+  one filters the previous matches (B §9.3).
+- **The whole-history strip from the segments** (P4, §8.4).
+- A Web Worker only past ~30,000 entries (01d O6).
+
+### 9.3 Server caching with N users
+
+Every entry is one user's (`userCache`, §6.2), and with months as the unit no entry comes near 2 MiB
+however long a history grows: a 100-plays-a-day month is ~300 KB raw (01d O3), and an import becomes
+many bounded months. Vercel's Data Cache is one least-recently-used store shared by every project on
+the team (01f §2.2), so one user's entries can evict another's; an eviction costs one month's
+rebuild, ~4,500-10,000 rows, never correctness. Closed months mostly live in the browser (IndexedDB
+and the HTTP cache), so the server rebuilds one only for a device that lacks it.
+
+### 9.4 Order and the December deadline
+
+P3 must ship before mid-December. If it cannot, the catalog split alone (01d O2) is the stopgap: the
+history entry drops from 86.6% to 37.1% of the limit and the next crossing moves ~10.7 months out
+[measured, 01d §5.1]. P3's client edits touch the load path phase E rewrites (lane 1905), so P3
+starts after lane 1906 merges, never in a parallel branch (C §7.2). Friends' history imports wait for
+segments: a five-year import is a ~4.2 MB history body today, over the item limit on day one and near
+Vercel's 4.5 MB response cap (01d §3.3, §7 decision 2).
 ## 10. The store, and STORE_MIGRATION (lanes 1901-1911)
 
 ## 11. Migrating Rem's data with nothing lost
