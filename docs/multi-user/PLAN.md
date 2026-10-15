@@ -2622,107 +2622,209 @@ On Oct 14, about 11:03 PM to 11:45 PM, on the Mac:
 
 ## 18. Decisions that are Rem's
 
-Each with a recommendation and its reason, grouped by what it blocks.
+Each with a recommendation and its reason, numbered as in §0 and grouped by what it blocks. The Oct 14
+version numbered them differently; §19 quotes the reviews, which use the Oct 14 numbers, and names the
+decision each became. Each phase's production deploy, and each step that writes Rem's data (the replay,
+P2's fill, Phase 1's four `meta` keys, Phase 2's token move), also waits for his go-ahead when it comes;
+those approve a reviewed step rather than choose a design, so they are not numbered here. The end of
+this section says which build work waits on which decision.
 
-**Now, before Oct 15, 8 PM**
+**Now: before the 7:05 AM push, and before lane 1901 (Oct 15, 8 PM)**
 
-1. **Phase 0's production changes**: rotate `AUTH_SECRET` in Production with a separate value for
-   Preview, set `SPOTIFY_OWNER_ID` in Production and `.env.local`, and gate `logout`. *Recommend yes,
-   before the cutover's window.* A browser that signed in before the guard can act as you until about
-   Nov 13, and its log-out can stop your capture (01b E1-E3, 01e F1). It costs one sign-in.
-2. **STORE_MIGRATION's edits 1-5** (§10.2: the dominant read and R4's growth term; Production-only
-   flip; phase E's user key; backups as a list with token rows stripped; deleting the cutover's
-   plaintext copies). *Recommend yes, before lane 1901.* None touches the cutover's logic, and each
-   saves doing the work twice.
-3. **Edit 6: lanes 1910-1911 also ship the identity-first orphan predicate.** *Recommend yes, after the
-   equality check on a current backup copy.* It gave the same verdict on every play of the Aug 11 copy
-   and reads ~2.7 rows a play where today's walks ~411 (§8.2); scoping alone leaves busy playlists
-   expensive, in a way the meter hides.
-4. **Where the three log tables live** (STORE_MIGRATION §4's open question). *Recommend keeping them
-   on the Zenbook, as you said.* Multi-user adds one reason: on Turso, five users' `api_log` would push
-   the month's writes past R4's 10% bar (§10.2).
-5. **Two one-minute dashboard reads**: Spotify's User Management list (how many accounts, any
-   grandfathered above five, whether you count toward the five) and Vercel's Active CPU per project
-   over 30 days. *Recommend now*: they settle target U and the Vercel plan (01f §6.2).
+1. **Phase 0.** Rotate `AUTH_SECRET` in Production with a separate value for Preview, and a day later
+   delete the production deployments built before the rotation; set `SPOTIFY_OWNER_ID` in Production
+   and `.env.local`; let one lane gate `logout` and run the dev sign-in and the refresh-token probe
+   (§13.1). *Recommend yes, today, and before lane 1903's flip at the latest.* The browser that signed
+   in as the second account before the guard still acts as Rem, and its log-out can stop his capture
+   (01b E1-E3, 01e F1). The Oct 14 version said that session ends about Nov 13. It does not: Auth.js
+   re-issues the cookie on every `GET /api/auth/session`, so only a rotation ends it (security R5). It
+   costs Rem one sign-in. Separately, the repo is public, local `main` is 238 commits ahead of
+   `origin/main` (`git rev-list --count`, 1 AM Oct 15), and something pushes `main` at about 7:05 AM
+   (`origin/main`'s reflog: Oct 13 and 14), which publishes these documents and the overviews'
+   description of that session and of the ungated `logout`. *Holding that push is optional*: the
+   description hands nobody the incident's cookie, and `logout`'s action id is not on the public
+   `/login` page (security §5). Phase 0 closes both exposures either way.
+2. **STORE_MIGRATION's edits** (§10.2): edits 1-5, 7 and 8, and its notes to the lanes. *Recommend yes,
+   before lane 1901.* None touches the cutover's logic. Edits 2, 4 and 5 close live exposures (Preview on
+   the production store, 13-scope grants in every backup, plaintext copies in scratch); edit 7 protects
+   the only copy of 122 of Rem's plays; edit 8 moves the daily chores off the Zenbook's reboot hour and
+   keeps the sync route's daily entry as the last-resort capture. No review found anything in lanes
+   1901-1911 that should wait.
+3. **P1 inside lanes 1910-1911**: the identity-first "From" predicate shipped with the scoping (edit
+   6). *Recommend yes.* On the Oct 14 backup copy it gives the same verdict on all 22,040 plays and walks
+   ~2.6 rows a play against ~380 (scale §3; the Aug 11 copy agreed, §8.2). Scoping alone leaves a busy
+   playlist's pass at plays × members, which the meter hides (01c §2.8). The lane pins it with a
+   known-answer test.
+4. **The three log tables stay on the Zenbook** (STORE_MIGRATION §4's open question). *Recommend yes,
+   as Rem said on Oct 13.* Multi-user adds a reason: on Turso, five users' `api_log` would be ~0.6M rows
+   written a month, which with the core writes passes R4's 10% bar (§10.2). The cost is `/usage`'s log
+   sections during a Zenbook outage and the Funnel certificate that lane 1907 renews.
+5. **Three one-minute dashboard reads**: Spotify's User Management list (how many accounts, whether more
+   than five survived Mar 9, whether Rem's own account takes one of the five), Vercel's Active CPU per
+   project over 30 days, and the project's Deployment Protection setting. *Recommend now.* They settle
+   target U, the Vercel plan (decision 18) and one of §13.2's gates. If the list is grandfathered above
+   five, removing anyone from it is permanent ("These limits only restrict what you can create or add
+   going forward", 01f §1.2), the canary included.
+
+**Around the store move (lane 1904)**
+
+6. **Copy `~/lazyboy-recorder/backstop.db` off the Zenbook now**, once, until edit 7's nightly copy
+   exists. *Recommend yes*; it is a minute's work. It holds the only copy of 122 of Rem's plays (56 on
+   Aug 9, 60 on Aug 10, 6 on Sep 8), and nothing backs it up (migration 8).
+7. **Replay those 122 plays** with `scripts/backfill-from-backstop.mjs` after lane 1904 and before P2's
+   fill, with a snapshot first. *Recommend yes.* It writes production data, so it is Rem's to approve. It
+   inserts only plays that are missing and re-rules their edges (`1ac38fa`); on a snapshot copy it
+   inserted 166 plays, then 0 on a re-run (the D1 entry, `.claude/QUEUE.md:16`). Run before the fill, P2 counts them (§11.3). The Extended
+   Streaming History import for Aug 30-Sep 9 takes the same slot once Rem's export arrives.
+8. **An interim second pinger** right after lane 1904: today's route accepts a second secret and skips a
+   tick within 90 s of the last one, and Rem re-enables the cron-job.org job with the new secret.
+   *Recommend yes.* Until Phase 3, six to seven weeks later [estimate, §13.3], the Zenbook is the only
+   frequent capture trigger, and in late August and September it lost about ten days of capture in four
+   weeks (migration 2). Cost: ~720 rows written a day, $0. Re-enabling the job is Rem's step because
+   STORE_MIGRATION's lanes read R6 as forbidding it.
+9. **A resolver on the Zenbook that does not depend on Tailscale.** *Recommend yes*, as an ops change
+   outside the lanes. Its only resolvers today are Tailscale's (`/etc/resolv.conf`, read Oct 15), which
+   is how one tailscaled fault took the pinger and the recorder down together for days in September
+   (migration 2).
 
 **The design, before Phase 1**
 
-6. **Five accounts, you included; past five, people run their own copies.** *Recommend yes.* It is
-   Spotify's cap, and no money changes it (01f §1.2-1.3).
-7. **A database per user.** *Recommend yes.* A forgotten filter becomes impossible rather than
-   unlikely, your data does not move, and deletion reaches every copy inside Spotify's five days
-   (§4.1, §12.3). Revisit only if friend features that join across users become the priority.
-8. **The single-user performance track before the multi-user phases** (P2, then P3 before
-   mid-December). *Recommend yes.* With the predicate of decision 3 it cuts your own store reads on a
-   heavy day from ~19M to ~1.45M rows (§8.6), and it removes the late-December cache cliff, whether or
-   not anyone else ever signs in.
-9. **The search target's device and network**: a mid-tier phone (4× CPU) at 10 Mbit/s, with slow 4G a
-   stated miss. *Recommend yes.* Meeting slow 4G on a first visit takes newest-first loading, an M-sized
-   change nothing else needs (§14.1).
-10. **Delete the incident's foreign plays from your history**, after reading the list. *Recommend yes.*
-    They are someone else's listening inside your stats, and once the store has owners they would be
-    filed as yours for good (§11.2).
+10. **Five accounts, Rem included; past five, each person runs their own copy.** *Recommend yes.* It is
+    Spotify's cap for an app in development mode, and extended quota mode takes only organizations with
+    at least 250k monthly users, so no money changes it (01f §1.2-1.3). An own copy costs its owner
+    their own Premium, developer app, Turso database and pinger and about an hour of setup (01f option
+    E), and works only once `npm run setup` provisions an empty install (§12.1, completeness M7).
+11. **A database per person.** *Recommend yes.* A forgotten filter becomes impossible instead of
+    unlikely, Rem's data does not move, and deleting a person is destroying one database (§4.1, §12.3).
+    Revisit only if friend features that join across users become the priority.
+12. **The single-user performance track before the multi-user phases** (P2, then P3 before
+    mid-December). *Recommend yes.* With P1 it cuts Rem's own heavy-day reads from ~19M rows to ~1.5M
+    (§8.6) and removes the late-December cache cliff, whether or not anyone else signs in. The cost: the
+    first friend arrives about 1.5-2.5 weeks later [estimate, completeness L7], since one lane in `db.ts`
+    at a time rules out running P3 beside Phase 1 (§13.3).
+13. **The search target's device and network**: a mid-tier phone (4× CPU) at 10 Mbit/s, with slow 4G a
+    stated miss. *Recommend yes.* Meeting slow 4G on a first visit takes newest-first loading, an M-sized
+    change nothing else needs yet (§14.1).
+14. **An e-mailed health alarm from Phase 1**, which lifts STORE_MIGRATION's R6 ("No new alerting
+    mechanism") for the multi-user phases while it keeps binding lanes 1901-1911. *Recommend yes.* Today
+    nothing that goes wrong notifies anyone: the Zenbook unit's `OnFailure=` is empty and everything
+    else ends on a page (completeness H1). Friends' data, Spotify's 24-hour breach notice and the
+    five-day deletion clock all depend on someone noticing. It is an hourly cron-job.org job with failure
+    e-mail calling `/api/cron/health` (§7.10), at $0.
+15. **The forced refresh stops calling Spotify in Phase 3.** *Recommend yes.* At a track change Home
+    shows the provisional row at once and the stored row after the next tick, up to ~2 minutes later,
+    instead of after an immediate harvest (§7.6). It removes an undebounced harvest and a concurrent
+    writer of the new derived totals (migration 3). The other Phase 3 changes the Oct 14 version made to
+    Rem's app, 15-second polling and the 2-hour backstop, now wait for the first friend (completeness L6).
 
-**Before the first friend**
+**Before the first friend (Phase 4a)**
 
-11. **Turso's Developer plan with overages**, $4.99 a month billed yearly. *Recommend yes, as
-    insurance*: five users fit Free after P4, but on Free one regression blocks every query for every
-    user until the 1st, as August showed, and Developer turns that into a bill. It also gives your data
-    ten days of point-in-time recovery and makes a deletion undoable for five days (§15).
-12. **Vercel Hobby or Pro.** *Recommend reading Active CPU first, and staying on Hobby only if the team
-    uses under ~2 of its 4 CPU-hours a month*; an overrun stops every project on the team for up to 30
-    days, and Pro ($20) turns it into a bill (01f §6.3).
-13. **What "log out" means.** *Recommend three actions*: sign out (this browser; capture continues),
-    sign out everywhere, and disconnect and delete. Today one button stops capture and signs out every
-    device (§5.4).
-14. **An `invalid_grant` within six months of consent.** *Recommend treating it as a disconnect*:
-    destroy the friend's database at once; if they come back and ask within four days, restore from
-    the backup or Turso's undelete. You are exempt. Waiting before deleting is gentler but either
-    stretches past Spotify's five days or needs bookkeeping; this keeps every copy inside five days
-    under any reading of the Terms (§12.3).
-15. **Retention for friends.** *Recommend*: kept while connected; deleted at a disconnect; deleted
-    twelve months after the last sign-in. The twelve is the number to choose; Spotify says not to keep
-    content indefinitely (01f §1.5).
-16. **Friends' backups kept four days and taken only while a friend is active; the telemetry store's
-    backups kept four days from the first friend on; the token key rotated within five days of a
-    friend's deletion.** *Recommend yes*: deletion then reaches every copy, the vendor's point-in-time
-    history included, with no file-by-file bookkeeping; your own backups stay at 60 days (§12.3-12.4).
-    The alternative to the key rotation is naming the ten-day vendor copy in the privacy policy and
-    accepting it.
-17. **`TURSO_PLATFORM_TOKEN` stays in the runtime**, Production only, used by the deletion job's destroy
-    and the daily usage read. *Recommend yes.* 01e §6 recommends removing it; the price of that is a
-    deletion that waits on a script you have to remember within five days (§12.3).
-18. **The privacy policy and end-user agreement**, and whether friends ever see derived stats. *The text
-    is yours to write or approve* (§12.2 lists what it must say). *Recommend each person sees only their
-    own listened time and skip stats* until you decide about comparisons, given the Developer Policy's
-    line on derived listenership metrics (01f §1.5).
-19. **A session whose Spotify grant has died.** *Recommend keeping today's behaviour*, a redirect to
-    sign in again: one sign-in restores reading and capture, and with decision 14 a friend's read-only
-    view would mostly show data being deleted. 01b §2.4 recommends a read-only mode instead (§5.4).
-20. **The recorder stays yours alone and runs hourly.** *Recommend yes* (01c §5.7, 01e §5.9). Separately:
-    its grant may age out by Feb 6, 2027; a fresh local sign-in copied into its `tokens.json` restarts
-    the clock (01e F3).
-21. **A canary account in Phase 4.** *Optional*: only if you have a spare Spotify account, since it holds
-    one of the five places while it exists (§6.5).
+16. **A canary week**: Phase 4a invites only a second Spotify account Rem controls, for a week, with exit
+    checks that can fail, and the first friend comes after it (Phase 4b). *Recommend yes.* Phases 1-3
+    cannot exercise isolation with one user, so without it the first two-user run in production is a
+    friend's (completeness H4). A free account is enough; it holds one of the five places while it
+    exists.
+17. **Turso's Developer plan with overages**, $4.99 a month billed yearly, from the canary's first sync.
+    *Recommend yes, as insurance.* Five users fit Free after P4 (§14.4), but on Free one regression
+    blocks every query for every user until the 1st, as August showed, and Developer turns that into a
+    bill. It also gives ten days of point-in-time recovery instead of one, and a five-day undelete for a
+    destroyed database (§15).
+18. **Vercel Hobby or Pro.** *Recommend reading Active CPU first (decision 5), and staying on Hobby only
+    if the team uses under ~2 of its 4 CPU-hours a month*: an overrun stops every project on the team
+    for up to 30 days, and Pro ($20) turns it into a bill (01f §6.3). On Pro, Skew Protection stays off
+    or gets a threshold at each phase deploy (§5.5, security R1).
+19. **Three log-out actions**: sign out (this browser; capture continues), sign out everywhere, and
+    disconnect and delete. *Recommend yes.* Today one button stops capture and signs out every device
+    (§5.4).
+20. **A session whose Spotify grant has died goes to sign in**, as today. *Recommend yes.* One sign-in
+    restores both reading and capture; 01b §2.4's read-only mode would mostly show a friend data that is
+    about to be deleted (§5.4).
+21. **A friend's `invalid_grant`.** *Recommend*: stop calls and keep the data; confirm with a second
+    refresh 10 minutes later; if two or more people, or Rem, are hit within 24 hours, treat it as
+    Spotify's event and delete nothing; a refresh token ~170 days old has expired and waits for its
+    owner to reconnect; a younger one counts as a revocation, which alerts Rem and destroys the database
+    on day 4 unless the person signs in first. Rem is never deleted automatically (§5.4, §12.3). The Oct
+    14 version destroyed the database at once; the reviews showed that one Spotify-side event would then
+    destroy every friend's history, and that an expiry could be filed as a revocation (security R4,
+    completeness H2). Day 4 stays inside Spotify's five days. The cost: on Developer the destroyed
+    database stays restorable through Turso's undelete until about day 9, which the strictest reading of
+    the Terms would count, so the policy names it. Day 0 is the alternative if Rem reads the Terms that
+    strictly, at the price of a false positive destroying a history for good on Free.
+22. **Retention for friends.** *Recommend*: kept while connected; capture paused after 60 days without a
+    sign-in; deleted at a disconnect and twelve months after the last sign-in. The twelve is the number
+    to choose; Spotify says not to keep content indefinitely (01f §1.5).
+23. **Friends' backups kept four days and taken for every friend not pending deletion; the telemetry
+    store's backups kept four days from Phase 4; no token-key rotation after each deletion.** *Recommend
+    yes.* Deletion then reaches every backup through retention, with no file bookkeeping (§12.4). The Oct
+    14 version rotated the token key within five days of each deletion so the vendor's ten-day
+    point-in-time copy of the encrypted token would be unreadable; that took the key outside Vercel, one
+    bad rotation would strand every user, and backups became unreadable across it (security R9, migration
+    9, completeness L2). The policy names the encrypted copy instead, and the key rotates only on a
+    suspected compromise (§5.3). Rem's own backups stay at 60 days.
+24. **`TURSO_PLATFORM_TOKEN` in the runtime, Production only, for the deletion job's destroy and the
+    daily usage read; for the scripts, in the Mac's Keychain; never in `.env.local`.** *Recommend yes.*
+    A deletion cannot wait for a laptop (§12.3), and in `.env.local` every dev server, its dependencies
+    and every lane's copy of the file would carry a credential that reads and destroys every friend's
+    data (security R8). 01e §6 recommends taking it out of the runtime; the price is a deletion that waits
+    on a script someone must remember to run within five days.
+25. **The privacy policy and end-user agreement**, and whether friends ever see derived stats. *The text
+    is Rem's to write or approve* (§12.2 lists what it must say, including the Spotify e-mail he enters on
+    the dashboard and the vendor's encrypted token copy). *Recommend each person sees only their own
+    listened time and skip stats* until Rem decides about comparisons, given the Developer Policy's line
+    on derived listenership metrics (01f §1.5). An engineer's reading, not legal advice.
+26. **The recorder stays Rem's alone and runs hourly from Phase 3.** *Recommend yes* (01c §5.7, 01e
+    §5.9): an hour is well inside 50 plays of any listening, and extending it to friends would put their
+    refresh tokens in a plain file on the Zenbook. Its grant may age out by Feb 6, 2027; a fresh local
+    sign-in copied into its `tokens.json` restarts the clock (01e F3).
+27. **sqld and the meter under their own Unix account on the Zenbook**, with no read access to the
+    backups, the rclone config or the recorder, before a friend's data is backed up there. *Recommend
+    yes*, an ops change. From Phase 4 the Funnel-facing box holds a read credential for every friend, and
+    the meter parses every query it forwards, unauthenticated ones included (security R10).
+28. **The fair-share brake applies to Rem too**, from the first friend. *Recommend yes* (§7.5): two
+    minutes for everyone until someone spends their share of the day's budget, then 15-minute batches
+    for that person alone, and 30 for everyone once the app's total reaches 426, with whatever anyone
+    opens always current. Exempting Rem moves his ~150 calls a day onto everyone else's share. The
+    alternative that keeps two minutes for all is server-side provisional plays (01c §5.3 ii),
+    medium-to-large work.
+29. **Finding out whether the quota is pooled.** *Recommend the passive way* (§7.9): per-user
+    attribution and each 429's reason from Phase 3, friends added one at a time, and after the first ban
+    one other user's harvest let through to see whether it is refused; plus a question on Spotify's
+    developer forum. The active test would ban Rem's own capture for up to ~12 hours if the quota is
+    shared (01c §7 decision 3).
 
-**Before the second friend**
+**When a friend asks for an import**
 
-22. **Closed-app freshness if the quota is shared.** *Recommend the fair-share brake for everyone, you
-    included* (§7.5): two minutes until the day's budget runs low, then 15-30 minutes for whoever is
-    above their share, with anything you open always current. Exempting you moves your ~150 calls a
-    day onto everyone else's share. The alternative that keeps two minutes for all is server-side
-    provisional plays (01c §5.3 ii), medium-to-large work.
-23. **Finding out whether the quota is pooled.** *Recommend the passive way* (§7.9) plus a question on
-    Spotify's developer forum. The active test bans your own capture for up to ~12 hours if the quota
-    is shared (01c §7 decision 3).
-24. **Friends' Extended Streaming History imports.** *Recommend not until segments exist*: a five-year
-    import is a ~4.2 MB history body today (01d §7 decision 2).
+30. **Friends' Extended Streaming History imports wait for newest-first loading and yearly segments for
+    closed years**, not for segments alone. *Recommend yes.* A five-year import is ~91,000 plays; with
+    monthly segments alone a cold visit is ~61 requests and ~3 s at 10 Mbit/s, past S2 (scale 9, §9.4).
 
 **Only if it happens**
 
-25. **If Spotify does not return `account_id`** to this app (Phase 0's dev sign-in shows it first).
+31. **If Spotify does not return `account_id`** to this app (Phase 0's dev sign-in shows it first).
     *Recommend deciding then.* Keying on the mutable Spotify `id` works for a handful of friends but can
     split one person into two users if Spotify ever lets ids change (01e §5.5, C §15 decision 5).
+    Phase 2 stops at its first step until this is settled (§11.4).
+
+**Dropped since Oct 14**: deleting the incident's plays from Rem's history (the Oct 14 version's
+decision 10). There are none: the store and the recorder agree play for play from Oct 13 on, and
+nothing back-dated was inserted since Oct 1 (§11.2, migration 7).
+
+**What the build waits on.** Most of the code is the same whatever Rem decides; this is where a
+decision changes what gets built or when it can run.
+
+| phase | waits on a decision | no decision holds it |
+|---|---|---|
+| 0 | the environment changes, the deployment deletions and the dashboard reads (1, 5) | the `logout` gate; the dev sign-in that logs `/v1/me`'s keys; the refresh-token probe on a local backup copy |
+| interim | the cron-job.org job going live (8); the replay (7); the resolver (9) | the route's second secret and 90-second guard, with tests |
+| P2, P3, P4 | P2 and P3's place before Phase 1 (12); P3's device and network target (13) | everything they contain |
+| 1 | the per-user database half: `forUser`'s client map and URL template, the owner stamp, the versioned open, `store_epoch`, and the harness's per-user files (11); the health check's cron-job.org job and e-mail (14); the second `AUTH_SECRET` rotation and `OWNER_UID` in Production, which are deploy steps | `identity.ts` and the branded `Uid`; `requireUser()` and its three outcomes; `auth_time`; keyed `cache()` boxes and module state; `playlistsCache` deleted; task owners; `userCache` with owner stamps; uid in ETags, bodies and storage keys; sign-out clearing storage; the token core in its own module with keyed maps and owner-carrying tokens; the `/api/cron/health` route; the harness's cache stub, scripted Spotify and planted-bug self-test |
+| 2 | `lazyboy-app` and the token move (11); where the platform token lives (24); `account_id` (31, only if absent) | the app-database module, the identity read, encryption with its sentinels and decrypt rules, conditional token writes, T5, T6, T9, T12 |
+| 3 | the forced refresh (15); the recorder's cadence (26) | the claim, the step, the probe, the harvest policy, the Liked change, paced pages, the brake's counter, T4, T13 |
+| 4a, 4b, 5 | 16-25 and 27-29, §13.2's gates, and each invite | – |
+| a friend's history import | 30 | – |
+
+Phase order binds whatever is decided. A lane that builds ahead of its phase's turn keeps to new files
+and files no queued lane edits, on its own branch, and rebases when the turn comes (§13.4).
 
 ## 19. Review disposition
 
