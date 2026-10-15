@@ -39,7 +39,8 @@ Status: complete.
   reach the store up to 30 minutes late.
 - **Search (§7, §12.2).** A database per user leaves each user's payload cost as it is today. On a
   mid-tier phone at 10 Mbit/s a first visit is usable in ~1.45 s for Rem and ~1.1 s for a typical
-  friend, once two small single-user changes ship (fetch at mount, build days lazily); repeat visits
+  friend, once two small single-user changes ship (fetch at mount, build days lazily); that rests
+  on a ~500 ms payload build on Turso, an estimate phase A's bench will check. Repeat visits take
   ~80 ms with phase E; a keystroke's match ≤ 15 ms. Rem's history entry still outgrows the Data
   Cache around late December and needs its catalog rows split out, multi-user or not.
 - **Reads (§12.4).** The free plan holds Rem and four light or typical friends with one constant
@@ -599,8 +600,8 @@ bucket.
 calls: 413 of Rem's 436 idle ticks on Oct 14 did (01c §2.1). `/me/player` reports the active
 device's track, including in the window where currently-playing 204s mid-playback, and answers
 204 itself only when no device is active (same GOTCHAS entry), which is all the harvest decision
-needs. The per-user probe then costs one call a tick, ~720 a day, against ~1,035-1,303 for Rem
-today (01c §2.7). The now-playing route keeps today's two-step read.
+needs. The per-user probe then costs one call a tick, ~720 a day, against ~1,035-1,303 for Rem's
+cron probe today (01c §2.7). The now-playing route keeps today's two-step read.
 
 **Capture health** (`src/lib/capture-health.ts`, the Home banner) reads the user's own
 `last_sync` and token row, and its "check the Zenbook pinger" hint shows to admins only (01c
@@ -717,8 +718,8 @@ still stops closed-app capture for every user (01c §6 item 4, 01f §3.5). The f
   app-database statements, so the effective cadence stays ~2 minutes: the tick interval is
   between 90 and 120 seconds depending on the two clocks' offset, never shorter. The second
   pinger adds 720 invocations a day; with Rem's ~200 a day of browsing and the same again per
-  friend, five users come to ~2,400 a day, ~7% of Hobby's million a month [estimate, 01f §2.3's
-  measured ~916 a day for Rem today].
+  friend, five users come to ~2,400 a day, ~7% of Hobby's million a month [estimate, from 01f
+  §2.3's ~916 a day for lazy-boy today, itself estimated from the team's usage shares].
 - With the Zenbook down, cron-job.org keeps every user's capture running; the recorder and the
   nightly backup pause.
 - With both down, capture resumes at the next app open (`/api/sync`) or the daily Vercel cron
@@ -736,7 +737,11 @@ from their first Home visit, where `PlaylistsSync` finds an empty store and kick
 `/api/playlists/sync` as a task in their own request (`src/components/playlists-sync.tsx:12`,
 `src/lib/playlists-sync.ts:24-71`). If the cron reaches it first, the 25 s deadline caps how long
 the tick waits; the scan commits per playlist and the next run skips finished ones (snapshot
-gate, `src/lib/sync/library.ts:64-71`). M23 drops the rescan's `/me` call
+gate, `src/lib/sync/library.ts:64-71`). The two paths must not scan one user at once: today the
+client kick checks only the 2-hour completion stamp (`src/lib/playlists-sync.ts:45-48`), which a
+new user does not have, while the cron also checks the 10-minute attempt stamp
+(`route.ts:37-39`). The kick stamps `library_scan_attempt_at` as well, so whichever path starts
+first owns the scan for ten minutes. M23 drops the rescan's `/me` call
 (`src/lib/sync/library.ts:40`): the user's Spotify id is on the user row, refreshed at each sign-in
 (01e §5.5).
 
@@ -1090,7 +1095,11 @@ not `lazyboy-u<N>` with N ≥ 2, and `deletion.test.ts` pins both refusals (§5.
 for 24 hours on Free and 10 days on Developer, the latter outside Spotify's five days. A destroyed
 database is out of point-in-time recovery, and on paid plans "deleted databases can be restored
 for up to five days" (https://docs.turso.tech/features/point-in-time-recovery), which ends inside
-the window when the destroy runs at the request.
+the window when the destroy runs at the request. It does not for a revocation on a paid plan: the
+four-day grace plus Turso's five-day undelete keeps a restorable copy for up to nine days.
+Whether a vendor's undelete counts as data "in your possession or control" is a reading of the
+Terms this lane cannot settle; the strict reading means no grace on a paid plan, so a friend
+whose grant fails is deleted at once and starts empty if they reconnect (§15 decision 10).
 
 **The platform token stays in Production for this.** 01e §6 recommends taking
 `TURSO_PLATFORM_TOKEN` out of the runtime when the second user arrives, because it can mint a token
@@ -1141,9 +1150,9 @@ minutes. Rem's data is written by the app's ordinary SQL in every phase and by n
 
 ### 11.2 Phase 1: the multi-user structure, with one user
 
-- One branch for M1-M12, cut from `main` after lanes 1910-1911 have merged: they rewrite
-  `recomputeOrphanFlags` and `storePlaylists`, the mechanical edit touches every function in
-  `db.ts`, and both at once would make a merge nobody can review. The mechanical part of M2 and
+- One branch for M1-M12, cut from `main` after lanes 1910-1911 have merged: scoping the orphan
+  pass changes `recomputeOrphanFlags` and its caller `storePlaylists`, the mechanical edit touches
+  every function in `db.ts`, and both at once would make a merge nobody can review. The mechanical part of M2 and
   M3 suits a Sonnet lane at medium effort with `tsc --noEmit` as the oracle; the token core (M5),
   the gate (M4), the cron (M8) and the open-app rule (M9) carry the risk and get an adversarial
   review of the diff before deploy.
@@ -1457,8 +1466,10 @@ Each with the recommendation and its reason, grouped by the phase it blocks.
    number to choose; Spotify says not to store content indefinitely (01f §1.5).
 10. **An `invalid_grant` under six months after consent.** Recommend 01e §5.7's rule: treat it as a
     revocation, stop at once, delete unless the user reconnects; owner exempt. This design deletes
-    after four days so the backups also clear inside the Terms' five (§10.3). Keeping the data is
-    gentler and outside the Terms.
+    after four days so the backups also clear inside the Terms' five (§10.3). On Turso's paid plan
+    a destroyed database stays restorable for five more days; if Rem reads that as data still in
+    his control, the grace goes to zero there and a reconnecting friend starts empty. Keeping the
+    data on every ambiguous signal is gentler and outside the Terms.
 11. **Friends' backups kept four days, and taken only while a friend is active.** Recommend yes:
     deletion then reaches the backups without bookkeeping; Rem's stay at 60 days.
 12. **The platform token in the runtime.** Recommend keeping it so in-app deletion destroys the
