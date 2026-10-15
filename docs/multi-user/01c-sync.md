@@ -534,8 +534,87 @@ STORE_MIGRATION and needs the daily prune (01a D32).
 
 ## 6. STORE_MIGRATION: what multi-user needs, and what should change before it runs
 
+Recommendation: run the migration as planned and before any multi-user schema work, with the first
+three edits below made before lane 1901 starts. Its cutover, fence and backups are all written
+against today's tables and two token rows; doing it single-user keeps them that simple.
+
+1. **§3 names the wrong dominant read.** It says: "One query dominates reads: the history payload's
+   plays scan (~50,500 rows read per run), rebuilt after every sync that lands a play: 23 runs." The
+   ~50,500-row statement is `orderedRealPlays` (`db.ts:854-862`), the all-time recompute, gated by
+   `alltime_at` (`db.ts:577-583`). The history payload's statement (`db.ts:1690-1698`) ran 0 times on
+   UTC Oct 13 and once on Oct 14 (78,781 rows); the meter's 150-character truncation makes the two
+   look alike (2.8). The 144-a-day ceiling still holds, since both gates are 10 minutes, but two
+   things in §3 change: the recompute runs from the cron's landed ticks, so it reaches its ceiling on
+   a long listening day whether or not Home is open; and neither phase E (the browser cache) nor
+   lanes 1910-1911 (the orphan pass) reduce it. Edit §3 to name it.
+2. **R4 has no growth term.** The recompute costs ~2.3 rows per stored play per run, and history
+   grows ~117 plays a day, so the term R4 projects rises ~12,000 rows a day for every day the app
+   runs (5.9); at today's 44 runs a day it is ~6.6M a day a year from now, ~200M a month, before any
+   second user. Add the growth line to R4 and queue an accumulator lane after 1903, next to
+   1910-1911. Multi-user needs it to fit R4 at all (5.9 table).
+3. **`/api/cron/daily` (phase A item 7) should loop over users from day one**, with one user today.
+   Its chores are the all-time heal, the Home payload rebuild and the convention check, each per user
+   in a multi-user store (S14); written as a loop now, the route does not need rewriting later.
+4. **The capture triggers stay on the Zenbook.** The target diagram (§5) keeps "the 2-min cron
+   pinger" and the recorder there, so after the move the Zenbook is no longer the store but is still
+   the only frequent capture trigger. A Zenbook outage keeps costing every user plays beyond their
+   last 50. A second pinger off the Zenbook needs the per-user lease first (5.7 b); it is a
+   multi-user-phase item, not a migration change.
+5. **The fence classifier** (phase A item 8) is pinned to every SQL string in `db.ts`. Multi-user's
+   new tables (per-user state, token rows, `user_meta`) have to be added to its core list (01a D36).
+6. **A free test of the `api_log` duplication hypothesis** (2.8): phase A gives the telemetry client
+   one attempt and a 4 s timeout. If duplicates stop after the cutover, the store fetch's retry ladder
+   was re-sending; lane 1904 can compare `COUNT(*)` with the distinct count for one day.
+7. **Per-user attribution of Spotify calls.** The quota question (§4, §7 decision 3) is answered by
+   knowing which user spent the scarce bucket when a ban lands. That needs a nullable `user_id` on
+   `api_log` (01a D31) and the 429 body's `reason`, both on the telemetry store; nothing in the
+   migration has to change for it.
+
 ## 7. Decisions that are Rem's
 
+1. **How many users.** Development mode allows five per app (§4); whether Rem counts toward the five
+   is not documented, and whether this app is grandfathered above five shows in the dashboard's User
+   Management list. Extended quota mode is closed to individuals. Several Client IDs share one quota
+   and conflict with the Developer Terms (01f §1.3). Recommendation: plan for Rem plus up to four.
+2. **Closed-app freshness if the quota is shared.** Today's 2-minute closed-app capture does not fit
+   five users in one recently-played budget (5.1). Options, with their cost in work: (i) harvest on
+   track changes, small, no freshness lost, not enough alone; (iii) one harvest per 15 min of
+   playback, trivial, plays reach the store up to 15 minutes late while the app is closed (an open app
+   still shows them at once); (ii) server-side provisional plays, medium-to-large (a provisional flag
+   through the skip chain, the totals and both payloads, plus reconciliation and its tests),
+   2-minute freshness for everyone. Recommendation: (i) now; (iii) for every user, Rem included, if
+   the quota proves shared; (ii) only if the 15-minute lag bothers someone.
+3. **How to find out whether the quota is shared.** Passive: record the 429 `reason` and a user id
+   per call, onboard one friend with budgets set as if shared, and watch combined spend against bans
+   (free, slow, answers only at the margin). Active: drive a test account into `QUOTA_EXCEEDED` and
+   see whether Rem's token is refused too: decisive within a day, but if the quota is shared it bans
+   Rem's own harvest and the recorder (same Client ID) until the ~10:50 AM reset, up to ~12 hours in
+   August, and plays beyond 50 in that window are lost. Recommendation: passive. Asking on Spotify's
+   developer forum costs nothing and may answer it sooner.
+4. **The recorder.** Recommendation: keep it owner-only and run it hourly (5.7 a). Extending it to
+   friends would put their refresh tokens in a plain file on the Zenbook and cost 96 scarce calls a
+   day each.
+5. **A second pinger off the Zenbook.** Recommendation: yes, once the per-user lease exists; the
+   cron-job.org job is already configured and costs nothing.
+6. **Friends' history before they joined.** Each friend can request their own Extended Streaming
+   History export and the importer can load it once it takes `--user` (S17). Product scope; it costs
+   nothing at sync time.
+
 ## 8. Unknowns
+
+- Whether the recently-played budget is the developer account's or each user's (§4). Everything in
+  5.1-5.3 has two answers because of it.
+- What else shares that bucket (recently-played and `/me` banned together in August; nothing else
+  did) and its size now; Spotify says groupings and limits "are subject to change".
+- The player bucket's and the library endpoints' limits; neither has been reached.
+- The development-mode rate limit's number (unpublished; 18 per 30 s passed without a 429).
+- Whether the owner counts toward the five users, and whether the app is grandfathered above five.
+- Vercel's function duration default and plan for this project (01f).
+- Why `api_log` duplicates rows (2.8 has a hypothesis and a free test, §6 item 6).
+- Whether Turso bills the orphan `UPDATE` the way the meter counts it or the way Turso's August bill
+  did (2.8); one orphan pass on the Turso copy after the cutover, read off Turso's usage before and
+  after, settles it.
+- Wall time from Vercel's side, and cold-start time (28 cold starts on Rem's day, untimed).
+- How friends listen. Every budget here uses a Rem-like worst case.
 
 ## Appendix A: exactly what I ran
