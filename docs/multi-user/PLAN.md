@@ -7,20 +7,20 @@ lists every finding and what changed. Planning only: nothing here changed code, 
 store, Turso or Vercel. It synthesizes the six overviews (`01a-data.md` to `01f-platform.md`, cited as
 01a §n and so on) and the three designs (`design-a.md`, `design-b.md`, `design-c.md`, cited as A §n,
 B §n, C §n). Code line numbers are against `ac6f7fe`, which the overviews cite; `git diff --stat
-ac6f7fe HEAD -- src scripts ops tests vercel.json next.config.ts package.json` is empty at `3800c73`.
+ac6f7fe HEAD -- src scripts ops tests vercel.json next.config.ts package.json` is still empty at `c6c9c07`.
 Every number is **[measured]** with its source or **[estimate]** with its arithmetic. §17 lists what
 the first lane ran, §20 what the revision ran.
 
-Status: revision in progress, Oct 15, 2026. Sections not yet revised still read as on Oct 14.
+Status: complete, Oct 15, 2026, 1:10 AM. Every section is revised; §19 accounts for every finding.
 
 ## 0. For Rem: the plan on one screen
 
 **What it takes.** Each person gets their own Turso database (yours is the `lazyboy` database the store
 migration creates, unchanged), plus one small app database for identity, encrypted Spotify tokens and
 scheduling. Every request carries a random user id, checked against the app database before any read;
-the sync tick leases each due user and works on them in parallel inside Spotify's shared budget; and a single-user performance
-track ships first, so five people's reads fit Turso's free plan and search stays fast. No friend gets
-in until a canary account has run beside you for a week.
+the sync tick leases each due user and works on them in parallel inside Spotify's shared budget; and a
+single-user performance track ships first, so five people's reads fit Turso's free plan and search
+stays fast. No friend gets in until a canary account has run beside you for a week.
 
 **Order of work** [time is an estimate at the lane program's pace; sizes S < M < L, §13.1]:
 
@@ -2728,9 +2728,10 @@ this section says which build work waits on which decision.
    Aug 9, 60 on Aug 10, 6 on Sep 8), and nothing backs it up (migration 8).
 7. **Replay those 122 plays** with `scripts/backfill-from-backstop.mjs` after lane 1904 and before P2's
    fill, with a snapshot first. *Recommend yes.* It writes production data, so it is Rem's to approve. It
-   inserts only plays that are missing and re-rules their edges (`1ac38fa`); on a snapshot copy it
-   inserted 166 plays, then 0 on a re-run (the D1 entry, `.claude/QUEUE.md:16`). Run before the fill, P2 counts them (§11.3). The Extended
-   Streaming History import for Aug 30-Sep 9 takes the same slot once Rem's export arrives.
+   inserts only plays that are missing and re-rules their edges (`1ac38fa`); on an older snapshot copy
+   it inserted 166 plays, then 0 on a re-run (the D1 entry, `.claude/QUEUE.md:16`). Run before the
+   fill, P2 counts them (§11.3). The Extended Streaming History import for Aug 30-Sep 9 takes the same
+   slot once Rem's export arrives.
 8. **An interim second pinger** right after lane 1904: today's route accepts a second secret and skips a
    tick within 90 s of the last one, and Rem re-enables the cron-job.org job with the new secret.
    *Recommend yes.* Until Phase 3, six to seven weeks later [estimate, §13.3], the Zenbook is the only
@@ -2796,10 +2797,10 @@ this section says which build work waits on which decision.
     about to be deleted (§5.4).
 21. **A friend's `invalid_grant`.** *Recommend*: stop calls and keep the data; confirm with a second
     refresh 10 minutes later; if two or more people, or Rem, are hit within 24 hours, treat it as
-    Spotify's event and delete nothing; a refresh token ~170 days old has expired and waits for its
-    owner to reconnect; a younger one counts as a revocation, which alerts Rem and destroys the database
-    on day 4 unless the person signs in first. Rem is never deleted automatically (§5.4, §12.3). The Oct
-    14 version destroyed the database at once; the reviews showed that one Spotify-side event would then
+    Spotify's event and delete nothing; a refresh token at least ~170 days old has expired and waits for
+    its owner to reconnect; a younger one counts as a revocation, which alerts Rem and destroys the
+    database on day 4 unless the person signs in first. Rem is never deleted automatically (§5.4, §12.3).
+    The Oct 14 version destroyed the database at once; the reviews showed that one Spotify-side event would then
     destroy every friend's history, and that an expiry could be filed as a revocation (security R4,
     completeness H2). Day 4 stays inside Spotify's five days. The cost: on Developer the destroyed
     database stays restorable through Turso's undelete until about day 9, which the strictest reading of
@@ -2988,7 +2989,7 @@ quotes them; the other columns use §18's.
 
 Lane 0225_lb_mu_revise, on the Mac, Oct 15, in two sessions. The first ran from 12:14 AM until its
 seat's usage ran out at 12:49 AM (`~/.claude/broke/scratch/lazyboy_mu/mu_dispatch.log`) and revised
-§0, §1, §3-§14, §19 and most of §2.3. The second ran from 12:49 AM to about 1:15 AM: it committed the
+§0, §1, §3-§14, §19 and most of §2.3. The second ran from 12:49 AM to 1:10 AM: it committed the
 rest of §2.3, rewrote §15, §16 and §18, added §13.4's rule for building ahead of a phase and two
 disposition rows, made the corrections listed below, and wrote this section.
 
