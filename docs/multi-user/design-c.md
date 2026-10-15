@@ -818,6 +818,101 @@ know the window's bounds: the sign-in times are not in the repo.
 
 ## 10. Sign-up gating, privacy, and account deletion
 
+### 10.1 Sign-up gating (M13)
+
+Two gates, both required:
+
+1. **Spotify's allowlist.** Rem adds each friend in the Developer Dashboard (the app → User
+   Management). An account not on it completes OAuth and then gets a 403 from `/v1/me`, which
+   `src/lib/spotify/userinfo.ts` already turns into `/login?error=SpotifyNotRegistered`.
+2. **The app's invite row.** `scripts/invite.mjs --spotify-id <id>` runs on the Mac with
+   `TURSO_PLATFORM_TOKEN`: it refuses if five users already exist (every row not being deleted),
+   inserts a `users` row with `status = 'invited'`, creates `lazyboy-u<uid>` in group `default`,
+   and prints the dashboard step. The Spotify id is the identifier Rem can see before the person
+   ever signs in (it is in their profile URL, 01e §5.4); on first sign-in the row binds to the
+   immutable `account_id` (§4.1).
+
+The app's gate stays even though Spotify's also gates: the app cannot read the dashboard, the row
+carries the cap, and `status` lets Rem cut someone off without the dashboard (01e §5.4). Every
+user's calls count against Rem's developer account (01c §4), so the gate is also the cost control.
+`SIGNUPS=owner` refuses everyone but uid 1 whatever the rows say; it is Phase 1's setting and
+Phase 2's way back. One dependency comes with every invite: "If the owner's Premium subscription
+lapses, the app will stop working" (migration guide, quoted in 01f §1.2), for all of them at once.
+
+### 10.2 Privacy (M10, M14, M16)
+
+Spotify's terms bind before anyone else signs in (01f §1.5): a privacy policy shown before
+sign-up, an end-user agreement users must accept, a disconnect mechanism with deletion within five
+days, "industry standard security" including vendors', a breach report to `security@spotify.com`
+within 24 hours, no commercial use (friends cannot be charged), linking by `account_id`, no e-mail
+to users, and requesting only the data the app needs. This lane reads the terms as an engineer,
+not as a lawyer.
+
+- **Terms and privacy pages** (M14), static and reachable without a session; `/login` links them
+  beside "Connect Spotify". The first visit after sign-up shows the agreement with an Agree
+  button, which records `agreed_version` and `agreed_at`. Until a user agrees, the cron skips
+  them and no library sync runs, so nothing is stored before consent beyond the token.
+- **What the privacy page says**: what is stored (plays from recently-played, playlist and Liked
+  membership, playlist and context names, and derived listened time and skip verdicts); where
+  (Turso in AWS us-east-1, Vercel's iad1 functions, request telemetry on a laptop in Rem's
+  apartment, backups on Rem's OneDrive); who can read it (Rem, as operator, has technical access to
+  every user's data through the store's tokens, and nobody else does); how long (while connected;
+  deleted within five days of disconnecting or of Spotify revoking access; after twelve months
+  without a sign-in, §10.3); how to disconnect (in the app, and at spotify.com/account/apps).
+- **Telemetry** (M10): `api_log` carries call metadata only; `client_metrics` carries page timings
+  and error text, and its `handoff` rows carry "artist — title" and the source playlist
+  (`src/app/(app)/home/den-home.tsx:888-894`, 01a §10). Both gain `user_id` so deletion reaches
+  them, and the `handoff` beacon sends the track id instead of the names, which still diagnoses a
+  phantom row against the user's own catalog.
+- **`/usage`** (M16) checks `users.admin`, never a stored `me_id` (01b S10). Each user sees only
+  their own stats; comparisons between friends wait for Rem's decision on derived metrics
+  (01f §1.5, §6.6).
+- **Scopes**: drop `user-read-email` and `user-read-private` (`src/lib/auth.ts:32-46`). Development
+  mode returns no email, nothing reads `product`, and no request uses `market=from_token` (grep).
+  It takes effect at each user's next consent, which is every sign-in (`show_dialog`,
+  `auth.ts:322`).
+
+### 10.3 Account deletion and backups (M15, M21)
+
+**Triggers.** A user's Disconnect; Rem removing a user; an `invalid_grant` that arrives less than
+six months after `granted_at`, which most likely means the user revoked the app at Spotify (01e
+§5.7: stop processing at once, delete in five days unless they reconnect); and twelve months
+without a sign-in. The last two are Rem's calls (§15).
+
+**The job**, idempotent, so a crash part-way leaves a row it can find and finish (01e §5.8). It
+runs inline for a Disconnect or a removal and from the daily route for the rest and for retries:
+
+1. `status = 'deleting'` and `session_epoch + 1`, so every session dies; delete the `user_tokens`
+   row, so every Spotify call stops.
+2. Destroy `lazyboy-u<uid>` through the Platform API.
+3. Delete the user's `api_log` and `client_metrics` rows on the telemetry store.
+4. Delete the user's backup files.
+5. Delete the `users` row. `AUTOINCREMENT` keeps the uid, and with it the database name and any
+   cache entry still keyed by it, from ever being reused (§3.1); those entries expire within 24
+   hours and no session can name them (§5.2).
+6. Show the user the instruction to remove Lazy Boy at spotify.com/account/apps, since the app
+   cannot revoke the grant (01e §1.6).
+
+**Destroy, not empty.** Emptying the tables would leave the data in Turso's point-in-time history
+for 24 hours on Free and 10 days on Developer, the latter outside Spotify's five days. A destroyed
+database is out of point-in-time recovery, and on paid plans "deleted databases can be restored
+for up to five days" (https://docs.turso.tech/features/point-in-time-recovery), which ends inside
+the window when the destroy runs at the request.
+
+**The platform token stays in Production for this.** 01e §6 recommends taking
+`TURSO_PLATFORM_TOKEN` out of the runtime when the second user arrives, because it can mint a token
+for every database. In this design the runtime already holds a group token that reads and writes
+every database, so the platform token adds the power to create and destroy databases and to change
+org settings, and in exchange a deletion cannot be forgotten. The alternative is a Rem-run
+`scripts/delete-user.mjs` with a five-day deadline and nothing to remind him. Rem's call (§15).
+
+**Backups** (M21) follow from §8.3 edit 3: one `(database, retention)` entry per database,
+`("lazyboy", 60 days)` as today, and `("lazyboy-app", 5 days)` and `("lazyboy-u<N>", 5 days)`.
+Five-day retention makes deletion reach the backups by itself, inside Spotify's window, with no
+per-file bookkeeping (01a §8.8, 01e §5.8). The cost: a friend's data lost more than five days back
+cannot be restored from a backup; Turso's own point-in-time history still covers the last day (ten
+on Developer). Rem's data and backups are unchanged.
+
 ## 11. Rollout in reversible phases
 
 ## 12. Each target, step by step, with its budget
