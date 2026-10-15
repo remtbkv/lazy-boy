@@ -5,9 +5,39 @@ nothing here changed code, data, the Zenbook store or Vercel. Line numbers are a
 this file was first written on (`bca1713`); every vendor quote carries the URL it was fetched from
 and the fetch time, and every number says how it was measured or that it is an estimate.
 
-Status: outline — sections fill in order; each is committed as it lands.
+Status: complete, 2026-10-14.
 
 ## 0. Summary
+
+- **Spotify allows five users on this app, Rem included, and no path to more.** Development mode is
+  "Up to 5 authenticated Spotify users" (since Mar 9, 2026 for existing apps); extended quota mode
+  takes only organizations with "at least 250k MAUs"; spreading users over several Client IDs breaks
+  "You may not use more than one Security Code for each SDA". 25 and 250 users cannot be served from
+  one app. `docs/SECURITY.md` and this program's design brief both say 25, which is out of date (1.2,
+  1.3).
+- **Spotify's dev-mode quota is documented as one pool per developer account.** The one quota this
+  app has hit, recently-played's daily budget, banned it at roughly 725-800 calls a day in August;
+  Rem plus the recorder use ~325 a day now, so two Rem-like users fit at today's harvest rate.
+  Whether the pool is really shared across users is the largest unknown in this plan (1.4).
+- **Vercel is Hobby, shared with three other projects.** lazy-boy uses ~2.7% of the invocations and
+  ~5% of the memory allowance. Active CPU (4 hours a month) could not be read through any API; my
+  estimate is 0.5-2.4 hours for lazy-boy alone, and overrunning any Hobby allowance stops it for up
+  to 30 days. Hobby crons run once a day, so the 2-minute tick has to live off Vercel (2).
+- **Every user path depends on the Zenbook today.** Down, every authed page errors; frozen, each store
+  query waits ~46 s. It reboots for 6-8 minutes around 3 AM daily (0.47% of the meter's 48.5 hours),
+  stalls besides, and its Funnel certificate expires Nov 8. After the Turso move, the remaining
+  user-visible dependency is the 2-minute pinger, which is everyone's closed-app history capture (3).
+- **Turso's free plan holds Rem plus a few light users, not two Rem-like ones.** Rem alone projects to
+  35-56% of its 500M reads, and crossing the limit blocks every query for every user until the 1st.
+  Reads bind first on every plan, and nearly all of it is the history payload's full rebuild (4).
+- **Nothing in STORE_MIGRATION needs to change before Oct 15, 8 PM.** Before a second user's data
+  arrives: a paid Turso plan or a cheaper rebuild, deletion that reaches the backups within Spotify's
+  five days, and user keys on Spotify's `account_id` (4.5).
+- **Cost.** Five users: $0-26 a month depending on Active CPU and how heavy the users are. 25 and 250
+  users are not permitted; the infrastructure alone would be ~$26-31 and ~$93-161. Past five, each
+  person running their own copy costs $0 in hosting. Rem pays all of it: a Streaming SDA may not
+  charge (5).
+- Rem's decisions, each with a recommendation, are in section 6.
 
 ## 1. Spotify's developer policy today
 
@@ -711,9 +741,9 @@ app.
    decides about comparisons. Friends cannot be charged for any of it (1.5).
 7. **How to learn whether the Spotify quota pools across users.** Recommended order: put a user
    column on `api_log` and cut the per-user harvest rate first (01c), then add one friend and read a
-   week of quota days on `/usage` before adding the next. A second person's first ban takes everyone's
-   history capture down for the rest of that quota day, so one at a time is the cheap version of the
-   experiment.
+   week of quota days on `/usage` before adding the next. If the quota pools, the first ban stops
+   everyone's history capture until the daily reset (~10:50 AM), so one person at a time is the cheap
+   version of the experiment.
 
 ## 7. What I ran, and what I did not measure
 
