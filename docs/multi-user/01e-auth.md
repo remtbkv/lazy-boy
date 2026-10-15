@@ -8,8 +8,9 @@ Status: complete (sections 0-8).
 
 ## 0. Summary
 
-**Today.** Auth.js v5 issues a 30-day, self-renewing JWT session cookie encrypted under `AUTH_SECRET`,
-with no server-side session state and no stable user id in it (§1.4). Sign-in is Spotify OAuth with
+**Today.** Auth.js v5 issues a JWT session cookie encrypted under `AUTH_SECRET` that lasts 30 days from
+sign-in (the app's `auth()` calls never renew it), with no server-side session state and no stable
+user id in it (§1.4). Sign-in is Spotify OAuth with
 PKCE and the client secret (§1.1). The Spotify grant lives in one plaintext `meta` row that every
 request reads and the cron uses (§2.1); refresh is coordinated by one in-process promise and a
 `meta`-table lock (§2.3); the owner guard runs only at sign-in (§1.2). The refresh path has no tests
@@ -18,9 +19,9 @@ request reads and the cron uses (§2.1); refresh is coordinated by one in-proces
 **Live problems found** (all outside this lane's planning-only remit to fix):
 
 - **F1.** Any browser that signed in before the guard, including the second account from Oct 14, still
-  acts as the owner: it reads the owner's history, edits the owner's playlists, and its log-out deletes
-  the owner's token. `AUTH_SECRET` is 133 days old, so nothing has ended those sessions. Rotating it
-  ends them at the cost of one sign-in.
+  acts as the owner until about Nov 13: it reads the owner's history, edits the owner's playlists, and
+  its log-out deletes the owner's token. `AUTH_SECRET` was created 133 days ago, so most likely nothing
+  has ended those sessions. Rotating it ends them at the cost of one sign-in.
 - **Production lacks `SPOTIFY_OWNER_ID`**, so the guard keys on the stored `me_id`. That value is
   correct right now (it matches the pre-incident owner by hash). Setting the variable removes the
   dependence on store state.
@@ -44,8 +45,9 @@ request reads and the cron uses (§2.1); refresh is coordinated by one in-proces
 - An app-side invite list. Development mode now caps new users at five (Feb 2026), so the program's
   25-user design target needs extended quota.
 - Split log-out into sign out, sign out everywhere, and disconnect.
-- Revocation or expiry (both `invalid_grant`) marks only that user `needs_reconnect`. Users get a
-  reconnect prompt before the six-month expiry. Disconnect and deletion follow Spotify's policy.
+- Revocation or the six-month expiry (both `invalid_grant`) marks only that user `needs_reconnect`;
+  the cron stops calling Spotify for them and nobody else is affected. The monthly re-sign-in already
+  renews every active user's grant. Disconnect and deletion follow Spotify's policy.
 
 **STORE_MIGRATION** needs no change for auth before it runs (§6). Four small additions: strip token
 rows from backups and the archive, delete the cutover's plaintext copies on the Mac, ship the user-id
@@ -138,18 +140,22 @@ belongs to.
 
 - Strategy `jwt`, `maxAge` 30 days (`auth.ts:300-303`), no adapter, so no server-side session table.
 - On HTTPS the cookie is `__Secure-authjs.session-token`: httpOnly, SameSite=Lax, Secure, path `/`
-  (`@auth/core lib/utils/cookie.js:45-48`). Its value is a JWE (`alg: dir`, `enc: A256CBC-HS512`,
+  (`@auth/core lib/utils/cookie.js:45-52`). Its value is a JWE (`alg: dir`, `enc: A256CBC-HS512`,
   `jwt.js:46-47`) under a key HKDF-derived from `AUTH_SECRET` with the cookie name as salt
   (`jwt.js:110-122`). The browser can neither read nor forge it; whoever holds `AUTH_SECRET` can mint
   one for anybody.
 - Payload: `name`, `email` (empty in development mode, §1.1), `picture`, `sub` (the random UUID),
   `iat`, `exp`, `jti`, `error` when set, and Spotify tokens only in the §1.3 fallback.
-- Wherever Auth.js can set a cookie (route handlers, server actions), the session action re-encodes the
-  JWT with a fresh 30-day expiry (`lib/actions/session.js:21-48`). A session in regular use never
-  expires.
-- Two things end a session early: a jwt callback that returns `null`, after which the session action
-  clears the cookie (`lib/actions/session.js:34, 55`), and rotating `AUTH_SECRET`, which ends every
-  session at once. Today's jwt callback never returns `null`.
+- The session lasts 30 days from sign-in and is never renewed. Auth.js's session action re-encodes
+  the JWT with a fresh expiry on every call (`lib/actions/session.js:21-48`), but the app only calls
+  `auth()` without arguments, and that path keeps the response body and drops its `Set-Cookie`
+  (`next-auth lib/index.js:89-91`). The one route that would deliver a renewed cookie,
+  `GET /api/auth/session`, is called by nothing in the app (no `SessionProvider`, no `useSession`;
+  `grep` over `src/`). So every user signs in again every 30 days.
+- Two things end a session before that: a jwt callback that returns `null`, after which `auth()`
+  reports no session (and the session action clears the cookie where its response reaches the browser,
+  `lib/actions/session.js:34, 55`), and rotating `AUTH_SECRET`, which ends every session at once.
+  Today's jwt callback never returns `null`.
 - Rotating `AUTH_SECRET` without logging everyone out takes `secret: [new, old]` in the config; decode
   tries each (`jwt.js:63-70`). next-auth beta.31 reads `AUTH_SECRET` as one string (`next-auth
   lib/env.js:22`), which skips @auth/core's `AUTH_SECRET_1..3` list (`@auth/core lib/utils/env.js:28-37`),
@@ -170,15 +176,16 @@ request (`src/lib/session.ts:10-14`).
 `signOut()`, which clears this browser's cookie. Deleting the one row does three things: closed-app
 capture stops (the cron finds no token and answers 503, `src/app/api/cron/sync/route.ts:103-111`);
 every other browser's session finds no row and goes to `/login` (`auth.ts:406-409`); and nothing is
-revoked at Spotify. The app calls no revocation endpoint and I found none in Spotify's Web API docs
-(users revoke at spotify.com/account/apps). The deleted refresh token stays valid at Spotify (§2.1),
+revoked at Spotify. The app calls no revocation endpoint, and Spotify's token documentation describes
+none (users revoke at spotify.com/account/apps). The deleted refresh token stays valid at Spotify (§2.1),
 as do its copies in the backups.
 
 ### F1 — sessions minted before the owner guard still act as the owner (open now)
 
 Sessions carry no identity (§1.3), every request reads the single token row (§2.1), and the guard runs
 only at sign-in (§1.2). The second account that completed sign-in on Oct 14 therefore holds a session
-cookie that stays valid until 30 days after its last use. With the owner's token back in the row, that
+cookie that stays valid until 30 days after that sign-in, about Nov 13 (§1.4). With the owner's token
+back in the row, that
 browser renders the owner's history and library, its server actions edit the owner's playlists and
 drive the owner's playback, and its "log out" deletes the owner's token row, which stops capture. Its
 chrome still shows the second account's name and avatar. This holds unless `AUTH_SECRET` was rotated
@@ -186,7 +193,7 @@ after the incident. Most likely it was not: `vercel env ls production` (9:31 PM)
 created 133 days ago, no doc records a rotation, and a rotation would have signed Rem out. That column
 may not move on an in-place edit, so this is strong evidence, not proof.
 
-Smallest fix: rotate `AUTH_SECRET` in Vercel production (`openssl rand -base64 32`, Sensitive) and
+Smallest fix: rotate `AUTH_SECRET` in Vercel production (`openssl rand -base64 32`, type Secret) and
 redeploy. Rem signs in once more; the token row and the cron are untouched. The lasting fix is §5.1's
 identity claim, checked on every request, which also rejects every cookie that lacks one. Doing either
 is outside this planning lane; it is Rem's to authorize, and I would do it before anything else in
@@ -226,8 +233,9 @@ through `ssh ubuntu python3 -` opened the Oct 1, Oct 8 and Oct 14 snapshots in m
 recorder's `tokens.json`; on the Mac, `sqlite3 -readonly data/replica.db` piped through `shasum`. No
 token value was printed or stored.
 
-- Production's refresh token had the same prefix (`d30e33fe`) on Oct 1, 8 and 14 while `expiresAt`
-  advanced (09:23, 08:51 and 09:14 UTC): two weeks of hourly refreshes and no rotation.
+- Production's refresh token had the same prefix (`d30e33fe`) in the Oct 1, 8 and 14 snapshots while
+  the access token's `expiresAt` moved on (to Oct 1 09:23, Oct 8 08:51 and Oct 14 09:14 UTC): two weeks
+  of hourly refreshes and no rotation.
   docs/quota-forensic/BRIDGE.md found the same on Aug 8. docs/GOTCHAS.md's "PKCE refresh token rotates
   on every use" does not describe this app's grant today; Spotify's wording is "Depending on the grant
   used to get the initial refresh token, a refresh token might not be included in each response"
@@ -391,7 +399,7 @@ background work 01c's; rows here stop at the auth boundary.
 | A1 | `db.ts:2511-2531` | one token row per environment in `meta` | a per-user token table keyed `(account_id, env)`, encrypted (§5.2, §5.3) | M |
 | A2 | `auth.ts:188-196` | `inflightRefresh` is one promise per instance | a map keyed by user. Left as is, user B's concurrent refresh joins user A's and receives **A's tokens**: B's request then reads and writes A's Spotify account. The one change here that leaks across users silently. | S, critical |
 | A3 | `auth.ts:73-83` | the request's token box holds one user's tokens | key the box by user, so nothing that touches two users in one request can mix them | S |
-| A4 | `auth.ts:212` | lock name `spotify_refresh` | `spotify_refresh:<account_id>`. Shared, every user's refresh would queue behind everyone else's and losers would poll the wrong row for up to ~32 s (§2.3) | S |
+| A4 | `auth.ts:212` | lock name `spotify_refresh` | `spotify_refresh:<account_id>:<env>`. Shared, a user who loses the lock to another user's refresh waits up to ~32 s for a token nobody is refreshing, then refreshes alone (§2.3) | S |
 | A5 | `auth.ts:170-289` | `coordinatedRefresh`, `waitForFreshToken`, `clearTokensIfStale`, `getValidAccessToken` read and clear "the" row | each takes the account id; tests first (§2.7) | M |
 | A6 | `auth.ts:270-272`; `src/lib/session.ts:9-19` | `spotifyAccessToken()` and `getSpotify()` return "the" token with no owner | return the token together with the account id the session named, so callers scope their reads by the same id | S |
 | A7 | `auth.ts:352-377` | the sign-in pass writes the global row and puts no identity on the JWT | write the user's row; put `account_id` and a session epoch on the JWT (§5.1) | M |
@@ -430,7 +438,8 @@ every sign-in (§1.1); email is not returned in development mode and is not an i
   request box. Unknown user, a status other than active, or `token.epoch !== users.session_epoch` →
   `null`. Today's request already pays one token read before rendering; the join keeps it at one round
   trip, so identity costs no latency. Two separate reads would add one round trip per request (about
-  15 ms on Turso at STORE_MIGRATION's R1 target, 40-210 ms through today's Funnel, STORE_MIGRATION §1).
+  15 ms on Turso at STORE_MIGRATION's R1 target; 40-210 ms medians through today's Funnel, measured from
+  the Mac, STORE_MIGRATION §1).
 - `session.user.id = uid`. Spotify calls `account_id` "public … pseudoanonymous", so sending it to its
   own user's browser is fine, and the browser needs it to key its caches (§5.6).
 - Pass the id explicitly. `getSpotify()` (or its successor) should return `{ uid, sp }`, and every
@@ -549,8 +558,8 @@ subscription. If the owner's Premium subscription lapses, the app will stop work
 "Users per app 5"; and "Existing apps are grandfathered: If you already have multiple Client IDs or
 more than 5 users, you will retain them. These limits only restrict what you can create or add going
 forward." So in development mode the allowlist can grow to five users at most (the page does not say
-whether the owner counts). **The program's design target of 25 users under development mode
-(make_mu.py's design prompt) exceeds what Spotify allows today.** Designs should take five as the
+whether the owner counts). **This program's design brief targets 25 users under development mode,
+which exceeds what Spotify allows today.** Designs should take five as the
 development-mode ceiling and treat 25 as an extended-quota question for 01f. docs/SECURITY.md:70-71
 ("caps to 25 allowlisted users") is out of date.
 
@@ -619,9 +628,10 @@ Recommended app-side gate, replacing `isOwnerSignIn`:
   call; I recommend it, because with several users signing out of a shared computer should not stop
   their history, and the policy needs a separate disconnect anyway.
 - An admin disable sets `users.status = 'disabled'`; it takes effect on the user's next request.
-- Keep the 30-day rolling lifetime. The epoch is a server-side kill switch, so a shorter cookie buys
-  little, and `AUTH_SECRET` rotation remains the everyone-out switch. Both checks ride the request's
-  single token read (§5.1).
+- Keep the fixed 30-day lifetime (§1.4). The epoch is a server-side kill switch, so a shorter cookie
+  buys little, and `AUTH_SECRET` rotation remains the everyone-out switch. Both checks ride the
+  request's single token read (§5.1). If a design makes sessions renew on use, it lengthens how long a
+  stolen cookie lives and stops the monthly re-authorization that §5.7 relies on.
 
 ### 5.7 When a user revokes the app
 
@@ -647,12 +657,16 @@ What N users need:
   expired, revoked, or otherwise invalid" (refreshing-tokens page). `granted_at` separates them: under
   six months it was revoked (or invalidated by Spotify for some other reason, which the docs do not
   list); at six months it expired.
-- The six-month lifetime means every user must authorize again at least twice a year, and a user who
-  opens the app daily never sees a login page (the cookie renews itself, §1.4). From `granted_at + 165
-  days`, show an in-app "Reconnect Spotify" prompt; with `show_dialog` that is two clicks. No e-mail:
-  development mode returns none, and the policy says "Don't email users unless they have provided you
-  with their explicit consent" (https://developer.spotify.com/policy). Rem's own production grant needs
-  the same: his Oct 14 sign-in (if that was his last) runs out around Apr 14, 2027.
+- The six-month lifetime mostly takes care of itself today. Sessions end 30 days after sign-in (§1.4),
+  and every sign-in passes Spotify's consent screen (`show_dialog`), which is a new authorization and
+  restarts the clock. It runs out only for a user who has not signed in for six months while the cron
+  kept capturing for them; their capture stops then, and an in-app prompt cannot reach someone who never
+  opens the app. E-mail is out: development mode returns no address, and the policy says "Don't email
+  users unless they have provided you with their explicit consent" (https://developer.spotify.com/policy).
+  So: mark them `needs_reconnect` at expiry, show the reason when they come back, and accept the gap.
+  If a design ever makes sessions renew on use (§5.6), add an in-app "Reconnect Spotify" prompt from
+  `granted_at + 165 days`. Rem's own production grant follows the same rule: it runs out six months
+  after his last sign-in.
 - Deleting data. Spotify's Developer Policy: "when a user disconnects their Spotify account or otherwise
   expresses an intent to prevent your SDA from accessing their data, you agree to delete and no longer
   request or process any of that user's personal data" (https://developer.spotify.com/policy, fetched
@@ -761,8 +775,8 @@ out of the Vercel runtime when the second user arrives; it serves `/usage` and a
 - Whether `AUTH_SECRET` was edited in place after the incident (the env listing shows it created 133
   days ago; F1).
 - Whether production uses the same Spotify client id as dev (values are not readable).
-- Whether `SPOTIFY_OWNER_ID` exists as a team-level shared variable that `vercel env ls` does not list;
-  the guard's behaviour is the same either way only if it does not.
+- Whether `SPOTIFY_OWNER_ID` is set as a team-level shared variable that `vercel env ls` does not
+  list. If it is, production's guard uses it and §1.2's "runs on the fallback" does not hold.
 - Whether `/v1/me` returns `account_id` to this development-mode app (documented, not observed).
 - Whether this app's refresh tokens can be refreshed without the client secret (§3.2).
 - Whether revoking at spotify.com stops the current access token at once, and whether a password
