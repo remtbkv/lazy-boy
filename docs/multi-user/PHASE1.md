@@ -139,7 +139,44 @@ one and must pass.
 
 ## 4. Left for Rem's decisions, or for the phase's turn
 
-pending
+**Waiting on a decision of Rem's** (PLAN.md §18's last table, Phase 1 row):
+
+| item | decision | why it waits |
+|---|---|---|
+| the per-user database half: `forUser(uid)` and its client map keyed by `db_name`, the one URL template, the owner check on open (`meta.owner_uid` per `(uid, db_name)`), the versioned open (`schema_version`, `min_reader`, schema steps from production only), `store_epoch`, the harness's per-user files (`app.db`, `u1.db`, `u2.db`), T1, T8, and the planted "URL template that ignores the uid" | 11, a database per person | the shape of every one of these is the per-user database model; under a shared store they would be a `user_id` column instead |
+| the cron-job.org job that calls `/api/cron/health` hourly, with failure e-mail | 14, the e-mailed alarm (it lifts STORE_MIGRATION's R6) | the route is built and tested; creating the job is the alerting mechanism R6 forbids until Rem says yes |
+| `OWNER_UID` in Production, the second `AUTH_SECRET` rotation, writing the four `meta` keys into `lazyboy` | deploy steps that wait for his go-ahead (§18's preamble) | they change production; this branch never deploys |
+
+**Left for Phase 1's turn**, because the work sits in files queued lanes edit (§13.4); none needs a
+decision:
+
+- the mechanical edit through `db.ts` (`forUser`, its 74 exports and their callers) and S3;
+- db.ts's seven cached reads onto `userCache` (S1's pending entry) and T2 over them; its two
+  `cache()` boxes keyed by uid; its four module-state entries (S4's pending list);
+- the uid in the search ETags and bodies and the client dropping a body with another `u` (T7's
+  server half), in the two search routes and Home's loaders;
+- the `(app)` layout rendering the uid for the browser, then the 12 pending storage names onto
+  `userStorageName` (S6), the sign-out form calling `clearUserStorage` (lane 1905 adds its own
+  IndexedDB clear to the same form, STORE_MIGRATION §10 edit 3), and the client fetchers clearing
+  on `isSignedOutResponse`;
+- the remaining entry points onto `requireUser` (the census's pending rows): Home and its first
+  wave behind the gate, `/usage` admin-only, `history-actions.ts`, the search routes, `/api/sync`,
+  and each action in `actions.ts` onto `requireActionUser` (the Phase 0 lane edits `logout` there);
+- `/api/metrics` taking the uid from the session and refusing reserved event names such as
+  `isolation` (T15). Until then a client can post an `isolation` row, which can only cause a false
+  alarm once the health check reads them;
+- the health check's isolation-event read (a `db.ts` function over the telemetry rows), the daily
+  chores' stamp (`/api/cron/daily`, lane 1901) and Turso's pace (after lane 1903): listed as
+  `unchecked` in its reply until then;
+- S7 (no await on the telemetry client), which needs lane 1901's client;
+- T10 and the scripts' required `--user` with its `scriptUser` minter: the import scripts are
+  queued, and the helper needs `forUser`.
+
+**Not done, and not blocked**: two Phase 1 items in unqueued files that this lane did not reach. S8
+and moving `/playlists/[id]`'s Spotify fetch and `storePlaylistTracks` write out of the nested
+`Tracks` component into the gated page body (PLAN.md T3's note); and the Spotify client asserting
+that a token's owner is the caller and tagging `api_log` with the uid (§5.2's last row), which
+needs `TokenSource` to carry a `UserTokens` instead of a string.
 
 ## 5. How to review the branch
 
