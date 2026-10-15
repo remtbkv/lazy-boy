@@ -359,15 +359,287 @@ background work 01c's; rows here stop at the auth boundary.
 
 ## 5. What multi-user must change
 
+These are recommendations for the three designs, with the reason for each. Schema sketches are
+illustrations; the data model as a whole is 01a's and the designs'.
+
 ### 5.1 Identity: the session must name the user
+
+The key is Spotify's `account_id`. The alternatives each fail: the Spotify `id` is the field Spotify
+says may change and must not be used for linking (§1.1); Auth.js's `sub` is a fresh random UUID at
+every sign-in (§1.1); email is not returned in development mode and is not an identity anyway.
+
+- Sign-in pass of the jwt callback: set `token.uid = profile.account_id` and `token.epoch =
+  users.session_epoch`, taken from the profile and the user row only, never from the incoming token.
+- Every later request: no `uid` → return `null`. Auth.js then treats the request as signed out and
+  clears the cookie where it can (§1.4). This one rule closes F1 and makes everyone sign in once at
+  rollout.
+- Read the user row and the token row in one query (`users LEFT JOIN user_tokens`), through the
+  request box. Unknown user, a status other than active, or `token.epoch !== users.session_epoch` →
+  `null`. Today's request already pays one token read before rendering; the join keeps it at one round
+  trip, so identity costs no latency. Two separate reads would add one round trip per request (about
+  15 ms on Turso at STORE_MIGRATION's R1 target, 40-210 ms through today's Funnel, STORE_MIGRATION §1).
+- `session.user.id = uid`. Spotify calls `account_id` "public … pseudoanonymous", so sending it to its
+  own user's browser is fine, and the browser needs it to key its caches (§5.6).
+- Pass the id explicitly. `getSpotify()` (or its successor) should return `{ uid, sp }`, and every
+  store function that reads user data should take `uid` as an argument. An ambient "current user" (for
+  example AsyncLocalStorage set in `auth()`) does not exist in the cron or in background tasks that
+  outlive their request (`src/lib/tasks/`), and where it does exist it can be the wrong user; an
+  explicit argument is checkable by the type system and by grep.
+
 ### 5.2 Per-user token rows, locks and request boxes
+
+A sketch (01a owns the schema):
+
+```sql
+CREATE TABLE users (
+  account_id    TEXT PRIMARY KEY,     -- Spotify account_id, immutable
+  spotify_id    TEXT NOT NULL,        -- mutable; refreshed at sign-in; replaces me_id
+  status        TEXT NOT NULL,        -- active | needs_reconnect | disabled
+  session_epoch INTEGER NOT NULL DEFAULT 0,
+  created_at    INTEGER NOT NULL
+);
+CREATE TABLE user_tokens (
+  account_id TEXT NOT NULL,
+  env        TEXT NOT NULL,           -- prod | dev: replaces the spotify_tokens/_dev key split
+  blob       TEXT NOT NULL,           -- encrypted {accessToken, refreshToken} (§5.3)
+  expires_at INTEGER NOT NULL,        -- plaintext, so the cron can pick who needs a refresh
+  granted_at INTEGER NOT NULL,        -- last authorization: the 6-month clock (§5.7)
+  PRIMARY KEY (account_id, env)
+);
+```
+
+- Every function in §2.2-2.5 takes the account id: the lock becomes
+  `lock:spotify_refresh:<account_id>:<env>` (A4), the in-process `inflightRefresh` becomes a map keyed
+  the same way (A2), the request box is keyed by account (A3), and `clearTokensIfStale` compares
+  within one user's row.
+- Move the token core (`refreshAccessToken`, `coordinatedRefresh`, `waitForFreshToken`,
+  `clearTokensIfStale`, `getValidAccessToken`, the in-flight map) out of `auth.ts` into a module with
+  no next-auth import, and keep the jwt callback's body as a function of `(token, account, profile,
+  deps)`, so the simulated environment (`tests/setup.ts`: a local SQLite file and a scripted fetch) can
+  run them. Known-answer tests to write first:
+  1. Two users with expired tokens refresh concurrently in one process: each ends with its own new
+     token, one token-endpoint call per user (A2).
+  2. User A holds the refresh lock; user B's refresh does not wait (A4).
+  3. `invalid_grant` for A clears A's row only (A5).
+  4. A's ciphertext copied into B's row fails to decrypt (§5.3).
+  5. A cookie with no `uid`, an unknown `uid`, a disabled user or a stale epoch: the callback returns
+     `null` (§5.1, §5.6).
+  6. `getValidAccessToken(uid)` for a user with no row returns `null` and makes no Spotify call.
+- Remove the cookie-held-token paths (A18). They exist for a store hiccup during sign-in; with N users
+  a sign-in that cannot write its token row should fail and be retried while the user is still on the
+  page. A token parked in a cookie is invisible to the cron, so that user's capture would stop silently
+  until a later request migrated it.
+- Write load (estimate from the code, not measured): the cron needs a valid access token for every
+  active user around the clock (it checks `currentlyPlaying` each tick, `cron/sync/route.ts:133-137`),
+  so each user costs about 24 refreshes a day, each one row write plus a lock acquire and release:
+  about 72 writes per user per day. Five users: ~360 a day; 25 users: ~1,800 a day, about 54K a month
+  against Turso's free 10M (STORE_MIGRATION R4). Reads stay at one per request.
+
 ### 5.3 Encryption at rest and key handling on Vercel
+
+What it protects: every place a token row goes that is not the Vercel runtime. That is the store
+(Zenbook today, Turso after Oct 15), its backups (14 days on the Zenbook, 60 on OneDrive, Turso's
+own), the migration's snapshots and scratch copies, `data/replica.db`, a dev server pointed at
+production, and whoever holds a leaked store or platform token. All of them hold live, 13-scope
+credentials today (F2). With other people's accounts in the store, these copies are the main risk.
+
+What it does not protect: anything that runs code in production (a bad deploy, a compromised
+dependency, Vercel itself), because that code holds the key; and a holder of `AUTH_SECRET`, who can
+drive the app as any user without ever seeing a token.
+
+Recommended design:
+
+- AES-256-GCM from Node's built-in `crypto`, no new dependency; a random 12-byte IV per write.
+- Stored as `v1.<base64url(iv ‖ ciphertext ‖ tag)>`, where `v1` names the key.
+- Associated data `lazyboy:tokens:<account_id>:<env>`. Without it, someone with write access to the
+  store but no key could copy a victim's ciphertext into their own row and use the app, through their
+  own session, on the victim's Spotify account. With it, the moved ciphertext fails to authenticate.
+- Plaintext columns: `account_id`, `env`, `expires_at`, `granted_at`. Both tokens go in one blob; the
+  access token lives an hour, and encrypting it costs nothing extra.
+- Keys in one env var, `TOKEN_KEYS="v2:<base64 32 bytes>,v1:<…>"`: the first writes, reads pick by
+  prefix. On Vercel, type Secret ("Secret values are write-only after saving",
+  https://vercel.com/docs/environment-variables/sensitive-environment-variables), Production only.
+  Preview gets no key (and no production store, §6). Dev rows use a dev key, so the production key
+  never sits in `.env.local`, and `vercel env pull` cannot return a Secret.
+- Rotation: put the new key first and redeploy. Active users' rows re-encrypt at their next refresh,
+  about hourly; a one-off script re-encrypts the rest; drop the old key once
+  `SELECT count(*) FROM user_tokens WHERE blob LIKE 'v1.%'` is zero.
+- Losing the key costs every user one sign-in and nothing else, so a copy in Rem's password manager is
+  enough backup.
+- A blob that fails to decrypt is treated as no token (`needs_reconnect`) and logged with the account
+  id, never the blob.
+- Cost: microseconds of CPU per request for a ~600-byte blob (an estimate; AES-GCM is hardware-
+  accelerated on x86), against a store round trip of tens of milliseconds, and no extra round trip.
+
+Alternatives I would not take:
+
+- Vercel KMS (beta) only signs: "KMS does not support symmetric (HS*) keys", and it exposes
+  `signJWT`/`signMessage` (https://vercel.com/docs/kms, updated Sep 7, 2026). It cannot encrypt or
+  decrypt.
+- AWS KMS through Vercel's OIDC federation keeps the key out of Vercel's env and logs every decrypt.
+  It defends against someone who can read Vercel's env but cannot run code there, and Secret values
+  already cannot be read without running code. The price is an AWS account and a network call (or a
+  cached data key) on every request, and Rem has already ruled AWS out for this app
+  (STORE_MIGRATION.md:107).
+- Encrypting the database file at the storage layer protects the disk only. The exposures above go
+  through the store's API (dumps, backups, a leaked token), which sees plaintext.
+
 ### 5.4 Sign-up gating in place of the owner guard
+
+Two gates exist today: Spotify's development-mode allowlist (an account not on it gets a 403 from
+`/v1/me`, GOTCHAS "Sign-in by an account outside that allowlist") and the owner guard.
+
+Spotify's current rules for development-mode apps, from the February 2026 migration guide
+(https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide, fetched
+2026-10-14): "All Development Mode apps require the app owner to have an active Spotify Premium
+subscription. If the owner's Premium subscription lapses, the app will stop working"; new apps get
+"Users per app 5"; and "Existing apps are grandfathered: If you already have multiple Client IDs or
+more than 5 users, you will retain them. These limits only restrict what you can create or add going
+forward." So in development mode the allowlist can grow to five users at most (the page does not say
+whether the owner counts). **The program's design target of 25 users under development mode
+(make_mu.py's design prompt) exceeds what Spotify allows today.** Designs should take five as the
+development-mode ceiling and treat 25 as an extended-quota question for 01f. docs/SECURITY.md:70-71
+("caps to 25 allowlisted users") is out of date.
+
+Recommended app-side gate, replacing `isOwnerSignIn`:
+
+- An invite table keyed by Spotify `id`, the identifier Rem can see before the person ever signs in (it
+  is in their profile URL); `account_id` only appears through `/v1/me` with their token. On first
+  sign-in a matching unclaimed invite creates the `users` row under `account_id` and records the claim;
+  from then on the user is found by `account_id`, so a later change of `id` does not matter.
+- `SPOTIFY_OWNER_ID` bootstraps the first admin (Rem), as today.
+- Fails closed on a store error, as `owner.ts:8-9` does now.
+- Keep it even while Spotify's allowlist also gates: the app cannot see the dashboard; extended quota
+  would remove that gate and the app's own must already exist; and `users.status` lets Rem cut a user
+  off without the dashboard.
+- Every user adds cron work and Spotify calls counted against Rem's developer account (July 2026
+  changelog, §3.2), so the gate is also the cost control.
+- Rem's Premium subscription becomes an uptime dependency for every user (the quote above).
+
 ### 5.5 Account linking
+
+- One provider, so linking means mapping a Spotify account to an app user, and the key is
+  `account_id` (§5.1). Never link by email: development mode returns none, and email linking lets
+  whoever controls an address claim an account; Auth.js only allows it behind
+  `allowDangerousEmailAccountLinking`.
+- Treat the Spotify `id` as an attribute: refresh `users.spotify_id` at sign-in and on library sync.
+  Playlist owners arrive as Spotify ids, so `getLibraryTracks`' owner filter (`db.ts:2310`) keeps
+  working.
+- If `/v1/me` comes back without `account_id`, refuse the sign-in and log it; do not fall back to `id`.
+  A fallback keys some users on a mutable field, and one person could later end up as two users. The
+  docs say `account_id` is returned; nobody has seen it from this app. The first post-change sign-in
+  (Rem's) settles it, and should happen before invites go out.
+- Read `profile.account_id` in the signIn and jwt callbacks, which both receive the raw profile at
+  sign-in. `account.providerAccountId` is the Spotify `id` (`@auth/core
+  lib/actions/callback/oauth/callback.js:233`) and is not the key.
+- One person with two Spotify accounts is two users. Merging histories is a product feature, not a
+  linking rule; I would not build it.
+- Rem's existing data belongs to his `account_id`. Bind it on his first sign-in after the change by
+  matching `profile.id` to `SPOTIFY_OWNER_ID`, or read it once from `/v1/me` with the stored production
+  token during the data migration. Never bind through `me_id`, which an intruder's sync can rewrite
+  (`tests/owner-signin.test.ts:33-38`).
+
 ### 5.6 Session fixation, sign-out and server-side revocation
+
+- Classic fixation needs a session id that survives login. Auth.js mints a new encrypted JWT at
+  sign-in from a `defaultToken` built from the signing-in user alone (`@auth/core
+  lib/actions/callback/index.js:72-79`), replacing whatever cookie the browser held. The design keeps
+  that only if the sign-in branch takes `uid` and `epoch` from the profile and the user row, never from
+  the incoming token (§5.1).
+- Login CSRF, planting the attacker's account in the victim's browser, is blocked by PKCE (§1.1).
+  Adding `"state"` to the provider's `checks` is free defence in depth; RFC 9700 does not require it.
+- One browser, two users. B signing in over A gets a clean B session. What can leak is client-side
+  state that outlives the switch: the `lb-nowplaying` localStorage cache (GOTCHAS, "The now-playing
+  localStorage cache"), the planned IndexedDB search copy (STORE_MIGRATION §10, which already clears on
+  a different user id or sign-out), and the browser's HTTP cache for `/api/search/*`. Those ETags are
+  `lib-<shape>-<version>-<date>` and `hist-…` with no user in them
+  (`src/app/api/search/library/route.ts:39`, `history/route.ts:26`). Two users whose version numbers
+  match on the same day would revalidate each other's cached body to a 304, so the ETag must carry the
+  user id (01b/01d). All of these key on `session.user.id` (A9).
+- Split today's single log-out into three actions:
+  1. **Sign out**: clear this browser's cookie. Capture continues.
+  2. **Sign out everywhere**: bump `users.session_epoch`; every other cookie fails its next request.
+  3. **Disconnect**: delete the token row, stop capture, delete the data (§5.8), and tell the user to
+     remove the app at spotify.com/account/apps, since the app cannot revoke the grant itself. Spotify's
+     policy requires this mechanism (§5.7).
+  Today log out stops capture and signs out every device (§1.6); the split changes that. It is Rem's
+  call; I recommend it, because with several users signing out of a shared computer should not stop
+  their history, and the policy needs a separate disconnect anyway.
+- An admin disable sets `users.status = 'disabled'`; it takes effect on the user's next request.
+- Keep the 30-day rolling lifetime. The epoch is a server-side kill switch, so a shorter cookie buys
+  little, and `AUTH_SECRET` rotation remains the everyone-out switch. Both checks ride the request's
+  single token read (§5.1).
+
 ### 5.7 When a user revokes the app
+
+Today, single user (from the code): the user removes the app at spotify.com/account/apps. Whether the
+stored access token stops working at once is undocumented; it expires within an hour regardless
+(`expires_in` 3600). A 401 meanwhile surfaces as a `SpotifyError` (`src/lib/spotify/client.ts:205-210`)
+and triggers nothing. The next refresh gets `400 invalid_grant`, which is terminal:
+`clearTokensIfStale` deletes the row; the request path sets `error` and sends the browser to `/login`;
+the cron answers 503 "no token" (`cron/sync/route.ts:103-111`) and the Zenbook's timer logs a failure.
+Capture stops; plays beyond Spotify's 50-play window are lost until the user signs in again.
+
+What N users need:
+
+- Isolation: user A's `invalid_grant` clears A's row only, costs one token-endpoint call, and delays
+  nobody else (per-user locks, A4; per-user error handling and time budget in the cron, 01c). Once A's
+  row is gone the cron skips A, so a revoked user costs nothing per tick.
+- Status, not absence: set `users.status = 'needs_reconnect'` where the row is cleared. The UI can then
+  say "Spotify disconnected Lazy Boy — reconnect", and the cron stops reading "one user has no token" as
+  "capture is down" (A15: today's 503 would fire whenever any one user disconnects).
+- A 401 on a token the store believes fresh should zero that user's `expires_at`, so the next call
+  refreshes and finds out within seconds instead of within the hour. Small and optional.
+- Revocation and expiry look the same: the token endpoint "returns invalid_grant when a refresh token is
+  expired, revoked, or otherwise invalid" (refreshing-tokens page). `granted_at` separates them: under
+  six months it was revoked (or invalidated by Spotify for some other reason, which the docs do not
+  list); at six months it expired.
+- The six-month lifetime means every user must authorize again at least twice a year, and a user who
+  opens the app daily never sees a login page (the cookie renews itself, §1.4). From `granted_at + 165
+  days`, show an in-app "Reconnect Spotify" prompt; with `show_dialog` that is two clicks. No e-mail:
+  development mode returns none, and the policy says "Don't email users unless they have provided you
+  with their explicit consent" (https://developer.spotify.com/policy). Rem's own production grant needs
+  the same: his Oct 14 sign-in (if that was his last) runs out around Apr 14, 2027.
+- Deleting data. Spotify's Developer Policy: "when a user disconnects their Spotify account or otherwise
+  expresses an intent to prevent your SDA from accessing their data, you agree to delete and no longer
+  request or process any of that user's personal data" (https://developer.spotify.com/policy, fetched
+  2026-10-14). An explicit in-app Disconnect is that intent: delete at once. An `invalid_grant` is
+  ambiguous (revocation, Spotify-side invalidation, or expiry). My recommendation: on `invalid_grant`,
+  stop all processing for that user immediately (no token, no calls), keep the data, show the reconnect
+  prompt, and purge after a fixed time without reconnecting; exempt the owner. The length of that window
+  is Rem's call (§7); the policy's literal text has no grace period, and an immediate purge on an
+  ambiguous signal destroys history irreversibly.
+
 ### 5.8 Account deletion
+
+- The policy requires "an easily accessible mechanism to disconnect their Spotify account from your SDA
+  at any time and provide clear instructions on how to do so", and a privacy policy (same page).
+- Order, as an idempotent job: bump the epoch (sessions die), delete the token row (access stops),
+  delete every user-scoped row and cached payload (01a's tables; user-keyed `meta` entries; any
+  telemetry that gains a user column), delete lock rows, and delete the `users` row last, so a crash
+  midway leaves a row the job can find and finish.
+- Tell the user to remove Lazy Boy at spotify.com/account/apps; the app cannot revoke the grant.
+- Backups keep deleted data until they age out: 14 days on the Zenbook and 60 on OneDrive
+  (`backup.py:16`), plus Turso's own retention after the migration. The privacy policy should say so.
+  With §5.3 the deleted user's tokens in those backups are ciphertext.
+- Per-user encryption keys for crypto-shredding would make backup copies unreadable at deletion. That
+  is more machinery than five users justify.
+
 ### 5.9 Session-less paths acting for N users
+
+- The cron (A14) iterates users that are active and have a production token row, calls
+  `getValidAccessToken(uid)` per user, and isolates each user's failures and time (01c). It should
+  refresh only users who need a Spotify call on that tick.
+- `CRON_SECRET` stays the cron's only gate, and fan-out raises its value (§3.2). A separate secret per
+  caller (the Zenbook timer, Vercel's cron) would let one be rotated without the other; optional.
+- Background tasks bind their token getter to the user at creation (A16).
+- The recorder holds Rem's grant in plaintext on the Zenbook. Extending it to other users means giving
+  the Zenbook every user's refresh token, decrypted (the key on an apartment laptop), or asking every
+  user to authorize a second grant for it. I would keep it owner-only; other users' capture then rests
+  on the Vercel cron alone, with Spotify's 50-play window as their loss floor. Rem's call (§7).
+- A dev server pointed at the production store (today's `.env.local`, and STORE_MIGRATION §8 step 15
+  keeps it so) can read every user's data. §5.3 keeps their tokens out of reach; their history is not.
+  Point dev at a local or separate store once a second user exists.
 
 ## 6. What multi-user needs from STORE_MIGRATION.md
 
