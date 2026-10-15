@@ -126,6 +126,79 @@ becomes per user.
 
 ## 4. Query sites: every statement, its caller, its trigger and how often it runs
 
+### 4.1 Triggers and how often they fire (the owner, today)
+
+| trigger | cadence | evidence |
+|---|---|---|
+| any authenticated request | per page render, action or API call; `auth()` reads the token row once per request (`auth.ts:73-78`) | code |
+| cron tick (`/api/cron/sync`) | every 2 min = 720/day, whether or not anyone listens | Zenbook timer (STORE_MIGRATION §3) |
+| harvest (the tick calls recently-played) | ~250-330/day: when playing, the first idle tick after playing, and hourly (`cron/sync/route.ts:121-146`) | [measured] api_log has 254/day recently-played calls Oct 7-13 (S-Oct14); the ledger's `sync_tick_*` rows say 330.6/day. Both are fire-and-forget writes (`db.ts:2623`, `db.ts:2818`) that can be lost when Vercel freezes the function (`spotify/client.ts:183-185` names the hazard); which one undercounts is not known |
+| landed harvest (≥1 new play) | ~110-175/day | [measured] ledger `sync_tick_landed` 174.7/day Oct 7-13; 30-day mean 163.5, busiest day 290 (Aug 25) |
+| library sync (`maybeSyncLibrary`) | at most every 30 min (`route.ts:28-42`); 48/day ceiling | api_log `cron-library-scan`: 160 Spotify calls/day [measured]; a steady run makes ~5 calls, so ~30+ runs/day [estimated] |
+| open Home tab | `/api/now-playing` every 6 s (leader tab), `POST /api/sync` on load / every 2 min / on focus (server debounce 60 s), `refreshHistoryAction` every 120 s and twice per track change (READ_QUOTA "an open Home tab"), search payloads on idle after first paint | code; client timers |
+| user actions | create / clean / delete / remove / resume / track menu | per click |
+| daily block (`x-vercel-cron`) | **never**: Vercel does not send the header; dead since Aug 10 (STORE_MIGRATION §3, `route.ts:67-91`) | absent `played_at_convention`, unpruned `api_log` back to Aug 10 in S-Oct14 |
+
+### 4.2 Every statement
+
+Plans are `EXPLAIN QUERY PLAN` on S-Oct14 with the SQL copied from `db.ts` [measured]. "Scope" is what
+the statement needs in a multi-user store; **leak** marks a statement that, run unchanged against a shared
+table, returns or changes another user's rows. Line numbers are `db.ts`.
+
+| function | statement and plan | called from | runs | scope |
+|---|---|---|---|---|
+| `getMeta` 2585, `setMeta` 2577, `metaStmt` 2568 | point read / upsert on `meta` PK | ~25 wrappers (§3) | the most frequent statement: per request (tokens), 3 per idle tick, ~10 per harvest, 4-5 per Home render | (user, key); **leak** for every per-user key |
+| `acquireLock` 2541, `releaseLock` 2559 | conditional upsert / delete of `lock:<name>` | `auth.ts:212, 221`; `actions.ts:130, 156` | per token refresh, per Clean | lock name carries the user |
+| `readCachedTracks` 426 | `tracks WHERE id IN (≤500)`; SEARCH PK | `recordPlays` 480, `storePlaylistTracks` 2069, `storeSavedTracks` 2231 | each harvest (≤50 ids), each playlist/Liked store | none: shared catalog |
+| `recordPlays` 464: existing-plays read 484 | `plays WHERE played_at >= ?`; SEARCH `idx_plays_played_at` | `sync/history.ts:50` | each harvest (cron, `/api/sync`, `refreshHistoryAction`); ~50 rows | `user_id = ?` + index `(user_id, played_at)`. Unscoped it reads everyone's window, and the dedupe set (`playKey`) drops a play when another user played the same track at the same instant |
+| `recordPlays` write batch 498-529 | track upserts (changed only), `INSERT OR IGNORE INTO plays`, `write_seq` bump, `last_sync` | same | each harvest; inserts only on landed ones | `plays.user_id`; UNIQUE `(user_id, track_id, played_at)`; per-user marker and stamp |
+| `recordPlays` successor reset 549 | `UPDATE plays SET skipped = NULL WHERE played_at = :at … OR id = (next play after :at)`; MULTI-INDEX OR | same | per out-of-order insert (rare) | **leak**: "the next play" must be the same user's |
+| `recomputeOrphanFlags` 724 `{newOnly}` | `UPDATE plays SET ctx_orphan = (predicate) WHERE ctx_orphan IS NULL`; SCAN via partial `idx_plays_orphan_null`, correlated probes on `playlist_tracks` by playlist id | `recordPlays` 535 | each landed harvest | predicate must match the play's user's `playlist_tracks` |
+| `recomputeOrphanFlags` `{playlistId}` | same UPDATE `AND context_uri = :uri`; SEARCH `idx_plays_context` | `storePlaylistTracks` 2109, `deletePlaylistFromDb` 2202 | per playlist whose cached tracks changed | **leak**: rewrites every user's plays from that playlist against one user's copy; add `user_id = ?` |
+| `recomputeOrphanFlags` `{}` (full) | same UPDATE over all plays; SCAN `plays` | `storePlaylists` 1897 when the playlist id set moved or the purge deleted rows | 0.2-0.4/day [measured, ledger `orphan_full_pass`]; 5,102,733 rows read at 21,950 plays (STORE_MIGRATION §3) | per user; it is the largest single read today and it scales with the whole table if left unscoped |
+| `recomputeSkipFlags` 780 | window from the last real play before the oldest pending one; SEARCH `idx_plays_played_at` + `idx_plays_skip_null`; then a batch of per-row UPDATEs | `recordPlays` 561 | each landed harvest | **leak / wrong data**: the gap chain orders ALL plays by time, so with two users a play's predecessor would be the other user's play and its listened time and skip verdict would be wrong. Every subquery needs `user_id = ?`; partial index `(user_id, played_at) WHERE skipped IS NULL` |
+| `orderedRealPlays` 854 | all real plays in time order; SCAN `plays` via `idx_plays_played_at` | `recomputeAllTimeStats` 1033 | ≤ every 10 min while plays land; daily heal (dead) | per user; same gap-chain hazard |
+| `unseenContexts` 619 | `contexts WHERE uri IN (≤50)`; SEARCH PK | `sync/history.ts:60` | each harvest | per user with per-user `contexts` |
+| `unresolvedContextUris` 646 | DISTINCT over all plays with a context, LEFT JOIN `contexts`; SCAN `plays` | `sync/history.ts:60` | daily (`contexts_full_check_at`) [measured, ledger 1.0/day] | per user |
+| `recordContexts` 586 | upsert batch + `write_seq` | `sync/history.ts:85`; `api/now-playing/route.ts:45, 52` | when a new context appears | per user (a 403 for one user is not a 403 for another) |
+| `getContextName` 2486 | point read on `contexts` | `api/now-playing/route.ts:36` | every now-playing poll with a context: every 6 s per open tab | per user |
+| `searchHistory` 884, empty query | newest plays; SCAN `plays` via `idx_plays_played_at`, LIMIT ≤50 | `history-actions.ts:148-156` | each `refreshHistoryAction` | `(user_id, played_at)` index or it walks other users' newest plays first |
+| `searchHistory`, LIKE | same scan filtered by `name/artist LIKE '%q%'`, LIMIT 500 | `history-actions.ts:194` (fallback search while payloads load) | rare [measured, ledger 0.0-0.1/day] | per user; unindexable by construction, so its cost is the user's whole history if scoped and the whole table if not |
+| `readAllTimePlays` 996 | SCAN `plays`, GROUP BY track, correlated "latest source" subquery on `idx_plays_track` | `getAllTimePlays` 988 ← `history-actions.ts:77, 171` | on slow-marker change, when the All-time view is open | per user; index `(user_id, track_id)` for the subquery |
+| `checkPlayedAtConvention` 1044 | 7-day window; SEARCH `idx_plays_played_at` | cron daily block (dead) | never | one user's timeline |
+| `readDailyStats` 1092 | 16-day window; SEARCH `idx_plays_played_at`; listened time from the previous play | `rebuildHomePayload` 1322; `getDailyStats` 1087 ← `home/page.tsx:58`, `history-actions.ts:71, 141` | ~110/day [measured, ledger `day_strip`] | per user; same gap-chain hazard |
+| `hasPlaysBeforeDay` 1152 | EXISTS on `idx_plays_played_at` | tests only (`tests/adversarial/skip-and-hostile.test.ts:187`) | never in the app | per user |
+| `readPlaysByDay` 1193 | day range on `idx_plays_played_at` + per-track source subquery | `rebuildHomePayload` 1331; `getPlaysByDay` 1186 ← `home/page.tsx:62`, `history-actions.ts:64, 173` | ~110/day [measured, ledger `day_plays`] | per user |
+| `rebuildHomePayload` 1315, `getHomePayload` 1348, `hasHomePayload` 1362 | the three reads above plus `meta.home_payload` | `sync/history.ts:106`; `home/page.tsx:63, 80` | rebuild per landed harvest; read per Home render; existence check per steady harvest | per user, in that user's time zone |
+| `readLibraryIndex` 1625 | SCAN `playlist_tracks` + `tracks` probes; SCAN `saved_tracks`; SCAN `playlists` | `getLibraryIndex` 1605 ← `api/search/library/route.ts:28, 49` | on `library_seq` change (cached) [measured, ledger 0.1-0.3/day, a lower bound] | per user; **leak** unscoped (every user's library in one payload) |
+| `readHistoryIndex` 1686 | SCAN `plays` via `idx_plays_played_at`, join `tracks`, LEFT JOIN `contexts` | `getHistoryIndex` 1620 ← `api/search/history/route.ts:21, 35` | on slow-marker change (≤144/day); the meter saw 23 runs and ~50,500 rows read per run on Oct 13 (STORE_MIGRATION §3) while the ledger recorded none that day | per user; **leak** unscoped |
+| `storePlaylists` 1763 | probe: SCAN `playlists`; rewrite tier: `DELETE FROM playlists`, re-insert, `DELETE FROM playlist_tracks WHERE playlist_id NOT IN (SELECT id FROM playlists)`, `DELETE FROM meta WHERE key LIKE 'plsnap:%' …` (SCAN `meta`) | `sync/library.ts:41` | each library sync; rewrite tier 2.9/day [measured, ledger] | **leak / data loss**: unscoped, one user's sync deletes every other user's playlists, their cached members and their snapshot keys. Every statement scoped |
+| `readStoredPlaylists` 1916 | SCAN `playlists` ORDER BY position | `getStoredPlaylists` 1911 ← `playlists/page.tsx:24`, `history-actions.ts:47` | per `/playlists` render and dock load (cached on `write_seq`) | per user |
+| `recomputeUniqueSongCount` 1969 | DISTINCT (artist, title) over members; SCAN `tracks` via `idx_tracks_artist_name`, probing `idx_pltracks_track` | `sync/library.ts:93`; `getUniqueSongCount` 1964 kick | when the library changed [measured, ledger 2.9-4.9/day] | per user; with a shared catalog the current plan walks every user's tracks, so drive it from the user's members |
+| `getStoredPlaylist` 1994 | point read on `playlists` | `playlists/[id]/page.tsx:45` | per detail page | per user |
+| `upsertStoredPlaylist` 2009 | upsert + both markers | `actions.ts:80` (merge, clean, save-queue, save-diff) | per created playlist | per user |
+| `storePlaylistTracks` 2041 | cached positions (SEARCH PK by `playlist_id`), `readCachedTracks`, diffed upserts/deletes, markers, `pltracks_at`/`plsnap` stamps, then `{playlistId}` orphan pass | `sync/library.ts:69`; `playlists/[id]/page.tsx:194`; `api/playlists/[id]/tracks/route.ts:29`; `actions.ts:244, 445, 574`; `clean/run.ts:65, 120` | per owned playlist whose snapshot moved, plus page/action fills | per user |
+| `getPlaylistSnapshot` 2115 | point read `plsnap:<id>` | `sync/library.ts:66`, `playlists/[id]/page.tsx:44`, `actions.ts:431` | once per OWNED playlist per library sync, serially: 110 reads per run [measured count of owned playlists, S-Oct14] | per user |
+| `getPlaylistTracks` 2120, `getPlaylistTrackOrder` 2137 | SEARCH PK by `playlist_id`, join `tracks` | `playlists/[id]/page.tsx:43`; `actions.ts:241, 420, 568`; `clean/run.ts:62` | per detail page / action | per user; **leak** unscoped: the detail page reads any playlist id with no ownership check (`playlists/[id]/page.tsx:42-46`) |
+| `removeCachedPlaylistTrack` 2151 | delete by uri (+ position), renumber positions | `actions.ts:456, 465` | per remove | per user |
+| `deletePlaylistFromDb` 2188 | delete the playlist row, its members, its two meta keys | `actions.ts:193` | per delete | per user; **leak / data loss** unscoped |
+| `storeSavedTracks` 2210 | SCAN `saved_tracks`, `readCachedTracks`, diffed writes, three stamps | `sync/library.ts:83` | when Liked Songs changed, at least daily | per user |
+| `getLibraryTracks` 2286 | UNION of Liked and OWNED playlist members (`owner_id = me_id`); SCAN `playlist_tracks` | `clean/run.ts:70, 125` | per Clean (both phases) | per user; replaces `me_id` with the user |
+| `playedTracksInContext` 2405 | SEARCH `idx_plays_context` | `actions.ts:569` (Resume) | per Resume | per user; **leak** unscoped (another user's plays from the same public playlist would move the resume point) |
+| `findTrackWithPlaylists` 2432 | SEARCH `idx_tracks_artist_name`, then `playlist_tracks` by `idx_pltracks_track` joined to `playlists` | `actions.ts:372` (track menu) | per right-click | catalog half shared; playlist half per user, **leak** unscoped (lists other users' playlist names) |
+| `logSpotifyRequest` 2603 | INSERT `api_log`; every 256th write per instance prunes rows older than 30 days | `spotify/client.ts:113, 142` | every Spotify call: 2,014/day [measured, S-Oct14 growth Sep 14 → Oct 14] | add a user column |
+| `getSpotifyCallBreakdown` 2640, `getRecentlyPlayedQuotaWindows` 2682, `getApiLogSummary` 2757, `pruneApiLog` 2736 | `api_log` by `ts` / `(path, ts)` | `/usage` (`usage/page.tsx:252-253`); `client.ts:161` on a 429; cron daily block (dead) | per `/usage` open; per 429 | admin only |
+| `ledgerAdd` 2818, `ledgerSet` 2840, `readLedger` 2858, `ledgerDayModeledTotal` 2872, `ledgerSyncCall` 2929 | upsert / range read on `usage_ledger` | the read paths above; `/usage`; `/api/cron/usage-check` (dead since Aug 10) | ~600-1,000 calls/day [measured, ledger `calls` sums] | global; per-user attribution optional |
+| `recordClientMetrics` 3052, `getClientLoadSpeed` 3082 | batch INSERT; SCAN `client_metrics` (the `ts` filter is not used by the plan) | `api/metrics/route.ts:46`, `instrumentation.ts:17`; `/usage` | per beacon; ~3 rows/day on average lately [measured, S-Sep14 → S-Oct14] | add a user column (the rows carry song names) |
+| `pruneClientMetrics` 2747 | DELETE by `ts` | cron daily block (dead) | never | global |
+
+Round trips per user per day from background work alone [estimated from the code paths above and
+§4.1's cadences]: an idle tick is ~3 statements, a steady harvest ~10, a landed harvest ~20 (the
+rebuilds), and a library sync ~120, of which 110 are the serial `plsnap` reads. At 390 idle ticks, 155
+steady and 175 landed harvests and ~30-48 library syncs, that is roughly 10,000-12,000 statements a
+day (1,170 + 1,550 + 3,500 + 3,600 to 5,760), a third to nearly half of them the per-playlist snapshot
+reads. None of it depends on the user opening the app.
+
 ## 5. Derived data and caches built on the store
 
 ## 6. Volumes: row counts, sizes and growth per day (the owner's data)
