@@ -222,6 +222,7 @@ CREATE TABLE users (
   is_admin       INTEGER NOT NULL DEFAULT 0,
   session_epoch  INTEGER NOT NULL DEFAULT 0,
   tz_zone        TEXT,                 -- IANA zone the browser reports; payloads bucket in it
+  terms_accepted_at INTEGER,           -- privacy policy and end-user agreement (§14)
   created_at     INTEGER NOT NULL
 );
 CREATE TABLE user_tokens (             -- 01e §5.2, encrypted blob (§5)
@@ -1103,6 +1104,27 @@ none of the Turso pages I read says whether deleting a database also deletes its
 should be asked before a friend's data is on that plan.
 
 ## 15. Rollout in reversible phases
+
+Ordered so the work that pays off for Rem alone ships first, and so a second account arrives only
+after every isolation test has failed on purpose and passed. Every phase is its own deploy; rolling one
+back is redeploying the previous build, because each adds columns, tables or code paths that the
+previous build ignores. Sizes as in 01a §7: S one place, M a contract or key with callers to follow,
+L a design change.
+
+| phase | ships | removes or proves | verified by | size |
+|---|---|---|---|---|
+| P0, not this design | F1 and E2 (rotate `AUTH_SECRET`, set `SPOTIFY_OWNER_ID`), E3 (gate `logout`), STORE_MIGRATION's lanes | live exposures today (01b §6, 01e §7) | those lanes | – |
+| P1a | `listened_ms`, the all-time accumulator, the Home payload patch, the `contexts` scan, one marker bump per batch, with §13's fenced fill | §3 rows 1, 2 and 9: ~75% of Rem's reads [estimate: (2.24M + 0.95M + ~0.04M) / 4.25M] | known-answer tests (accumulator = `allTimeStats` over fixtures with out-of-order inserts; patched payload = rebuilt payload after a day of synthetic harvests); `verify-derived.mjs` extended; Turso's usage before and after | M |
+| P1b | segments in `payloads`, the manifest in the page, the segment route, lazy days, the strip and the all-time list from segments, phase E keyed per segment | §3 rows 3-4, and the 2 MiB cliff; **must ship before mid-December** (01d §3.2) | segments equal `readHistoryIndex()` slices; 01d §2.3's throttled-browser harness; T2's numbers on `/usage` | L |
+| P1c | `/me/player`-only probe, harvest on track change (F = 2, one user), rescans through `snapshot_id`, no `/me`, weekly Liked refetch, `refreshHistoryAction` without Spotify, 15 s now-playing, 429s read by reason | §3 rows 8, 10, 11; Spotify calls roughly halved | `tests/harvest-gate.test.ts` extended; `api_log` counts per source before and after | M |
+| P1d | `playlist_tracks.ident`, the library body patch with the unique count, the two-probe orphan verdict | §3 rows 5-7, §10.1 | known answers: patched body = rebuilt body after member diffs; flags unchanged across a full pass | M |
+| P2 | app database, `users`, encrypted `user_tokens`, `sync_state`; uid and epoch on the session; the per-user token core and its six tests; §13 step 4 | one identity per request, F1 closed for good | 01e §5.2's tests; Rem signs in once | M-L |
+| P3 | the `UserDb` handle; uid in every remaining cache key, ETag and browser store; task owners; admin-only `/usage`; the tick with its lock, state and governor; the second pinger; uid on telemetry; per-database backups with dump checks; the deletion path, exercised on a throwaway test database; Preview and dev off production | §6's surfaces | the two-user suite (§6), each test first shown failing against a planted bug | L |
+| P4 | the privacy policy and end-user agreement, `scripts/invite.mjs`, the first friend on the allowlist | the quota question (01c decision 3, the passive way): a week of quota days on `/usage` with per-user attribution | the week's ledger; no cross-user marker in any response | S-M |
+| P5 | up to four friends, one a week | the governor finds F | T3's lag numbers per user | S |
+
+Backing out of P4 or P5 needs no deploy: setting a friend's `status` to `disabled` stops their sync and
+their sessions and keeps their data; the owner guard can come back behind a flag.
 
 ## 16. Costs
 
