@@ -506,7 +506,7 @@ cron-job.org (§12). The tick:
 
 Each pinger hit is one invocation: 2,880 a day whatever N is. Tick-lock writes: 2 per tick, 2,880 a
 day in total [estimate]. Wall time: the slowest due user, about 1-3 s at five users through Turso;
-at 250 users ~125 users fall due per minute, ~0.5-1 s each at 16-way concurrency, ~4-8 s per tick
+at 250 users up to ~125 users fall due in a minute, ~0.5-1 s each at 16-way concurrency, ~4-8 s per tick
 [estimate]. The route sets `maxDuration = 60`; nothing under `src/app` sets one today, so the
 project's 300 s default applies (01f §2.1).
 
@@ -595,7 +595,7 @@ and the uid, which is how the passive experiment learns whose calls a ban follow
 - `refreshHistoryAction` stops calling Spotify and only reads the store (01c S6, §5.5).
 - Now-playing polls every 15 s mid-track, plus the existing end-of-track and visibility polls (01c
   §5.5): at most ~4 calls a minute per visible tab. Five users with a visible tab each: ~10 per 30 s,
-  plus ~3 from the ticks' probes, inside the planned 12.
+  plus ~1-2 from the ticks' probes (five active users probed every 2 minutes), about the planned 12.
 - The browser's instant handoff (`src/lib/optimistic-play.ts`, `handoff.ts`) is unchanged; it is what
   puts a finished track on screen the moment the tab sees it end.
 
@@ -656,9 +656,9 @@ payload walks 16 days per landed harvest (§3, rows 1-2).
   `idx_plays_track`, and marks their months dirty (§8.3).
 - **`alltime_dirty`** makes the next tick recompute the totals from the stored columns: one scan of
   that user's plays (~22,000 rows for Rem), only on that event.
-- One-time cost at migration: a full chain walk to fill `listened_ms` (~22,000 rows read, ~14,500
-  written for Rem [estimate]), verified by `SUM(listened_ms)` equalling today's `alltime_stats` on
-  the same snapshot.
+- One-time cost at migration: a full chain walk to fill `listened_ms` (~45,000 rows read with the
+  `tracks` probes, ~14,500 written for Rem [estimate]), verified by `SUM(listened_ms)` equalling
+  today's `alltime_stats` on the same snapshot.
 
 ### 8.2 The Home payload, patched in place
 
@@ -859,8 +859,8 @@ bills (01c §2.8), and lanes 1910-1911 scope the pass without changing the predi
 The design adds `playlist_tracks.ident` (lower-cased artist and title, the identity everything else
 uses) with an index on `(playlist_id, ident)`, filled by `storePlaylistTracks` from fields it already
 holds. The verdict becomes two index probes: ~5 rows per play [estimate], so ~5 per landed play and
-~5 × (plays from the playlist) per scoped pass. Storage: ~0.3 MB for Rem's 7,400 members [estimate,
-~40 bytes per entry]. That is why §8.6 counts ~20 rows per landed play, not ~150.
+~5 × (plays from the playlist) per scoped pass. Storage: ~0.5 MB for Rem's 7,400 members [estimate,
+~70 bytes per member for the column and its index entry]. That is why §8.6 counts ~20 rows per landed play, not ~150.
 
 ### 10.2 Per Rem-like user per day
 
@@ -902,9 +902,9 @@ Zenbook.
 | storage | Rem-like user | basis |
 |---|---|---|
 | core tables | 11.87 MB | [measured, 01a §2] |
-| added: `ident` + index, `listened_ms` | ~0.4 MB | [estimate] |
+| added: `ident` + index, `listened_ms` | ~0.6 MB | [estimate] |
 | payload bodies: segments ~2.2 MB, library ~0.8 MB, Home ~30 KB | ~3.0 MB | [measured raw sizes, 01d §2.1 and O3] |
-| **total today** | **~15.3 MB** | |
+| **total today** | **~15.5 MB** | |
 | growth | ~40 KB a day (plays ~33 KB, tracks ~2.4 KB, segment growth ~4.5 KB) | target ≤ 50 KB |
 
 A new user starts near 3.3 MB (01a §9.1) plus ~0.5 MB of bodies.
@@ -920,7 +920,7 @@ $4.99 a month billed yearly ($5.99 monthly), unlimited databases, 2.5B read, 25M
 | rows read | 10.5M: 2.1% of Free | 52M: 10% | 525M: 105% of Free, 21% of Developer |
 | rows read, heavy days (~100,000 a user) | 15M: 3% | 75M: 15% | 750M: 30% of Developer |
 | rows written | 0.42M: 4.2% of Free | 1.5M: 15% | 13.6M: 136% of Free, 54% of Developer |
-| storage, today's histories | 77 MB: 1.5% | 380 MB: 7.6% | 3.8 GB: 76% of Free, 42% of Developer |
+| storage, today's histories | 78 MB: 1.6% | 390 MB: 7.8% | 3.9 GB: 78% of Free, 43% of Developer |
 | storage growth a year | +73 MB | +365 MB | +3.7 GB |
 | databases (users + app + template) | 7 | 27 | 252: over Free's 100 |
 | **cheapest plan that holds** | **Free** | **Free** | **Developer**, $4.99-5.99 a month |
@@ -940,7 +940,7 @@ count over it.
 | recently-played + `/me` | 35-150 by F (§7.4) | ~379 with F ≈ 10 and the recorder | ~375, completeness only, no freshness | ~3,750 | ~725-800 measured, 450 planned; shared by the account |
 | player | ~450 + ~4 a minute per visible tab | ~2,250 + tabs | ~11,250 | ~112,500 | unmeasured; ≤ 2,500 planned at five |
 | library | ~100 | ~500 | ~2,500 | ~25,000 | unmeasured; never a 429 |
-| per 30 s, peak | – | ~3 from ticks + ~10 from five visible tabs | ~15 + tabs | ~40-60 from ticks alone | 18 observed safe |
+| per 30 s, peak | – | ~1-2 from ticks + ~10 from five visible tabs | ~6 + tabs | ~40-60 from ticks alone | 18 observed safe |
 
 | per month | 5 users | 25 users | 250 users | Hobby allows |
 |---|---|---|---|---|
@@ -1093,8 +1093,8 @@ plaintext row (the later `expiresAt` wins, STORE_MIGRATION step 10's rule); play
 code are ordinary rows the old code reads. On day 7, drop the plaintext token rows and the retired
 `meta` keys (§4.4).
 
-Cost on Turso, once [estimate]: ~100,000 rows read (the chain walk, the builders, the index build) and
-~25,000 written, under 0.3% of a month on the free plan.
+Cost on Turso, once [estimate]: ~200,000 rows read (the column additions, the chain walk, the payload
+builders, the index build) and ~30,000 written: 0.04% of a free month's reads and 0.3% of its writes.
 
 ## 14. Sign-up gating, privacy and account deletion
 
@@ -1210,7 +1210,7 @@ an L before the first friend.
 | T3: stored ≤ 2 min | yes for one or two Rem-like users; **~10-12 min at five** if the quota is shared | §7.4 | server-side provisional plays from the probe (01c §5.3 ii): 2-minute stored freshness for everyone at ~47 harvests a day each, for medium-to-large work (a provisional flag through the skip chain, the totals and the payloads, plus a reconciliation and its tests); or the quota proves per user and F stays at 2 |
 | T3: completeness | yes while either pinger runs | §7.8, §12 | – |
 | T4: reads ≤ 100,000, writes ≤ 2,500, growth ≤ 50 KB a day | yes: ~70,000 typical, ~1,800, ~40 KB | §10.2 | an incremental backup removes ~40,000 more reads |
-| T4: five users under 5% of Free | yes: reads 2-3%, writes 4.2%, storage 1.5% | §10.3 | – |
+| T4: five users under 5% of Free | yes: reads 2-3%, writes 4.2%, storage 1.6% | §10.3 | – |
 | T4: 250 users under $10 a month of store | yes: Developer, $4.99-5.99 | §10.3 | – |
 | T5: no apartment machine on a request path or as the only capture trigger | yes | §12 | – |
 | T6: isolation | by construction, plus tests that do not exist yet | §6 | proven only once the two-user suite has failed against planted bugs and then passed |
