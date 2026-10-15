@@ -436,6 +436,64 @@ assert that none of A's strings appears in any response and every write lands un
 
 ## 6. Exposures that exist today, single-user
 
+Found while mapping the surface. None needs multi-user to be fixed, and the first three are cheap.
+Each fix below is a production change, so each is Rem's to approve; this lane changed nothing.
+
+**E1. Sessions minted before the guard still act as the owner.** Section 1.4: the browser that
+completed the second account's sign-in before 8:41 PM holds a cookie that resolves to the owner's
+token. It can read the owner's history and library and drive the owner's Spotify (play, queue,
+create and edit playlists, save to Liked), and it can stop capture through E3. Its cookie lasts up to
+30 days (`auth.ts:300-303`). `AUTH_SECRET` is listed as created 133 days ago, so rotation since the
+incident is unlikely (1.4). Two fixes:
+(a) rotate `AUTH_SECRET` in Production and Preview and redeploy. Every session ends, Rem signs in
+once, and nothing else changes: nothing in `src/` reads `AUTH_SECRET` (`grep`, section 9), and the
+stored Spotify token, the cron and the Zenbook recorder are untouched;
+(b) ship S1 early: store the Spotify id in the token and refuse any token without it, or whose id is
+not `SPOTIFY_OWNER_ID`. This also ends every session and binds sessions to an identity from then on,
+at the cost of a code change and a deploy.
+Recommendation: (a) now, because it is one environment change; (b) as the first multi-user step.
+
+**E2. The owner guard has no fixed owner in production.** `SPOTIFY_OWNER_ID` is in neither the Vercel
+environment (`vercel env ls`, all environments) nor `.env.local`, although `src/lib/owner.ts:7` says
+it is set in both. So the guard falls back to `meta.me_id` (`owner.ts:11`), which every library sync
+rewrites from whichever account's token is stored (`sync/library.ts:40-50` → `db.ts:1804`,
+`:1817-1822`). Commit `044c9b6` records that `me_id` flipped during the incident. If no library sync
+has run with the owner's token since Rem signed back in, the guard today admits the second account
+and refuses Rem's next sign-in. The cron reaches the library sync only on ticks that harvest
+(`cron/sync/route.ts:144-146` returns before `:171`), at least hourly through the backstop, so
+`me_id` has most likely been restored, but I did not read it (it is production data). Fix: set
+`SPOTIFY_OWNER_ID` in Production and in `.env.local`. `tests/owner-signin.test.ts` already covers the
+case where the variable overrides a flipped `me_id`.
+
+**E3. `logout` has no gate and deletes the token row.** `actions.ts:63-69` runs
+`clearSpotifyTokens()` for any caller. Its action id ships in the signed-in layout's client bundle
+(`src/app/(app)/chrome.tsx:7`, `:335`), so anyone who has had a session can invoke it, the E1 browser
+with one click. The effect: closed-app capture stops and the cron answers 503 "no token"
+(`cron/sync/route.ts:103-111`) until Rem signs in again. Plays are not lost while the Zenbook
+recorder runs on its own token chain (`docs/ARCHITECTURE.md`, "The history's loss floor"). Fix: a
+session check at the top of the action, independent of multi-user.
+
+**E4. Preview deployments would run on the production store.** Section 3.7. No preview exists today;
+the first pushed branch creates one.
+
+**E5. Anonymous requests to `/home` cost four store reads.** `home/page.tsx:78-83` runs the payload
+read, the cooldown read and the two capture-health reads (`db.ts:1738-1741`) in the same
+`Promise.all` as the gate, against `docs/SECURITY.md`'s own rule ("The gate must not sit in a
+`Promise.all` with the reads either, or they run anyway"). Nothing leaks: the page redirects before it
+renders. But a stranger can put load on the Zenbook through the Funnel, and the payload row is the
+largest of them (`db.ts:1359-1361` puts it at ~20 KB). The overlap was a deliberate latency choice
+(commit `e5dd8bc` kept the payload read parallel when it added the gate). S2 keeps the overlap and
+drops the anonymous cost.
+
+**E6. The incident left foreign rows in the owner's store.** Commit `044c9b6` says the cron recorded
+the second account's plays into the owner's history. `plays` has no user column, so those rows are
+separable only by time window and by comparison with the Zenbook recorder's capture, which uses the
+owner's own token chain. Any migration that assigns the existing rows to Rem (01a, and section 7)
+should remove them first. The library tables healed on the next owner sync: `storePlaylists`
+rewrites the list, and the purge of `plsnap:` keys (`db.ts:1874-1878`) forces the re-fetch of any
+playlist whose tracks were dropped. `contexts` may still hold names resolved with the second account's
+token.
+
 ## 7. What multi-user needs from STORE_MIGRATION.md
 
 ## 8. Unknowns and what I did not verify
