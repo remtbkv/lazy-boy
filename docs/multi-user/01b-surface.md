@@ -541,4 +541,44 @@ snapshot, which step 10's compare already handles, but there is no reason to tes
 
 ## 8. Unknowns and what I did not verify
 
+- **Whether `AUTH_SECRET` changed since it was created.** `vercel env ls` shows creation age, not the
+  last update, so an in-place overwrite would not show. Whether the second account's browser still
+  holds its cookie is unknowable from here. E1's fix is the same either way.
+- **The current `meta.me_id`.** Not read; it is production data. E2 says how to make it not matter.
+- **Action-id exposure.** I did not check whether any anonymous response references the signed-in
+  layout's client chunk, which would let a stranger, not only a past session holder, find `logout`'s
+  id (E3). Nor did I verify against a build that Next 16 leaves the two uncalled actions' ids out of
+  the client bundle (2.2).
+- **Server-action origin checks against a non-browser caller.** Next compares the `Origin` and `Host`
+  headers, which a non-browser client sets freely; I am fairly sure this does not stop a scripted
+  `logout`, but did not test it.
+- **React `cache()` inside a Next 16 route handler.** The code's comment says it is a pass-through
+  there (3.3); I did not verify it.
+- **Vercel's Data Cache across environments, and Deployment Protection on previews.** Not checked.
+  If previews and production share the Data Cache, a preview's code could also write entries
+  production reads.
+- **Whether Spotify counts rate limits per app or per user.** Decides whether the shared cooldown (C9)
+  is right; 01f's question.
+- **Whether two readers can get different track ids for the same playlist.** `GOTCHAS.md` documents
+  different ids for the same song across contexts, not across readers; C2's risk is plausible, not
+  shown.
+
 ## 9. What I ran
+
+Read-only throughout. No query against the production store or the Zenbook, no request to the
+deployed app, no write anywhere except this file.
+
+- `git diff --stat 1c7aabb HEAD -- src ops scripts vercel.json next.config.ts` (empty: the code is
+  unchanged since `1c7aabb`); `git ls-remote --heads origin` and `git branch -r` (only `main`).
+- `find src/app -type f`; `grep -rn` over `src/` for `unstable_cache`, `revalidatePath`,
+  `revalidateTag`, `tags:`, `"use server"`, `localStorage`, `sessionStorage`, `BroadcastChannel`,
+  `fetch(`, `Cache-Control`, `s-maxage`, `AUTH_SECRET`, `SPOTIFY_OWNER_ID`; a loop that greps each
+  exported action's name across `src/` to find its callers.
+- `curl -sSL https://registry.npmjs.org/@auth/core/-/core-0.41.2.tgz` into a scratch directory, then
+  `grep` on `lib/actions/callback/oauth/callback.js` and `lib/actions/callback/index.js` (1.1).
+- `curl -sSL https://registry.npmjs.org/next/-/next-16.2.6.tgz`, extracting only
+  `dist/server/web/spec-extension/unstable-cache.js`, then `grep` for the key construction (3.1). Both
+  downloads were deleted afterwards.
+- `vercel env ls production` and `vercel env ls`: variable names, environments and creation age; the
+  values are never shown.
+- `grep -o "^[A-Z_]*=" .env.local`: variable names only.
