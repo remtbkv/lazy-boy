@@ -15,56 +15,60 @@ Status: revision in progress, Oct 15, 2026. Sections not yet revised still read 
 
 ## 0. For Rem: the plan on one screen
 
-(Being rewritten from the reviews; the Oct 14 summary follows until it is replaced.)
+**What it takes.** Each person gets their own Turso database (yours is the `lazyboy` database the store
+migration creates, unchanged), plus one small app database for identity, encrypted Spotify tokens and
+scheduling. Every request carries a random user id, checked against the app database before any read;
+the sync tick claims users one at a time inside Spotify's shared budget; and a single-user performance
+track ships first, so five people's reads fit Turso's free plan and search stays fast. No friend gets
+in until a canary account has run beside you for a week.
 
-- **Targets (§1).** Five accounts, Rem included: Spotify's development mode allows five per app and no
-  path to more, so the brief's 25 is out of reach; past five, people run their own copies. No path
-  returns or caches another user's data, and every way it could is met by one layer that prevents it
-  and one that detects it. On a mid-tier phone at 10 Mbit/s: search usable ≤ 2 s after first paint on
-  a first visit, ≤ 300 ms on a repeat, a keystroke painted ≤ 50 ms. Freshness: what any screen shows
-  is always current; with the app closed, a play is stored within ~2 minutes while Spotify's shared
-  budget allows; no play is lost while a pinger runs. Store: ≤ 1.5M rows read per heavy user on a heavy
-  day, and nothing on a per-visit path that grows with history. No user path on the Zenbook. $0 until
-  the first friend, ≤ $26 a month at five.
-- **Structure (§2).** The three designs agree on the skeleton: a Turso database per user plus a small
-  app database, a user id and session epoch checked on every request in one query, AES-256-GCM tokens,
-  one cron tick for all users. The plan takes A's structure (layered enforcement and phases that
-  change nothing a friend can reach until Phase 4), B's cost rule and its three levers that matter at
-  five users, and C's operational choices. The picks that differ from one or more designs: a random
-  uid, never reused (B); a versioned open with an owner stamp in place of `init()` (A with C); per-user
-  leases on the tick (A); a fair-share quota brake (A); monthly history segments built on demand (A)
-  carrying listened seconds (B); destroy-at-once deletion with four-day friend backups (A, C).
-- **A finding this lane reproduced (§8.2).** B's rewrite of the "From" verdict, starting from the song
-  instead of walking the playlist, gives the same verdict on all 7,572 plays of the Aug 11 copy and
-  reads ~2.7 rows a play where today's walks ~411. Lanes 1910-1911 should ship it with their scoping.
-- **Gaps the designs left, closed here**: every per-user client must be built through the store fetch
-  that two incidents hardened (§4.2); the search manifest stores each month's play count so it never
-  scans history (§9.1); and deletion has to reach the telemetry store's 60-day backups and the app
-  database's point-in-time copy of the friend's token, which four-day telemetry backups and a token-key
-  rotation do (§12.3).
-- **Store cost (§8).** Rem's heavy day is ~19M rows on Turso's terms today (most of it three unscoped
-  orphan passes and the all-time recompute); ~1.45M after the predicate, a stored listened time with an
-  accumulator, and segments; ~0.36M after the Home payload is patched in place. Five app-heavy
-  Rem-like users a year in: ~70M a month, 14% of the free plan.
-- **Search (§9, §14.1).** First visit ~1.1-1.4 s for Rem, ~0.8-1.1 s for a typical friend; repeat
-  ~80 ms; a keystroke ~25-35 ms. The segments must ship before mid-December: Rem's history body passes
-  the Data Cache's 2 MiB limit around late December, multi-user or not.
-- **Sync (§7, §14.2).** One tick a minute from two pingers (the Zenbook's and cron-job.org's), each user
-  under a lease and their own deadline; harvests on track changes. Rem plus one friend fits Spotify's
-  scarce budget with room; five heavy listeners need the brake, which slows the heaviest first and
-  holds closed-app freshness to 15-30 minutes late on heavy days.
-- **STORE_MIGRATION (§10).** No lane waits. Six small edits before Oct 15, 8 PM; one widens lane
-  1910's scope to the predicate rewrite. Rem's data moves nowhere: `lazyboy` becomes his user database,
-  and only his token rows leave it, a week after they are copied (§11).
-- **Rollout (§13).** Phase 0 now; the migration; the single-user performance track; three owner-only
-  phases; the first friend no earlier than early to mid-December [estimate]; the quota brake and the
-  Home patch before the second; friends one at a time.
-- **Not met (§14):** 25 accounts on one Spotify app; a first visit on slow 4G; a heavy three-year
-  user's first visit (~2.2-2.6 s); two-minute closed-app freshness for five heavy listeners if the
-  quota is shared. Each has its options.
-- **Rem's decisions (§18):** 25, each with a recommendation. Five are for now: Phase 0's production
-  changes, STORE_MIGRATION's edits, the predicate in lanes 1910-1911, where the logs live, and two
-  dashboard reads.
+**Order of work** [time is an estimate at the lane program's pace; sizes S < M < L, §13.1]:
+
+| step | what | starts | work | money a month |
+|---|---|---|---|---|
+| Phase 0 | rotate `AUTH_SECRET`, set `SPOTIFY_OWNER_ID`, gate log-out; three dashboard reads; copy `backstop.db` off the Zenbook | today | S: ~30 minutes of yours, one lane | $0 |
+| STORE_MIGRATION | lanes 1901-1911 with eight edits (§10.2); P1, the "From" predicate, inside 1910-1911 | Oct 15, 8 PM; ~1 week | as planned | $0 |
+| after lane 1904 | an interim second pinger with a 90-second guard; replay the 122 plays only the recorder holds | late October | S | $0 |
+| P2, P3 | stored listened time and the all-time accumulator; monthly history segments, lazy days | after lane 1911; P3 before mid-December | M, L | $0 |
+| Phases 1-3 | the user id everywhere and the e-mailed health alarm; the app database and encrypted tokens; the per-user sync queue and the Liked fix; all on you alone | after P3; 3-5 weeks with soaks | L, M, L | $0 |
+| Phase 4a | a canary account for a week; sign-up, deletion, per-user backups, the quota brake | after Phase 3 and §13.2's gates | M-L | Turso Developer $4.99 (recommended); Vercel Pro $20 only if Active CPU says so |
+| Phase 4b | the first friend | a week after 4a; mid to late December at the earliest | S | the same |
+| P4, Phase 5 | the Home payload patched in place and the open-tab fix; then friends two to four, a week apart | before the second friend | M, then S each | $5-26 at five users |
+
+**Targets** (§1; budgets in §14):
+
+| target | met? |
+|---|---|
+| five accounts, you included (U) | yes. The 25 asked for is out of reach: Spotify allows five per app in development mode |
+| no path shows or caches another user's data (I) | by design: per class of mistake a layer that prevents it and a test or runtime check that detects it, a canary week, an e-mailed alarm |
+| search ready ≤ 300 ms on a repeat visit, ≤ 2 s on a first at 10 Mbit/s, a keystroke ≤ 50 ms, on a phone (S1-S3) | yes for you (~80 ms, ~1.1-1.4 s, ~25-35 ms) and a typical friend; no for a heavy three-year history (~2.2-2.6 s), a five-year import (~3 s) and slow 4G |
+| screens current; closed-app plays stored p50 ~1 min, p95 ~5 min; none lost while a pinger runs (F1-F3) | yes; on a heavy shared day a user past their share waits up to 15 minutes, everyone up to 30 once the day's budget is spent |
+| reads ≤ 1.5M rows a heavy day with nothing per visit growing with history; writes ≤ ~5,000 rows a day (D1-D3) | after P4: you go from ~4.5-19M a day today to ~0.36M; writes ~4,500-5,000 |
+| no request on the Zenbook; capture survives its outages; one user's failure stays theirs (A1-A3) | after STORE_MIGRATION, the interim pinger, and Phase 3 respectively |
+| $0 until the first friend, ≤ $26 a month at five | yes |
+
+**Risks that remain.** Spotify sets the ceiling: five accounts, your Premium as everyone's dependency,
+and a recently-played budget whose size is inferred from August's bans and whose pooling is unknown
+(the brake plans to 60% of it). Turso, Vercel and cron-job.org are shared fate; a Hobby Active CPU
+overrun stops every project on the team for up to 30 days, so it is read before the first friend.
+Restores, rollbacks and deletions are runbooks a person follows, rehearsed once each. The Zenbook keeps
+telemetry, backups and your recorder. Storing friends' history under Spotify's terms is an engineer's
+reading, not legal advice.
+
+**Your decisions** (§18 has each reason):
+
+| # | decide | recommend |
+|---|---|---|
+| 1 | Phase 0; the 7:05 AM push publishes these docs on the public repo before it unless held | yes, today; holding the push is optional |
+| 2-5 | STORE_MIGRATION's edits; P1 in lanes 1910-1911; the log tables stay on the Zenbook; the dashboard reads | yes to all, before lane 1901 |
+| 6-9 | copy `backstop.db` now; replay its 122 plays after lane 1904; the interim second pinger; a Zenbook resolver outside Tailscale | yes to all |
+| 10-13 | five accounts; a database per person; the single-user track first (it costs the first friend ~1.5-2.5 weeks); the phone and 10 Mbit/s search target | yes to all |
+| 14-15 | an e-mailed health alarm, lifting STORE_MIGRATION's R6 for these phases; the forced refresh stops calling Spotify in Phase 3 | yes; yes |
+| 16-20 | a canary week; Turso Developer; the Vercel plan; three log-out actions; a dead grant sends you to sign in | yes; yes; read Active CPU first; yes; yes |
+| 21 | a friend's `invalid_grant` | stop and keep the data, alert you, delete on day 4 unless they reconnect; never automatic when two or more are hit |
+| 22-24 | friends' retention; four-day backups without a key rotation per deletion; the platform token in the runtime and your Keychain, never `.env.local` | while connected, paused after 60 idle days, deleted at 12 months (the number is yours); yes; yes |
+| 25-27 | the privacy policy; the recorder stays yours, hourly; sqld under its own account on the Zenbook | yours to write; yes; yes |
+| 28-31 | the brake for everyone, you included; learning the quota's pooling passively; imports after newest-first loading; if Spotify sends no `account_id` | yes; yes; yes; decide then |
 
 ## 1. Targets
 
