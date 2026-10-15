@@ -328,6 +328,35 @@ for JWT, Spotify-token and PEM shapes (`git grep -E 'eyJ…|AQ…|BQ…|-----BEG
 
 ## 4. Census: every single-user assumption in auth
 
+Sizes as in 01-current-system.md: **S** a key or filter in one place; **M** a function's contract or a
+table's key changes and callers follow; **L** a new mechanism, a migration over live data, or a loop
+that must fan out per user. The data layer beyond tokens is 01a's, the request surface 01b's, the
+background work 01c's; rows here stop at the auth boundary.
+
+| # | where | single-user assumption | multi-user needs | size |
+|---|---|---|---|---|
+| A1 | `db.ts:2511-2531` | one token row per environment in `meta` | a per-user token table keyed `(account_id, env)`, encrypted (§5.2, §5.3) | M |
+| A2 | `auth.ts:188-196` | `inflightRefresh` is one promise per instance | a map keyed by user. Left as is, user B's concurrent refresh joins user A's and receives **A's tokens**: B's request then reads and writes A's Spotify account. The one change here that leaks across users silently. | S, critical |
+| A3 | `auth.ts:73-83` | the request's token box holds one user's tokens | key the box by user, so nothing that touches two users in one request can mix them | S |
+| A4 | `auth.ts:212` | lock name `spotify_refresh` | `spotify_refresh:<account_id>`. Shared, every user's refresh would queue behind everyone else's and losers would poll the wrong row for up to ~32 s (§2.3) | S |
+| A5 | `auth.ts:170-289` | `coordinatedRefresh`, `waitForFreshToken`, `clearTokensIfStale`, `getValidAccessToken` read and clear "the" row | each takes the account id; tests first (§2.7) | M |
+| A6 | `auth.ts:270-272`; `src/lib/session.ts:9-19` | `spotifyAccessToken()` and `getSpotify()` return "the" token with no owner | return the token together with the account id the session named, so callers scope their reads by the same id | S |
+| A7 | `auth.ts:352-377` | the sign-in pass writes the global row and puts no identity on the JWT | write the user's row; put `account_id` and a session epoch on the JWT (§5.1) | M |
+| A8 | `auth.ts:379-443` | later requests trust any cookie that decrypts | require the id, check the user's status and epoch, return `null` otherwise (§5.1, §5.6) | M |
+| A9 | `auth.ts:444-452`; `src/types/next-auth.d.ts` | the session exposes no id | `session.user.id` (STORE_MIGRATION §10 already wants one) | S |
+| A10 | `auth.ts:344-347`; `src/lib/owner.ts` | owner-only sign-in by Spotify `id` | a sign-up gate (§5.4) | M |
+| A11 | `db.ts:1804, 1817-1823, 2034-2036, 2297, 2310` | `me_id` is one global value, rewritten by every library sync | a per-user `spotify_id` on the user row, refreshed at sign-in (data side: 01a) | M |
+| A12 | `src/app/(app)/actions.ts:63-69` | log out deletes the only token row, which also stops capture and signs out every device | delete only this user's state, and decide what log out means (§5.6) | S + Rem's call |
+| A13 | `src/lib/login-error.ts:11-13` | "single-user for now" copy | a sign-up-gate message | S |
+| A14 | `cron/sync/route.ts:96-119` | the cron syncs "the" account | fan out over users, each isolated (§5.9; 01c) | L |
+| A15 | `cron/sync/route.ts:103-111` | no token row means "signed out", answered 503 | per-user status; 503 only when the store or every user fails (§5.7) | S |
+| A16 | `actions.ts:46-57`; `src/lib/playlists-sync.ts:58-66` | background token getters read "the" account | bind the getter to the account id at task creation | S |
+| A17 | `src/lib/playlists-sync.ts:22` | one `currentSyncId` per instance | keyed by user (01b/01c) | S |
+| A18 | `auth.ts:367-374, 388-405` | tokens may sit in the cookie and migrate into "the" row | remove both paths: a sign-in whose token write fails should fail visibly and be retried (§5.2) | S |
+| A19 | `owner.ts:11`; `.env.example:8-10` | `SPOTIFY_OWNER_ID` names the only user | keep it as the bootstrap admin's id, or retire it after the owner is migrated | S |
+| A20 | Zenbook `~/lazyboy-recorder` | one refresh-token chain, Rem's | stays owner-only unless Rem decides otherwise (§5.9, §7) | – |
+| A21 | `tests/*` mocking `@/lib/auth` | the refresh path is untestable | move the token core out of `auth.ts` into a module the simulated environment can load (§5.2) | M |
+
 ## 5. What multi-user must change
 
 ### 5.1 Identity: the session must name the user
