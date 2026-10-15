@@ -951,9 +951,10 @@ minutes. Rem's data is written by the app's ordinary SQL in every phase and by n
   done; `npm test` green including §5.4's suite; `npm run build` green; Preview has no store
   variables (§8.3 edit 1).
 - Deploy and migrate as §9.2. Then a three-day soak, done when: §9.2 step 6 holds every day; Rem's
-  recently-played calls a day are about half of his Oct 1-14 range (139-319, 01c §2.7), which
-  checks the track-change rule on real traffic; every tick answers 200; no `getClient` refusal
-  appears in the logs; Turso's rows read a day are within ~5% of the pre-Phase-1 days.
+  cron harvests a day come to about his plays a day plus ~30 for session tails and hourly
+  backstops (Oct 14 had 280 harvests for 129 plays, 01c §2.1; the rule predicts ~160), which checks
+  the track-change rule on real traffic; every tick answers 200; no `getClient` refusal appears
+  in the logs; Turso's rows read a day are within ~5% of the pre-Phase-1 days.
 - If Phase 2 never ships, Phase 1 is still worth having: sessions bound to an identity, the token
   encrypted, and capture that one Spotify error cannot stop.
 
@@ -995,6 +996,136 @@ account into a ban to find out would risk Rem's own capture for up to ~12 hours 
 decision 3); asking on Spotify's developer forum costs nothing.
 
 ## 12. Each target, step by step, with its budget
+
+### 12.1 T0 and T1: isolation, and five users
+
+T0 is met by §5.1's closures and proven by §5.4's suite on every `npm test`, then confirmed by the
+first friend in Phase 2. T1's budget per user: one Turso database (100 on the free plan), one
+of Spotify's five allowlist slots, one invite row. The cap is enforced twice, by the dashboard
+and by `invite.mjs`. Past five, see §14.
+
+### 12.2 T2: search on a phone
+
+**First visit**, no browser copy, mid-tier phone (4× CPU), 10 Mbit/s, the payload not in the
+Data Cache (the version moves every 10 minutes while music plays, so a first visit after
+listening misses):
+
+| step | the owner today | a typical friend after a year | basis |
+|---|---|---|---|
+| first paint → fetch starts | ~100 ms with S1 | ~100 ms | today up to 2 s (Chrome's idle callback) or 800 ms (Safari's timer), `den-home.tsx:665-676` |
+| identity and version reads | ~30 ms | ~30 ms | two round trips at R1's 15 ms target |
+| build on a cache miss, both payloads in parallel | ~500 ms | ~400 ms | [estimate] 01d §2.2 puts the history build at ~850 ms through the Funnel today; its local floor is ~100 ms; Turso is unmeasured until phase A's bench route |
+| transfer | 900 KB gzipped → ~0.75 s | ~620 KB → ~0.5 s | 01d §2.1 (measured), §3.3 (projected) |
+| parse and the search set | ~65 ms | ~50 ms | 01d §2.3, measured at 4× |
+| the day list | ~5 ms with S2 | ~5 ms | 199 ms today at 4× (01d §2.3) |
+| **search usable after first paint** | **~1.45 s** | **~1.1 s** | target ≤ 2 s |
+
+Without S1 and S2 the owner's worst case on Chrome is ~3.5 s (2 s of idle wait plus 199 ms of day
+building), so those two single-user changes are what meet T2 for him. With the payload already in
+the Data Cache the build step is ~50 ms instead. On slow 4G (1.6 Mbit/s) the transfer alone is
+~4.5 s for the owner and ~3.1 s for the friend: §14.
+
+**Repeat visit**, with phase E's copy: IndexedDB read ~20 ms at 4× + the search set ~47 ms + one
+lazy day ~5 ms ≈ **~80 ms** against R3's 300 ms (01d §5.2's estimate, from its measured parts);
+the network revalidation runs after that and blocks nothing.
+
+**A keystroke**: match, rank and cap measured 0.9-13.2 ms at 4× on the owner's 14,500 entries,
+the worst being a one-letter query with 8,599 hits (01d §2.3), so **≤ 15 ms against 50**. It stays
+under 50 ms until a set of ~50,000 entries (55.9 ms at 58,028 entries, 01d §3.2), which a
+three-year heavy listener reaches; the lever then is a Web Worker (01d O6). Keystroke-to-paint has
+been measured only on a desktop dev build (43.8 ms median, `den-home.tsx:514-518`); rendering up to
+400 rows is most of it. Before Phase 2, Rem opens `/home?perf=1` on his phone (GOTCHAS, "Measuring
+a search from the browser") and reads `paint=`; if it is over 50 ms, render the first screenful and
+the rest on scroll (01d O6). That measurement does not depend on multi-user.
+
+Multi-user changes none of these numbers: each user's payloads are their own size, built from their
+own database. The one shared term is the team-wide Data Cache's eviction (§7.3).
+
+### 12.3 T3: freshness
+
+A play that ends while the app is closed, policy (i):
+
+| step | budget | basis |
+|---|---|---|
+| the play ends → the next tick | 0-120 s, mean ~60 s | two 2-minute pingers and a 90 s lease (§6.5) |
+| lease and user list | ~30 ms | two app-database statements at R1's target |
+| the token | < 1 ms to decrypt; up to ~3 s when the hourly refresh falls on this tick | 3 s timeout per token-endpoint attempt, `auth.ts:121` |
+| player probe | ~0.2-0.6 s | [estimate] one or two Spotify calls |
+| harvest | ~0.3-0.8 s | [estimate] one call |
+| store it: insert, verdicts, Home payload rebuild | ~0.5 s | ~30 round trips for a landed tick (01c §2.1) at 15 ms |
+| **stored after the play ends** | **p50 ~62 s, worst ~125 s** | target ~2 minutes |
+
+With the app open, the browser's provisional play shows the song at once
+(`src/lib/optimistic-play.ts`, `src/lib/handoff.ts`), and `refreshHistoryAction`'s track-change
+call, under its 60 s debounce, usually stores it sooner than the cron. On a day the Phase 3 brake
+trips, the stored row can wait up to 30 minutes (§6.4); the provisional one does not.
+
+Spotify-side budget per user per day, scarce bucket: §6.4's table (Rem ~174 after M23; friends
+~69-150 by profile).
+
+### 12.4 T4: reads, writes and growth per user per day
+
+Reads, in Turso rows. Rem's column comes from the meter's per-statement log for Oct 14 (01c §2.1-2.3,
+§5.9). The friend columns apply the same per-run costs to assumed profiles (01d §3.3, 01f §5.1):
+**light** 40 plays a day with 6 months of history (7,200 plays); **typical** 50 a day, a year
+(18,250); **heavy** a Rem-like 115 a day, a year (42,000, no catalog rows). The visit term uses
+01d §4.2's assumption of eight Home visits a day with both versions moved, its weakest input.
+
+| term, rows a day | Rem, Oct 14 | light | typical | heavy |
+|---|---|---|---|---|
+| ticks and steady harvests (~215 rows each) | 0.04M | 0.01M | 0.01M | 0.01M |
+| landed plays: insert, verdicts, Home payload (~7,700 rows each for Rem, scaling with the 16-day window) | 0.95M | 0.11M | 0.17M | 0.89M |
+| all-time recompute (~2.3 rows per stored play per run; 44 runs for Rem) | 2.24M | 0.25M | 0.84M | 4.3M |
+| rescans and the unique-song count | 0.17M | ~0.05M | ~0.1M | ~0.17M |
+| search payload rebuilds on Home visits (~3 rows per play + ~2 per membership) | ~0.13M (1-2 visits) | 0.19M | 0.5M | 0.8M |
+| **total a day** | **~3.5M** | **~0.6M** | **~1.6M** | **~6.2M** |
+| the same with M24's 60-minute gate | ~1.9M | ~0.4M | ~0.95M | ~3.1M |
+
+Rem's total leaves out the unscoped orphan pass, ~5M rows on Turso per run and three runs on Oct
+14 (01c §2.8); lanes 1910-1911 scope it before Phase 2 (§8.3). With it, Rem's month is the 135-170M
+01c §5.9 computes.
+
+Against Turso's free plan, 500M rows a month, with R4's bar at 50%:
+
+| five users | as built | + M24 gate | + M24 accumulator and 01d's O3 segments |
+|---|---|---|---|
+| Rem + 4 light | ~180M (36%) | ~105M (21%) | – |
+| Rem + 4 typical | ~300M (60%) | ~170M (34%) | – |
+| Rem + 4 heavy | ~850M (170%) | ~425M (85%) | ~170M (34%) |
+
+So the free plan holds Rem and four light or typical friends once the 60-minute gate ships, and
+four heavy friends only with the accumulator and segmented history as well. Friends start at zero
+history, so these are where a year of listening leads, not where Phase 3 starts; Turso reports
+usage per database, and the Phase 3 gate reads it monthly. The Developer plan includes 2.5B
+reads a month, which takes even the worst row to 34% of its allowance with no work at all (01f
+§4.2, §15 decision 5).
+
+Writes: ~3,000 core rows a day for Rem (01c §2.7), roughly proportional to plays for friends; plus
+~72 token writes per user, ~270 `probe` writes on a day like Rem's, and 720 lease writes for the
+whole app. Five heavy users: ~17,000 a day, ~0.5M a month, 5% of the free plan's 10M. Telemetry
+writes stay on the Zenbook (~2,000 `api_log` rows a day per user, 01a §6), with the 30-day prune
+restored by STORE_MIGRATION's daily route.
+
+Growth: ~35 KB of core data a day for a Rem-like user (116.8 plays × 275 B + 8.9 tracks × 265 B,
+01a §6), ~12 KB for a light one. A year of five heavy users is ~64 MB, against 5 GB.
+
+### 12.5 T5: uptime, component by component
+
+| what fails | what users see | closed-app capture | today, for comparison |
+|---|---|---|---|
+| the Zenbook (reboots ~6-8 min nightly, stalls besides, 01f §3.3) | nothing: telemetry calls are never awaited on a user path and time out at 4 s (STORE_MIGRATION §6 items 1, 4); `/usage` loses its log sections (§6 item 6) | continues on cron-job.org's ticks; Rem's recorder and the nightly backup pause | every authenticated page fails, or waits ~46 s per query when the host is frozen (01f §3.2) |
+| cron-job.org | nothing | continues on the Zenbook's timer | – |
+| both pingers | nothing | stops until a user opens the app or the daily Vercel cron runs; plays beyond each user's last 50 are lost | the same, with one pinger |
+| Turso | every authenticated page fails | stops | – |
+| Turso's read quota | every query BLOCKED for every user until the 1st (01f §4.2) | stops | §12.4's budget; on Developer with overages it becomes a bill instead |
+| Vercel, or a Hobby allowance overrun | the app is down; an overrun lasts up to 30 days and takes the team's other projects too (01f §2.2) | stops | Active CPU is measured before Phase 2 (§11.3) |
+| Spotify suspends the app, or Rem's Premium lapses | Spotify calls fail for everyone | stops | shared fate (01f §1.6 item 5) |
+| one user's token, allowlist entry or Spotify error | that user only | that user only | today the one token's failure stops capture outright |
+| the Funnel's certificate (expires Nov 8; lane 1907) | after the move: `/usage`'s log sections | nothing | today: the whole app |
+
+The Zenbook stops being on any path a user waits on once STORE_MIGRATION lands, and stops being
+on the capture path once the second pinger runs. What remains are managed services and Spotify's
+policy, each a single point of failure for every user and none fixable by this app.
 
 ## 13. Costs
 
