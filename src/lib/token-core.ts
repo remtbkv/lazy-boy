@@ -61,6 +61,7 @@ export async function refreshAccessToken(refreshToken: string): Promise<SpotifyT
           grant_type: "refresh_token",
           refresh_token: refreshToken,
         }),
+        cache: "no-store",
         // Hard timeout: a slow/hanging token endpoint must NOT block the page
         // render (the layout awaits auth()). On timeout we fall back to the
         // existing session and retry on a later request.

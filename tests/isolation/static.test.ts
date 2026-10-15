@@ -1,0 +1,257 @@
+// Static checks over src/ (PLAN.md §6.4: S1, S2, S4, S5, S6), run on every `npm test`. They
+// parse the source with the TypeScript compiler API, so a comment or a string that merely
+// mentions a pattern does not count. Each allowlist entry says why it is there; an entry marked
+// PENDING is single-user code that Phase 1's turn moves (it sits in a file queued lanes edit),
+// and the check fails if a PENDING entry disappears without its line being deleted, so the
+// lists only shrink on purpose.
+//
+// S3 (no per-user function exported from db.ts), S7 (no await on the telemetry client) and S8
+// (no nested async server component reading user data) wait for forUser, STORE_MIGRATION's
+// telemetry client and the page moves respectively; see docs/multi-user/PHASE1.md §4.
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import path from "node:path";
+import ts from "typescript";
+import { describe, expect, it } from "vitest";
+
+const ROOT = path.resolve(__dirname, "../..");
+const SRC = path.join(ROOT, "src");
+
+function walk(dir: string): string[] {
+  return readdirSync(dir).flatMap((n) => {
+    const p = path.join(dir, n);
+    if (statSync(p).isDirectory()) return walk(p);
+    return /\.(ts|tsx)$/.test(n) && !/\.test\.ts$/.test(n) && !n.endsWith(".d.ts") ? [p] : [];
+  });
+}
+const FILES = walk(SRC).map((abs) => {
+  const rel = path.relative(ROOT, abs);
+  const text = readFileSync(abs, "utf8");
+  return { rel, text, sf: ts.createSourceFile(rel, text, ts.ScriptTarget.Latest, true) };
+});
+
+function visit(node: ts.Node, f: (n: ts.Node) => void): void {
+  f(node);
+  node.forEachChild((c) => visit(c, f));
+}
+const calleeText = (c: ts.CallExpression | ts.NewExpression, sf: ts.SourceFile) =>
+  c.expression.getText(sf).replace(/\s+/g, "");
+
+/** Every call (or `new`) whose callee text matches, as `file: callee(firstArg)`. */
+function calls(match: (callee: string) => boolean): string[] {
+  const out: string[] = [];
+  for (const { rel, sf } of FILES) {
+    visit(sf, (n) => {
+      if ((ts.isCallExpression(n) || ts.isNewExpression(n)) && match(calleeText(n, sf))) {
+        const arg = n.arguments?.[0]?.getText(sf) ?? "";
+        out.push(`${rel}: ${calleeText(n, sf)}(${arg})`);
+      }
+    });
+  }
+  return out;
+}
+
+describe("S1: unstable_cache only inside userCache", () => {
+  const ALLOWED = new Set(["src/lib/user-cache.ts"]);
+  // PENDING: db.ts's seven cached reads move onto userCache in Phase 1's turn.
+  const PENDING = new Set(["src/lib/db.ts"]);
+
+  it("no other file calls it", () => {
+    const files = new Set(calls((c) => c === "unstable_cache").map((s) => s.split(":")[0]));
+    const stray = [...files].filter((f) => !ALLOWED.has(f) && !PENDING.has(f));
+    expect(stray).toEqual([]);
+    for (const p of PENDING) expect(files.has(p), `${p} no longer calls unstable_cache: drop it from PENDING`).toBe(true);
+  });
+});
+
+describe("S2: a Uid is minted in one place", () => {
+  // The gate mints from the session; auth.ts mints Rem's uid in the sign-in branch and in the
+  // two owner-bound Phase 1 shims. Phase 2 adds the cron's claim; the scripts' --user helper
+  // comes with forUser.
+  const MINTERS = new Set(["src/lib/session-gate.ts", "src/lib/auth.ts"]);
+
+  it("no `as Uid` outside identity.ts", () => {
+    const casts: string[] = [];
+    for (const { rel, sf } of FILES) {
+      visit(sf, (n) => {
+        if (ts.isAsExpression(n) && n.type.getText(sf) === "Uid" && rel !== "src/lib/identity.ts") {
+          casts.push(`${rel}: ${n.getText(sf)}`);
+        }
+      });
+    }
+    expect(casts).toEqual([]);
+  });
+
+  it("mintUid is imported only by the minters", () => {
+    const importers: string[] = [];
+    for (const { rel, sf } of FILES) {
+      for (const st of sf.statements) {
+        if (!ts.isImportDeclaration(st)) continue;
+        const named = st.importClause?.namedBindings;
+        if (named && ts.isNamedImports(named) && named.elements.some((e) => (e.propertyName ?? e.name).text === "mintUid")) {
+          importers.push(rel);
+        }
+      }
+    }
+    expect(importers.filter((f) => !MINTERS.has(f))).toEqual([]);
+  });
+});
+
+describe("S4: module-scope state is on a reviewed list", () => {
+  // Every module-scope binding that is ever mutated: a top-level `let` that is assigned, a
+  // top-level const container (Map, Set, array, object, a globalThis-backed store) that has a
+  // mutating method called on it or an element assigned, and every non-readonly static class
+  // field. Each says how it is keyed, or why one value for every user is right.
+  const BROWSER = "browser module: one tab, one signed-in user";
+  const REVIEWED: Record<string, string> = {
+    "src/lib/user-cache.ts: names": "wrapper names, process-wide on purpose: no user data",
+    "src/lib/playlists-sync.ts: currentSync": "Map<Uid, task id>",
+    "src/lib/tasks/registry.ts: store": "tasks carry their owner; getTaskFor checks it",
+    "src/lib/tasks/registry.ts: running": "completion promises by task id; holds no result",
+    "src/lib/han-fold.ts: TABLE": "a fixed folding table filled at module load; no user data",
+    "src/lib/spotify/client.ts: cooldownUntil": "app-wide on purpose: Spotify's rate limit is per app (PLAN.md §4.3)",
+    "src/app/(app)/use-search-mode.ts: lastKbHeight": BROWSER,
+    "src/components/now-playing-context.tsx: markedNowPlayingReady": BROWSER,
+    "src/components/playlist-tracks-sync.tsx: lastAttempt": BROWSER,
+    "src/components/playlists-sync.tsx: inFlight": BROWSER,
+    "src/components/playlists-sync.tsx: lastAttempt": BROWSER,
+    "src/components/playlists-sync.tsx: watching": BROWSER,
+    "src/lib/metrics-client.ts: buffer": BROWSER,
+    "src/lib/metrics-client.ts: errorsRecorded": BROWSER,
+    "src/lib/metrics-client.ts: loadPage": BROWSER,
+    "src/lib/metrics-client.ts: loadPv": BROWSER,
+    "src/lib/metrics-client.ts: page": BROWSER,
+    "src/lib/metrics-client.ts: pendingNav": BROWSER,
+    "src/lib/metrics-client.ts: pv": BROWSER,
+    "src/lib/metrics-client.ts: sessionMemo": BROWSER,
+    "src/lib/metrics-client.ts: started": BROWSER,
+    "src/lib/metrics-client.ts: viewStart": BROWSER,
+    "src/lib/metrics-client.ts: visibleMs": BROWSER,
+    "src/lib/metrics-client.ts: visibleSince": BROWSER,
+    "src/lib/search-perf.ts: enabled": BROWSER,
+  };
+  // PENDING: db.ts state that becomes per uid in Phase 1's turn (PLAN.md §6.2 layer 4).
+  const PENDING: Record<string, string> = {
+    "src/lib/db.ts: apiLogWrites": "telemetry prune counter; moves to the telemetry client (lane 1901)",
+    "src/lib/db.ts: g": "the one store client; becomes forUser's client map",
+    "src/lib/db.ts: storeSizeMemo": "per uid",
+    "src/lib/db.ts: uniqueRecomputeKickedAt": "per uid",
+  };
+
+  const MUTATORS = new Set(["set", "add", "delete", "clear", "push", "pop", "splice", "shift", "unshift", "sort", "reverse", "fill"]);
+
+  function mutated(sf: ts.SourceFile, name: string, isLet: boolean): boolean {
+    let hit = false;
+    visit(sf, (n) => {
+      if (hit) return;
+      if (ts.isBinaryExpression(n) && n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && n.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+        const left = n.left;
+        const root = ts.isPropertyAccessExpression(left) || ts.isElementAccessExpression(left) ? left.expression : left;
+        if (ts.isIdentifier(root) && root.text === name && (isLet || root !== left)) hit = true;
+      }
+      if ((ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) && ts.isIdentifier(n.operand) && n.operand.text === name) hit = true;
+      if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)) {
+        const obj = n.expression.expression;
+        if (ts.isIdentifier(obj) && obj.text === name && MUTATORS.has(n.expression.name.text)) hit = true;
+      }
+    });
+    return hit;
+  }
+
+  function found(): string[] {
+    const out: string[] = [];
+    for (const { rel, sf } of FILES) {
+      for (const st of sf.statements) {
+        if (ts.isVariableStatement(st)) {
+          const isLet = (st.declarationList.flags & ts.NodeFlags.Let) !== 0;
+          for (const d of st.declarationList.declarations) {
+            if (!ts.isIdentifier(d.name)) continue;
+            if (mutated(sf, d.name.text, isLet)) out.push(`${rel}: ${d.name.text}`);
+          }
+        }
+        if (ts.isClassDeclaration(st)) {
+          for (const m of st.members) {
+            const mods = ts.canHaveModifiers(m) ? (ts.getModifiers(m) ?? []) : [];
+            const isStatic = mods.some((x) => x.kind === ts.SyntaxKind.StaticKeyword);
+            const ro = mods.some((x) => x.kind === ts.SyntaxKind.ReadonlyKeyword);
+            if (ts.isPropertyDeclaration(m) && isStatic && !ro) out.push(`${rel}: ${st.name?.text}.${m.name.getText(sf)}`);
+          }
+        }
+      }
+    }
+    return out.sort();
+  }
+
+  it("every finding is reviewed or pending, and every pending entry still exists", () => {
+    const f = found();
+    const unreviewed = f.filter((x) => !(x in REVIEWED) && !(x in PENDING));
+    expect(unreviewed).toEqual([]);
+    for (const p of Object.keys(PENDING)) expect(f, `${p} is gone: drop it from PENDING`).toContain(p);
+  });
+});
+
+describe("S5: Spotify is fetched with no-store or through the client", () => {
+  // Auth.js's own token exchange goes through this customFetch with Auth.js's init: a POST,
+  // which no cache stores.
+  const EXEMPT = new Set(["src/lib/auth.ts: fetch(input)"]);
+
+  it("every direct fetch in a file that names a Spotify host sets cache: no-store", () => {
+    const bad: string[] = [];
+    for (const { rel, sf, text } of FILES) {
+      if (rel === "src/lib/spotify/client.ts") continue;
+      if (!/https:\/\/(api|accounts)\.spotify\.com/.test(text)) continue;
+      visit(sf, (n) => {
+        if (!ts.isCallExpression(n) || n.expression.getText(sf) !== "fetch") return;
+        const id = `${rel}: fetch(${n.arguments[0]?.getText(sf) ?? ""})`;
+        const opts = n.arguments[1];
+        const noStore =
+          opts !== undefined &&
+          ts.isObjectLiteralExpression(opts) &&
+          opts.properties.some(
+            (p) => ts.isPropertyAssignment(p) && p.name.getText(sf) === "cache" && p.initializer.getText(sf) === '"no-store"',
+          );
+        if (!noStore && !EXEMPT.has(id)) bad.push(id);
+      });
+    }
+    expect(bad).toEqual([]);
+  });
+});
+
+describe("S6: browser storage names", () => {
+  const STORAGE = /^(window\.)?(localStorage|sessionStorage)\.(getItem|setItem|removeItem)$|^navigator\.locks\.request$|^BroadcastChannel$/;
+  // Device-level names: not user data, kept across users on purpose.
+  const DEVICE = new Set([
+    "src/components/now-playing-context.tsx: localStorage.getItem(RELOAD_STAMP_KEY)",
+    "src/components/now-playing-context.tsx: localStorage.setItem(RELOAD_STAMP_KEY)",
+    "src/lib/metrics-client.ts: sessionStorage.getItem(SESSION_KEY)",
+    "src/lib/metrics-client.ts: sessionStorage.setItem(SESSION_KEY)",
+    "src/lib/search-perf.ts: window.localStorage.setItem(FLAG)",
+    "src/lib/search-perf.ts: window.localStorage.removeItem(FLAG)",
+    "src/lib/search-perf.ts: window.localStorage.getItem(FLAG)",
+    "src/app/(app)/error.tsx: sessionStorage.getItem(KEY)",
+    "src/app/(app)/error.tsx: sessionStorage.setItem(KEY)",
+  ]);
+  // PENDING: user data under a bare name. Each moves to userStorageName(uid, …) once the (app)
+  // layout renders the uid for the browser (a queued file); until then sign-out clears them by
+  // their bare names (user-storage.ts).
+  const PENDING = new Set([
+    "src/components/now-playing-context.tsx: localStorage.setItem(CACHE_KEY)",
+    "src/components/now-playing-context.tsx: localStorage.getItem(CACHE_KEY)",
+    "src/components/now-playing-context.tsx: BroadcastChannel(CHANNEL)",
+    "src/components/now-playing-context.tsx: navigator.locks.request(LEADER_LOCK)",
+    "src/lib/clean-progress.ts: localStorage.getItem(CLEAN_LS_KEY)",
+    "src/lib/clean-progress.ts: localStorage.setItem(CLEAN_LS_KEY)",
+    "src/lib/clean-progress.ts: localStorage.removeItem(CLEAN_LS_KEY)",
+    "src/app/(app)/home/den-home.tsx: sessionStorage.getItem(DAY_STORE)",
+    "src/app/(app)/home/den-home.tsx: sessionStorage.removeItem(DAY_STORE)",
+    "src/app/(app)/home/den-home.tsx: sessionStorage.setItem(DAY_STORE)",
+    "src/app/(app)/chrome.tsx: sessionStorage.getItem(RING_CACHE + image)",
+    "src/app/(app)/chrome.tsx: sessionStorage.setItem(RING_CACHE + image)",
+  ]);
+
+  it("every storage name is built by userStorageName, device-level, or pending", () => {
+    const all = [...new Set(calls((c) => STORAGE.test(c)))];
+    const bad = all.filter((s) => !/\(userStorageName\(/.test(s) && !DEVICE.has(s) && !PENDING.has(s));
+    expect(bad).toEqual([]);
+    for (const p of PENDING) expect(all, `${p} is gone: drop it from PENDING`).toContain(p);
+  });
+});
