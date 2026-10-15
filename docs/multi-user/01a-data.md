@@ -11,9 +11,37 @@ Source of every measured count and size: the Zenbook's nightly backups, pulled r
 `lazyboy-20261014-0840.db` (taken 4:40 AM today), **S-Sep14** and **S-Aug16** the same file from those
 mornings. Nothing in this document read the production store or the Zenbook.
 
-Status: outline. Sections fill in order; each is committed as it lands.
+Status: complete.
 
 ## 0. Summary
+
+- **The store has no notion of a user.** Ten tables, 24.56 MB (core 11.87 MB, telemetry 12.69 MB), one
+  client, no foreign keys, no user column; all 243 `meta` rows are global, including the one plaintext
+  Spotify token row (§2, §3). All 74 async exports of `db.ts` are user-less (§7, D2).
+- **The owner's data** [measured on the Oct 14 nightly backup]: 22,040 plays (14,511 real, 7,529
+  backfill), ~115 real plays a day (median 113, p90 150, busiest 204), 15,859 tracks, 110 owned playlists
+  with 7,404 members. Core data grows ~35 KB a day; `api_log` grows ~2,000 rows a day and its 30-day
+  prune has not run since Aug 10 (§6).
+- **38 single-user assumptions, with file:line** (§7). The ones that would hurt people, not just leak:
+  one user's library sync deletes every user's playlists and cached tracks (D12); skip verdicts and
+  listened time chain each play to the previous play of ANY user and are then stored (D18); a play is
+  dropped when another user played the same track at the same instant (D17); the seven data-cache keys
+  and both search ETags carry no user (D26, D27); the playlist page reads any playlist id with no
+  ownership check (D14).
+- **Recommendation: a database per user** at this app's ceiling of five accounts (§8.1). It makes the
+  unscoped statements correct without editing them, leaves the owner's data where it is, and lets a
+  deletion reach backups. The row-level alternative is fully specified too (§8.2-8.6), with an INTEGER
+  user key (measured 280 B per play against 432 B for a text Spotify id).
+- **Scaling: storage is not the limit, reads are** (§9). Measured locally, user-led indexes keep a
+  per-user history scan at 32-36 ms from 25 to 100 users, against 130-527 ms without them. On Turso's
+  free plan, five owner-like users read ~570-615M rows a month with today's orphan pass (over the 500M
+  limit) and ~245-290M with it scoped; per-user reads also grow with each user's history. An
+  incremental history payload and an all-time accumulator are the data-model levers.
+- **STORE_MIGRATION: run it as planned and keep the multi-user schema out of it** (§10). Four small
+  additions: archive the meter's pre-cutover logs, make the ledger's route-handler writes reliable or
+  label it a lower bound, write the backup as a loop over databases, and re-check R4 at N users.
+- **Rem's calls** (§12): the data model, retention for invited users, backups versus the five-day
+  deletion rule, and keeping the backstop recorder owner-only.
 
 ## 1. Where the data lives and how it is reached
 
