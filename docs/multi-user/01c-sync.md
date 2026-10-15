@@ -4,9 +4,42 @@ Lane 0221_lb_mu_ov_sync, 2026-10-14. Planning only: nothing here changed code, d
 or Vercel. Line numbers are against commit `ac6f7fe`. Every number says how it was measured;
 the exact commands are in Appendix A. "Rem's day" below means UTC 2026-10-14 unless stated.
 
-Status: outline — sections fill in order; each is committed as it lands.
-
 ## 0. Summary
+
+- **What runs.** Closed-app capture is the Zenbook's 2-minute pinger on `/api/cron/sync` plus the
+  Zenbook's own 15-minute recorder; the daily Vercel cron is the only trigger off that machine, and
+  its daily chores never run (§1). Open tabs add `/api/sync`, Home's refresh and a 6-second
+  now-playing poll.
+- **What one user costs today** (Rem, measured): ~1,530-1,690 Spotify calls a day, two-thirds of
+  them the tick asking the player what is playing, plus 139-319 recently-played harvests, ~150
+  rescan calls and the recorder's 96 (§2.7). The sync paths read ~3.9M store rows a day, and the
+  biggest single read is the all-time recompute (53% on Oct 14), a full `plays` scan up to 144 times
+  a day that grows with history (§2.2).
+- **N is at most 5.** Development mode allows five users per app and extended quota mode is closed to
+  individuals (§4). The 25 and 250 in the planning brief are not reachable.
+- **The binding limit is Spotify's recently-played quota**, ~725-800 calls a day in August (01f),
+  which Spotify's docs say belongs to the developer account, shared by every user. Rem alone spends
+  ~235-415. Five Rem-like users on today's policy need ~1,200-2,100. They fit only if harvests are
+  batched (one per 15 min of playback) or freshness comes from the player probe with server-side
+  provisional plays (§5.1, §5.3). That trades closed-app freshness and is Rem's call (§7.2), as is
+  how to find out whether the quota is really shared (§7.3).
+- **A second user on today's code** gets wrong skip verdicts and listened time (the gap chain uses
+  the whole table's previous play), deletes other users' playlists on a library change, can receive
+  another user's tokens from the shared in-flight refresh, and one user's revoked token or
+  de-allowlisting fails the tick for everyone (§3, S1-S18).
+- **For N users:** one invocation a minute, a per-user due queue with leases and a state machine
+  (active, idle, backoff, needs re-auth, removed), per-user 25 s deadlines, 429s split by reason and
+  bucket, idempotent writes only (§5.2, §5.4); open tabs stop harvesting on their own (§5.5).
+- **On Turso's free plan**, per-user indexes are a precondition and five heavy users need an
+  incremental all-time accumulator to fit STORE_MIGRATION's R4; no lane builds it (§5.9).
+- **STORE_MIGRATION:** run it as planned and first. Before lane 1901: correct §3, which names the
+  history payload as the dominant read when it is the all-time recompute; add a growth line to R4
+  and an accumulator lane; write `/api/cron/daily` as a per-user loop (§6).
+- **Two measurement findings:** 25-30% of `api_log` rows are re-sent duplicates (§2.8), and the store
+  meter undercounts the unscoped orphan `UPDATE` ~40× against what Turso billed (§2.8).
+- **Uptime:** after the move a Zenbook outage still stops closed-app capture for every user; a second
+  pinger off the Zenbook fixes that once the per-user lease exists, and the recorder should stay
+  owner-only and run hourly (§5.7).
 
 ## 1. Inventory: every background job today
 
