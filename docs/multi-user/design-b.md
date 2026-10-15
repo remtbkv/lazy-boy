@@ -251,13 +251,15 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);  -- global keys only
 
 ### 4.3 Each user's database
 
-Today's seven core tables, with two columns added and one table:
+Today's seven core tables, with three columns, one index and one table added:
 
 - `plays.listened_ms INTEGER`: the play's listened time, written with its skip verdict (both come
   from the same `min(gap, duration)`, `src/lib/skip-rule.ts:33-46`). Everything that sums listened
   time then sums a column instead of walking the gap chain (§8.1).
 - `playlists.snapshot_id TEXT`: replaces the 110 `plsnap:<id>` meta rows, so a rescan compares every
   snapshot in the list probe it already makes (§7.6).
+- `playlist_tracks.ident TEXT` with an index on `(playlist_id, ident)`: the song identity, so the
+  "From" verdict is two index probes instead of a walk over the playlist's members (§10.1).
 - `payloads (kind, key, version, shape, body, dirty, built_at, PRIMARY KEY (kind, key))`: the
   materialized bodies: `home` (today's `meta.home_payload`), `hist`/`<YYYY-MM>` per UTC month,
   `hist`/`catalog`, and `lib`. Each read is one row; each write is a compare-and-set on `version`
@@ -271,7 +273,8 @@ Today's seven core tables, with two columns added and one table:
 | `plays` | user DB | `+ listened_ms` |
 | `contexts` | user DB | none; per user, so one account's 403 never hides a name from another (01a D25) |
 | `playlists` | user DB | `+ snapshot_id` |
-| `playlist_tracks`, `saved_tracks` | user DB | none |
+| `playlist_tracks` | user DB | `+ ident` (lower-cased artist and title) and an index on `(playlist_id, ident)` (§10.1) |
+| `saved_tracks` | user DB | none |
 | `api_log` | telemetry (Zenbook) | `+ uid` (nullable), `+ reason` (the 429 body's `QUOTA_EXCEEDED` or not, 01c S4) |
 | `client_metrics` | telemetry | `+ uid`; `handoff` beacons stop carrying song names (01a §10) |
 | `usage_ledger` | telemetry | unchanged; per-user truth now comes from Turso's per-database usage |
@@ -684,7 +687,8 @@ dump check covers drift, as for segments.
   relying on the daily scan to find them.
 - **Orphan verdict for a new play**: computed in the read batch with the song's identity bound as
   parameters, then written with the insert. The stored predicate (`db.ts:700-709`) looks the identity
-  up in `tracks`, which has no row yet for a never-seen track in the same batch. Same ~130 rows.
+  up in `tracks`, which has no row yet for a never-seen track in the same batch. With the
+  `playlist_tracks.ident` index of §10.1 the verdict is two probes, ~5 rows instead of ~130.
 - **The write marker**: one bump per landed batch, where today a landed tick bumps two or three times
   (the insert batch, the orphan flags, the skip verdicts: `db.ts:522, 749, 819`).
 
@@ -695,7 +699,7 @@ database, against a p50 of 30 store round trips per landed tick today [measured,
 
 | | today, per landed play [measured, 01c §2.2] | this design [estimate] |
 |---|---|---|
-| rows read | ~7,700, or ~59,000 when the all-time gate opens | ~150: the orphan predicate ~130, the newest play, new track ids (~3 each), new contexts, the uniqueness probe, three payload and meta rows |
+| rows read | ~7,700, or ~59,000 when the all-time gate opens | ~20: the orphan verdict ~5 (§10.1; ~130 with today's predicate), the newest play, new track ids (~3 each), new contexts, the uniqueness probe, three payload and meta rows |
 | rows written | 15-20 | ~10: the play with its index entries (~6), the `alltime`, `home` and segment rows, the marker |
 | round trips | ~30 | 3 |
 
@@ -811,7 +815,7 @@ The design adds `playlist_tracks.ident` (lower-cased artist and title, the ident
 uses) with an index on `(playlist_id, ident)`, filled by `storePlaylistTracks` from fields it already
 holds. The verdict becomes two index probes: ~5 rows per play [estimate], so ~5 per landed play and
 ~5 × (plays from the playlist) per scoped pass. Storage: ~0.3 MB for Rem's 7,400 members [estimate,
-~40 bytes per entry]. §8.6's ~150 rows per landed play becomes ~20.
+~40 bytes per entry]. That is why §8.6 counts ~20 rows per landed play, not ~150.
 
 ### 10.2 Per Rem-like user per day
 
