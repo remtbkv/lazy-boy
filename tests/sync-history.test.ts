@@ -1,6 +1,6 @@
 // syncRecentPlays end-to-end: a fake Spotify service feeding the REAL store — cooldown
 // gating, context resolution + negative caching, the home-payload rebuild trigger.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { syncRecentPlays } from "@/lib/sync/history";
 import {
   getHomePayload,
@@ -68,11 +68,21 @@ describe("syncRecentPlays (fake Spotify, real store)", () => {
         "spotify:playlist:dead": null, // 403/404 → negative cache
       },
     });
-    const { added } = await syncRecentPlays(sp);
+    // The payload's day strip is a now-relative window; pin only Date near DAY for the
+    // harvest + rebuild, so the test does not age out of it.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-13T12:00:00Z"));
+    let added: number;
+    let payload: Awaited<ReturnType<typeof getHomePayload>>;
+    try {
+      ({ added } = await syncRecentPlays(sp));
+      payload = await getHomePayload();
+    } finally {
+      vi.useRealTimers();
+    }
     expect(added).toBe(2);
     expect(await getContextName("spotify:playlist:good")).toBe("Good List");
     expect(await getContextName("spotify:playlist:dead")).toBeNull(); // negative, not undefined
-    const payload = await getHomePayload();
     expect(payload).not.toBeNull(); // rebuild ran because plays landed
     expect(payload!.daily.some((d) => d.day === DAY)).toBe(true);
     const rows = await getPlaysByDay(DAY, 0);

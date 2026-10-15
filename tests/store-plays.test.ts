@@ -1,7 +1,7 @@
 // Simulation: the plays pipeline end-to-end against a real (throwaway, local) SQLite
 // store — inserts, skip verdicts, out-of-order re-adjudication, backfill exclusion,
 // counters. Every case here pins a finding from the 2026-08-19 audit.
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   checkPlayedAtConvention,
   getAllTimeStats,
@@ -105,7 +105,15 @@ describe("plays pipeline (simulated store)", () => {
   });
 
   it("daily stats agree with the day view on count and exclusions", async () => {
-    const daily = await getDailyStats(0, 30);
+    // getDailyStats windows from Date.now(); pin only Date (the lock test needs real timers).
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-12T12:00:00Z"));
+    let daily: Awaited<ReturnType<typeof getDailyStats>>;
+    try {
+      daily = await getDailyStats(0, 30);
+    } finally {
+      vi.useRealTimers();
+    }
     const day = daily.find((d) => d.day === DAY);
     const rows = await getPlaysByDay(DAY, 0);
     const rowPlays = rows.reduce((s, r) => s + r.plays, 0);
