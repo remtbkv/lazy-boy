@@ -100,7 +100,7 @@ numbers, because the quota cannot buy the second one for five heavy listeners:
   user is harvested before 25 tracks pile up, half of recently-played's 50 (GOTCHAS "`recently-played`
   only returns the last 50 plays").
 
-Why split: 2-minute stored freshness for five Rem-like users costs ~750-830 recently-played calls a day
+Why split: 2-minute stored freshness for five Rem-like users costs ~750-850 recently-played calls a day
 (01c §5.1, policy i) against a budget measured at ~725-800 for the whole app in August (01f §1.4), and
 nobody sees stored freshness while the app is closed. Today [code]: a play reaches the store within
 one 2-minute tick while something plays (`src/app/api/cron/sync/route.ts:121-146`). Checked by: the
@@ -153,26 +153,26 @@ weeks from the history payload's 2 MiB cache cliff (01d §3.2). Five mechanisms 
    history payloads become monthly segments stored in the user's database, the current month appended
    to on every landed harvest; the library body is patched per changed playlist. A page visit reads
    rows and never scans (§8).
-3. **A per-minute scheduler with a per-user due queue, leases and a quota governor.** Freshness signals
+3. **A one-minute tick with a global lock, per-user state and a quota governor.** Freshness signals
    come from the player probe, a bucket Spotify has never rationed here; recently-played harvests are
    rationed across users inside the developer account's daily budget; one user's failure stays in that
    user's slot (§7).
 4. **Search from the browser's own copy**: segments under versioned, immutable URLs, kept in IndexedDB
    per user and segment (STORE_MIGRATION phase E, with a finer key), day lists built on demand, and a
    virtualized result list (§9).
-5. **Two independent pingers** (the Zenbook's timer and cron-job.org) behind the queue's lease, so
+5. **Two independent pingers** (the Zenbook's timer and cron-job.org) behind the tick lock, so
    closed-app capture survives either one (§12).
 
 ```
 browser ─► Vercel functions (iad1)
              ├─ app DB, Turso `lazyboy-app`: users · user_tokens (AES-256-GCM) · invites ·
-             │        sync_state (due queue, leases, harvest state) · quota_ledger · meta (global)
+             │        sync_state (probe and harvest state) · quota_ledger · meta (global, tick lock)
              ├─ user DBs, Turso, one per user, same group (Rem's is `lazyboy`):
              │        tracks · plays (+listened_ms) · contexts · playlists (+snapshot_id) ·
              │        playlist_tracks · saved_tracks · meta · payloads (segments, library, home)
              └─ telemetry, Zenbook sqld via the Funnel, best effort, never awaited:
                       api_log · client_metrics · usage_ledger, each with a nullable uid
-pingers: Zenbook timer (1 min) + cron-job.org (1 min) ─► /api/cron/sync, deduplicated by the lease
+pingers: Zenbook timer (1 min) + cron-job.org (1 min) ─► /api/cron/sync, deduplicated by the tick lock
 Zenbook: telemetry · the owner's recorder (hourly) · nightly per-database backups, which also
          recompute every derived value from the dump and flag drift
 ```
@@ -195,13 +195,13 @@ cron ticks, 129 plays landed. Home was barely opened that day, so the two terms 
 | 2 | Home payload rebuild: 16-day strip + the opening day (`db.ts:1315-1343`) | every landed harvest | ~7,500 | 954,265 (22%), 127 runs | plays per 16 days | patched in place from the harvest in hand (§8) |
 | 3 | history payload rebuild (`db.ts:1686-1730`) | a browser fetch after the slow marker moved | ~79,000 | 78,781, 1 run; ceiling 144 × 79,000 ≈ 11M with Home open all day (01c §6) | stored plays; hits the 2 MiB Data Cache limit in late December (01d §3.2) | monthly segments in the store, current month appended on write (§8, §9) |
 | 4 | whole-history day strip, `dailyStatsAction(100000)` prefetched on every Home mount (`den-home.tsx:374-384`), cached on `write_seq`, so the first mount after any landed play re-reads every real play | Home mounts after listening | ~43,500 [estimate: 14,511 real plays × ~3 rows for a `plays JOIN tracks`, READ_QUOTA "Measured reads"] | ~0 (no mounts) | stored plays × visits | built in the browser from segments that carry listened seconds (§9) |
-| 5 | unscoped orphan pass (`db.ts:724-751`) | the library's playlist id set moved, ~3 a week | ~5,100,000 as Turso counts it (01c §2.8) | 394,820 as the meter counted 3 runs | plays × members | lanes 1910-1911 scope it; kept scoped (§8) |
+| 5 | unscoped orphan pass (`db.ts:724-751`) | the library's playlist id set moved, ~3 a week (3 on Oct 14) | ~5,100,000 as Turso counts it (01c §2.8) | 394,820 as the meter counted 3 runs | plays × members | lanes 1910-1911 scope it; kept scoped (§8) |
 | 6 | unique-song count (`db.ts:1969-1991`) | a library sync that changed anything; the daily Liked refetch always counts as a change (`sync/library.ts:81-84`) | ~39,000 | ~160,000, 4 runs | library members | counted inside the library body's build and patch (§8) |
 | 7 | library payload rebuild (`db.ts:1625-1684`) | a fetch after `library_seq` moved, which every list rewrite does | ~15,000 | 0-2 runs a day (ledger, 01d §2.2) | members | patched per changed playlist (§8) |
 | 8 | library rescan's snapshot reads (`sync/library.ts:65-66`) | every rescan, ~30 a day | ~110 serial one-key reads | ~3,500 round trips | owned playlists | one statement over a `snapshot_id` column (§7) |
 | 9 | daily contexts pass, `unresolvedContextUris` (`db.ts:646-667`) | once a day | ~43,000 [estimate: ~2 rows per contexted play, READ_QUOTA "Attribution": 14.1K at 7,194 plays] | one run | stored plays | a scan of the 114-row `contexts` table (§8) |
-| 10 | harvest that lands nothing (`db.ts:480-496`, `unseenContexts`) | 155 a day | ~215 | ~33,000 | – | diff against the previous batch's keys in sync state: 0 user-DB rows (§7) |
-| 11 | idle tick: token, two gate stamps | 436 a day | ~3 | ~1,300 | – | one claim statement for all due users (§7) |
+| 10 | harvest that lands nothing (`db.ts:480-496`, `unseenContexts`) | 155 a day | ~215 | ~33,000 | – | diff against the previous batch's keys in sync state: 0 user-DB rows (§7.4) |
+| 11 | idle tick: token, two gate stamps | 436 a day | ~3 | ~1,300 | – | one batch read of every user's state per tick (§7.2) |
 | 12 | orphan verdict for new plays | every landed harvest | ~130 | 16,528 | one playlist's size | kept: bounded (§8) |
 | 13 | nightly backup dump (STORE_MIGRATION phase D, after the cutover) | nightly | ~45,800 [estimate: the core row counts in 01a §2] | not yet running | every stored row | kept; an incremental form past 25 users (§10) |
 
@@ -234,7 +234,7 @@ databases (250 needs the Developer plan, which 250 users' writes need anyway, §
 connection per active user per function instance (an in-region TLS handshake, a few milliseconds
 [estimate]; undici keeps an idle connection ~4 s by default); a schema change is a loop over
 databases (§4.6); cross-user features (the roadmap's friends) merge two reads in code; and `tracks`,
-public catalog rows, is stored once per user (4.2 MB for Rem, ≤ 1 GB at 250 such users, §10).
+public catalog rows, is stored once per user (4.2 MB for Rem, ~1 GB at 250 such users, §10).
 
 One group token reaches every database in the group ("a new token that can be used to connect to any
 database in the group", https://docs.turso.tech/cli/group/tokens/create, fetched 2026-10-14), so the
@@ -265,17 +265,17 @@ CREATE TABLE user_tokens (             -- 01e §5.2, encrypted blob (§5)
 CREATE TABLE invites (                 -- what Rem can see before the person signs in (01e §5.4)
   spotify_id TEXT PRIMARY KEY, uid TEXT NOT NULL, created_at INTEGER NOT NULL, claimed_at INTEGER
 );
-CREATE TABLE sync_state (              -- the due queue and harvest state (§7)
-  uid TEXT PRIMARY KEY, state TEXT NOT NULL, next_due_at INTEGER NOT NULL,
-  lease_owner TEXT, lease_until INTEGER,
+CREATE TABLE sync_state (              -- probe and harvest state; due times are computed (§7.2)
+  uid TEXT PRIMARY KEY,
+  state TEXT NOT NULL,                 -- active | idle | backoff | needs_reconnect | removed | paused
+  harvest_lock_owner TEXT, harvest_lock_until INTEGER,  -- the per-user harvest lock (§7.7)
   last_probe_at INTEGER, last_track TEXT, last_progress_ms INTEGER, last_active_at INTEGER,
   changes_since_harvest INTEGER NOT NULL DEFAULT 0, last_harvest_at INTEGER,
-  batch_keys TEXT,                     -- the previous harvest's 50 played_at stamps, ~0.6 KB
+  batch_keys TEXT,                     -- the previous harvest's 50 (played_at, track_id) keys, ~2.4 KB
   next_rescan_at INTEGER, last_rescan_at INTEGER,
   failures INTEGER NOT NULL DEFAULT 0, last_error TEXT, last_ok_at INTEGER,
   lag_p50_s INTEGER, lag_p95_s INTEGER -- T3's instrument, rolled up by the daily route
 );
-CREATE INDEX idx_sync_due ON sync_state (next_due_at);
 CREATE TABLE quota_ledger (            -- Spotify calls per quota day and bucket (§7.4)
   quota_day TEXT NOT NULL, bucket TEXT NOT NULL, calls INTEGER NOT NULL,
   PRIMARY KEY (quota_day, bucket)
@@ -362,7 +362,7 @@ eight round trips per database each instance touches, on the request path. Inste
   https://docs.turso.tech/api-reference/databases/create, fetched 2026-10-14). The provisioning
   script runs when Rem creates an invite (§14), so sign-in never waits on it and the platform token
   stays out of the Vercel runtime (01e §6).
-- A migration is `scripts/migrate-dbs.mjs`: per user, pause that user's sync through its lease, apply,
+- A migration is `scripts/migrate-dbs.mjs`: per user, set that user's sync state to `paused`, apply,
   verify, bump the version, resume. Additive changes only on live databases; anything that rebuilds a
   table runs on one user at a time behind a snapshot (Turso's point-in-time restore: 1 day on Free, 10
   on Developer, pricing page fetched 2026-10-14).
@@ -406,8 +406,8 @@ R1 target.
 **Refresh is per user everywhere.** The lock is `lock:spotify_refresh:<uid>:<env>`; the in-flight
 refresh is a map keyed the same way (01e A2: shared, it hands user A's tokens to user B); the request
 box is keyed by uid; `clearTokensIfStale` compares within one row; the cookie-held-token paths go
-(01e A18). The cron's claim statement (§7.2) joins `user_tokens` for every due user, so a tick reads
-all its tokens in one statement and refreshes only users whose access token has under 60 s left.
+(01e A18). The tick's state read (§7.2) joins `user_tokens`, so a tick reads every user's token in
+one statement and refreshes only due users whose access token has under 60 s left.
 Writes: ~24 refreshes a day per active user, each a lock acquire, a token write and a release, ~72
 rows [01e §5.2, estimate]; 1,800 a day at 25 users, 18,000 at 250.
 
@@ -420,7 +420,7 @@ and no Spotify call for a user without a row.
 
 **One way in.** `db.ts` stops exporting per-user functions that reach a module-level client. Each takes
 a `UserDb` first: a branded type wrapping that user's libSQL client, minted only by `forUser(uid)`,
-whose `uid` comes from `requireUser()` (the verified session, §5) or from the cron's claim (§7.2),
+whose `uid` comes from `requireUser()` (the verified session, §5) or from the tick's state read (§7.2),
 never from request input and never from an ambient "current user" (01e §5.1 explains why
 AsyncLocalStorage is the wrong tool here). App-database and telemetry functions stay module-level. A
 call site that forgets the user does not compile. The client cache (`g.__listenDbReady`,
@@ -452,9 +452,9 @@ used out) so a long-lived instance does not hold every user's connection.
 4. The payload routes: B's request with A's ETag answers 200 with B's body; a segment key only A has is
    a 404 for B.
 5. The token core: 01e's six tests (§5).
-6. The cron: two due users, B's refresh answering `invalid_grant` and B's Spotify answering 403 "not
-   registered"; A's harvest lands, the tick answers 200 with per-user outcomes, B ends in
-   `needs_reconnect` and `removed`.
+6. The cron: two due users, with B failing two ways in turn, a refresh answering `invalid_grant` (B
+   ends `needs_reconnect`) and Spotify answering 403 "not registered" (B ends `removed`); each time A's
+   harvest lands and the tick answers 200 with per-user outcomes.
 7. Process state: library syncs for A then B within 60 s in one process store B's own playlists; B
    polling A's task id gets a 404.
 8. A structural test: parse `db.ts`'s exports and fail on any function that names a per-user table
@@ -530,6 +530,12 @@ A user is harvested (one recently-played call, the last 50 plays) when any of th
 | H4 open app | a visible tab's load or focus, if a track change was seen since the last harvest; ≥ 60 s apart | ~5 for Rem, ~20 for an app-heavy friend |
 | H5 freshness | a track change seen, and ≥ F minutes since the last harvest | 9 h × 60 / F, at most one per play |
 
+**What a harvest costs the store.** The tick compares the 50 plays Spotify returns with the previous
+harvest's keys in `sync_state.batch_keys`. Plays already seen cost nothing, so a harvest that brings
+nothing new reads and writes no user-database row (today ~215 rows read, §3 row 10); new plays go to
+§8.6's two batches. The `(track_id, played_at)` unique key stays the authority: a lost or stale key
+list only sends more candidates to §8.6, whose read batch finds the ones already stored.
+
 **F is the governor's one knob.** The quota ledger (§4.2) counts the scarce bucket's calls per quota
 day; every hour the governor compares the day's spend with a straight line from 0 to 426 (450 less the
 recorder's 24) across the quota day: ahead of the line, F doubles (to at most 30 minutes); behind it,
@@ -581,7 +587,7 @@ and the uid, which is how the passive experiment learns whose calls a ban follow
 
 - `POST /api/sync` (on load, every 2 minutes, on focus; `src/components/sync-on-load.tsx:12-27`) runs
   the same per-user step as the tick, under a per-user harvest lock (a compare-and-set on
-  `sync_state.lease_until`, written only when a harvest starts), and harvests only by H4. Today it
+  `sync_state.harvest_lock_until`, written only when a harvest starts), and harvests only by H4. Today it
   harvests whenever the last harvest is over a minute old (01c §2.4).
 - `refreshHistoryAction` stops calling Spotify and only reads the store (01c S6, §5.5).
 - Now-playing polls every 15 s mid-track, plus the existing end-of-track and visibility polls (01c
@@ -610,7 +616,7 @@ and the uid, which is how the passive experiment learns whose calls a ban follow
 
 01c §5.4 lists the cases; each lands in this design as a state on one user's row. A user whose calls
 hang uses its 25 s and is retried at its next due time. `invalid_grant` clears that user's token row
-and sets `needs_reauth` (§5). A 403 "not registered" sets `removed`. The same error for every user at
+and sets `needs_reconnect` (§5). A 403 "not registered" sets `removed`. The same error for every user at
 once (the owner's Premium lapsing, 01f §1.2) backs the whole tick off instead of marking anyone
 removed. A store failure ends the tick at step 1. Every write on this path is idempotent: the lease and
 the tick lock are compare-and-sets, counters are written as values, inserts have natural keys, and
