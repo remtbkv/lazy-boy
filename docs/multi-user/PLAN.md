@@ -403,9 +403,11 @@ CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT);
 Choices in it: there is no `env` column on tokens, because dev runs its own app database (§5.5) and
 production's never holds a dev grant (A, C). Invites are `users` rows in status `invited`, with the
 database already provisioned, so one claim statement binds a sign-in to a row (A §10.2). A user's
-lifecycle lives in `users.status` alone, written by one function with `status_at`, and the cron's claim
-joins `users` and leases only `active` users, so disabling, removing or deleting someone stops their
-sync at the next tick (security R2). What the probe last saw (track, progress, when playback stopped)
+lifecycle lives in `users.status` alone, written by one function with `status_at`, always as a
+compare-and-set from the status it read, so a returning sign-in and the deletion job cannot both win
+(whichever moves the row first makes the other's write land nothing). The cron's claim joins `users`
+and leases only `active` users, so disabling, removing or deleting someone stops their sync at the
+next tick (security R2). What the probe last saw (track, progress, when playback stopped)
 stays in the user's own `meta` beside today's `player_last_active` and `rp_last_harvest`
 (`db.ts:2364-2374`); `sync_state` holds times, counters and leases only. `events` is expected to stay
 empty; a row is a bug report the health check e-mails (§7.10).
@@ -692,7 +694,9 @@ token. Vercel KMS only signs; AWS KMS brings the AWS dependency Rem ruled out (0
   refresh tokens that are "expired, revoked, or otherwise invalid" (01e §5.7), and what else
   invalidates a grant is undocumented (01e §8), so the app treats it as a question, not a verdict:
   1. Stop at once: no Spotify call for that user, status `needs_reconnect`, data and blob kept.
-  2. Confirm: one more refresh at least 10 minutes later. If it succeeds, back to `active`.
+  2. Confirm: one more refresh at least 10 minutes later. The claim never leases a `needs_reconnect`
+     user (T6), so the tick makes this call itself after its steps: one token-endpoint call for at most
+     one such user whose confirmation is due, and no data calls. If it succeeds, back to `active`.
   3. If two or more users, or the admin, got `invalid_grant` within 24 hours, it is an app-wide
      event: everyone stays `needs_reconnect` with their data, nothing is scheduled for deletion, and
      the health check reports it (§7.10).
