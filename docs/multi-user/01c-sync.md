@@ -461,14 +461,14 @@ One user's failure must cost that user's slot and nothing else:
 ### 5.7 The recorder and the loss floor
 
 During a capture outage of T hours a user loses every play beyond the newest 50 (GOTCHAS,
-"`recently-played` only returns the last 50 plays"). Rem averages ~117 plays a day and ~16-20 an hour
-while listening, so an outage that spans more than 2.5-3 hours of listening loses plays. Each user's
-floor is set by their own listening.
+"`recently-played` only returns the last 50 plays"). Rem averages ~117 plays a day, ~14-16 an hour
+while listening on Rem's day and ~20 at peak (`recorder.py`'s docstring), so an outage spanning more
+than 2.5-3.5 hours of listening loses plays. Each user's floor is set by their own listening.
 
 The recorder protects only the owner, costs 96 scarce-bucket calls a day (a quarter to two-fifths of
 the app's spend in that bucket, 2.7), and runs on the same machine as the pinger, so the outages it
-was built for took it down too (the Oct 3 review, D2: Aug 30-Sep 2 and Sep 3-9, several hundred
-plays lost). After STORE_MIGRATION the store leaves the Zenbook but the pinger and the recorder stay
+was built for took it down too (the Oct 3 review, D2: Aug 30-Sep 2 and Sep 3-9, plausibly several
+hundred plays lost). After STORE_MIGRATION the store leaves the Zenbook but the pinger and the recorder stay
 (its §5 diagram), so a Zenbook outage still stops closed-app capture for every user.
 
 - (a) Keep the recorder owner-only and run it hourly: 24 calls a day instead of 96, and no play is
@@ -515,9 +515,9 @@ That is ~4.5-5.6M a day, ~135-170M a month (27-34%), at today's history.
 | five Rem-like users | reads a month | of 500M |
 |---|---|---|
 | per-user scoped, nothing else changed | ~675-850M | over the plan |
-| + the orphan pass scoped to changed playlists (lanes 1910-1911), taken as ~10× cheaper | ~350-520M | over R4, at or over the plan |
-| + an incremental all-time accumulator | ~120-180M | 24-36%, inside R4 |
-| + the Home payload's strip updated in place on an append | well under 100M | |
+| + the orphan pass scoped to changed playlists (lanes 1910-1911), taken as ~10× cheaper | ~375-540M | over R4, at or over the plan |
+| + an incremental all-time accumulator | ~155-215M | 31-43%, inside R4 |
+| + the Home payload's strip updated in place on an append | under 100M | under 20% |
 
 The all-time recompute also grows with history: ~2.3 rows per stored play per run, ~44 runs a day for
 Rem, ~117 new plays a day, so its daily cost rises ~12,000 rows every day. A year from now it is
