@@ -8,11 +8,44 @@ and so on; code line numbers are against `ac6f7fe` (no file under `src/`, `scrip
 `tests/` changed since). Every number is labelled **[measured]** with its source, or **[estimate]**
 with the arithmetic.
 
-Status: outline. Sections are filled and committed one at a time.
+Status: complete, 2026-10-14.
 
 ## 0. Summary
 
-(to be written last)
+- **Targets, refined (§1).** Five users, because Spotify's development mode allows five per app and
+  extended quota is closed to individuals; 250 stays as the sizing point for everything Spotify does
+  not control. Search: first visit ≤ 2 s and repeat ≤ 300 ms after first paint, keystroke ≤ 50 ms, on a
+  4×-throttled CPU at 10 Mbit/s. Freshness split in two: what any screen shows is always within 2
+  minutes; what the store holds with the app closed is within 2 minutes for up to two heavy listeners
+  and ~10 at five, if the quota is shared as Spotify documents. Per heavy user a day: ≤ 100,000 rows
+  read, ≤ 2,500 written, ≤ 50 KB stored. No machine in Rem's apartment on a request path or as the only
+  capture trigger.
+- **The rule: a user's recurring cost follows what changed, never what is stored (§2).** Today Rem's
+  store reads 4.25M rows a day, half of it one full `plays` scan repeated 44 times (§3). With this
+  design ~70,000 [estimate], two-thirds of that the nightly backup (§10.2).
+- **How (§4-§9).** A Turso database per user plus an app database; listened time stored per play and
+  the all-time totals kept as an accumulator; the Home payload patched in place; history as monthly
+  segments stored in the user's database and appended to on write, which also removes the 2 MiB cache
+  cliff the owner hits in late December; the library body patched per playlist; an identity index
+  that turns the "From" verdict from a walk over a playlist into two probes, a cost the store meter
+  cannot see (§10.1); a one-minute tick with a quota governor; two independent pingers.
+- **Results [estimates].** A landed play costs ~20 rows read and 3 round trips, against ~7,700 rows
+  (59,000 with the all-time scan) and ~30 round trips today. Search is usable ~1.4 s after first paint
+  on Rem's first visit, ~80 ms on a repeat visit; a keystroke paints in ~25-35 ms.
+- **Store.** Turso's free plan holds five users under 5% of every dimension and 25 under 16%; 250 need
+  the Developer plan, $4.99-5.99 a month (§10.3). At 250 it is Spotify that fails: its five-user cap,
+  a shared recently-played budget that cannot keep 250 users complete, and a 30-second rate limit their
+  probes alone exceed.
+- **Misses (§17):** 25 and 250 users on one app; a heavy three-year user's first visit (~2.6 s); slow
+  4G; 2-minute closed-app freshness for five heavy listeners under a shared quota. Each has its options
+  and their costs.
+- **STORE_MIGRATION: run it as planned (§11).** Six small edits, none blocking: correct §3's
+  attribution of the dominant read, key phase E's browser copy per segment, loop the backup over
+  databases and strip token rows, consider the identity index in lanes 1910-1911, give R4 a growth
+  term, flip Production only.
+- **Rollout (§15):** single-user performance first (it pays off for Rem alone, and its segment step must
+  ship before mid-December), then identity, then the multi-user plumbing with its two-user tests, then
+  one friend, then up to five. **Rem's decisions** are in §18.
 
 ## 1. Targets, as briefed and as refined
 
