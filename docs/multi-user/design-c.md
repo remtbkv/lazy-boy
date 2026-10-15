@@ -1240,9 +1240,9 @@ Each with the recommendation and its reason, grouped by the phase it blocks.
 **Before Phase 3**
 
 15. **Freshness under a shared quota.** Recommend the brake for every user, Rem included (§6.4).
-    Exempting the owner keeps his closed-app freshness at 2 minutes and leaves the friends ~300
-    calls a day between them on trip days; provisional plays avoid the brake for M-L work
-    (§14 item 3).
+    Exempting the owner keeps his closed-app freshness at 2 minutes; his ~174 calls a day then come
+    out of the friends' share, so their brake trips earlier and holds them longer. Provisional
+    plays avoid the brake altogether, for M-L work (§14 item 3).
 16. **Finding out whether the quota is shared.** Recommend passive (§11.4) plus a question on
     Spotify's developer forum. The active test risks Rem's own capture for up to ~12 hours
     (01c §7 decision 3).
@@ -1257,3 +1257,55 @@ Each with the recommendation and its reason, grouped by the phase it blocks.
     entry would stop being cached.
 
 ## 16. Unknowns, risks, and what I ran
+
+### 16.1 Unknowns, and what answers each
+
+| unknown | where it matters | answered by |
+|---|---|---|
+| whether Spotify's dev-mode quota is one pool or one per user | §6.4, T3 | a ban in Phase 3, or never; the design is safe either way |
+| the team's Vercel Active CPU | Phase 2's gate, §13 | Rem, on the dashboard, in a minute (01f §6 decision 2) |
+| whether Rem counts toward five, and whether more than five were grandfathered | T1 | the dashboard's User Management list |
+| whether `/v1/me` returns `account_id` to this app | §4.1, §9.2 step 5 | Rem's first Phase 1 sign-in |
+| Turso's round trip from iad1 and its payload build times | §12.2-12.3 assume R1's 15 ms target and an estimated ~500 ms build | lanes 1902-1903's bench route |
+| keystroke-to-paint on a real phone | T2 | `lb-perf` on Rem's phone |
+| how friends listen and how often they open Home | every friend column in §6.4 and §12.4 | Phase 2's week with one friend |
+| the incident window | §9.5 | the sign-in times; not in the repo |
+| the Data Cache's hit rate under the team's other projects | §7.3 | not observable on Hobby, whose runtime logs last an hour (01f §2.2) |
+
+### 16.2 Risks this design carries
+
+- **A wrong uid compiles.** The required parameter catches a missing uid, not a wrong one: a
+  literal `1`, or the cron handing user A's uid to user B's step. The structural test greps for
+  uid literals outside `getClient` and the setup script, and the routes test runs as user 2, where
+  a hard-coded 1 returns user 1's marker strings and fails.
+- **One token reads everything.** Production's group token reaches every user's data. It should
+  be a Secret-type variable, write-only after saving (01e §5.3); I did not check the type of
+  today's `TURSO_AUTH_TOKEN`. With the platform token also in the runtime (§10.3), code execution
+  in production can destroy databases; the group token alone can already drop every table, so the
+  added power is creating databases and changing org settings.
+- **A leaked `CRON_SECRET`** spends quota but reads nothing (01e §3.2), and now at most one tick of
+  work per 90 s however often it is called, because every tick takes the lease first.
+- **Rollback** assumes Spotify keeps not rotating this app's refresh tokens; if it starts, a
+  rollback costs Rem one sign-in (§9.4).
+- **Schema changes** that are not additive have to loop over every database; a database that
+  misses one fails loudly at its next `init()` rather than serving wrong data.
+- **Cold starts** pay `init()` once per database (§3.4), measurable in Phase 1's tick wall times.
+
+### 16.3 What I ran
+
+Read-only throughout. Nothing ran against the production store, the Zenbook, Turso, Vercel or
+Spotify, and nothing was written except this file.
+
+- `git rev-parse --short HEAD` (`774bb21`); `git diff --stat ac6f7fe HEAD -- src scripts ops tests
+  vercel.json next.config.ts` (empty); `git show -s 044c9b6` (the owner-guard commit's message).
+- Reads of every file cited. Counts: `grep -c "getClient()" src/lib/db.ts` → 54; `grep -c "^export
+  async function" src/lib/db.ts` → 74; for each of those names, lines in `src/` outside `db.ts`
+  matching `name(` with comment lines dropped → 235, and in `tests/` → 308.
+- `grep` over `src/` for `myPlaylistsAll`, `myPlaylists(`, `playlistsCache`, `from_token`,
+  `market=` and `product`, and `sed` of `den-home.tsx:655-676` (the idle wait).
+- `curl -sSL` with a desktop user agent, ~10:08-10:12 PM Oct 14, of nine Turso documentation pages
+  into a scratch directory, text extracted with a short Python HTML strip: `cli/group/tokens/create`,
+  `api-reference/groups/create-token`, `features/multi-db-schemas`, `api-reference/databases/create`,
+  `cli/db/destroy`, `features/point-in-time-recovery`, `cli/db/create`,
+  `cli/group/tokens/invalidate`, `cli/db/tokens/invalidate` (all under https://docs.turso.tech/).
+  The scratch directory was deleted afterwards.
