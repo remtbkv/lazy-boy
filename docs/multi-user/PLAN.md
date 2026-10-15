@@ -694,7 +694,9 @@ bounds each user's share (§6.6, §7.5).
      users' tabs in one browser neither read nor relay each other's state (01b §3.6).
    - Sign-out clears that storage in the browser before the sign-out form submits (sign-out is a
      server action, 01b §7 item 1), and the response sends `Clear-Site-Data: "cache", "storage"` where
-     the browser honours it; the client-side clear is the one relied on. *Stops M7.*
+     the browser honours it; the client-side clear is the one relied on. A 401 from any of the app's
+     own routes clears it too (B §6), so a device whose session died elsewhere (sign out everywhere, a
+     deletion) forgets on its next request. *Stops M7.*
 7. **The shared remainder.** `app-db.ts` holds every statement on the app database; the handful that
    take no uid (sign-in's lookup and claim, the cron's claim, the admin list, the global keys) are
    cross-user by design and each has a test (T6). `/usage` and any admin page require `is_admin`,
@@ -1184,8 +1186,11 @@ runtime logs that age out within the hour). The step-by-step phone budget is §1
 - **Phase E's IndexedDB copy** stores bodies under `(uid, kind, segment, version, shape)`, so a repeat
   visit paints search from disk before the network (STORE_MIGRATION §10, 01d O5).
 
-**Segment versions** are per-month counters in the user's `meta` (`seg_seq:<YYYY-MM>`), bumped by
-every write that can change a closed month (A §7.1, B §8.3):
+**Segment versions** are per-month entries in the user's `meta` (`seg_seq:<YYYY-MM>`, holding the
+version and the month's play count), bumped by every write that can change a closed month (A §7.1,
+B §8.3). Keeping the count beside the version is what lets the manifest be one `meta` range read of a
+dozen rows; counting plays per month at render time would be a scan of the whole history on every
+Home open, the thing D2 forbids.
 
 | event | how its months are found |
 |---|---|
@@ -1392,9 +1397,11 @@ are done; §11.2 is done; a fresh verified backup exists.
    Rem's uid with `granted_at` = now − 30 days (every session is at most 30 days old and every sign-in
    re-authorizes, 01e §5.7), corrected at his next sign-in. Write his `sync_state` from `last_sync`,
    `player_last_active`, `rp_last_harvest` and `library_synced_at`.
-5. Deploy Phase 2, still `SIGNUPS=owner`. Compare the two token copies on `expiresAt` and keep the
-   later, since an old instance may have refreshed in between (STORE_MIGRATION §8 step 10's rule).
-   Pingers on; three ticks answer 200 with Rem's outcome `ok`.
+5. Set Production's environment (the group token in place of `lazyboy`'s own, `TOKEN_KEYS`, the app
+   database's URL; C §9.2 step 4), values on stdin as STORE_MIGRATION §8 step 9 does, and deploy
+   Phase 2, still `SIGNUPS=owner`. Compare the two token copies on `expiresAt` and keep the later,
+   since an old instance may have refreshed in between (STORE_MIGRATION §8 step 10's rule). Pingers
+   on; three ticks answer 200 with Rem's outcome `ok`.
 6. Verify, each a known answer that must match exactly: the seven tables' counts at or above the
    pre-migration counts and `max(played_at)` moving; `verify-derived.mjs` green; `lazyboy.meta`'s key
    set unchanged (the moved keys go only in step 7); the blob decrypting to the plaintext row;
@@ -1513,6 +1520,21 @@ So the ambiguous case 01e §5.7 raised (an earlier purge is irreversible, a late
 Terms) needs no waiting period: the destroy is immediate, and the copies Rem already keeps are the
 recovery window.
 
+**Two copies outside the friend's database**, which none of the designs closed:
+
+- **The telemetry store's backups.** STORE_MIGRATION phase D backs up the Zenbook file nightly and keeps
+  60 days on OneDrive (its §9), so the friend's `api_log` and `client_metrics` rows deleted in step 3
+  would survive there for two months. From Phase 4 the telemetry backup takes the friends' four-day
+  retention (§12.4); it is diagnostics, and four days of restore points is enough.
+- **The app database's point-in-time history** (1 day on Free, 10 on Developer) keeps the friend's
+  `users` row and token blob after steps 1 and 5 delete them. The identifiers in it (`account_id`,
+  Spotify id, timestamps) are what the privacy policy names as held by the database vendor for up to
+  ten days. The token matters more: the app cannot revoke a grant, so after an in-app disconnect it
+  stays valid at Spotify until the person removes the app there. Rotating `TOKEN_KEYS` within five days
+  of a deletion (§5.3's procedure: new key first, redeploy, re-encrypt the active rows, drop the old
+  key) leaves that copy undecryptable. At five users that is at most four rotations, ever; the
+  deletion job records the due date on `/usage` (§18 decision 16).
+
 The destroy needs `TURSO_PLATFORM_TOKEN` in the runtime (§5.5). 01e §6 recommends taking it out once a
 second user exists. The runtime already holds a group token that can read and drop every table, so the
 platform token adds the power to create and destroy databases, and a deletion then cannot wait on a
@@ -1525,8 +1547,9 @@ STORE_MIGRATION phase D's nightly job (lane 1904) with edit 4 of §10.2, extende
 
 - One `(database, retention)` entry per database: `("lazyboy", 60 days)` as today, `("lazyboy-app",
   4 days)`, and `("lb-u-<uid>", 4 days)` for each friend whose status is `active`, read each night from
-  the app database through the read-only group token. A destroyed database, or one whose user is not
-  active, drops out of the list by itself.
+  the app database through the read-only group token; from Phase 4, the Zenbook's telemetry file at 4
+  days too (§12.3). Retention applies on the Zenbook and on OneDrive alike. A destroyed database, or
+  one whose user is not active, drops out of the list by itself.
 - Plaintext token and lock rows stripped from every copy before compression (until Phase 2's week is
   over, `lazyboy` still holds them). `user_tokens` rows are ciphertext whose key never leaves Vercel,
   so the app database's copies keep them and a restore keeps everyone signed in.
@@ -1960,8 +1983,12 @@ Each with a recommendation and its reason, grouped by what it blocks.
 15. **Retention for friends.** *Recommend*: kept while connected; deleted at a disconnect; deleted
     twelve months after the last sign-in. The twelve is the number to choose; Spotify says not to keep
     content indefinitely (01f §1.5).
-16. **Friends' backups kept four days, and taken only while a friend is active.** *Recommend yes*:
-    deletion then reaches the backups with no bookkeeping; yours stay at 60 days (§12.4).
+16. **Friends' backups kept four days and taken only while a friend is active; the telemetry store's
+    backups kept four days from the first friend on; the token key rotated within five days of a
+    friend's deletion.** *Recommend yes*: deletion then reaches every copy, the vendor's point-in-time
+    history included, with no file-by-file bookkeeping; your own backups stay at 60 days (§12.3-12.4).
+    The alternative to the key rotation is naming the ten-day vendor copy in the privacy policy and
+    accepting it.
 17. **`TURSO_PLATFORM_TOKEN` stays in the runtime**, Production only, used by the deletion job's destroy
     and the daily usage read. *Recommend yes.* 01e §6 recommends removing it; the price of that is a
     deletion that waits on a script you have to remember within five days (§12.3).
