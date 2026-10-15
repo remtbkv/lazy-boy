@@ -5,12 +5,34 @@ changed code, data, the Zenbook store or Vercel. Line numbers are against commit
 Every number is labelled **[measured]** (how, where, when) or **[estimate]** (the arithmetic).
 The commands behind the measurements are in the appendix.
 
-Status: outline — sections fill in order; each is committed as it lands. A section that still
-reads "pending" was not reached.
+Status: complete, 2026-10-14.
 
 ## 0. Summary
 
-_(pending)_
+- **The history payload's server cache stops working around late December 2026, for the owner
+  alone.** Vercel's Data Cache (and Next 16.2.6's own check) refuses items over 2 MB without an error.
+  The history entry is at 86.6% and grows ~6 points a month (§3.2). Past the limit, every Home open
+  re-runs the full plays scan, and the only signal is a warning in logs that age out within an hour.
+- **The "small, volatile" half is now the big one.** History is 1.79 MB raw / 615 KB gzipped, the
+  library 0.81 MB / 285 KB; 58% of the history body is catalog rows that never change (§2.1). Both
+  versions move several times a day, so in practice a visit hours after the last one rebuilds both
+  bodies on the server and downloads both in full (§2.2).
+- **On a phone-class CPU (4× throttled) the client spends 264 ms** parsing and building, three quarters
+  of it `buildDays` materializing every day of history up front. Matching a keystroke is ≤ 13 ms;
+  rendering the rows is the larger share (§2.3). Real users (mostly August, device unknown) waited a
+  median 4.0 s, p90 8.7 s, between the page's rows and search being ready.
+- **Multi-user** needs a user in every key, marker, ETag, delta and browser store (01a, 01b). The two
+  traps specific to search are payload cache keys built from small per-user counters, which collide
+  and serve one user's payload to another, and the in-memory delta patch, which phase E would persist
+  into IndexedDB (§4.1, §4.3 with six tests).
+- **Full-body rebuilds do not scale.** At ~3 store rows per play per visit, 25 typical users cost
+  ~380M rows a month (76% of Turso's free plan); monthly history segments, a delta at visit start and
+  per-playlist library deltas bring it to ~2M (§4.2).
+- **Recommended order (§5.2):** lazy days and monthly segments (catalog as its own segment) now, for
+  the cliff; per-user keys with the isolation tests before a second account; STORE_MIGRATION phase E
+  storing segments, plus the visit-start delta; per-playlist library chunks later. Nothing in the
+  store migration has to change before it runs (§6), but its §3 likely misattributes the ~50,500-row
+  read to the history payload.
 
 ## 1. How search works today
 
@@ -655,3 +677,36 @@ production-path timing of the full history build on Turso, which this document d
   measured on the owner's mix only.
 
 ## Appendix: commands run
+
+Nothing ran against the Zenbook store, Turso, Vercel or Spotify. Scratch directory
+`S=~/.claude/broke/scratch/lazyboy_mu/0221_search` (mode 700); scripts in `$S/bin`.
+
+1. Backup copy: `rclone copy onedrive-backup:lazyboy-db/lazyboy-20261014-0840.db.gz $S/dl/`,
+   `gunzip -k`, `cp` to `$S/db/work.db`; `sqlite3 work.db "PRAGMA integrity_check"` → ok; table counts
+   with `SELECT count(*)` and the month and context-type breakdowns of §2 and §3.1.
+2. Real-user timings: `python3 -I $S/bin/rum.py work.db` and `… work.db 2026-09-14` (reads
+   `client_metrics` for `/home`, groups by the `pv:` tag); page views and TTFB rows per month with
+   `sqlite3`.
+3. Payload sizes, local build times, Node-side client timings at 1-8× scale:
+   `node --expose-gc $S/bin/measure.mjs work.db`.
+4. Data-cache item sizes: `node $S/bin/itemsize.mjs work.db`; growth at monthly cutoffs:
+   `node $S/bin/growth.mjs work.db`; monthly segments: `node $S/bin/segments.mjs work.db`.
+5. Browser: `node $S/bin/bodies.mjs work.db $S/bodies` (bodies at 1/2/4/8× and the type-stripped
+   `han-fold.ts` + `history-days.ts`), then `node $S/bin/browser.mjs $S/bodies` (Chromium 145 headless
+   via `playwright-core` 1.58.0 from `~/projects/handy/node_modules`, CDP
+   `Emulation.setCPUThrottlingRate` 1/4/6, three fresh pages per cell) and
+   `node $S/bin/idb.mjs $S/bodies 1` (IndexedDB read-back).
+6. Ledger and markers: `sqlite3 work.db` over `usage_ledger` (`history_payload`, `library_payload`,
+   `playlist_rewrite`, `unique_song_count`, all readers for Oct 12-14) and `meta` (`library_seq`,
+   `write_seq`, `slow_seq_pub`).
+7. Next's cache limit: `npm pack next@16.2.6` into `$S/next`, read
+   `dist/server/lib/incremental-cache/index.js:35-75, 455-500` and
+   `dist/server/web/spec-extension/unstable-cache.js:1-60, 160-260`.
+8. Vercel docs: `curl -sL https://vercel.com/docs/functions/limitations` and
+   `https://vercel.com/docs/data-cache`, text extracted and searched for the quoted lines.
+9. Code: `grep` over `src/` for every caller of the payload functions, `fuzzyFilter`, `hanFold`,
+   `localStorage`/`sessionStorage`, and `git diff --stat 1c7aabb HEAD -- src` (empty).
+
+The backup copy (it holds the Spotify token row), the payload bodies, the Next package and the fetched
+pages were deleted from `$S` after the measurements; the scripts were kept so each number can be
+re-run against a newer backup.
