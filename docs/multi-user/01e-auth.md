@@ -26,9 +26,10 @@ request reads and the cron uses (§2.1); refresh is coordinated by one in-proces
   correct right now (it matches the pre-incident owner by hash). Setting the variable removes the
   dependence on store state.
 - **F2.** Spotify does not rotate this app's refresh tokens (unchanged across two weeks of hourly
-  refreshes) and documents a six-month lifetime. Every copy of the token row is therefore a live
-  13-scope credential: 14 nightly snapshots on the Zenbook, 60 days of them on OneDrive, the Mac's
-  `data/replica.db`.
+  refreshes) and documents a six-month lifetime. Every copy of the token row therefore stays a live
+  13-scope credential for up to six months after the sign-in that minted it: 14 nightly snapshots on
+  the Zenbook, 60 days of them on OneDrive, the Mac's `data/replica.db` (which holds the recorder's
+  current grant).
 - **F3.** The backstop recorder's grant may age out by Feb 6, 2027, silently.
 
 **What multi-user must change** (§5):
@@ -47,7 +48,8 @@ request reads and the cron uses (§2.1); refresh is coordinated by one in-proces
 - Split log-out into sign out, sign out everywhere, and disconnect.
 - Revocation or the six-month expiry (both `invalid_grant`) marks only that user `needs_reconnect`;
   the cron stops calling Spotify for them and nobody else is affected. The monthly re-sign-in already
-  renews every active user's grant. Disconnect and deletion follow Spotify's policy.
+  renews every active user's grant. A disconnect, explicit or a revocation, deletes the user's data
+  within the Developer Terms' five days, backups included (§5.7, §5.8).
 
 **STORE_MIGRATION** needs no change for auth before it runs (§6). Four small additions: strip token
 rows from backups and the archive, delete the cutover's plaintext copies on the Mac, ship the user-id
