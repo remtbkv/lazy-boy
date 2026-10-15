@@ -7,10 +7,11 @@ anything. Isolation, security, scale and completeness have their own reviewers; 
 already in `review-completeness.md` it is cited, not repeated. Planning only: nothing here changed
 code, data, the Zenbook, Turso or Vercel. Every production read was read-only and is listed in §4.
 
-Severity: **S1** loses or mis-assigns Rem's data, or takes every user down, with no plan step that
-catches it; **S2** a plan claim that is wrong or unproven in a way that changes a decision or a
-runbook step, or a gap whose failure loses plays or takes every user down; **S3** a gap a lane would
-trip over; **S4** wording or a number to correct.
+Severity (named so as not to clash with the plan's search targets S1-S3): **Critical** loses or
+mis-assigns Rem's data, or takes every user down, with no plan step that catches it; **High** a plan
+claim that is wrong or unproven in a way that changes a decision or a runbook step, or a gap whose
+failure loses plays or takes every user down; **Medium** a gap a lane would trip over; **Low** wording
+or a number to correct.
 
 ## 0. Summary
 
@@ -18,10 +19,11 @@ trip over; **S4** wording or a number to correct.
 
 ## 1. Findings
 
-Nothing reaches S1: every S2 below needs a second event the plan expects to happen (a store blip, a
-restore, a rollback, a Zenbook outage, a key rotation) before it costs data or uptime.
+Nothing is Critical: each High finding needs a second event the plan expects to happen (a store
+blip, a restore, a rollback, a Zenbook outage, a key rotation) before it costs data or uptime, or
+concerns data the plan does not touch yet.
 
-### S2-1. Restores have no runbook, and four parts of the design make a plain restore misroute data
+### 1. (High) Restores have no runbook, and four parts of the design make a plain restore misroute data
 
 **Evidence.** The plan names restores as its recovery path (§4.5 step 4 and §11.3 "take a restore
 point"; §12.4 "Turso's point-in-time recovery covers the last day"; §12.4 "a restore keeps everyone
@@ -71,12 +73,13 @@ restore drill".
   `store_epoch`; set the user `paused`; move `users.db_name`; delete the old database's `owner_uid` so
   any other opener refuses; resume. For `lazyboy-app`, before the pingers resume: delete every row
   whose `lb-u-<uid>` no longer appears in `turso db list` and re-run its telemetry deletion, bump every
-  `session_epoch`, and re-apply disables from a log kept outside the app database (the deletion job and
-  any disable already write to the telemetry store; make that a one-line record per action).
+  `session_epoch`, and re-apply disables from a log kept outside the app database (have the deletion job
+  and every disable append a one-line record to the telemetry store, which an app-database restore
+  does not touch).
 - Rehearse it in §13.2's throwaway-invite gate: restore that database under a new name, see the app
   serve from it, then destroy it.
 
-### S2-2. Until Phase 3 the Zenbook is the only frequent capture trigger, and its outage rate is understated
+### 2. (High) Until Phase 3 the Zenbook is the only frequent capture trigger, and its outage rate is understated
 
 **Evidence.** §14.5's first row sizes Zenbook downtime by the nightly reboot: "6-8 minutes daily,
 0.47% of the meter's 48.5 hours" (PLAN.md:1807). That window starts Oct 13 (01f §3.3). The Oct 3
@@ -104,14 +107,15 @@ days to weeks to arrive (D2).
   `UPDATE meta SET value = :now WHERE key = 'tick_at' AND CAST(value AS INTEGER) < :now - 90000`,
   inserted if absent, skip when no row changed. With pingers on alternate minutes every second tick
   runs, so Spotify sees today's calls; either pinger alone keeps today's two-minute cadence. Phase 3's
-  lease replaces the guard. Cost: ~1,440 rows written a day on Turso, 0.4% of the free plan.
+  lease replaces the guard. Cost: one row written per tick that runs, ~720 a day on Turso, about 0.2%
+  of the free plan's writes.
   Re-enabling the cron-job.org job with a fresh secret is Rem's step (STORE_MIGRATION's lanes read R6
   as forbidding it).
 - Give the Zenbook a resolver that does not depend on tailscaled. Rem's call: an ops change outside
   this program's lanes.
 - Restate §14.5's first row with the measured history, and add the interim as a stated exposure.
 
-### S2-3. P2's accumulator and P3/P4's patched values are read-modify-write, and the plan dropped what made them safe
+### 3. (High) P2's accumulator and P3/P4's patched values are read-modify-write, and the plan dropped what made them safe
 
 **Evidence.** P2 computes `listened_ms` "in JS and written with the insert" and keeps the all-time
 totals as an accumulator "applied one play at a time: for a counted play, `plays + 1`, `durationMs +
@@ -158,7 +162,117 @@ or the Home strip after P3 and P4. `scripts/verify-derived.mjs` sees it only whe
 - Known answers: two concurrent harvests with overlapping batches, and a re-sent batch, each leave the
   totals equal to `allTimeStats` over the stored rows.
 
-(more S2 findings follow)
+### 4. (High) Writers that do not know P2's and P3's new state leave it wrong: the unfenced fill, rollback windows, the import scripts
+
+**Evidence.**
+- **The fill window is not fenced.** P2's fill runs in "a fenced window of ~15 minutes … pause both
+  pingers and wait for 5 minutes without writes" (§11.3, PLAN.md:1373-1381). At P2 there is one
+  pinger, and pausing it stops none of the other writers: an open or pinned tab's `/api/sync` every two
+  minutes, `refreshHistoryAction`, a dev server on `lazyboy`. The cutover proved quiet with the meter's
+  statement log and stopped stale builds with the meter's fence (STORE_MIGRATION §8 steps 3 and 10);
+  after the cutover the meter sees telemetry only (STORE_MIGRATION §9), and Turso offers neither. A play
+  the old build inserts between the fill and the deploy keeps `listened_ms = NULL` for good: nothing in
+  §8.3 revisits a NULL, so the accumulator never counts it.
+- **Rollback windows.** P2's rollback is "redeploy the previous build; the column is ignored", P3's
+  "revert; browsers re-download once" (§13.1, PLAN.md:1582-1583). While the older build runs, it
+  inserts plays with no `listened_ms` and moves no `seg_seq`. Rolling forward resumes the accumulator
+  from what the old build left and serves months whose versions never moved, immutable in browsers.
+  Neither cell says what the roll-forward must repair.
+- **The import scripts bypass the path the plan names.** §8.3 counts "the backstop replay, an import"
+  among the non-append events that re-open a successor "now rewriting its `listened_ms` too, and set
+  `alltime_dirty`", citing `db.ts:547-561` (PLAN.md:1070-1075). The scripts never call that code:
+  `scripts/backfill-from-backstop.mjs` and `scripts/import-extended-history.mjs` write raw SQL and
+  close with `importTailStmts` (`scripts/import-tail.mjs`), which nulls `skipped` on each run's edges,
+  bumps `write_seq` and deletes `home_payload`. Nothing there touches `listened_ms`, `alltime_dirty` or
+  `seg_seq`. §9.1 does say the scripts will bump their months for P3; nothing assigns the P2 half, and
+  T10 tests the scripts only for `--user` (§6.4). Two imports of Rem's own plays are already queued
+  (`.claude/QUEUE.md:16-17`: the 122-play backstop replay, finding 8, and the Extended Streaming
+  History import for the Aug 30-Sep 9 gap). Run after P2 as the scripts stand, both leave their plays
+  out of the all-time totals.
+
+**Fix.** Treat `listened_ms IS NULL` on a counted play as pending, the way `skipped IS NULL` is today:
+a partial index (`WHERE listened_ms IS NULL AND (context_type IS NULL OR context_type <> 'backfill')`),
+filled by the pass that rules skips, which sets `alltime_dirty` whenever it fills one. Then the fill
+needs no quiet window, a rollback window heals at roll-forward, and a writer that does not know the
+column does no lasting harm. P2's lane also adds `alltime_dirty` to `importTailStmts`, and P3's the
+`seg_seq` bumps, with known answers in `tests/import-scripts.test.ts`. Rolling P3 forward after a
+rollback moves the segment shape token, the escape hatch §9.1 already names. Simplest of all for the
+two queued imports: run them before P2's fill (finding 8), so the fill counts them.
+
+### 5. (High) The identity read has no failure branch, and the obvious ones turn a store blip into a sign-out and a wiped browser cache
+
+**Evidence.** From Phase 2 every request's identity, token and capture health come from one
+`lazyboy-app` statement (§5.1, PLAN.md:487-501). The plan says when the jwt callback returns null (no
+uid, unknown uid, wrong status, stale epoch) and says nothing about the statement failing. Today's
+callback keeps the session on a failed read on purpose: "a Turso hiccup must NOT crash the request into
+a Configuration error / forced logout" (`src/lib/auth.ts:379-387`). Both natural ways to write the new
+callback lose that:
+- a read that throws makes Auth.js log `JWTSessionError` and clean the session cookie
+  (`@auth/core` 0.41.2, `lib/actions/session.js:58-62`, read from the published package tonight);
+- a read caught and treated as "no row" returns null, which cleans it too (same file, `:54-55`).
+
+On the `auth()` path the clean-up `Set-Cookie` is dropped (`next-auth` 5.0.0-beta.31,
+`lib/index.js:89-91`), so the cookie survives, but the request has no session: `requireUser()` sends
+pages to `/login`, answers routes 401 and actions `{ ok: false }` (§5.1). And "A 401 from any of the
+app's own routes clears" the browser's storage (§6.2 layer 6, PLAN.md:703-705). The now-playing poll
+hits a route every 6-15 s, so a few seconds of store trouble empty the IndexedDB search copy,
+`lb-days` and the rest on every open tab, and the next Home visit on each device pays a first visit's
+download (target S2's 2 s) instead of a repeat visit's (S1's 300 ms).
+
+`lazyboy-app` is also a new single point on every request, not only on ticks: one database blocked,
+refused or broken by a migration takes every user down while every user database is healthy. §7.8 has
+it for the tick (PLAN.md:971); §14.5 does not have it at all.
+
+**Fix.** Give the identity read three outcomes: allowed; refused (null, for the four cases §5.1
+lists); unavailable (the statement failed). On unavailable the callback returns the token unchanged,
+as today, and `requireUser()` answers 503, an error page or `{ ok: false, retry: true }` without
+redirecting to `/login`. The browser clears its storage only on a 401 that carries an explicit
+signed-out marker, never on a 5xx or a network error. Known answers in T5: the identity read throws,
+and there is no redirect, no 401 and no cleared storage. Add "`lazyboy-app` unavailable" to §14.5, with
+finding 1's restore path as its recovery.
+
+### 6. (High) The rollbacks do not say how, and on this project the obvious ways misfire
+
+**Evidence.** The rollback cells say "redeploy the previous build" (P2, Phase 1, P4; §11.4 "redeploy
+Phase 1") or "revert" (P3, Phase 3), never by which mechanism (§13.1, PLAN.md:1579-1589). Here the
+mechanisms behave differently:
+- **Instant Rollback**: "Hobby users can roll back to the immediately previous deployment"; "After a
+  rollback, Vercel turns off auto-assignment of production domains. This means new pushes to your
+  production branch won't replace the rolled-back deployment"; the rolled-back build keeps the
+  environment variables it was built with (https://vercel.com/docs/instant-rollback, updated
+  2026-07-07, fetched tonight). Every push to `main` deploys production (STORE_MIGRATION §3) and this
+  program pushes docs all day, so "the immediately previous deployment" is usually a docs-only rebuild
+  of the very phase being rolled back.
+- **`vercel redeploy <url>`** "will rebuild and deploys an existing deployment"
+  (https://vercel.com/docs/cli/redeploy), and "Any change you make to environment variables are not
+  applied to previous deployments, they only apply to new deployments"
+  (https://vercel.com/docs/environment-variables, updated 2026-09-17). So a redeploy runs old code on
+  today's variables [inference: a rebuild is a new deployment]. Phase 2 changes what
+  `TURSO_AUTH_TOKEN` holds and adds `TOKEN_KEYS` and the app database's URL (§11.4 step 5).
+- **The morning push**: "something pushes `main` at about 7 AM" (STORE_MIGRATION §3); the local reflog
+  of `origin/main` shows pushes at 07:05 on Oct 13 and Oct 14 and 07:08 on Oct 3. A redeployed older
+  build with the phase still on `main` is replaced at the next push. Tonight local `main` is 202
+  commits ahead of `origin/main`, and the owner guard production has run since 8:41 PM (`044c9b6`) is
+  on no remote branch: production already runs code that only the next push will put on `main`.
+
+Design C wrote the whole recipe: "Promote the previous production deployment in Vercel, restore the
+previous environment values, and revert the Phase 1 merge on `main`, so the next push cannot redeploy
+it" (design-c.md:978-981). The plan took C's gates and soak checks and left this out. Whether a rolled
+back build opens databases one schema step ahead at all is review-completeness H3, which this finding
+does not repeat.
+
+**Fix.** Write one rollback recipe in §13 and point every cell at it: revert the phase's merge on
+`main` and push, an ordinary production deploy of the old code that survives the morning push and
+keeps auto-assignment on; use Instant Rollback only as a minutes-long stopgap when the previous
+deployment is the pre-phase build, and Undo Rollback once the revert is live. Make environment changes
+additive: a phase adds variables and never changes what an older build reads, or its cell says why the
+older build still works with the new value (Phase 2: a group token reaches `lazyboy`, so Phase 1 runs
+on it). Add a boot check that names a missing store variable: today a missing `TURSO_DATABASE_URL`
+falls back to `file:data/listens.db` (`src/lib/db.ts:127-128`) and fails every query at `mkdirSync`
+(`:154-156`) with a bare EROFS [inference: Vercel functions can write only under `/tmp`]. Rehearse each
+phase's rollback on Rem alone inside its soak; it costs minutes and is the only test the cell gets.
+
+(more High findings follow)
 
 ## 2. STORE_MIGRATION, from this lens
 
