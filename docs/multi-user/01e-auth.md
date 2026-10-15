@@ -242,8 +242,8 @@ token value was printed or stored.
   (https://developer.spotify.com/documentation/web-api/tutorials/refreshing-tokens).
 - Two grants for Rem's account are live at once. The production row and the recorder's chain
   (`35fbe7ac`) both refreshed today (the recorder's `expires_at` is Oct 15 02:15 UTC). The recorder's
-  refresh token is byte-identical to the `spotify_tokens_dev` row in the store, in every snapshot, and
-  in the Mac's `data/replica.db`. The recorder and the Mac's `.env.local` use the same client id (hash
+  refresh token is byte-identical to the `spotify_tokens_dev` row in all three snapshots checked and in
+  the Mac's `data/replica.db`. The recorder and the Mac's `.env.local` use the same client id (hash
   prefix match); I could not read production's, so "one client holds two live grants for one user" is
   likely but unverified.
 - Spotify now documents a lifetime: "Refresh tokens issued to apps registered in the Developer Dashboard
@@ -317,7 +317,10 @@ unchanged to per-user rows.
 Two paths leave Spotify tokens in the session cookie, encrypted under `AUTH_SECRET`: the sign-in
 fallback when the store write fails (`auth.ts:367-374`), and sessions from before the tokens moved to
 the store, migrated on their next request (`auth.ts:388-405`). Any session of the second kind has long
-since been migrated or expired, so today the migration only finishes what the fallback started.
+since expired, so today the migration only finishes what the fallback started. Because the app never
+re-issues the cookie (§1.4), the `delete t.accessToken` lines in both paths never reach the browser: a
+cookie that once held tokens keeps them until it expires, and if a log-out elsewhere deletes the row,
+that cookie's next request writes its old grant back (`auth.ts:389-398`).
 
 ### 2.7 Tests
 
@@ -569,7 +572,8 @@ Recommended app-side gate, replacing `isOwnerSignIn`:
   is in their profile URL); `account_id` only appears through `/v1/me` with their token. On first
   sign-in a matching unclaimed invite creates the `users` row under `account_id` and records the claim;
   from then on the user is found by `account_id`, so a later change of `id` does not matter.
-- `SPOTIFY_OWNER_ID` bootstraps the first admin (Rem), as today.
+- `SPOTIFY_OWNER_ID` bootstraps the first admin (Rem), as today. Admin is a flag on the `users` row
+  bound to his `account_id`; store-wide views such as `/usage` gate on it (01b).
 - Fails closed on a store error, as `owner.ts:8-9` does now.
 - Keep it even while Spotify's allowlist also gates: the app cannot see the dashboard; extended quota
   would remove that gate and the app's own must already exist; and `users.status` lets Rem cut a user
@@ -707,6 +711,20 @@ What N users need:
 - A dev server pointed at the production store (today's `.env.local`, and STORE_MIGRATION §8 step 15
   keeps it so) can read every user's data. §5.3 keeps their tokens out of reach; their history is not.
   Point dev at a local or separate store once a second user exists.
+
+### 5.10 docs/SECURITY.md's open checklist, from the auth side
+
+- `AUTH_URL` and `AUTH_SECRET` (SECURITY.md:65-66): `AUTH_URL` is set in Production and Preview
+  (`vercel env ls`); `AUTH_SECRET` needs the F1 rotation, and Preview should get its own (§3.1).
+- Development mode (SECURITY.md:70-71): the cap is now five, not 25 (§5.4).
+- CSP (SECURITY.md:72-73): with N users an XSS acts as its victim only (the session cookie is httpOnly,
+  server actions run as the victim). The text the app renders comes from Spotify, and any Spotify user
+  can name a playlist, so the main defence remains React's escaping. A nonce-based CSP is still worth
+  having; I would not make it a multi-user blocker.
+- Rate limiting (SECURITY.md:74-75): with N users, per-user limits on server actions protect the
+  shared Spotify quota (§3.2); 01b and 01c own the mechanism.
+- No token logging (SECURITY.md:79-80): holds today (§2.1). Keep the decrypt-failure log to the account
+  id (§5.3).
 
 ## 6. What multi-user needs from STORE_MIGRATION.md
 
