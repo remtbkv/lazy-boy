@@ -10,11 +10,10 @@ Status: complete (sections 0-8).
 
 **Today.** Auth.js v5 issues a JWT session cookie encrypted under `AUTH_SECRET` that lasts 30 days from
 sign-in (the app's `auth()` calls never renew it), with no server-side session state and no stable
-user id in it (§1.4). Sign-in is Spotify OAuth with
-PKCE and the client secret (§1.1). The Spotify grant lives in one plaintext `meta` row that every
-request reads and the cron uses (§2.1); refresh is coordinated by one in-process promise and a
-`meta`-table lock (§2.3); the owner guard runs only at sign-in (§1.2). The refresh path has no tests
-(§2.7).
+user id in it (§1.4). Sign-in is Spotify OAuth with PKCE and the client secret (§1.1). The Spotify
+grant lives in one plaintext `meta` row that every request reads and the cron uses (§2.1); refresh is
+coordinated by one in-process promise and a `meta`-table lock (§2.3); the owner guard runs only at
+sign-in (§1.2). The refresh path has no tests (§2.7).
 
 **Live problems found** (all outside this lane's planning-only remit to fix):
 
@@ -670,7 +669,7 @@ What N users need:
   kept capturing for them; their capture stops then, and an in-app prompt cannot reach someone who never
   opens the app. E-mail is out: development mode returns no address, and the policy says "Don't email
   users unless they have provided you with their explicit consent" (https://developer.spotify.com/policy).
-  So: mark them `needs_reconnect` at expiry, show the reason when they come back, and accept the gap.
+  Mark them `needs_reconnect` at expiry, show the reason when they come back, and accept the gap.
   If a design ever makes sessions renew on use (§5.6), add an in-app "Reconnect Spotify" prompt from
   `granted_at + 165 days`. Rem's own production grant follows the same rule: it runs out six months
   after his last sign-in.
