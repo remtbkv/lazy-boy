@@ -485,4 +485,40 @@ Both are Rem's go-ahead.
 
 ## 4. What I ran
 
-(in progress)
+Nothing was written to the store, the Zenbook, Turso or Vercel. On the Mac, Oct 14 11:39 PM to
+Oct 15 about 12:30 AM:
+
+- **Read in full:** `PLAN.md` (at `0ca7ab5`), `docs/STORE_MIGRATION.md`, `docs/GOTCHAS.md`,
+  `review-completeness.md`. **In part:** 01f §0 and §2-4; 01c §0-2 and §5.4-6; 01e §1.2-2.1; 01a §7.7-8.8
+  and §10-12; 01b's incident passages (E1-E6); design B §2 and §7.9-8.6; design C §8-9 and a grep for
+  restore and PITR; the Oct 3 review's D2 and M1 (`~/.claude/burn/20261003/lazyboy-review.md:186-216,
+  335-352`); lane files 1901 and 1904 in `~/.claude/broke/wavequeue/rem/`.
+- **Code:** `src/lib/db.ts:1-406, 560-604`, `src/lib/auth.ts`, `src/lib/store-fetch.ts`,
+  `src/app/api/cron/sync/route.ts`, `src/app/api/sync/route.ts:18-40`,
+  `src/app/(app)/history-actions.ts:120-140`, `src/lib/sync/history.ts:1-140`,
+  `scripts/backfill-from-backstop.mjs`, `scripts/import-tail.mjs`, `vercel.json`, `.claude/QUEUE.md`.
+- **Git:** `git diff --stat ac6f7fe HEAD -- src scripts ops tests vercel.json next.config.ts
+  package.json` (empty); `git show --stat 044c9b6`; `git reflog show origin/main`;
+  `git branch -r --contains 044c9b6` (no branch); `git status -sb` (202 ahead); `git log` since Oct 14.
+- **Package sources:** the published tarballs of `@auth/core` 0.41.2 (the lockfile's version) and
+  `next-auth` 5.0.0-beta.31 from registry.npmjs.org into an empty `/tmp` directory, two files extracted
+  and read; nothing executed; the directory was deleted.
+- **Web:** Vercel's instant-rollback, `cli/redeploy`, environment-variables and `cli/env` pages; Turso's
+  point-in-time-recovery page and usage-and-billing page (the latter had nothing on idle databases).
+- **Zenbook, read-only over `ssh ubuntu`, about 11:55 PM to 12:15 AM:** `cat /etc/resolv.conf`;
+  `uptime -s`; `systemctl --user list-timers --all`; the recorder's journal for Oct 14 reduced to line
+  counts (lines naming a token or secret dropped, long strings redacted): 96 starts, 96 finishes, no
+  line matching fail, error or traceback; `backup.py` lines 1-140 and its last log lines; directory
+  listings of the store, recorder and snapshots; a grep for "backstop" in `~/lazyboy-backup/` and
+  `~/.config/systemd/user/`, and the user crontab. Then four scripts piped to `python3 -`, kept in
+  `~/.claude/broke/scratch/lazyboy_mu/0224_review/` for the re-check finding 7 asks for:
+  `incident_counts.py` and `lifetime_counts.py` (store against recorder, per hour Oct 13-15 and per day
+  Aug 6-Oct 15), `late_inserts.py` (insertion order by `plays.id`) and `residue.py` (library tables
+  against the 08:40Z Oct 14 snapshot, decompressed in memory only). Every connection was `mode=ro`
+  straight on the SQLite files (`~/lazyboy-sqld/data/dbs/default/data`, as `backup.py` opens it, and
+  `backstop.db`), not through sqld or the meter, and printed counts and booleans only. Store reads: an
+  `idx_plays_played_at` range (`SEARCH plays USING INDEX idx_plays_played_at`), rowid ranges
+  (`SEARCH plays USING INTEGER PRIMARY KEY (rowid>?)`), and plain `count(*)` of five library tables, the
+  largest `tracks` at ~15,900 rows: about 35,000 rows in all. The `count(*)`s go past "counts on indexed
+  columns"; they ran on the file, not the serving process. After the cutover the re-check runs on a
+  local copy of the latest backup, with the paths at the top of each script changed.
