@@ -658,8 +658,8 @@ figures:
 
 - 25 users. Invocations 25 × 6,000 + 21,600 (ticks batched) ≈ 172K, or 690K if per user: under
   $0.42. Active CPU 12.5-60 h: $1.60-7.68. Provisioned memory 485 GB-h: $5.14. Total ~$7-13, inside
-  Pro's $20 credit, so **$20**. Turso reads 3.25-7B on Developer: 0.75-4.5B over, **$5.74-10.49** at
-  the monthly price.
+  Pro's $20 credit, so **$20**. Turso reads 3.25-7B on Developer: 0.75-4.5B over at $1 per billion,
+  so **$5.74-9.49** billed yearly or $6.74-10.49 month-to-month.
 - 250 users. Invocations ~1.52M batched (6.9M per user): $0.91-4.14. Active CPU 125-600 h: $16-77.
   Provisioned memory 4,850 GB-h: $51. Total **~$68-132** (the $20 fee is absorbed by the credit). Turso
   reads 32.5-70B: Developer would be $35-73 plus write overage (32.5M core writes against 25M,
@@ -673,7 +673,7 @@ Monthly, all users Rem-like (upper bound), today's code:
 |---|---|---|---|---|---|
 | **5** | $0; the cap for one app | Hobby $0 if Active CPU fits (2.5-12 CPU-h vs 4; unmeasured), else Pro $20 | Free is over (0.65-1.4B reads) → Developer $4.99-5.99 | $0: pinger, recorder, backups, telemetry | **$5-26** |
 | 5 (Rem + 4 light) | $0 | Hobby likely, same CPU caveat | Free holds: ~170-320M reads, up to 64% of the plan on Rem's heavy month | $0 | **$0-20** |
-| **25** | **not possible on one app**; option E only | Pro $20 (usage inside the credit) | Developer $5.74-10.49 | $0, or retired by Pro's cron | $26-31 if Spotify allowed it |
+| **25** | **not possible on one app**; option E only | Pro $20 (usage inside the credit) | Developer $5.74-10.49 (yearly low end to monthly high end) | $0, or retired by Pro's cron | $26-31 if Spotify allowed it |
 | **250** | **not possible on one app**; option E only | Pro ~$68-132 | Scaler $24.92-29 | – | ~$93-161 if Spotify allowed it |
 | any N, option E | each person's own app | $0 each (Hobby) | $0 each (Free) | none | **$0**, plus each person's Premium and setup time |
 
@@ -685,4 +685,75 @@ app.
 
 ## 6. Decisions that are Rem's
 
+1. **How many people.** Plan for five accounts on the one Spotify app, Rem included. Recommended,
+   because Spotify's policy allows no more (1.2, 1.3) and no amount of money changes that. If more
+   people want lazyboy, option E (each runs their own copy) serves them without any multi-user code.
+2. **Two one-minute dashboard reads before the designs settle.** Spotify Developer Dashboard → the
+   app → User Management: how many accounts are listed, and whether more than five survived Mar 9.
+   Vercel → the team → Usage → Active CPU over 30 days, per project. Recommended now: the first fixes
+   the user count, the second decides item 3.
+3. **Vercel plan.** Stay on Hobby for five users if the whole team is under about 2 of its 4
+   CPU-hours a month; otherwise move to Pro ($20 a month) before inviting anyone. Reason: overrunning
+   a Hobby allowance stops the feature for up to 30 days, for every project on the team, and Pro turns
+   the same overrun into a bill of cents to dollars.
+4. **Turso plan after the move.** Developer with overages enabled before a second person's data
+   arrives, $4.99 a month billed yearly. Reason: Rem alone uses 35-56% of the free plan's reads, and
+   crossing it blocks every query for every user until the 1st (4.2, 4.5). The read-path fix is worth
+   doing anyway, but the block should not be the thing that finds out whether it worked.
+5. **The pinger.** Add a second, independent 2-minute pinger (cron-job.org, free) with the route
+   ignoring a tick within ~90 s of the last. Recommended over Pro's cron unless Pro is bought for CPU.
+   It also helps today: Rem's closed-app capture stops whenever the Zenbook does.
+6. **Policy risk.** Storing friends' history indefinitely, and showing derived listening stats, sit
+   against the Developer Terms' storage rule and the Policy's "derived listenership metrics" line (1.5).
+   That risk is Rem's to accept or not. My recommendation if he goes ahead: a privacy policy with a
+   stated retention period and an end-user agreement shown before sign-up; in-app disconnect that
+   deletes within five days, backups included; and each user's stats shown to that user only until he
+   decides about comparisons. Friends cannot be charged for any of it (1.5).
+7. **How to learn whether the Spotify quota pools across users.** Recommended order: put a user
+   column on `api_log` and cut the per-user harvest rate first (01c), then add one friend and read a
+   week of quota days on `/usage` before adding the next. A second person's first ban takes everyone's
+   history capture down for the rest of that quota day, so one at a time is the cheap version of the
+   experiment.
+
 ## 7. What I ran, and what I did not measure
+
+All of it read-only. Nothing was written to the store, Vercel or the Zenbook, and no SQL went through
+the Funnel.
+
+- **Vendor pages**: `curl -sS -L -A "<desktop Chrome UA>" -o <file> <url>` for every URL in 1.1, 2.2,
+  3.4 and 4.2, 9:12-9:19 PM, then an HTML-to-text pass for quoting.
+- **Vercel** (the Mac's CLI token, `~/Library/Application Support/com.vercel.cli/auth.json`, never
+  printed): `vercel whoami`; `GET /v2/teams/team_omHOXItW1PXTC6XJ6WBBv16M`;
+  `GET /v9/projects/prj_UA3749Btv0RiQPwuymee4MdZZ7HA?teamId=…`;
+  `GET /v2/usage?teamId=…&type={requests,data_cache,cron_jobs,builds,edge}&from=2026-09-14T00:00:00Z&to=2026-10-14T00:00:00Z`
+  and `type={monitoring,edge_group_by_project,artifacts}` for Oct 7-14 (empty). Refused or absent:
+  `vercel usage --from 2026-09-14 --to 2026-10-13` ("Costs not found (404)"), `vercel metrics … --since
+  {30d,1d,12h,3d}` ("Observability Plus is required"), `GET /v1/usage` ("only available to Teams on the
+  Pro or Enterprise plan"), `GET /v4/usage` and `GET /v1/billing/usage` (404).
+- **Zenbook**, over `ssh ubuntu`: `hostname`, `uptime`, `uptime -s`; `ls -la` of `~/lazyboy-backup/`,
+  its `snapshots/`, `~/lazyboy-sqld/querylog/` and `~/lazyboy-sqld/data/dbs/default/`; `du -sh
+  ~/lazyboy-sqld/data`; `tail -4 ~/lazyboy-backup/backup.log`; `systemctl --user list-timers --all`;
+  a `python3 -c` that printed the key names of `~/lazyboy-recorder/config.json` and the last six
+  characters of its `client_id`; `python3 ~/lazyboy-sqld/meter-report.py` with no argument, with
+  `2026-10-13` and with `2026-10-14`; a gap finder piped over stdin (`ssh ubuntu python3 - <
+  meter_gaps.py`) that reads the querylog and writes nothing; and `scp` of
+  `lazyboy-backup/snapshots/lazyboy-20261014-0840.db.gz` (last night's verified backup) to scratch on
+  the Mac.
+- **The snapshot copy**, opened `mode=ro` with Python's `sqlite3`: `PRAGMA integrity_check` (ok), a
+  `count(*)` per table, `dbstat` sizes, plays per UTC day and month, and `api_log` grouped by day,
+  endpoint, source and status, plus the recently-played quota days bucketed at 14:51 UTC as
+  `getRecentlyPlayedQuotaWindows` does. The copy and the scratch scripts were deleted when this file
+  was finished.
+
+Not measured, and where each matters:
+
+- Vercel Active CPU, for any project (2.3): decides Hobby vs Pro at five users. Rem can read it.
+- Whether Spotify's dev-mode quota pools across users or splits per user (1.4): decides whether five
+  users fit the recently-played budget at all. Only a second user can show it.
+- Whether the owner counts toward five, how many accounts the allowlist holds, and whether any are
+  grandfathered (1.2): the dashboard shows all three.
+- The Funnel's bandwidth limits ("non-configurable", unpublished) and how an offline node looks through
+  its relay (3.2, 3.4).
+- Vercel-to-Turso latency: R1 is lane 1902's measurement.
+- The size of Vercel's shared Data Cache on Hobby (unpublished), and the Zenbook's power draw.
+- The light-friend profile in 5.1 is an assumption, not a measurement.
