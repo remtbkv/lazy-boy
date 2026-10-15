@@ -1229,7 +1229,7 @@ home of the per-user chores, the usage read and the deletion job's retries; lane
 orphan pass; phase E's browser copy.
 
 **Six edits before Oct 15, 8 PM**, each small and none touching the cutover's logic; each is the
-director's and Rem's call (§18 decision 2):
+director's and Rem's call (§18 decisions 2 and 3):
 
 | # | where | edit | why | from |
 |---|---|---|---|---|
@@ -1846,3 +1846,100 @@ written except this file. On Oct 14, about 11:03 PM to 11:45 PM, on the Mac:
   `< orphan_plans.sql`, against the Mac's Aug 11 local copy (7,572 plays; nothing written, no WAL
   opened). The output is quoted in §8.2 and matched B §10.1's figures exactly.
 ## 18. Decisions that are Rem's
+
+Each with a recommendation and its reason, grouped by what it blocks.
+
+**Now, before Oct 15, 8 PM**
+
+1. **Phase 0's production changes**: rotate `AUTH_SECRET` in Production with a separate value for
+   Preview, set `SPOTIFY_OWNER_ID` in Production and `.env.local`, and gate `logout`. *Recommend yes,
+   before the cutover's window.* A browser that signed in before the guard can act as you until about
+   Nov 13, and its log-out can stop your capture (01b E1-E3, 01e F1). It costs one sign-in.
+2. **STORE_MIGRATION's edits 1-5** (§10.2: the dominant read and R4's growth term; Production-only
+   flip; phase E's user key; backups as a list with token rows stripped; deleting the cutover's
+   plaintext copies). *Recommend yes, before lane 1901.* None touches the cutover's logic, and each
+   saves doing the work twice.
+3. **Edit 6: lanes 1910-1911 also ship the identity-first orphan predicate.** *Recommend yes, after the
+   equality check on a current backup copy.* It gave the same verdict on every play of the Aug 11 copy
+   and reads ~2.7 rows a play where today's walks ~411 (§8.2); scoping alone leaves busy playlists
+   expensive, in a way the meter hides.
+4. **Where the three log tables live** (STORE_MIGRATION §4's open question). *Recommend keeping them
+   on the Zenbook, as you said.* Multi-user adds one reason: on Turso, five users' `api_log` would push
+   the month's writes past R4's 10% bar (§10.2).
+5. **Two one-minute dashboard reads**: Spotify's User Management list (how many accounts, any
+   grandfathered above five, whether you count toward the five) and Vercel's Active CPU per project
+   over 30 days. *Recommend now*: they settle target U and the Vercel plan (01f §6.2).
+
+**The design, before Phase 1**
+
+6. **Five accounts, you included; past five, people run their own copies.** *Recommend yes.* It is
+   Spotify's cap, and no money changes it (01f §1.2-1.3).
+7. **A database per user.** *Recommend yes.* A forgotten filter becomes impossible rather than
+   unlikely, your data does not move, and deletion reaches every copy inside Spotify's five days
+   (§4.1, §12.3). Revisit only if friend features that join across users become the priority.
+8. **The single-user performance track before the multi-user phases** (P2, then P3 before
+   mid-December). *Recommend yes.* It cuts your own store reads on a heavy day from ~19M to ~1.5M rows
+   (§8.6) and removes the late-December cache cliff whether or not anyone else ever signs in.
+9. **The search target's device and network**: a mid-tier phone (4× CPU) at 10 Mbit/s, with slow 4G a
+   stated miss. *Recommend yes.* Meeting slow 4G on a first visit takes newest-first loading, an M-sized
+   change nothing else needs (§14.1).
+10. **Delete the incident's foreign plays from your history**, after reading the list. *Recommend yes.*
+    They are someone else's listening inside your stats, and once the store has owners they would be
+    filed as yours for good (§11.2).
+
+**Before the first friend**
+
+11. **Turso's Developer plan with overages**, $4.99 a month billed yearly. *Recommend yes.* Not for
+    capacity (five users fit Free after P4) but because on Free one regression blocks every query for
+    every user until the 1st, as August showed; it also gives your data ten days of point-in-time
+    recovery and makes a deletion undoable for five days (§15).
+12. **Vercel Hobby or Pro.** *Recommend reading Active CPU first, and staying on Hobby only if the team
+    uses under ~2 of its 4 CPU-hours a month*; an overrun stops every project on the team for up to 30
+    days, and Pro ($20) turns it into a bill (01f §6.3).
+13. **What "log out" means.** *Recommend three actions*: sign out (this browser; capture continues),
+    sign out everywhere, and disconnect and delete. Today one button stops capture and signs out every
+    device (§5.4).
+14. **An `invalid_grant` within six months of consent.** *Recommend treating it as a disconnect*:
+    destroy the friend's database at once; if they come back and ask within four days, restore from
+    the backup or Turso's undelete. You are exempt. Waiting before deleting is gentler but either
+    stretches past Spotify's five days or needs bookkeeping; this keeps every copy inside five days
+    under any reading of the Terms (§12.3).
+15. **Retention for friends.** *Recommend*: kept while connected; deleted at a disconnect; deleted
+    twelve months after the last sign-in. The twelve is the number to choose; Spotify says not to keep
+    content indefinitely (01f §1.5).
+16. **Friends' backups kept four days, and taken only while a friend is active.** *Recommend yes*:
+    deletion then reaches the backups with no bookkeeping; yours stay at 60 days (§12.4).
+17. **`TURSO_PLATFORM_TOKEN` stays in the runtime**, Production only, used by the deletion job's destroy
+    and the daily usage read. *Recommend yes.* 01e §6 recommends removing it; the price of that is a
+    deletion that waits on a script you have to remember within five days (§12.3).
+18. **The privacy policy and end-user agreement**, and whether friends ever see derived stats. *The text
+    is yours to write or approve* (§12.2 lists what it must say). *Recommend each person sees only their
+    own listened time and skip stats* until you decide about comparisons, given the Developer Policy's
+    line on derived listenership metrics (01f §1.5).
+19. **A session whose Spotify grant has died.** *Recommend keeping today's behaviour*, a redirect to
+    sign in again: one sign-in restores reading and capture, and with decision 14 a friend's read-only
+    view would mostly show data being deleted. 01b §2.4 recommends a read-only mode instead (§5.4).
+20. **The recorder stays yours alone and runs hourly.** *Recommend yes* (01c §5.7, 01e §5.9). Separately:
+    its grant may age out by Feb 6, 2027; a fresh local sign-in copied into its `tokens.json` restarts
+    the clock (01e F3).
+21. **A canary account in Phase 4.** *Optional*: only if you have a spare Spotify account, since it holds
+    one of the five places while it exists (§6.5).
+
+**Before the second friend**
+
+22. **Closed-app freshness if the quota is shared.** *Recommend the fair-share brake for everyone, you
+    included* (§7.5): two minutes until the day's budget runs low, then 15-30 minutes for whoever is
+    above their share, with anything you open always current. Exempting you moves your ~150 calls a
+    day onto everyone else's share. The alternative that keeps two minutes for all is server-side
+    provisional plays (01c §5.3 ii), medium-to-large work.
+23. **Finding out whether the quota is pooled.** *Recommend the passive way* (§7.9) plus a question on
+    Spotify's developer forum. The active test bans your own capture for up to ~12 hours if the quota
+    is shared (01c §7 decision 3).
+24. **Friends' Extended Streaming History imports.** *Recommend not until segments exist*: a five-year
+    import is a ~4.2 MB history body today (01d §7 decision 2).
+
+**Only if it happens**
+
+25. **If Spotify does not return `account_id`** to this app (Phase 0's dev sign-in shows it first).
+    *Recommend deciding then.* Keying on the mutable Spotify `id` works for a handful of friends but can
+    split one person into two users if Spotify ever lets ids change (01e §5.5, C §15 decision 5).
