@@ -13,6 +13,8 @@ claim that is wrong or unproven in a way that changes a decision or a runbook st
 failure loses plays or takes every user down; **Medium** a gap a lane would trip over; **Low** wording
 or a number to correct.
 
+Status: complete, Oct 15, 2026, 12:15 AM.
+
 ## 0. Summary
 
 Nine High findings, four Medium, three Low; nothing Critical.
@@ -26,8 +28,8 @@ Nine High findings, four Medium, three Low; nothing Critical.
   instances keep writing to the old one, version counters are re-issued under year-long immutable
   caching, and an app-database restore revives deleted users and dead sessions.
 - **The Zenbook stays the only frequent pinger for six to seven weeks after the cutover** (2), on a box
-  that lost about nine and a half days of capture in late August and September and still resolves
-  names only through Tailscale. A 90-second guard makes the second pinger safe now.
+  that lost about ten days of capture in late August and September and still resolves names only
+  through Tailscale. A 90-second guard makes the second pinger safe now.
 - **The new derived state is fragile** (3, 4): P2-P4's totals are read-modify-write without design B's
   compare-and-set and drift check, and the import scripts, rollback windows and the unfenced fill
   bypass it. Pending-NULL semantics and SQL-side increments fix both.
@@ -75,9 +77,9 @@ with a new name, and four parts of the plan assume names and counters never chan
    the reuse §4.4 rejects for uids, left in place for the cache's own keys.
 4. **Restoring `lazyboy-app` resurrects state.** Users deleted since the backup come back `active` with
    their token blobs, decryptable unless the key has rotated since; `session_epoch` returns to values
-   from before any "sign out everywhere"; `disabled` users are enabled again. The tick refreshes a due
-   user's token and probes Spotify before it opens their database (§7.2 step 2), so a deleted friend's
-   grant is used again on the first tick.
+   from before any "sign out everywhere"; `disabled` users are enabled again. The tick's step refreshes
+   a due user's token before it records into their database (§7.2 step 2), so a deleted friend's grant
+   can be refreshed and used at Spotify before anything notices that their database is gone.
 
 The drill does not cover it either: lane 1904's restore test loads a snapshot into a scratch file and
 compares counts (`~/.claude/broke/wavequeue/rem/1904_lb_store_aftercare.txt`, item 1) and runs weeks
@@ -107,9 +109,9 @@ restore drill".
 0.47% of the meter's 48.5 hours" (PLAN.md:1807). That window starts Oct 13 (01f §3.3). The Oct 3
 review measured what the same box did in late summer (`~/.claude/burn/20261003/lazyboy-review.md:186-205`,
 item D2, which 01c §5.7 cites): down Aug 30 14:12Z to Sep 2 06:13Z; down Sep 3 01:22Z to Sep 5 21:51Z,
-then up but unable to resolve names until Sep 9 03:15Z; 16 hours on Sep 9; 19.5 hours on Sep 25. That
-is about nine and a half days without capture in four weeks, with the pinger and the recorder failing
-together, because "The Zenbook's resolv.conf is MagicDNS-only": any tailscaled trouble is a total DNS
+then up but unable to resolve names until Sep 9 03:15Z; 16 hours more on Sep 9 after a restart; 19.5
+hours on Sep 25. That is about ten days without capture in four weeks, with the pinger and the
+recorder failing together, because "The Zenbook's resolv.conf is MagicDNS-only": any tailscaled trouble is a total DNS
 loss. Read tonight, `/etc/resolv.conf` on the Zenbook still lists only `100.100.100.100` and
 `fd7a:115c:a1e0::53`, both Tailscale's resolver (§4).
 
@@ -262,9 +264,9 @@ mechanisms behave differently:
   rollback, Vercel turns off auto-assignment of production domains. This means new pushes to your
   production branch won't replace the rolled-back deployment"; the rolled-back build keeps the
   environment variables it was built with (https://vercel.com/docs/instant-rollback, updated
-  2026-07-07, fetched tonight). Every push to `main` deploys production (STORE_MIGRATION §3) and this
-  program pushes docs all day, so "the immediately previous deployment" is usually a docs-only rebuild
-  of the very phase being rolled back.
+  2026-07-07, fetched tonight). Every push to `main` deploys production (STORE_MIGRATION §3), and
+  docs-only commits reach `main` between phases (the morning push carries whatever is there), so "the
+  immediately previous deployment" is often a later rebuild of the very phase being rolled back.
 - **`vercel redeploy <url>`** "will rebuild and deploys an existing deployment"
   (https://vercel.com/docs/cli/redeploy), and "Any change you make to environment variables are not
   applied to previous deployments, they only apply to new deployments"
@@ -304,15 +306,15 @@ it. Tonight, read-only on the Zenbook (§4):
   and all 96 of its runs on Oct 14 finished with no error line in its journal. From Oct 13 00:00Z to
   Oct 15 03:45Z the store and the recorder hold the same 264 plays: none in the store only, none in the
   recorder only. Over the recorder's whole life (Aug 6 to Oct 15) the store-only plays are 54 on Aug 6,
-  before the recorder's first run, and 2 on Sep 9 and 4 on Sep 25, during recorder outages (Oct 3
+  older than the recorder's first 50-play capture, and 2 on Sep 9 and 4 on Sep 25, during recorder outages (Oct 3
   review D2) when an open tab could still write through the Funnel [my reading]; none since Sep 25.
 - **Insertion order.** `plays.id` is an AUTOINCREMENT rowid, so it orders inserts. Of the 1,500 rows
   inserted since the first Oct 1 play, none carries an earlier `played_at`; of the 267 since the first
   Oct 13 play, one does, an Oct 12 play the recorder also holds.
 - **The library side.** Against the 08:40Z Oct 14 snapshot, taken before the second sign-in:
   playlists 114 and 114, owned by `me_id` 110 and 110, `playlist_tracks` 7,400 and 7,400, Liked 48 and
-  49, `contexts` 114 and 117 with one row written during the incident (named, so no negative cache
-  left by the other account), `me_id` unchanged by sha256 prefix. The rewrites healed as 01b E6 said.
+  49, `contexts` 114 and 117 with one row written between the snapshot and midnight UTC (named, so no
+  negative cache left by the other account), `me_id` unchanged by sha256 prefix. The rewrites healed as 01b E6 said.
 
 The method also has a blind spot that would have mattered had those plays existed. §11.2 lists "the
 plays from the start of Oct 14 to Rem's first sign-in" (PLAN.md:1353-1354). A harvest on another
@@ -335,8 +337,8 @@ not exist.
 Oct 3 review queued as D1, whose production run "is Rem's, after C1" (`.claude/QUEUE.md:16`); C1
 landed on Oct 14 (`afb21d1`), so nothing blocks it. Their only copy is
 `~/lazyboy-recorder/backstop.db` on the Zenbook: `backup.py` copies the store's file alone
-(`SRC = ~/lazyboy-sqld/data/dbs/default/data`, read tonight), and no other unit or script names the
-recorder's file. The plan says Rem's data "moves nowhere" (§0) and leans on the recorder as the
+(`SRC = ~/lazyboy-sqld/data/dbs/default/data`, read tonight), and no backup script, user unit or
+user crontab entry names the recorder's file. The plan says Rem's data "moves nowhere" (§0) and leans on the recorder as the
 loss-repair path (§7.9, §11.2) without scheduling the replay or protecting the file, on a box whose
 outage history finding 2 gives. Spotify's Extended Streaming History export could recover them too,
 days to weeks after Rem asks for it.
@@ -412,7 +414,7 @@ loaded dump against itself proves the file loads; it cannot see a dump that ende
 the source comparison is for, and lane 1904 may export table by table over HTTP if Turso refuses
 `/dump` (`1904_lb_store_aftercare.txt`, item 1).
 
-**Fix.** Keep the source counts, the cheapest insurance in the plan. If the 0.3% matters, compare
+**Fix.** Keep the source counts. If the 0.3% matters, compare
 `plays`' `max(id)` (one row: `id` is a real column, so a dump keeps it) and the small tables' counts
 (about 500 rows), and require the CLI's exit status and, for a `.dump`, the closing `COMMIT;`.
 
@@ -502,13 +504,13 @@ Both are Rem's go-ahead.
 - **Deletion by destroying the database**, with Turso's point-in-time and undelete behaviour quoted
   correctly (re-read tonight: "PITR restores an existing database — it cannot bring back a database
   that was deleted").
-- **§14.5's closing line**: Turso, Vercel and Spotify are shared fate at this size, and the plan says
-  so instead of pretending to engineer around them.
+- **Shared fate, stated.** §14.5's closing line names Turso, Vercel and Spotify as failures this app
+  cannot remove at its size.
 
 ## 4. What I ran
 
 Nothing was written to the store, the Zenbook, Turso or Vercel. On the Mac, Oct 14 11:39 PM to
-Oct 15 about 12:30 AM:
+Oct 15 12:15 AM:
 
 - **Read in full:** `PLAN.md` (at `0ca7ab5`), `docs/STORE_MIGRATION.md`, `docs/GOTCHAS.md`,
   `review-completeness.md`. **In part:** 01f §0 and §2-4; 01c §0-2 and §5.4-6; 01e §1.2-2.1; 01a §7.7-8.8
