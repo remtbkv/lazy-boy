@@ -653,6 +653,75 @@ The other secrets, and what this design asks of each:
 
 ## 5. Isolation tests
 
+The tests live in the existing simulated environment (`npm test`: vitest against throwaway local
+SQLite files and a scripted global `fetch`, `tests/setup.ts`, `vitest.config.ts`), so they run on
+every change and touch no store, no Spotify and no Vercel. Each is written before the code it
+proves, red first (§14's order), as the repo's rules require for non-trivial logic.
+
+### 5.1 What the harness gains
+
+- **Three database files per test file**, not one (today `tests/setup.ts:7-9` makes one `sim.db`):
+  `app.db`, `u1.db`, `u2.db` in the per-file temp directory, with `users` rows for uid 1 and uid 2
+  created by the same provisioning code production uses (§10.1), so provisioning is under test too.
+- **A two-user seed with deliberate collisions**: the same track id at the same `played_at` in both
+  users (01a D17); the same playlist id with different members (D14); the same context URI named
+  for one user and negative-cached for the other (D25); interleaved timelines (D18); and equal
+  `write_seq`, `library_seq` and `slow_seq_pub` values, so a cache key that lacks the user collides
+  (01a §5). Every text column carries a marker, `A-only-…` or `B-only-…`, so "nothing of A's
+  reached B" is a substring check over the serialized output.
+- **A faithful `unstable_cache` stub.** Today's stub is a pass-through (`tests/stubs/next-cache.ts:4-10`),
+  so no test can see a key collision. The new one is a Map keyed the way Next 16.2.6 keys
+  (`fn.toString()`, the key parts, `JSON.stringify(args)`; 01b §3.1), honours `tags` and records
+  `revalidateTag` calls.
+- **A scripted Spotify that answers per bearer token**: different profiles, players, plays and
+  playlists for A's and B's access tokens, and a log of which bearer each call carried.
+- **A session switch**: the `vi.mock("@/lib/auth")` pattern of `tests/now-playing-route.test.ts:13-16`,
+  returning A's, B's or no session; and, once the token core leaves `auth.ts` (§4.2), the real jwt
+  callback body run against the simulated app database.
+- **An open counter** on `userClient`, per uid, and **file hashes**: sha256 of `u2.db` (and any
+  `-wal`) before and after an operation as user A. The hash check is total: it catches a write to
+  B's database through any path, including ones nobody listed.
+
+### 5.2 The suites
+
+| id | what it runs | what must hold | classes |
+|---|---|---|---|
+| T1 | every method of `UserStore`, enumerated from the object so a new method is covered automatically, with arguments from a fixture table, as A and then as B | the other user's file hash unchanged; no other-user marker in the return value | M1 |
+| T2 | the seven cached reads (`db.ts:983-1914`'s wrappers, now on `userCache`) as A then B, counters equal; then a forged entry under B's key stamped with A | B never gets an A marker; the forged entry is refused, B's data returned uncached, an `isolation` event logged | M4 |
+| T3 | every page, every `"use server"` export and every route handler under `src/app`, found by globbing the files and importing them: (a) with no session; (b) as B; (c) as B with A's identifiers in the input (A's playlist id on `/playlists/[id]`, A's task id on `/api/tasks/[id]`, A's `hk` in a segment path); (d) `/usage` as non-admin B | (a) refused, zero user-database opens; (b) no A marker anywhere, A's file unchanged, every Spotify call carried B's bearer; (c) B's own data or a 404, never A's (01b B4, B9; 01d §4.3 test 1); (d) refused. Exempt from (a), by a named list: `/`, `/login`, `/api/build`, `/api/auth/*`, `/api/cron/*` (T4 covers the cron) | M2, M3, M6, M10 |
+| T4 | one cron tick with A and B due and both tokens expired | each database gets only its own plays and playlists; one refresh per user, each user its own token (01e §5.2 test 1); A's lock does not delay B (test 2); A failing (a 403 "not registered", `invalid_grant`, a hang past the deadline) leaves B's outcome `ok`; the tick answers 200 with both outcomes; a library sync for A then B within 60 s on one instance stores each user's own list (the `playlistsCache` trap, 01b A6) | M5, M6, M8 |
+| T5 | the token core | A's blob in B's row fails to decrypt and B goes `needs_reconnect`, A untouched; `invalid_grant` for A clears A only (01e test 3); a token object owned by A passed for B throws; a cookie with no uid, an unknown uid, a stale epoch or a disabled user yields no session (test 5); no token row means no Spotify call (test 6) | M6 |
+| T6 | the six app-database functions without a uid (§2.7) | `claimDueUsers` never returns a leased user and never the same user to two concurrent claims; an invite is claimed once; `userByAccount` matches exactly; `getGlobal`/`setGlobal` accept only the listed keys | M10 |
+| T7 | the search routes and the client storage module (behind a storage interface, as STORE_MIGRATION §10 plans for phase E) | equal versions give A and B different ETags; B sending A's ETag gets 200 with B's body, never 304 (01d §4.3 test 3); a segment path with A's `hk` under B's session is 404; a stored body whose `u` is not the page's is discarded; sign-out empties the store; no ETag contains a Spotify id (01d test 6) | M7 |
+| T8 | a users row pointing uid 2 at `u1.db`; a database at the wrong schema version | `forUser(2)` refuses before any read or write, logs, A's hash unchanged; the wrong version is refused for that user only | M9 |
+| T9 | sign-in | an invite is claimed once; a profile without `account_id` is refused; a returning user is found by `account_id` after their Spotify `id` changed; Y cannot claim X's invite | M12 |
+| T10 | every script | exits non-zero without `--user`; with `--user 2` touches only `u2.db`; the backstop replay refuses any user but the admin | M11 |
+| T11 | account deletion for B (§12) | B's next request has no session; B's token row, queue row and telemetry rows are gone; B's database is destroyed (in tests, the file); `revalidateTag("u:2")` was called; A's hash unchanged; a second run is a no-op; the job refuses uid 1's database and any database whose `owner_uid` is not the departing uid | M1, M9 |
+| T12 | the phase-2 migration on a local copy of a nightly snapshot (§9), run by hand, not in CI, since it needs Rem's data | per-table counts equal; `verify-derived.mjs --user 1` green; `meta` key set equal less the moved and dropped keys; `owner_uid = 1`; the moved token decrypts to the original | migration |
+
+### 5.3 Static checks (also in `npm test`)
+
+| id | check |
+|---|---|
+| S1 | `unstable_cache(` appears only in `src/lib/user-cache.ts` |
+| S2 | no `as UserId` (or a double cast to it) outside `src/lib/identity.ts`; its minting helper is imported only by the gate, the cron's claim and the script helper |
+| S3 | no per-user function is exported from `db.ts` at module level; `app-db.ts` exports exactly the fifteen functions of §2.7 (a snapshot: adding one means updating the list, which a reviewer sees) |
+| S4 | every top-level `let`, module-scope `new Map(` and `globalThis` write under `src/` is on a reviewed allowlist that says how it is keyed or why it is not per user |
+| S5 | every `fetch` to `api.spotify.com` or `accounts.spotify.com` sets `cache: "no-store"` or goes through `src/lib/spotify/client.ts` |
+| S6 | every `localStorage`, `sessionStorage`, IndexedDB, `BroadcastChannel` and Web Lock name in `src/` is built by the `hk`-prefixing helper |
+
+### 5.4 In production
+
+- **Isolation events.** The owner check on open, the cache stamp, the token-owner assertion and the
+  segment `hk` check each log an `isolation` event (`client_metrics`, with the uid and a code, no
+  data) and the first lines of `/usage` show the count for the admin. The expected count is zero;
+  any other number is a bug with its code path attached.
+- **An adversarial review** of the isolation change in a fresh context, told to find a cross-user
+  path, before it deploys: the pattern lanes 1902 and 1906 follow for STORE_MIGRATION (its §7).
+- **A canary account** is optional and Rem's call (§16): a second Spotify account he controls,
+  signed in on another browser for phase 4's first week, checked by eye to see only its own data. It
+  holds one of the five allowlist places while it exists.
+
 ## 6. Sync fan-out within Spotify's limits
 
 ## 7. Search: per-user payloads and caching
