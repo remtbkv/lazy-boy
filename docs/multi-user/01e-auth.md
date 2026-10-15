@@ -274,7 +274,57 @@ the jwt callback are not. Making exactly this code per-user is the riskiest chan
 ## 3. Secrets: who holds what
 
 ### 3.1 Inventory
-### 3.2 Blast radius and rotation per secret
+
+Sources: the env names the code reads (`grep process.env` over `src/`), `.env.example`, the key names
+(not values) in the Mac's `.env.local`, docs/STORE_MIGRATION.md §3 for Vercel, docs/SECURITY.md:49-54
+for `CRON_SECRET`, docs/quota-forensic/BRIDGE.md:165-182 and an `ls -la` on the Zenbook for its files
+(2026-10-14). I read no Vercel env, so where a secret sits there comes from those docs.
+
+| secret | read by | held in | unlocks today |
+|---|---|---|---|
+| `AUTH_SECRET` | Auth.js (`next-auth lib/env.js:22`) | Vercel; Mac `.env.local` | minting a session cookie, which today is full owner access (F1) |
+| `SPOTIFY_CLIENT_SECRET` (+ public `SPOTIFY_CLIENT_ID`) | `auth.ts:100, 310` | Vercel; Mac `.env.local`; Zenbook `~/lazyboy-recorder/config.json` (0600) | refreshing any stored refresh token; impersonating the app at Spotify |
+| `TURSO_AUTH_TOKEN` (+ `TURSO_DATABASE_URL`) | `db.ts:128-129` | Vercel Production and Preview (STORE_MIGRATION.md:69-71); Mac `.env.local`; Zenbook `~/lazyboy-sqld/jwt-token.txt` (0600) | the whole store, read and write, token rows included, from anywhere (the hostname is public) |
+| sqld signing key | sqld (`--auth-jwt-key-file` holds the public half) | Zenbook `~/lazyboy-sqld/jwt-private.pem` (0600, BRIDGE.md:169) | minting store tokens: same as the row above |
+| `TURSO_PLATFORM_TOKEN` (+ `TURSO_ORG`) | `/usage` render (`src/app/(app)/usage/page.tsx:85-86`), `/api/cron/usage-check` (`route.ts:124-136`) | Vercel Production; Mac `.env.local` | the Turso org's platform API; after STORE_MIGRATION, minting a token for the core database |
+| `CRON_SECRET` | `cron/sync/route.ts:61-66` (constant-time compare), `cron/usage-check/route.ts:120` | Vercel (Sensitive); Mac `.env.local`; Zenbook `~/lazyboy-cron/env` (0600); stale copies in the cron-job.org job and `/etc/lazyboy-sync.env` (SECURITY.md:49-54) | running the sync and usage-check routes on demand |
+| `CRONJOB_API_KEY` (+ `CRONJOB_JOB_ID`) | `src/lib/cronjob.ts:17-36` | Vercel Production | the cron-job.org account's jobs (that branch has not run since Aug 10, STORE_MIGRATION.md:72-77) |
+| Vercel CLI token | the tunnel updater, retired | Zenbook `~/lazyboy-tunnel/env` (0600, BRIDGE.md:175); dead since Aug 9 (STORE_MIGRATION.md:363) | nothing while dead; a live one reads and writes every secret above |
+| rclone OneDrive token | `backup.py` | Zenbook rclone config | the 60 days of backups, which hold token rows (F2) |
+| Spotify refresh tokens | §2 | §2.1's table | the user's Spotify account, 13 scopes |
+
+Not secrets, for completeness: `SPOTIFY_OWNER_ID`, `AUTH_URL`, `TURSO_DATABASE_NAME`. The repo is
+public (`gh repo view`: `PUBLIC`) and BRIDGE.md:182 states no secret value is committed; a pattern scan
+for JWT, Spotify-token and PEM shapes (`git grep -E 'eyJ…|AQ…|BQ…|-----BEGIN'`) found none.
+
+### 3.2 Blast radius and rotation, and what N users changes
+
+- `AUTH_SECRET`. Today a forged cookie is the owner. Once sessions carry a user id (§5.1), a forged
+  cookie can name any user, so it becomes the key to every account's in-app session. It never reveals
+  a Spotify token by itself, because tokens stay in the store. Rotation: swap and redeploy, which logs
+  everyone out once, or `secret: [new, old]` for a grace period (§1.4).
+- `SPOTIFY_CLIENT_SECRET`. With it, any refresh token in any backup is usable. Whether a refresh token
+  from this app can be refreshed without the secret is unknown: the sign-in sends a PKCE verifier
+  and authenticates with the secret, and Spotify's docs describe the PKCE refresh as needing only the
+  public `client_id` ("client_id: Only required for the PKCE extension",
+  https://developer.spotify.com/documentation/web-api/tutorials/refreshing-tokens). Testing it would
+  mean using a live grant, which this lane does not do. Plan as if a leaked refresh token alone is
+  enough. Rotation: in the Spotify dashboard, then Vercel, `.env.local` and the recorder's
+  `config.json`. I expect existing refresh tokens survive a secret rotation, but I have not seen that
+  documented.
+- The store token. Today it is one user's data and one user's live grant. With N users it is
+  everyone's data and, unless §5.3 is built, everyone's live grant. sqld checks only the signature, so
+  revoking one leaked JWT means replacing the keypair (all tokens die at once). After STORE_MIGRATION
+  the store token is a Turso token "full access, no expiry" (STORE_MIGRATION.md:129).
+- `TURSO_PLATFORM_TOKEN`. After the migration it can mint a core-database token, so it is worth the
+  same as the store token, and it sits in the Vercel runtime to feed a page (`/usage`) and a guard that
+  is dormant. With N users I would take it out of the runtime (§6).
+- `CRON_SECRET`. Today: extra syncs of one account. With N users a holder can make the cron fan out
+  across every user on demand. That spends Spotify quota, which is counted "per developer account
+  rather than per Client ID" in development mode
+  (https://developer.spotify.com/documentation/web-api/references/changes/july-2026), so it can push
+  every user into a 429. No data leaks through it.
+- The rest are unchanged by multi-user.
 
 ## 4. Census: every single-user assumption in auth
 
