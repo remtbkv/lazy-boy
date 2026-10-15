@@ -1,13 +1,12 @@
-// Static checks over src/ (PLAN.md §6.4: S1, S2, S4, S5, S6), run on every `npm test`. They
+// Static checks over src/ (PLAN.md §6.4: S1, S2, S4, S5, S6, S8), run on every `npm test`. They
 // parse the source with the TypeScript compiler API, so a comment or a string that merely
 // mentions a pattern does not count. Each allowlist entry says why it is there; an entry marked
 // PENDING is single-user code that Phase 1's turn moves (it sits in a file queued lanes edit),
 // and the check fails if a PENDING entry disappears without its line being deleted, so the
 // lists only shrink on purpose.
 //
-// S3 (no per-user function exported from db.ts), S7 (no await on the telemetry client) and S8
-// (no nested async server component reading user data) wait for forUser, STORE_MIGRATION's
-// telemetry client and the page moves respectively; see docs/multi-user/PHASE1.md §4.
+// S3 (no per-user function exported from db.ts) and S7 (no await on the telemetry client) wait
+// for forUser and STORE_MIGRATION's telemetry client; see docs/multi-user/PHASE1.md §4.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import ts from "typescript";
@@ -253,5 +252,39 @@ describe("S6: browser storage names", () => {
     const bad = all.filter((s) => !/\(userStorageName\(/.test(s) && !DEVICE.has(s) && !PENDING.has(s));
     expect(bad).toEqual([]);
     for (const p of PENDING) expect(all, `${p} is gone: drop it from PENDING`).toContain(p);
+  });
+});
+
+describe("S8: no nested async server component reads user data or calls Spotify", () => {
+  // A component nested in a page renders after, and apart from, the page body's gate; T3 can
+  // only reach what the page body does. In each page.tsx, an async function component other
+  // than the default export may not call anything imported from the store, the session or the
+  // Spotify client (it may await a promise the gated body started).
+  const SOURCES = new Set(["@/lib/db", "@/lib/session", "@/lib/spotify", "@/lib/auth"]);
+  const PENDING = new Set<string>([]);
+
+  it("finds none outside the pending list", () => {
+    const bad: string[] = [];
+    for (const { rel, sf } of FILES) {
+      if (!rel.endsWith("page.tsx")) continue;
+      const imported = new Set<string>();
+      for (const st of sf.statements) {
+        if (!ts.isImportDeclaration(st) || !SOURCES.has((st.moduleSpecifier as ts.StringLiteral).text)) continue;
+        const nb = st.importClause?.namedBindings;
+        if (nb && ts.isNamedImports(nb)) for (const e of nb.elements) imported.add(e.name.text);
+      }
+      for (const st of sf.statements) {
+        if (!ts.isFunctionDeclaration(st) || !st.name || !/^[A-Z]/.test(st.name.text)) continue;
+        const mods = ts.getModifiers(st) ?? [];
+        if (mods.some((m) => m.kind === ts.SyntaxKind.DefaultKeyword)) continue;
+        if (!mods.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)) continue;
+        visit(st, (n) => {
+          if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && imported.has(n.expression.text)) {
+            bad.push(`${rel}: ${st.name!.text} calls ${n.expression.text}`);
+          }
+        });
+      }
+    }
+    expect(bad.filter((b) => !PENDING.has(b))).toEqual([]);
   });
 });

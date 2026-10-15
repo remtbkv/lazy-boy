@@ -93,6 +93,8 @@ export default async function PlaylistDetailPage({
   const trackCount = cached?.trackCount ?? cachedTracks.length;
   const isMine = !!meId && ownerId === meId;
   const totalMs = cachedTracks.reduce((sum, t) => sum + (t.durationMs ?? 0), 0);
+  // Cold cache: start the live fetch here, behind the gate; <Tracks> only awaits it.
+  const coldLoad = cachedTracks.length === 0 ? loadColdTracks(id, coldLive) : null;
 
   // The (app) layout no longer wraps children in a <main> — each page owns its own, because
   // Home needs a viewport lock and the others don't. This is the standard page container.
@@ -126,7 +128,7 @@ export default async function PlaylistDetailPage({
         {/* Serve the cached track list instantly (no Spotify pagination on render); a
           background check refreshes it only when the playlist's snapshot_id changed.
           First ever visit (cold cache) streams a live fetch that also fills the cache. */}
-        {cachedTracks.length > 0 ? (
+        {coldLoad === null ? (
           <>
             <TrackList
               tracks={cachedTracks}
@@ -141,7 +143,7 @@ export default async function PlaylistDetailPage({
           </>
         ) : (
           <Suspense fallback={<TracksSkeleton />}>
-            <Tracks id={id} canRemove={isMine} live={coldLive} />
+            <Tracks load={coldLoad} playlistId={id} canRemove={isMine} />
           </Suspense>
         )}
       </div>
@@ -150,16 +152,14 @@ export default async function PlaylistDetailPage({
 }
 
 // Cold-cache path: fetch live from Spotify, fill the cache (with the real snapshot so
-// future visits stay on the fast cache path), render.
-async function Tracks({
-  id,
-  canRemove,
-  live,
-}: {
-  id: string;
-  canRemove: boolean;
-  live?: Playlist;
-}) {
+// future visits stay on the fast cache path). Started by the page body, after its gate, and
+// handed to <Tracks> as a promise: the list still streams in under Suspense, but no nested
+// component reads user data or calls Spotify on its own (multi-user PLAN.md T3, static check
+// S8), so the page's gate covers it.
+async function loadColdTracks(
+  id: string,
+  live: Playlist | undefined,
+): Promise<{ tracks: Track[] | null; status: number }> {
   const sp = await getSpotify("playlist-detail");
   let tracks: Track[] | null = null;
   let snapshot: string | undefined;
@@ -182,7 +182,20 @@ async function Tracks({
     status = e instanceof SpotifyError ? e.status : 0;
     tracks = null;
   }
+  if (tracks) await storePlaylistTracks(id, tracks, snapshot);
+  return { tracks, status };
+}
 
+async function Tracks({
+  load,
+  playlistId,
+  canRemove,
+}: {
+  load: ReturnType<typeof loadColdTracks>;
+  playlistId: string;
+  canRemove: boolean;
+}) {
+  const { tracks, status } = await load;
   if (!tracks) {
     return (
       <div className="rounded-lg border border-border bg-card p-6 text-center text-sm text-muted-foreground">
@@ -192,13 +205,11 @@ async function Tracks({
       </div>
     );
   }
-
-  await storePlaylistTracks(id, tracks, snapshot);
   return (
     <TrackList
       tracks={tracks}
       duplicatePositions={duplicatePositions(tracks)}
-      playlistId={id}
+      playlistId={playlistId}
       canRemove={canRemove}
     />
   );
