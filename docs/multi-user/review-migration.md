@@ -15,7 +15,29 @@ or a number to correct.
 
 ## 0. Summary
 
-(written last)
+Nine High findings, four Medium, three Low; nothing Critical.
+
+- **Two measurements tonight change the migration section.** The store holds no plays from the second
+  account: the recorder and the store agree play for play from Oct 13 on, nothing back-dated was
+  inserted since Oct 1, and the library tables match the pre-incident snapshot (finding 7). §11.2's
+  deletion, its rollout row, the Phase 2 precondition and decision 10 can go. And 122 of Rem's own
+  plays (Aug 9-10, Sep 8) exist only in the recorder's file, which nothing backs up (finding 8).
+- **Restores have no runbook** (1): every Turso restore makes a database with a new name, warm
+  instances keep writing to the old one, version counters are re-issued under year-long immutable
+  caching, and an app-database restore revives deleted users and dead sessions.
+- **The Zenbook stays the only frequent pinger for six to seven weeks after the cutover** (2), on a box
+  that lost about nine and a half days of capture in late August and September and still resolves
+  names only through Tailscale. A 90-second guard makes the second pinger safe now.
+- **The new derived state is fragile** (3, 4): P2-P4's totals are read-modify-write without design B's
+  compare-and-set and drift check, and the import scripts, rollback windows and the unfenced fill
+  bypass it. Pending-NULL semantics and SQL-side increments fix both.
+- **Three failure paths the plan leaves unspecified:** a failed identity read becomes a sign-out and a
+  wiped browser cache (5); rollbacks name no mechanism, and on Hobby the obvious ones misfire (6); a
+  mis-set token key strands every user in `needs_reconnect` (9).
+- **STORE_MIGRATION:** no change to the cutover. Keep edit 4's source counts, add a seventh edit that
+  backs up the recorder's file, and check Production's variables after edit 2 (§2).
+- **For Rem:** run the 122-play replay after lane 1904 (recommend yes); bring the second pinger forward
+  and give the Zenbook a resolver outside Tailscale (recommend yes); drop decision 10.
 
 ## 1. Findings
 
