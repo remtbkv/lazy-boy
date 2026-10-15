@@ -7,7 +7,7 @@ overviews cite (`git diff --stat ac6f7fe HEAD` over those paths is empty). Every
 current system cites `file:line` or an overview section (01a-01f); every number is **[measured]**
 with how, or **[estimate]** with the arithmetic. Section 17 lists everything I ran.
 
-Status: outline; sections are filled in order and committed one at a time.
+Status: complete, Oct 14, 2026.
 
 ## 0. Targets, and the design on one page
 
@@ -326,7 +326,9 @@ value today is legitimately the same for two users.
 
 ### 2.6 Layer 6: the browser
 
-The browser never learns a user id. The `(app)` layout renders an opaque key,
+The browser never learns a user id: nothing new goes on the `Session` type, which Auth.js serves to
+any script on the origin at `GET /api/auth/session` (docs/SECURITY.md). The `(app)` layout renders
+an opaque key,
 `hk = base64url(HMAC-SHA256(HK_SECRET, "hk:" + uid))[0:16]`, computed on the server (0.86 µs,
 measured, §17), and everything below keys on it:
 
@@ -350,7 +352,7 @@ measured, §17), and everything below keys on it:
   client-side clear is the one relied on).
 
 `HK_SECRET` is its own Production secret. Rotating it changes every `hk`, which re-keys browser
-caches and costs one cold visit; it unlocks nothing.
+caches and costs one cold visit; the key grants access to nothing.
 
 **What it stops.** M7. **Cost.** Microseconds on the server; on a shared browser, two users no longer
 thrash one HTTP cache entry.
@@ -392,6 +394,16 @@ migration (§9). It is never derived from `me_id` or anything a sync writes (01b
 user's database through the same owner check. `backfill-from-backstop.mjs` refuses any user but the
 admin, because the recorder captures only Rem (01c §5.7).
 
+**Shared quotas (M13).** A user can only read their own database, but every read counts against the
+one Turso budget, and every Spotify call against the one developer account. So the expensive entry
+points get per-user limits, which 01b S13 already asks for: `dailyStatsAction`'s `days` (today any
+value up to 100,000, and each distinct value is a scan and a new cache entry,
+`src/app/(app)/history-actions.ts:67-71`) narrows to the one value the client sends
+(`home/den-home.tsx:379`); the `LIKE`
+fallback (`searchPlaysAction`) and the playlist re-fetch (`/api/playlists/[id]/tracks`) get a small
+per-user rate limit; Spotify's scarce bucket is shared out by §6.4. With friends who were invited by
+name this is a guard against accidents more than attacks, but an accident here is everyone's outage.
+
 **Preview and dev.** Preview deployments get no store variables (01b S14), so a branch's code can
 neither read production nor migrate it. Dev runs on local files (`data/app.db`,
 `data/<db_name>.db`) with a dev token key; once a friend exists, `.env.local` holds no production
@@ -416,7 +428,7 @@ running app refuses. Test ids are §5's.
 | M10 shared tables and operator views | `app-db.ts` with 15 listed functions; admin flag (2.7) | T6; T3 for `/usage` as a non-admin |
 | M11 scripts and dev on production | `--user` required; dev on local files; Preview without store variables (2.7) | T10 (a script without `--user` refuses) |
 | M12 sign-in bound to the wrong account | `account_id` key, compare-and-set claim, no-store profile read (2.5, §10.2) | T9 (double claim, missing `account_id`, changed `id`) |
-| M13 shared quotas | per-user fair share of the scarce bucket (§6.4); plan choices (§15) | per-database usage on `/usage`; `api_log.user_id` attribution |
+| M13 shared quotas | per-user fair share of the scarce bucket (§6.4); per-user limits on the expensive entry points (2.7); plan choices (§15) | per-database usage on `/usage`; `api_log.user_id` attribution |
 
 ### 2.9 What isolation costs
 
@@ -1375,7 +1387,7 @@ built, never who can reach it.
 | phase | what ships | exit check | how it is undone |
 |---|---|---|---|
 | **0, now** (no multi-user code) | rotate `AUTH_SECRET`, Preview gets its own (01b E1, 01e F1); set `SPOTIFY_OWNER_ID` in Production and `.env.local` (01b E2); gate `logout` (01b E3); STORE_MIGRATION with §8.3's six edits; lazy days and history segments before December (§7.4); measure S3's render at 4× (§13.2); read Vercel's Active CPU and the allowlist (§16); the foreign-row cleanup after lane 1904 (§9.2) | Rem signed in on the new secret; STORE_MIGRATION's own R1-R6; the cleanup's `verify-derived` green | env changes and deploys revert; the cleanup restores from its snapshot |
-| **1, identity and isolation scaffolding** (single-user) | `UserId` and the gate on every entry point; `uid: 1`, `ep: 0` on the cookie for the owner, cookies without a uid refused (Rem signs in once, which is F1's lasting fix); `forUser(1)` over today's one database, `owner_uid = 1` written; `userCache` with owner stamps; keyed React boxes and module state; `playlistsCache` removed; task owners; `hk` in ETags, URLs, bodies and storage; the token core out of `auth.ts`; tests T1-T3, T5, T7, T8 and S1-S6 green with a simulated uid 2 | the suite green; a week of production with zero isolation events and capture unchanged (play counts against the recorder) | revert the deploy: old code ignores the extra cookie claim and the two new `meta` keys |
+| **1, identity and isolation scaffolding** (single-user) | `UserId` and the gate on every entry point; `uid: 1`, `ep: 0` on the cookie for the owner, cookies without a uid refused (Rem signs in once, which is F1's lasting fix); `forUser(1)` over today's one database (the uid-to-database map and the epoch are constants until phase 2), `owner_uid = 1` written; `userCache` with owner stamps; keyed React boxes and module state; `playlistsCache` removed; task owners; `hk` in ETags, URLs, bodies and storage; the token core out of `auth.ts`; tests T1-T3, T5, T7, T8 and S1-S6 green with a simulated uid 2 | the suite green; a week of production with zero isolation events and capture unchanged (play counts against the recorder) | revert the deploy: old code ignores the extra cookie claim and the two new `meta` keys |
 | **2, the app database and the tokens** (single-user) | `lazyboy-app`; users row 1; the token encrypted into `user_tokens`; the jwt callback's one join (§4.2); the steps of §9.3 | §9.3 step 7 | §9.3's rollback |
 | **3, the sync queue** (single-user) | `sync_state` with claims and leases; the per-user step; cooldowns per bucket; the fair-share counters (inert at one user); `/api/sync` through the step; `refreshHistoryAction` off Spotify; now-playing at 15 s; the rescan changes; then the second pinger; the recorder hourly; tests T4, T6 | a week of capture matching the recorder, no harvest doubled by two pingers | revert the route code; disable the second pinger |
 | **4, the first friend** | the invite script, `/join` with the policy and agreement, the claim (§10); disconnect and deletion (§12); one backup file per database; admin-only `/usage`; `owner.ts` removed; Preview without store variables and dev on local files, both confirmed; the Turso plan decided (§16) before the friend's first sync; tests T9-T11; an adversarial review of the whole change | a week with one friend: isolation events at zero, the friend's quota spend visible per user (`api_log.user_id`), no ban | set the friend `disabled` (their sessions die and their sync stops at once); if they leave, the deletion job |
@@ -1408,7 +1420,7 @@ design change), so the director can turn them into lanes:
 
 | phase | size | the big pieces |
 |---|---|---|
-| 1 | L | `db.ts`'s 74 exports behind `forUser`, with every caller touched once (01a D2); the gate on 8 pages, 24 actions and 12 routes (01b §2); `userCache`; the test harness and T1-T8 |
+| 1 | L | `db.ts`'s 74 exports behind `forUser`, with every caller touched once (01a D2); the gate on 8 pages, 24 actions and 12 routes (01b §2); `userCache`; the test harness, T1-T3, T5, T7, T8 and S1-S6 |
 | 2 | M | `app-db.ts`, the token core extracted and encrypted, the migration script |
 | 3 | M-L | 01c §5's queue, step and policies |
 | 4 | M | invite, join and claim; deletion; the backup loop; admin gating |
@@ -1455,17 +1467,19 @@ Each with my recommendation and the reason.
 9. **Vercel**: Hobby if the team uses under ~2 of its 4 CPU-hours, else Pro at $20 (01f §6.3).
 10. **What "log out" means.** Split it into sign out, sign out everywhere, and disconnect and delete
     (01e §5.6): with friends, signing out of a shared computer should not stop someone's history.
-11. **`invalid_grant` within six months of a grant**: treat it as a disconnect, delete after a
-    five-day grace unless they reconnect, you exempt (01e §5.7). The alternative keeps data on an
-    ambiguous signal, outside the Terms.
+11. **`invalid_grant` within six months of a grant**: treat it as a disconnect and destroy at once,
+    you exempt (01e §5.7). On a paid plan Turso's five-day recovery is the grace: a person who comes
+    back inside it is restored (§12). The alternative keeps data on an ambiguous signal, outside the
+    Terms.
 12. **Retention for friends**: kept while connected, deleted five days after a disconnect, deleted
     after twelve months without a sign-in (§11). The twelve months is the number to choose.
 13. **Backups**: one file per database, a friend's deleted with their account (§8.3, §12). Yes.
 14. **The platform token stays in the runtime** for same-day database destruction and the daily
     usage read, Production only (§12). The alternative, a Mac script, puts the five-day deletion
     clock on a laptop that is not always on.
-15. **Turso's "Allow restore" stays on**: a mistaken delete is recoverable for five days, which still
-    fits inside Spotify's five when the destroy runs the same day (§12).
+15. **Turso's "Allow restore" stays on**: a mistaken delete, or a person who revoked by accident, is
+    recoverable for five days, which still fits inside Spotify's five when the destroy runs the same
+    day (§12).
 16. **The privacy policy and end-user agreement**: yours to write or approve; §11 lists what they
     must say. And whether friends see derived stats (listened time, skips) at all, given the
     Developer Policy's line on derived listenership metrics (01f §1.5); this design shows each
