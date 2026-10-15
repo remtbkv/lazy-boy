@@ -26,9 +26,10 @@ Status: complete, 2026-10-14.
 - **How (§4-§9).** A Turso database per user plus an app database; listened time stored per play and
   the all-time totals kept as an accumulator; the Home payload patched in place; history as monthly
   segments stored in the user's database and appended to on write, which also removes the 2 MiB cache
-  cliff the owner hits in late December; the library body patched per playlist; an identity index
-  that turns the "From" verdict from a walk over a playlist into two probes, a cost the store meter
-  cannot see (§10.1); a one-minute tick with a quota governor; two independent pingers.
+  cliff the owner hits in late December; the library body patched per playlist; the "From" verdict
+  rewritten to probe the song's identity through two existing indexes instead of walking the
+  playlist, a cost the store meter cannot see (§10.1); a one-minute tick with a quota governor; two
+  independent pingers.
 - **Results [estimates].** A landed play costs ~20 rows read and 3 round trips, against ~7,700 rows
   (59,000 with the all-time scan) and ~30 round trips today. Search is usable ~1.4 s after first paint
   on Rem's first visit, ~80 ms on a repeat visit; a keystroke paints in ~25-35 ms.
@@ -196,7 +197,7 @@ cron ticks, 129 plays landed. Home was barely opened that day, so the two terms 
 | 2 | Home payload rebuild: 16-day strip + the opening day (`db.ts:1315-1343`) | every landed harvest | ~7,500 | 954,265 (22%), 127 runs | plays per 16 days | patched in place from the harvest in hand (§8) |
 | 3 | history payload rebuild (`db.ts:1686-1730`) | a browser fetch after the slow marker moved | ~79,000 | 78,781, 1 run; ceiling 144 × 79,000 ≈ 11M with Home open all day (01c §6) | stored plays; hits the 2 MiB Data Cache limit in late December (01d §3.2) | monthly segments in the store, current month appended on write (§8, §9) |
 | 4 | whole-history day strip, `dailyStatsAction(100000)` prefetched on every Home mount (`den-home.tsx:374-384`), cached on `write_seq`, so the first mount after any landed play re-reads every real play | Home mounts after listening | ~43,500 [estimate: 14,511 real plays × ~3 rows for a `plays JOIN tracks`, READ_QUOTA "Measured reads"] | ~0 (no mounts) | stored plays × visits | built in the browser from segments that carry listened seconds (§9) |
-| 5 | unscoped orphan pass (`db.ts:724-751`) | the library's playlist id set moved, ~3 a week (3 on Oct 14) | ~5,100,000 as Turso counts it (01c §2.8) | 394,820 as the meter counted 3 runs | plays × members | lanes 1910-1911 scope it; kept scoped (§8) |
+| 5 | unscoped orphan pass (`db.ts:724-751`) | the library's playlist id set moved, ~3 a week (3 on Oct 14) | ~5,100,000 as Turso counts it (01c §2.8) | 394,820 as the meter counted 3 runs | plays × members | the rewritten predicate, ~0.1-0.2M a full pass [estimate], and lanes 1910-1911 scope it (§10.1) |
 | 6 | unique-song count (`db.ts:1969-1991`) | a library sync that changed anything; the daily Liked refetch always counts as a change (`sync/library.ts:81-84`) | ~39,000 | ~160,000, 4 runs | library members | counted inside the library body's build and patch (§8) |
 | 7 | library payload rebuild (`db.ts:1625-1684`) | a fetch after `library_seq` moved, which every list rewrite does | ~15,000 | 0-2 runs a day (ledger, 01d §2.2) | members | patched per changed playlist (§8) |
 | 8 | library rescan's snapshot reads (`sync/library.ts:65-66`) | every rescan, ~30 a day | ~110 serial one-key reads | ~3,500 round trips | owned playlists | one statement over a `snapshot_id` column (§7) |
@@ -286,15 +287,13 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);  -- global keys only
 
 ### 4.3 Each user's database
 
-Today's seven core tables, with three columns, one index and one table added:
+Today's seven core tables, with two columns and one table added:
 
 - `plays.listened_ms INTEGER`: the play's listened time, written with its skip verdict (both come
   from the same `min(gap, duration)`, `src/lib/skip-rule.ts:33-46`). Everything that sums listened
   time then sums a column instead of walking the gap chain (§8.1).
 - `playlists.snapshot_id TEXT`: replaces the 110 `plsnap:<id>` meta rows, so a rescan compares every
   snapshot in the list probe it already makes (§7.6).
-- `playlist_tracks.ident TEXT` with an index on `(playlist_id, ident)`: the song identity, so the
-  "From" verdict is two index probes instead of a walk over the playlist's members (§10.1).
 - `payloads (kind, key, version, shape, body, dirty, built_at, PRIMARY KEY (kind, key))`: the
   materialized bodies: `home` (today's `meta.home_payload`), `hist`/`<YYYY-MM>` per UTC month,
   `hist`/`catalog`, and `lib`. Each read is one row; each write is a compare-and-set on `version`
@@ -308,7 +307,7 @@ Today's seven core tables, with three columns, one index and one table added:
 | `plays` | user DB | `+ listened_ms` |
 | `contexts` | user DB | none; per user, so one account's 403 never hides a name from another (01a D25) |
 | `playlists` | user DB | `+ snapshot_id` |
-| `playlist_tracks` | user DB | `+ ident` (lower-cased artist and title) and an index on `(playlist_id, ident)` (§10.1) |
+| `playlist_tracks` | user DB | none; the "From" predicate over it is rewritten (§10.1) |
 | `saved_tracks` | user DB | none |
 | `api_log` | telemetry (Zenbook) | `+ uid` (nullable), `+ reason` (the 429 body's `QUOTA_EXCEEDED` or not, 01c S4) |
 | `client_metrics` | telemetry | `+ uid`; `handoff` beacons stop carrying song names (01a §10) |
@@ -731,8 +730,8 @@ dump check covers drift, as for segments.
   relying on the daily scan to find them.
 - **Orphan verdict for a new play**: computed in the read batch with the song's identity bound as
   parameters, then written with the insert. The stored predicate (`db.ts:700-709`) looks the identity
-  up in `tracks`, which has no row yet for a never-seen track in the same batch. With the
-  `playlist_tracks.ident` index of §10.1 the verdict is two probes, ~5 rows instead of ~130.
+  up in `tracks`, which has no row yet for a never-seen track in the same batch. With §10.1's
+  rewritten predicate the verdict is a few index probes, ~5-10 rows instead of ~130.
 - **The write marker**: one bump per landed batch, where today a landed tick bumps two or three times
   (the insert batch, the orphan flags, the skip verdicts: `db.ts:522, 749, 819`).
 
@@ -848,19 +847,33 @@ rows), the library payload (~15,000) and the whole-history strip (~43,500). Here
 
 The stored "From" verdict (`ctx_orphan`) asks, for a play from a cached playlist, whether the song's
 identity is among that playlist's members. The predicate (`db.ts:700-709`) answers it by walking the
-playlist's members and probing `tracks` for each: ~M to 2M rows for a playlist of M members, for every
-play it judges. That fits the ~130 rows per landed play the meter saw (01c §2.2; Rem's playlists
-average ~65 members, 7,400 / 114), and it makes a pass
-scoped to one playlist cost (plays from that playlist) × M: for a playlist holding 300 songs with 3,000
-plays from it, ~900,000 rows [estimate; Rem's per-playlist play counts were not measured]. The meter
-cannot show this, because it counts an `UPDATE`'s correlated subqueries at about 1/40 of what Turso
-bills (01c §2.8), and lanes 1910-1911 scope the pass without changing the predicate.
+playlist's members (`SEARCH plm USING INDEX idx_pltracks_pl`) and probing `tracks` for each: up to 2M
+rows for a playlist of M members, for every play it judges, fewer when the walk meets the song early.
+That fits the ~130 rows per landed play the meter saw (01c §2.2; Rem's playlists average ~65 members,
+7,400 / 114) and the ~350 a play Turso billed for a full pass in August (2,544,558 at 7,194 plays,
+READ_QUOTA "Sibling sweep"). It also makes a pass scoped to one playlist cost (plays from that
+playlist) × M: for a playlist holding 300 songs with 3,000 plays from it, ~900,000 rows [estimate;
+Rem's per-playlist play counts were not measured]. The meter cannot show the scoped or the full pass,
+because it counts the correlated subqueries in an `UPDATE`'s `WHERE` at about 1/40 of what Turso bills
+(01c §2.8), and lanes 1910-1911 scope the pass without changing the predicate.
 
-The design adds `playlist_tracks.ident` (lower-cased artist and title, the identity everything else
-uses) with an index on `(playlist_id, ident)`, filled by `storePlaylistTracks` from fields it already
-holds. The verdict becomes two index probes: ~5 rows per play [estimate], so ~5 per landed play and
-~5 × (plays from the playlist) per scoped pass. Storage: ~0.5 MB for Rem's 7,400 members [estimate,
-~70 bytes per member for the column and its index entry]. That is why §8.6 counts ~20 rows per landed play, not ~150.
+The design rewrites the predicate to start from the song instead of the playlist: the play's own
+`tracks` row, the tracks sharing its identity through `idx_tracks_artist_name`, then their memberships
+through `idx_pltracks_track`, filtered to the playlist. `CROSS JOIN` pins that loop order, since
+SQLite's planner otherwise picks the member walk. No column, index or migration is added. Checked on
+the Mac's Aug 11 copy (`data/replica.db`, opened read-only: 7,572 plays, 15,328 memberships, 181
+playlists; §19):
+
+- the plan becomes `SEARCH me USING INDEX sqlite_autoindex_tracks_1 (id=?)`, `SEARCH tm USING INDEX
+  idx_tracks_artist_name`, `SEARCH plm USING INDEX idx_pltracks_track (track_id=?)` [measured];
+- over the 6,801 plays from a cached playlist, today's form walks up to 411 rows per play on average
+  (twice the playlist's members; max 2,256), and the rewrite matches 2.7 (max 7) [measured], ~5-10 as
+  Turso counts index and table visits [estimate];
+- both forms give the same verdict on all 7,572 plays: 764 orphans each, 0 differ [measured].
+
+So a landed play's verdict costs ~5-10 rows instead of ~130, a scoped pass ~5-10 × (plays from the
+playlist), and a full pass at today's 22,040 plays ~0.1-0.2M instead of ~5.1M [estimate]. That is why
+§8.6 counts ~20 rows per landed play, not ~150.
 
 ### 10.2 Per Rem-like user per day
 
@@ -902,9 +915,9 @@ Zenbook.
 | storage | Rem-like user | basis |
 |---|---|---|
 | core tables | 11.87 MB | [measured, 01a §2] |
-| added: `ident` + index, `listened_ms` | ~0.6 MB | [estimate] |
+| added: `listened_ms` | ~0.1 MB | [estimate: 22,040 plays × ~4 bytes] |
 | payload bodies: segments ~2.2 MB, library ~0.8 MB, Home ~30 KB | ~3.0 MB | [measured raw sizes, 01d §2.1 and O3] |
-| **total today** | **~15.5 MB** | |
+| **total today** | **~15.0 MB** | |
 | growth | ~40 KB a day (plays ~33 KB, tracks ~2.4 KB, segment growth ~4.5 KB) | target ≤ 50 KB |
 
 A new user starts near 3.3 MB (01a §9.1) plus ~0.5 MB of bodies.
@@ -1002,9 +1015,12 @@ Nothing blocks the cutover, and none of these touches its runbook:
 2. **Phase E's store key** gains the segment dimension now, so segments arrive without a second
    migration of browser data (01d §6 item 3).
 3. **Phase D's backup** loops over database names and strips token rows (01a §10, 01e §6).
-4. **Lanes 1910-1911** should consider the `ident` index (§10.1) alongside the scoping: a pass scoped to
-   a busy playlist still costs plays × members, which the meter undercounts about 40× (01c §2.8). One
-   pass on the Turso copy, read off Turso's usage before and after (01c §8), measures it.
+4. **Lanes 1910-1911** should ship §10.1's rewritten predicate with the scoping, or ahead of it. On the
+   Aug 11 copy it gives the same verdict on every play and matches ~2.7 rows per play where today's
+   walks up to ~411, which takes a full pass from ~5.1M rows to ~0.1-0.2M [estimate] with no schema
+   change; a pass scoped to a busy playlist with today's predicate still costs plays × members, which
+   the meter undercounts about 40× (01c §2.8). One pass of each form on the Turso copy, read off
+   Turso's usage before and after (01c §8), measures both.
 5. **R4** gains a growth term and, for multi-user, a per-dimension bar at the planned N (01c §6 item 2).
 6. **Step 9 flips Production only**; Preview gets its own database or none (01b §7 item 2).
 
@@ -1066,11 +1082,10 @@ own rollback:
 
 1. Pause both pingers; wait for no writes for 5 minutes.
 2. Restore point: Turso's point-in-time restore (1 day on Free) plus a dump by the backup script.
-3. On `lazyboy`: add `plays.listened_ms`, `playlists.snapshot_id`, `playlist_tracks.ident` and its
-   index, the `payloads` table. Fill them: `listened_ms` by one chain walk in JS (the same pure
-   function the skip verdicts use), `snapshot_id` from the `plsnap:*` rows, `ident` from `tracks`, the
-   segments, the library body and the Home payload from the existing builders, the `alltime`
-   accumulator from today's `alltime_stats`.
+3. On `lazyboy`: add `plays.listened_ms`, `playlists.snapshot_id` and the `payloads` table. Fill
+   them: `listened_ms` by one chain walk in JS (the same pure function the skip verdicts use),
+   `snapshot_id` from the `plsnap:*` rows, the segments, the library body and the Home payload from
+   the existing builders, the `alltime` accumulator from today's `alltime_stats`.
 4. Create `lazyboy-app` and `lb-template`. In the app database: Rem's users row (a new uid; his
    `account_id` read once from `/v1/me` with the stored token, never bound through `me_id`, 01e §5.5;
    `db_name = 'lazyboy'`; `is_admin = 1`; `tz_zone = 'America/New_York'`); both token rows encrypted
@@ -1094,7 +1109,7 @@ code are ordinary rows the old code reads. On day 7, drop the plaintext token ro
 `meta` keys (§4.4).
 
 Cost on Turso, once [estimate]: ~200,000 rows read (the column additions, the chain walk, the payload
-builders, the index build) and ~30,000 written: 0.04% of a free month's reads and 0.3% of its writes.
+builders) and ~30,000 written: 0.04% of a free month's reads and 0.3% of its writes.
 
 ## 14. Sign-up gating, privacy and account deletion
 
@@ -1163,7 +1178,7 @@ L a design change.
 | P1a | `listened_ms`, the all-time accumulator, the Home payload patch, the `contexts` scan, one marker bump per batch, with §13's fenced fill | §3 rows 1, 2 and 9: ~75% of Rem's reads [estimate: (2.24M + 0.95M + ~0.04M) / 4.25M] | known-answer tests (accumulator = `allTimeStats` over fixtures with out-of-order inserts; patched payload = rebuilt payload after a day of synthetic harvests); `verify-derived.mjs` extended; Turso's usage before and after | M |
 | P1b | segments in `payloads`, the manifest in the page, the segment route, lazy days, the strip and the all-time list from segments, phase E keyed per segment | §3 rows 3-4, and the 2 MiB cliff; **must ship before mid-December** (01d §3.2) | segments equal `readHistoryIndex()` slices; 01d §2.3's throttled-browser harness; T2's numbers on `/usage` | L |
 | P1c | `/me/player`-only probe, harvest on track change (F = 2, one user), rescans through `snapshot_id`, no `/me`, weekly Liked refetch, `refreshHistoryAction` without Spotify, 15 s now-playing, 429s read by reason | §3 rows 8, 10, 11; Spotify calls roughly halved | `tests/harvest-gate.test.ts` extended; `api_log` counts per source before and after | M |
-| P1d | `playlist_tracks.ident`, the library body patch with the unique count, the two-probe orphan verdict | §3 rows 5-7, §10.1 | known answers: patched body = rebuilt body after member diffs; flags unchanged across a full pass | M |
+| P1d | the rewritten orphan predicate (§10.1), the library body patch with the unique count | §3 rows 5-7 | known answers: both predicates give the same verdict on every play of a full pass (done once on the Aug 11 copy, §10.1); patched body = rebuilt body after member diffs | M |
 | P2 | app database, `users`, encrypted `user_tokens`, `sync_state`; uid and epoch on the session; the per-user token core and its six tests; §13 step 4 | one identity per request, F1 closed for good | 01e §5.2's tests; Rem signs in once | M-L |
 | P3 | the `UserDb` handle; uid in every remaining cache key, ETag and browser store; task owners; admin-only `/usage`; the tick with its lock, state and governor; the second pinger; uid on telemetry; per-database backups with dump checks; the deletion path, exercised on a throwaway test database; Preview and dev off production | §6's surfaces | the two-user suite (§6), each test first shown failing against a planted bug | L |
 | P4 | the privacy policy and end-user agreement, `scripts/invite.mjs`, the first friend on the allowlist | the quota question (01c decision 3, the passive way): a week of quota days on `/usage` with per-user attribution | the week's ledger; no cross-user marker in any response | S-M |
@@ -1254,9 +1269,15 @@ foreign plays so they can be removed before your history is labelled yours (01b 
 
 ## 19. What I ran, and what I did not measure
 
-Nothing ran against the production store, the Zenbook, any Turso database or Vercel, and I took no
-measurements of my own. Every **[measured]** number above is an overview's measurement, cited with its
-source there; every design number is an **[estimate]** with its arithmetic beside it.
+Nothing ran against the production store, the Zenbook, any Turso database or Vercel. Every
+**[measured]** number above is an overview's measurement, cited with its source there, except §10.1's,
+which are mine; every design number is an **[estimate]** with its arithmetic beside it.
+
+- §10.1, Oct 14 about 10:50 PM, on the Mac only: `sqlite3 -readonly
+  'file:data/replica.db?immutable=1'` (the Aug 11 local copy; nothing written, no WAL opened) running
+  two files from `~/.claude/broke/scratch/lazyboy_mu/0222_design_b/`: `orphan_plans.sql`
+  (`EXPLAIN QUERY PLAN` of the newOnly `UPDATE` in both forms, then per-play counts of the rows each
+  form matches) and `orphan_equal.sql` (both predicates as `SELECT`s over every play, compared).
 
 - Read in full: the six overviews (`01a`-`01f`), `docs/STORE_MIGRATION.md`, `docs/READ_QUOTA.md`,
   `docs/SECURITY.md`, `docs/ARCHITECTURE.md`, `docs/GOTCHAS.md`, the project's `CLAUDE.md`. Not read:
