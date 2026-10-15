@@ -1752,8 +1752,97 @@ I$ holds: one round trip on Home, microseconds elsewhere.
 
 ## 15. Costs
 
+Money, a month, at 01f §2.2 and §4.2's prices (fetched Oct 14):
+
+| item | Phases 0-3, Rem alone | five users | basis |
+|---|---|---|---|
+| Turso | $0 (Free) | **$4.99 billed yearly ($5.99 month to month)** on Developer with overages, recommended before the first friend; $0 if Rem stays on Free, which §14.4's projections hold once P4 ships | 01f §4.2 |
+| Vercel | $0 (Hobby) | $0 if the team's Active CPU stays under ~2 of Hobby's 4 hours; otherwise Pro, $20 including $20 of usage | 01f §2.2-2.3 |
+| cron-job.org (the second pinger) | $0 | $0 | free tier |
+| the Zenbook | $0 | $0 | runs anyway for the recorder, telemetry, backups and DiveLoop |
+| Spotify | $0; Rem's Premium is required for the app to work at all | $0 | friends cannot be charged: the app controls playback, which makes it a Streaming SDA, and those may not be used commercially (01f §1.5) |
+| **total** | **$0** | **$5-26 with Developer; $0-20 on Free** | |
+
+Isolation itself adds $0: the databases are free (100 on Free, unlimited on paid plans, idle ones cost
+only storage), encryption is Node's built-in `crypto`, and the tests run in the existing harness.
+
+What the Developer plan buys besides capacity, which is why it is recommended although five users fit
+Free after P4: a month's reads past the allowance become a bill ($1 per billion) instead of a block on
+every query for every user until the 1st, which is what August's regressions did (READ_QUOTA "Where
+August actually went"); ten days of point-in-time recovery for Rem's own data instead of one; and a
+five-day undelete for a destroyed database, which is the grace §12.3 relies on.
+
+The work is in §13.1's sizes: P2 M, P3 L, Phase 1 L, Phase 2 M, Phase 3 M-L, Phase 4 M, P4 and the
+brake M, each friend after that S.
+
 ## 16. Unknowns and risks
+
+### 16.1 Unknowns, and what answers each
+
+| unknown | where it matters | answered by |
+|---|---|---|
+| whether Spotify's development-mode quota is one pool or one per user | §7.5, F2 | the passive check (§7.9): a ban in Phase 5, or never; the plan is safe under both readings |
+| the team's Vercel Active CPU | Phase 4's gate, §15 | Rem, on the dashboard, in Phase 0 |
+| how many accounts the allowlist holds, whether any are grandfathered, whether Rem counts toward five | U | the dashboard's User Management list, in Phase 0 |
+| whether `/v1/me` returns `account_id` to this app, and under which scopes | §5.1, §11.4, §12.1 | Phase 0's dev sign-in; Phase 2 step 2 before anything depends on it |
+| R1 on Turso, and the payload build time from iad1 | every latency in §14 | lanes 1902-1903's bench route |
+| whether recently-played lists a play after the player has moved on, and how often | F2's worst case | Phase 3's soak: the retry count |
+| whether `/me/player` alone ever misses playback that currently-playing sees | §7.3 | Phase 3's soak: no play first stored by a backstop while Rem was listening |
+| whether the identity-first predicate is equal on today's data | §8.2 | lane 1910's check on a current copy (verified so far on the Aug 11 copy only) |
+| the player bucket's limit and the rate limit's number | §14.3 | a player-endpoint 429, with its `reason`, in `api_log` |
+| keystroke-to-paint on a real phone | S3 | Phase 0's `lb-perf` read on Rem's phone |
+| how friends listen and how often they open Home | §14.2, §14.4 | Phase 4's week; Turso's per-database usage |
+| whether a destroyed Turso database's point-in-time history goes with it | §12.3 | A and C quote Turso's docs saying it does; B could not find the statement (B §14). Re-read the page before a friend's data is on a paid plan |
+| the incident's exact window | §11.2 | not needed: the recorder diff finds the rows |
+| whether Preview and Production share the Data Cache; whether `cache()` is active in route handlers | §6.2 | not needed: the owner stamp and the keyed boxes make the design correct either way |
+| the Data Cache's size and hit rate under the team's other projects | §9.3 | not observable on Hobby; an eviction costs one month's rebuild |
+| what "Turso is joining Supabase" means for plans and prices | §10.1 | Turso's announcements; each user's data stays portable |
+
+### 16.2 Risks the plan carries
+
+- **A wrong uid compiles.** The branded type stops a uid made from request input; it cannot stop a
+  real uid used in the wrong place, such as the cron handing user A's uid to user B's step. The step
+  receives its arguments and touches nothing else, T4 checks that each user's play lands in that
+  user's file, and the token-owner assertion and owner stamps catch a mismatch at runtime (C §16.2).
+- **One token reads everything.** The group token reaches every user's data and cannot be revoked
+  alone (B §19). It must be a Secret-type variable (write-only after saving), which nobody has checked
+  for today's `TURSO_AUTH_TOKEN` (C §16.2).
+- **The open app trusts the cron.** While ticks run, an open tab harvests only its catch-ups, even if
+  the cron's step for that one user keeps failing; the user's capture health shows the stall, and for a
+  quota ban not harvesting is the right behaviour (C §16.2).
+- **The mechanical edit's volume.** Threading `forUser` touches ~535 call lines (upper bound, C §2.2),
+  and a semantics change can hide in that much noise. `tsc --noEmit` is the oracle, the adversarial
+  review reads the non-mechanical hunks, and the isolation suite runs every per-user method as two
+  users.
+- **A missed segment bump** serves one user a stale month until its next bump; each bump site has a
+  known-answer test, the manifest's play counts catch a missed insert, and moving the shape token
+  re-fetches everything (§9.1).
+- **P3's deadline.** If segments slip past mid-December, the catalog split (01d O2) buys ~10 months.
+- **Spotify can lower the budget.** The brake plans to 60% of a limit Spotify says "may change"; the
+  429 `reason` with per-user attribution shows the first sign.
+- **Rollbacks assume Spotify keeps not rotating this app's refresh tokens** (01e F2); if it starts, a
+  rollback costs Rem one sign-in (§11.4).
+- **Policy.** Storing friends' history and showing derived listening stats sit against the Developer
+  Terms' storage rule and the Policy's "derived listenership metrics" line (01f §1.5). The plan
+  narrows the exposure (each user sees only their own stats; retention; deletion inside five days);
+  accepting the rest is Rem's call. This is an engineer's reading, not legal advice.
 
 ## 17. What I ran
 
+Nothing ran against the production store, the Zenbook, Turso, Vercel or Spotify, and nothing was
+written except this file. On Oct 14, about 11:03 PM to 11:45 PM, on the Mac:
+
+- Read in full: the six overviews (`01a`-`01f`), the three designs, `docs/STORE_MIGRATION.md`,
+  `docs/GOTCHAS.md` and the project's `CLAUDE.md`.
+- `git rev-parse --short HEAD` (`7e0c5b1` at the start) and `git diff --stat ac6f7fe HEAD -- src scripts
+  ops tests vercel.json next.config.ts package.json` (empty, so the overviews' line numbers hold).
+- Code read with `sed -n` to check what this plan cites beyond the overviews: `src/lib/db.ts:570-590`
+  (the all-time gate) and `690-760` (the orphan predicate and `recomputeOrphanFlags`);
+  `src/lib/skip-rule.ts:28-75`; `src/app/(app)/home/den-home.tsx:370-386` and `655-680`;
+  `src/app/api/cron/sync/route.ts:20-60` and `92-186`; `src/lib/harvest-gate.ts`;
+  `tests/stubs/next-cache.ts`.
+- B's two scripts, re-run unchanged from `~/.claude/broke/scratch/lazyboy_mu/0222_design_b/`:
+  `sqlite3 -readonly 'file:data/replica.db?immutable=1' < orphan_equal.sql` (1.3 s) and
+  `< orphan_plans.sql`, against the Mac's Aug 11 local copy (7,572 plays; nothing written, no WAL
+  opened). The output is quoted in §8.2 and matched B §10.1's figures exactly.
 ## 18. Decisions that are Rem's
