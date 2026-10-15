@@ -880,7 +880,7 @@ Five users sit under 5% of the free plan on every dimension (T4). At 250 the fre
 database count and reads; on Developer every dimension sits at or under 54%, and past its allowances
 the overage is $1 per million writes and $1 per billion reads, not a block. Replacing the nightly full
 dump with an incremental one (plays since the last backup through `(played_at)`, the small tables
-weekly) would take 250 users' reads to ~36-80% of Free, which still leaves writes and the database
+weekly) would take 250 users' reads to ~36-88% of Free, which still leaves writes and the database
 count over it.
 
 ### 10.4 Spotify and Vercel at the same sizes
@@ -890,7 +890,7 @@ count over it.
 | recently-played + `/me` | 35-150 by F (§7.4) | ~379 with F ≈ 10 and the recorder | ~375, completeness only, no freshness | ~3,750 | ~725-800 measured, 450 planned; shared by the account |
 | player | ~450 + ~4 a minute per visible tab | ~2,250 + tabs | ~11,250 | ~112,500 | unmeasured; ≤ 2,500 planned at five |
 | library | ~100 | ~500 | ~2,500 | ~25,000 | unmeasured; never a 429 |
-| per 30 s, peak | – | ~3 from ticks + ~10 from five visible tabs | ~15 + tabs | ~63 from ticks alone | 18 observed safe |
+| per 30 s, peak | – | ~3 from ticks + ~10 from five visible tabs | ~15 + tabs | ~40-60 from ticks alone | 18 observed safe |
 
 | per month | 5 users | 25 users | 250 users | Hobby allows |
 |---|---|---|---|---|
