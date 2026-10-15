@@ -6,11 +6,36 @@ and what the isolation design misses. Planning only: no code, data, store, Turso
 changed. Code line numbers are against `ac6f7fe`, as the plan's are (`git diff --stat ac6f7fe HEAD --
 src scripts ops tests vercel.json next.config.ts package.json` is still empty). §5 lists what I ran.
 
-Status: in progress (outline).
+Status: complete, Oct 15, 2026.
 
 ## 0. Summary
 
-(to be filled)
+The isolation skeleton holds: a database per user with an owner stamp, a branded uid only three
+functions mint, keyed token state with AES-GCM bound to the uid, and the gate before every read. I
+could not find a cross-user read in the target design as written. The holes are at its edges, where
+the plan assumes an operation does what its name says:
+
+- **R1 (High).** A Vercel deployment keeps the environment it was built with, and Instant Rollback
+  restores that environment. After Phase 0, a one-click rollback brings back the old `AUTH_SECRET` and
+  with it the incident's session as Rem; on Pro, a rollback across Phase 1 puts single-user code in
+  front of friends' valid cookies, and its search routes serve Rem's history to them. Fix: rotate
+  `AUTH_SECRET` again at Phase 1 (it costs nothing, since Phase 1 makes Rem sign in once anyway),
+  delete pre-rotation and pre-Phase-1 production deployments, rebuild instead of rolling back.
+- **R2.** `status = 'disabled'`, the plan's kill switch, ends sessions but not sync: the cron's claim
+  never reads `users.status`.
+- **R3.** A refresh racing the deletion job writes the deleted user's live grant back, and nothing
+  sweeps it.
+- **R4.** One `invalid_grant` storm would destroy every friend's database at once (no correlated-failure
+  guard, no undelete on Free), and a refresh racing a sign-in can make an expiry read as a revocation.
+- **R5.** Sessions renew through `GET /api/auth/session`, so "fixed 30 days" is not a bound and the
+  pre-guard browser does not expire on Nov 13; add an `auth_time` claim.
+- R6-R10, medium-low: the identity check's failure mode is unspecified and today's code fails open;
+  the isolation tripwire is forgeable through `/api/metrics` and lost when the Zenbook is down; the
+  platform token in `.env.local`; the production token key handled on the Mac; the Funnel-facing
+  Zenbook holding every friend's read credential. R11-R16 are hardening and process.
+
+STORE_MIGRATION needs no hold. Its edits 2, 4 and 5 close live exposures; add Phase 0 before lane
+1903's flip, and name the `lazyboy` token Phase 2 must invalidate (§3).
 
 ## 1. Findings, most severe first
 
@@ -34,7 +59,7 @@ how §12.3 makes the vendor's copy of a deleted friend's token unreadable; `SIGN
 - This project keeps production deployments 30 days and always the last 10
   (`deploymentExpiration`, `vercel api /v9/projects/lazy-boy`, read Oct 15).
 - The plan's rollback column says "redeploy the previous build" (§13.1, Phase 1), "redeploy Phase 1"
-  (§11.4) and "redeploy" (P2, P4): the natural reading of each is the dashboard's one-click rollback.
+  (§11.4) and "redeploy" (P2, P4); one natural reading of each is the dashboard's one-click rollback.
 - Builds from before Phase 1 gate the search routes and the six history actions on `!!auth()` alone
   (`src/app/api/search/history/route.ts:16`, `src/app/api/search/library/route.ts:22`,
   `src/app/(app)/history-actions.ts:29-31`) and read "the" store with the database token in their
@@ -51,13 +76,14 @@ Two ways it bites:
    sign-in overwrites the token row as on Oct 14.
 2. **After Phase 4, if the team moves to Pro** (§15 and decision 12 contemplate it). Every build
    between Phase 0 and Phase 1 shares the current `AUTH_SECRET`. A rollback to one of them puts
-   single-user code in front of friends' valid cookies: a friend's next `GET /api/search/history`
-   returns Rem's whole history and library, and until the plaintext token row goes (§11.4 step 7)
-   their clicks drive Rem's Spotify.
+   single-user code in front of friends' valid cookies. The plaintext token row is gone by then (§11.4
+   step 7), so its pages send them to `/login`, but the routes gated on `!!auth()` alone still answer:
+   a friend's next `GET /api/search/history` returns Rem's whole history, and `/api/search/library`
+   Rem's library.
 
 Skew Protection widens this on Pro. Vercel enables it by default for projects created after Nov 19,
-2024 (this one: June 3, 2026, `vercel project inspect`); it routes any request carrying `?dpl=`, an
-`x-deployment-id` header or a `__vdpl` cookie to that deployment, by default for a day after the
+2024 (this one: June 3, 2026, `vercel project inspect`); it routes same-origin requests carrying
+`?dpl=`, an `x-deployment-id` header or a `__vdpl` cookie to that deployment, by default for a day after the
 deployment's creation and up to the retention limit if raised (https://vercel.com/docs/skew-protection,
 fetched Oct 15). Each rotation then has a tail of at least a day. On Hobby it is unavailable, and
 today's public `/login` carries no `dpl` parameter and sets no `__vdpl` cookie (§5), so pinning is
@@ -87,10 +113,11 @@ Fix, all cheap:
 
 §12.1: `status = 'disabled'` ends sessions at the next request "and their sync at the next claim,
 which skips users who are not active". §13.1 makes it Phase 4's rollback ("sessions die and sync
-stops at once") and §6.6 the answer to a misbehaving friend. But the claim in §7.2 reads only
-`sync_state.state NOT IN ('needs_reconnect', 'removed', 'paused')`; it never reads `users.status`, and
-nothing in the plan writes `sync_state.state` when `users.status` changes. T6 tests leases and double
-claims, not status.
+stops at once") and §6.6 the answer to a misbehaving friend. But the claim in §7.2 leases on
+`sync_state.state NOT IN ('needs_reconnect', 'removed', 'paused')` alone; the join that follows
+fetches tokens and database names and is not said to filter on `users.status`, and nothing in the
+plan writes `sync_state.state` when `users.status` changes. T6 tests leases and double claims, not
+status.
 
 Scenario: Rem disables a friend after a suspected compromise. Their sessions die; the cron keeps
 refreshing their token, probing and harvesting their account and spending the shared quota,
@@ -129,8 +156,8 @@ Decision 14 and §12.3 destroy a friend's database at once on an `invalid_grant`
 not this one. Spotify answers `invalid_grant` for refresh tokens that are "expired, revoked, or
 otherwise invalid" (01e §5.7); what else invalidates a grant, a client-secret rotation or an account
 event, is undocumented (01e §3.2, §8). On Turso's Free plan a destroyed database cannot be undeleted
-(the quote in §12.3 is "on paid plans"), and §15 allows staying on Free, so recovery would be a
-nightly backup restored by hand, up to a day of plays short.
+(the quote in §12.3 is "on paid plans"), and §15 allows staying on Free, so unless Rem takes decision
+11's Developer plan, recovery is a nightly backup restored by hand, up to a day of plays short.
 
 The second path is inside the plan. `granted_at` is a plaintext column beside the blob (§4.2), set at
 sign-in, and today's sign-in write takes no refresh lock (`src/lib/auth.ts:352-362`). A cron refresh
@@ -174,7 +201,7 @@ Today's jwt callback returns the cookie untouched when the token read throws
 (`src/lib/auth.ts:379-387`) and when the read after a failed refresh throws (`:436-438`), on purpose,
 so a store hiccup does not sign Rem out. §5.1 lists four cases that return null (no uid, unknown uid,
 wrong status, stale epoch) and says nothing about a failed read. A Phase 2 lane moving today's
-callback onto the app database will carry the fail-open branch with it.
+callback onto the app database is likely to carry the fail-open branch with it.
 
 Scenario: the `lazyboy-app` read times out while a user database answers (separate databases need
 not fail together). A session that "sign out everywhere" ended, or a disabled user's, passes the jwt
@@ -196,8 +223,7 @@ weeks (§14.5).
 
 Scenario: a friend posts `{"events":[{"page":"/home","event":"isolation"}]}` and Rem's admin view
 starts a breach investigation. The other way round, a real cross-user event during a Zenbook outage
-leaves no record anywhere, so the layer the I target counts as "detects" misses exactly when the
-store is degraded.
+leaves no record anywhere: target I's runtime detector is blind exactly when the store is degraded.
 
 Fix: the server writes isolation events, awaited, to a small table in `lazyboy-app` (expected count
 zero, so it costs nothing), plus a `console.error` with a fixed prefix; `/usage` counts that table.
@@ -349,9 +375,9 @@ catches a stuck tab cheaply) and a per-uid token bucket on the player actions. A
 
 The repo is public (01e §3.1). Local `main` is 202 commits ahead of `origin/main` and nothing under
 `docs/multi-user/` is on origin (`git log origin/main -- docs/multi-user` is empty). The next push of
-`main`, by STORE_MIGRATION's lanes from Oct 15, 8 PM at the latest, publishes 01b §6 and 01e F1: a
-pre-guard session that still acts as the owner, and a `logout` with no gate. Land Phase 0 first, or
-hold these files off `origin` until it ships.
+`main` (at the latest when STORE_MIGRATION's lanes run, from Oct 15, 8 PM) publishes 01b §6 and 01e
+F1: a pre-guard session that still acts as the owner, and a `logout` with no gate. Land Phase 0
+first, or hold these files off `origin` until it ships.
 
 ## 2. What holds up
 
@@ -396,7 +422,7 @@ I tried to break each of these and could not; several I checked against producti
   invocation" models.
 - **The cron's secret check**: constant-time and fail-closed (`src/app/api/cron/sync/route.ts:45-66`).
 - **Deletion by destroying the database**, with T11's three refusals (the admin, `lazyboy`, a name or
-  owner mismatch) and backups that list only active users; R3 and R4 tighten its triggers, not its
+  owner mismatch) and backups that list only active users; R3 and R4 tighten its edges, not its
   shape.
 - **The recorder staying Rem's alone**, and the rule that every isolation test is first shown failing
   against a planted bug.
@@ -442,8 +468,10 @@ bug, then green.
 
 ## 5. What I ran
 
-Oct 14, 11:39 PM to Oct 15, about 12:20 AM, on the Mac. Nothing wrote to the store, the Zenbook,
-Turso, Vercel or Spotify; the only file written in the repo is this one.
+Oct 14, 11:39 PM to Oct 15, about 12:10 AM, on the Mac. Nothing wrote to the store, the Zenbook,
+Turso, Vercel or Spotify; the only file written in the repo is this one, and the scratch files
+(extracted tarballs, three field-filter scripts, the fetched `/login` page) under
+`/tmp/lb_sec_review/` were deleted at the end.
 
 - Read in full: `PLAN.md`, `01b-surface.md`, `01e-auth.md`. Read the parts that bear on this lens and
   scanned the rest with `grep` for security terms: `01a` §7, `01c` §0, §3, §5.4, §5.7, `01d` §4,
