@@ -2,12 +2,52 @@
 
 Lane 0221_lb_mu_ov_surface, Oct 14, 2026. Planning only: nothing here changed code, data, the Zenbook
 store or Vercel. Line numbers are against commit `1c7aabb` (no file under `src/` changed between it
-and `90e912f`, checked with `git diff --stat 1c7aabb HEAD -- src`). Every claim cites `file:line`
+and `ed70ad5`, checked with `git diff --stat 1c7aabb HEAD -- src`). Every claim cites `file:line`
 or a doc section; every number says how it was measured. Section 9 lists every command I ran.
 
-Status: outline. Sections fill in order and are committed as each lands.
+Status: complete.
 
 ## 0. Summary
+
+The surface is 8 pages, 24 server actions and 12 route files. Every entry point checks *whether*
+someone is signed in and none checks *who*, because nothing can: the session cookie carries no
+Spotify id (Auth.js mints a random `sub` per sign-in and the app stores nothing else), every Spotify
+call takes the one global token row, and every store read is unscoped (section 1).
+
+With a second account signed in, as the code stands: 14 actions and 4 routes call Spotify with
+whichever account's token is stored; all 7 Data Cache entries, both search ETags and the 3 version
+markers are keyed without a user; the cached playlist tracks are served by playlist id with no access
+check, so a private playlist is readable by anyone who knows its id; and two pieces of
+per-instance memory cross users outright. The in-flight token refresh hands A's tokens to B, and the
+60-second playlist-list cache makes B's library a copy of A's, which a cron that syncs users in turn
+would hit for every user after the first. Section 4 lists 26 entry points and shared states by root
+cause, with `file:line` and what each needs.
+
+The fixes the surface needs (section 5): the Spotify id in the session; one `requireUser()` gate
+called first everywhere; a store API that cannot be called without a user; per-user tokens, locks
+and refresh coordination; the user id as an *argument* to every cached read, because Next builds the
+key from the callback's source text and its arguments, so an id captured in a closure is invisible to
+it; per-user ETags and browser storage cleared on sign-out; owners on tasks; owner-only `/usage`;
+previews off the production store. The current test stub makes `unstable_cache` a pass-through, so
+the simulated environment cannot see a key collision; a faithful stub plus a two-user test proves
+most of the list.
+
+Three things are wrong today, single-user (section 6). The browser that completed the second
+account's sign-in before the 8:41 PM guard still holds a session that acts as the owner, since the
+guard runs only at sign-in and `AUTH_SECRET` is listed as created 133 days ago: rotate `AUTH_SECRET`.
+`SPOTIFY_OWNER_ID` is set nowhere, so the guard trusts `meta.me_id`, which the incident flipped and
+library syncs rewrite: set it in Production. `logout` has no gate and deletes the token row: add one.
+
+`STORE_MIGRATION.md` need not wait (section 7). Three passages should change before Oct 15, 8 PM:
+§10 must define the per-user key for the browser's IndexedDB copy, since no user id reaches the
+browser; §8 step 9 should flip Production only and keep Preview off the new store; §6 item 8's fence
+should derive its table list from `init()`. The multi-user token table should land after the cutover,
+whose runbook compares a single token row.
+
+Decisions that are Rem's: E1-E3's production changes (recommended now); whether sign-out also
+disconnects Spotify and stops capture (recommended: no, a separate "disconnect"); whether a session
+with a dead Spotify refresh may still read its stored history (recommended: yes); per-user playlist
+membership over a shared track cache (recommended, section 5, S9).
 
 ## 1. How a request learns who the user is today
 
