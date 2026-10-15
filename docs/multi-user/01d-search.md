@@ -90,7 +90,8 @@ the store cannot read (`null`) is served fresh with `Cache-Control: no-store` an
 `"lib-<shape>-<version>-<UTC day>"` / `"hist-<shape>-<version>-<UTC day>"`
 (`library/route.ts:39-43`, `history/route.ts:26-30`). The browser keeps the body and revalidates on
 every load; an unchanged tag answers 304 with no body (`library/route.ts:45-47`,
-`history/route.ts:31-33`). The UTC day in the tag forces one full download per day at most.
+`history/route.ts:31-33`). Because the tag carries the UTC day, the first visit of each UTC day
+downloads both bodies in full even when nothing changed.
 
 **Shape tokens.** `LIBRARY_INDEX_SHAPE = "v1"` and `HISTORY_INDEX_SHAPE = "v2"` (`db.ts:1511-1513`) sit
 in both the cache key and the ETag, because the Data Cache outlives a deploy and once served an
@@ -104,8 +105,8 @@ old-shaped body to new code (GOTCHAS "The Data Cache OUTLIVES THE DEPLOY").
 1. **Server render** (`home/page.tsx:69-137`): `auth()`, the materialized Home payload (one `meta`
    row, `meta.home_payload`, rebuilt on the write path by `rebuildHomePayload`, `db.ts:1227-1357`),
    the Spotify cooldown and capture health, all in one `Promise.all` (`page.tsx:78-83`). The page
-   ships the 14-day strip, the all-time totals and the opening day's rows; `loading.tsx` paints a
-   skeleton before the first byte. The chrome (`(app)/layout.tsx:39-71`) mounts the now-playing
+   ships the 14-day strip, the all-time totals and the opening day's rows; `loading.tsx` streams a
+   skeleton that waits on no query. The chrome (`(app)/layout.tsx:39-71`) mounts the now-playing
    poller (every 6 s, `now-playing-context.tsx:76, 358`), `SyncOnLoad` (POST `/api/sync` on load,
    every 2 min and on focus, `sync-on-load.tsx:12-26`) and the metrics collector.
 2. **On mount**: the action dock's playlists (`dockDataAction`, `dock-loader.tsx:21-50`), the
@@ -343,7 +344,7 @@ the cliff (§5).
 body of a Vercel Function is 4.5 MB ... it will return an error 413: FUNCTION_PAYLOAD_TOO_LARGE"
 (https://vercel.com/docs/functions/limitations, fetched 2026-10-14). That is a 413 and no payload at all,
 so the box degrades to the server fallback. The library body reaches it at ~36,000 identities; the
-history body, by §3.1's model, at roughly 90,000 plays with 20,000 identities (§3.3).
+history body, by §3.1's model, at roughly 110,000 plays with 20,000 identities (§3.3).
 
 **3. Client main-thread time.** Measured at 4× in §2.3: 264 ms at today's size; **[measured]** 496 ms
 at 2× and 1,013 ms at 4× synthetic scale (identities and plays duplicated under suffixed names, so
@@ -581,15 +582,17 @@ today.
 
 | step | repeat visit, owner today | first visit, typical 1-yr user |
 |---|---|---|
-| payload source | IndexedDB, ~20 ms | manifest: 1 round trip; segments in parallel, ~350 KB gzipped: ~0.3 s at 10 Mbit/s, ~1.8 s at 1.6 Mbit/s |
+| payload source | IndexedDB, ~20 ms | manifest: 1 round trip; library ~350 KB + history segments ~350 KB gzipped, in parallel: ~0.6 s at 10 Mbit/s, ~3.5 s at 1.6 Mbit/s |
 | server | none on the critical path; manifest + delta after paint | each segment built once from an index range (~4,500 rows), then cached |
-| parse + search set | no parse (stored objects) + `buildEntries` ~47 ms | ~45 ms |
+| parse + search set | no parse (stored objects) + `buildEntries` ~47 ms | ~50 ms |
 | days | lazy: < 5 ms per day selected | the same |
-| search usable after the effect runs | **~80 ms** (R3: ≤ 300 ms) | **~0.8-1.2 s** at 10 Mbit/s, **~2.3 s** on slow 4G |
+| search usable after the effect runs | **~80 ms** (R3: ≤ 300 ms) | **~1.0-1.4 s** at 10 Mbit/s, **~4 s** on slow 4G |
 | one-letter keystroke | 10.5 ms matching + rendering | ~7 ms matching + rendering |
 
 The first-visit target of 2 s on a phone holds on a normal mobile connection and misses on slow 4G for
-anything above a light user. That is set by compressed bytes, so the remaining lever is fewer of them
+anything above a light user (a light user's ~250 KB lands in ~1.8 s there). Today the client waits
+for both halves (`den-home.tsx:620`); letting the history half build the days and the played songs
+before the library lands would make the first visit usable sooner without moving fewer bytes. That is set by compressed bytes, so the remaining lever is fewer of them
 on a cold visit, for example one art and album dictionary shared by all of a user's segments instead
 of one per segment (the 30% overhead above). Stripping the `https://i.scdn.co/image/` prefix is not
 that lever: it was measured at −16% raw but −1% gzip (`db.ts:1428-1431`), so it helps the 2 MiB and
@@ -661,11 +664,11 @@ production-path timing of the full history build on Turso, which this document d
   both.
 - **The 304 rate.** Nothing counts 304s. §2.2's "each visit hours apart re-downloads both" comes from
   how often the versions move and from the ledger's one-rebuild-per-visit pattern, not from a count.
-- **Why `library_seq` moves several times a day.** It stands at 603. The ledger shows 2-4 playlist-list
-  rewrites (`playlist_rewrite`, `storePlaylists`' delete-and-reinsert branch, `db.ts:1762-1800`) and
-  2-6 unique-song recomputes on the days they happen in Sep-Oct; each list rewrite moves the version
-  and costs every browser a full library download. Whether those rewrites reflect real changes was not
-  traced.
+- **Why `library_seq` moves several times a day.** It stands at 603. The ledger averages 1.9-2.8
+  playlist-list rewrites (`playlist_rewrite`, `storePlaylists`' delete-and-reinsert branch,
+  `db.ts:1762-1800`) and 2.4-3.4 unique-song recomputes a day over the days they ran in Sep-Oct (3-5
+  and 2-7 on Oct 12-14). Each list rewrite moves the version and costs every browser a full library
+  download. Whether those rewrites reflect real changes was not traced.
 - **Which statement the meter counted at ~50,500 rows** on Oct 13 (§2.2, §6 item 4): the meter log is
   on the Zenbook and was not read.
 - **Vercel Data Cache size and eviction.** The docs state LRU eviction at "a fixed storage limit" shared
