@@ -239,6 +239,123 @@ key that lets `init()` skip its DDL when current would remove it; it is optional
 
 ## 4. Identity, sessions and per-user tokens encrypted at rest
 
+### 4.1 The session names its user (M4)
+
+Today nothing on the server can say which Spotify account a session belongs to: Auth.js mints a
+random `sub` at every sign-in, and the app stores no id on the token (01b §1.1, 01e §1.3-1.4). The
+design follows 01e §5.1, with an integer uid in place of the `account_id` as the token's claim:
+
+- **Sign-in.** The `signIn` callback (`auth.ts:344-347`) keeps its not-registered branch and
+  replaces `isOwnerSignIn` with `admitSignIn(profile)`, which reads the app database: a user whose
+  `account_id` equals `profile.account_id` and whose status is `active` or `needs_reconnect` is
+  admitted; so is an `invited` row whose `spotify_id` equals `profile.id` and whose `account_id`
+  is still empty. Everyone else gets AccessDenied, worded "not invited" on `/login`. A profile
+  without `account_id` is refused and logged, never keyed on `id` instead (01e §5.5), and a store
+  error refuses, as `owner.ts` does today. An env flag `SIGNUPS=owner|invite` keeps Phase 1
+  owner-only and gives Phase 2 a one-variable way back.
+- **The jwt callback's sign-in branch** (`auth.ts:352-377`) binds the row with a compare-and-set
+  (`UPDATE users SET account_id = ?, status = 'active', spotify_id = ?, last_sign_in = ? WHERE id
+  = ? AND (account_id IS NULL OR account_id = ?)`), writes the encrypted token with `granted_at =
+  now`, and sets `token.uid` and `token.epoch` from the row, never from the incoming token (01e
+  §5.6, fixation). If the token write fails, the sign-in fails visibly: the two paths that park
+  tokens in the cookie (`auth.ts:367-374`, `388-405`) are removed, because a parked token is
+  invisible to the cron (01e A18).
+- **Every later request** reads the user row and the token row in one statement on the app
+  database, `SELECT u.status, u.session_epoch, t.blob, t.expires_at FROM users u LEFT JOIN
+  user_tokens t ON t.uid = u.id WHERE u.id = ?`, through a React `cache()` box keyed by uid (it
+  replaces `tokenBox`, `auth.ts:73-83`). No `uid` on the cookie, an unknown uid, a status of
+  `disabled`, `deleting` or `invited`, or an epoch that differs from the row's → the callback
+  returns `null` and the request is signed out. Status `needs_reconnect` keeps today's behaviour
+  for a missing token: `error = "RefreshAccessTokenError"`, and the gates send the user to
+  `/login` (`auth.ts:406-409`). It is one round trip, as today's token read is (01e §5.1).
+- **`requireUser()`**, server-only, wraps `auth()` and returns `{ uid }`, or redirects a page,
+  answers 401 to a route and `{ ok: false }` to an action (01b S2). It is the only source of `uid`
+  for an entry point. The session exposes `user.id = uid`; that integer is public by design
+  (`GET /api/auth/session` serves whatever the session holds, `docs/SECURITY.md` "Tokens never
+  reach the browser") and is also the browser's storage key (§5.3).
+
+Every cookie minted before Phase 1 lacks `uid`, so at deploy every session ends once, the
+owner's included. That closes 01b E1 / 01e F1 for good. M0a closes it now, because Phase 1 is
+days to weeks away and the second account's cookie lasts until about Nov 13 (01e F1).
+
+Home loses one parallel wave. Today the page runs `auth()` and three reads in one `Promise.all`
+(`src/app/(app)/home/page.tsx:78-83`), so an anonymous request costs four store reads (01b E5).
+The reads now need the uid, so they start after the gate: one extra sequential round trip to the
+user's database, ~15 ms at STORE_MIGRATION R1's target. Keeping the wave by decoding the JWT
+separately (01b S2) would save those milliseconds at the cost of a second decode path; this
+design does not take it.
+
+### 4.2 Tokens per user (M5)
+
+The token core leaves `auth.ts` for a module with no next-auth import, so the simulated
+environment can load it (`tests/owner-signin.test.ts:5-6` explains why it cannot today; 01e
+A21). Every function in it takes the uid:
+
+| today | design | why |
+|---|---|---|
+| `inflightRefresh`, one promise per instance (`auth.ts:188-196`) | `Map<uid, Promise>` | left as one promise, user B's refresh joins user A's and receives A's tokens (01e A2): the one change in this list that would leak silently |
+| `acquireLock("spotify_refresh")` (`auth.ts:212`) | `lock:spotify_refresh:<uid>` in the app database | a shared lease makes B wait up to ~32 s for a token nobody is refreshing (01e A4) |
+| `getSpotifyTokens()` / `setSpotifyTokens()` / `clearSpotifyTokens()` on Rem's `meta` (`db.ts:2514-2531`) | `getTokens(uid)` / `setTokens(uid, …)` / `clearTokens(uid)` on `user_tokens` | 01e A1, A5 |
+| `getValidAccessToken()` (`auth.ts:278-289`), `refreshingToken()` (`actions.ts:46-57`), the library task's getter (`playlists-sync.ts:61-65`) | each takes the uid, and a background task binds it at creation | 01e A16 |
+| `clearTokensIfStale` (`auth.ts:170-181`) | same rule, within one user's row | the fresh-token veto carries over unchanged (01e §2.5) |
+| a terminal `invalid_grant` clears the row | clears that user's row and sets `status = 'needs_reconnect'`; the cron stops calling Spotify for them | 01e §5.7; nobody else is touched |
+
+Write load: the cron probes every active user on every tick, so each user's access token is
+refreshed about hourly, ~24 times a day, each a lock, a row write and a release: ~72 app-database
+writes per user per day, ~11,000 a month at five users [estimate, 01e §5.2's arithmetic].
+
+### 4.3 Encryption at rest
+
+01e §5.3's design, adopted as written:
+
+- AES-256-GCM from `node:crypto`, a random 12-byte IV per write, stored as
+  `v1.<base64url(iv ‖ ciphertext ‖ tag)>`. Both tokens go in one blob.
+- Associated data `lazyboy:tokens:<uid>`: a ciphertext copied into another user's row fails to
+  authenticate, so write access to the store without the key cannot borrow someone's Spotify
+  account through the app.
+- Keys in one variable, `TOKEN_KEYS="v1:<base64 of 32 bytes>"`, a Vercel Secret, Production only.
+  Preview gets none. Dev has its own key and its own app database (§8.2), so the production key
+  never sits in `.env.local`.
+- Rotation: put the new key first and redeploy; rows re-encrypt at their next refresh, about
+  hourly; drop the old key once `SELECT count(*) FROM user_tokens WHERE blob LIKE 'v1.%'` is 0.
+  Losing the key costs every user one sign-in and nothing else; a copy in Rem's password manager
+  is the backup.
+- A blob that fails to decrypt reads as no token (`needs_reconnect`), logged with the uid only.
+- Cost: microseconds of CPU per request on a ~600-byte blob, and no extra round trip [estimate,
+  01e §5.3].
+
+What it protects: every copy of a token row outside the running app, which after the move means
+Turso's own backups and point-in-time history, the nightly dumps on the Zenbook and OneDrive,
+scratch copies, and anyone holding a leaked database or platform token (01e F2 lists today's
+plaintext copies). What it does not protect: code running in production, which holds the key, and
+a holder of `AUTH_SECRET`, who can drive the app as any user without seeing a token. Vercel KMS
+only signs and AWS KMS brings the AWS dependency Rem ruled out for this app (01e §5.3).
+
+The two plaintext rows already in Rem's database (`spotify_tokens`, `spotify_tokens_dev`) and
+every copy in his 60 days of backups are not covered by this. §9 deletes the rows once the
+rollback window closes, and STORE_MIGRATION's backup rewrite should strip them from the copies
+now (§8.3, 01e §6 item 1).
+
+### 4.4 Sign-out, revocation and the session-less paths
+
+- **Sign out** clears this browser's cookie and the browser stores (M18). Capture continues.
+  **Sign out everywhere** bumps `session_epoch`. **Disconnect** deletes the token, bumps the
+  epoch, deletes the user's data (§10.3) and tells them to remove Lazy Boy at
+  spotify.com/account/apps, since the app cannot revoke a grant (01e §1.6). Today's single
+  `logout` both stops capture and signs out every device (`actions.ts:63-69`); the split is
+  01e §5.6's recommendation and Rem's call (§15). Phase 0's M0c only adds the missing session
+  check.
+- The 30-day session stays unrenewed (01e §1.4). Every sign-in passes Spotify's consent screen
+  (`show_dialog`, `auth.ts:322`), which restarts the 6-month refresh-token lifetime, so an active
+  user never reaches it.
+- A user who revokes the app at Spotify surfaces as `invalid_grant` at the next refresh (01e
+  §5.7). What happens to their data afterwards is in §10.3.
+- The cron and background tasks call `getValidAccessToken(uid)` for the user they serve.
+  `CRON_SECRET` stays the cron's only gate; with fan-out a holder can make the app spend every
+  user's share of the Spotify quota, though no data leaks through it (01e §3.2). One secret for
+  both pingers is enough at this size; the cron-job.org job rejoins the holder list in
+  `docs/SECURITY.md`.
+
 ## 5. Isolation: the enforcement points and the tests that prove them
 
 ## 6. Background sync for N users inside Spotify's limits
