@@ -8,11 +8,53 @@ which the overviews cite; `git diff --stat ac6f7fe HEAD -- src scripts ops tests
 next.config.ts package.json` is empty at `7e0c5b1`. Every number is **[measured]** with its source or
 **[estimate]** with its arithmetic. §17 lists everything this lane ran.
 
-Status: outline; sections are filled in order and committed one by one.
+Status: complete, Oct 14, 2026.
 
 ## 0. Summary
 
-(to fill last)
+- **Targets (§1).** Five accounts, Rem included: Spotify's development mode allows five per app and no
+  path to more, so the brief's 25 is out of reach; past five, people run their own copies. No path
+  returns or caches another user's data, and every way it could is met by one layer that prevents it
+  and one that detects it. On a mid-tier phone at 10 Mbit/s: search usable ≤ 2 s after first paint on
+  a first visit, ≤ 300 ms on a repeat, a keystroke painted ≤ 50 ms. Freshness: what any screen shows
+  is always current; with the app closed, a play is stored within ~2 minutes while Spotify's shared
+  budget allows; no play is lost while a pinger runs. Store: ≤ 1.5M rows read per heavy user on a heavy
+  day, and nothing on a per-visit path that grows with history. No user path on the Zenbook. $0 until
+  the first friend, ≤ $26 a month at five.
+- **Structure (§2).** The three designs agree on the skeleton: a Turso database per user plus a small
+  app database, a user id and session epoch checked on every request in one query, AES-256-GCM tokens,
+  one cron tick for all users. The plan takes A's structure (layered enforcement and phases that
+  change nothing a friend can reach until Phase 4), B's cost rule and its three levers that matter at
+  five users, and C's operational choices. The picks that differ from one or more designs: a random
+  uid, never reused (B); a versioned open with an owner stamp in place of `init()` (A with C); per-user
+  leases on the tick (A); a fair-share quota brake (A); monthly history segments built on demand (A)
+  carrying listened seconds (B); destroy-at-once deletion with four-day friend backups (A, C).
+- **A finding this lane reproduced (§8.2).** B's rewrite of the "From" verdict, starting from the song
+  instead of walking the playlist, gives the same verdict on all 7,572 plays of the Aug 11 copy and
+  reads ~2.7 rows a play where today's walks ~411. Lanes 1910-1911 should ship it with their scoping.
+- **Store cost (§8).** Rem's heavy day is ~19M rows on Turso's terms today (most of it three unscoped
+  orphan passes and the all-time recompute); ~1.45M after the predicate, a stored listened time with an
+  accumulator, and segments; ~0.36M after the Home payload is patched in place. Five app-heavy
+  Rem-like users a year in: ~70M a month, 14% of the free plan.
+- **Search (§9, §14.1).** First visit ~1.1-1.4 s for Rem, ~0.8-1.1 s for a typical friend; repeat
+  ~80 ms; a keystroke ~25-35 ms. The segments must ship before mid-December: Rem's history body passes
+  the Data Cache's 2 MiB limit around late December, multi-user or not.
+- **Sync (§7, §14.2).** One tick a minute from two pingers (the Zenbook's and cron-job.org's), each user
+  under a lease and their own deadline; harvests on track changes. Rem plus one friend fits Spotify's
+  scarce budget with room; five heavy listeners need the brake, which slows the heaviest first and
+  holds closed-app freshness to 15-30 minutes late on heavy days.
+- **STORE_MIGRATION (§10).** No lane waits. Six small edits before Oct 15, 8 PM; one widens lane
+  1910's scope to the predicate rewrite. Rem's data moves nowhere: `lazyboy` becomes his user database,
+  and only his token rows leave it, a week after they are copied (§11).
+- **Rollout (§13).** Phase 0 now; the migration; the single-user performance track; three owner-only
+  phases; the first friend no earlier than early to mid-December [estimate]; the quota brake and the
+  Home patch before the second; friends one at a time.
+- **Not met (§14):** 25 accounts on one Spotify app; a first visit on slow 4G; a heavy three-year
+  user's first visit (~2.2-2.6 s); two-minute closed-app freshness for five heavy listeners if the
+  quota is shared. Each has its options.
+- **Rem's decisions (§18):** 25, each with a recommendation. Five are for now: Phase 0's production
+  changes, STORE_MIGRATION's edits, the predicate in lanes 1910-1911, where the logs live, and two
+  dashboard reads.
 
 ## 1. Targets
 
