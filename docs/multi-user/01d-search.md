@@ -435,7 +435,143 @@ path, each with the test that proves it:
 ## 5. What keeps it fast per user: caching and incremental updates
 
 ### 5.1 The options, each with its mechanism and cost
+
+Sizes as in 01-current-system: **S** = one place, **M** = a function's contract or a key changes with
+callers to follow, **L** = a design change.
+
+**O1. Per-user keys, markers, ETags and browser stores (§4.1). M. Required.** It makes multi-user
+correct and does nothing for size or growth.
+
+**O2. Move the catalog rows out of the history body into an immutable third body. M.** The catalog rows
+never change after `scripts/backfill-scan.mjs` writes them, so they can sit behind their own version
+(bumped only by that script) and a long-lived browser copy. **[measured]** Effect today: the volatile
+history body drops from 1,791,126 to 774,035 B (§2.1), its data-cache item from 86.6% to 37.1%, and
+the next crossing moves from ~late December 2026 to ~10.7 months out at the current slope (§3.1).
+`buildDays` loses 35% of its plays. It does not stop the history growing ~123 KB a month, and it
+leaves every visit after listening re-downloading the rest.
+
+**O3. Split the history into monthly segments behind a manifest. L.** One body per (user, UTC month),
+plus the catalog as its own segment; each self-contained in today's tuple format. A small manifest
+(`[segment, version, plays]`, a few hundred bytes for years of history) tells the client which ones
+moved. A segment's URL carries its version, so the browser keeps it with
+`Cache-Control: private, max-age=31536000, immutable` and never asks again, and the server builds it
+once per version from an index range on `(user_id, played_at)`.
+
+**[measured]** The owner's history split this way:
+
+| segment | plays | raw | gzip |
+|---|---|---|---|
+| 2026-06 | 3,459 | 303,184 B | 112,436 B |
+| 2026-07 | 2,879 | 246,175 B | 92,014 B |
+| 2026-08 | 3,632 | 291,369 B | 106,716 B |
+| 2026-09 | 2,692 | 220,230 B | 81,484 B |
+| 2026-10 (to the 14th) | 1,367 | 126,902 B | 47,372 B |
+| catalog | 7,529 | 1,046,987 B | 357,537 B |
+| all segments | 21,559 | 2,235,069 B (+24.8%) | 797,780 B (+29.8%) |
+| one body (today) | 21,559 | 1,791,134 B | 614,713 B |
+
+A cold visit pays ~30% more bytes because each segment interns its own art and album strings. A
+visit after listening pays only the hot month: 47 KB gzipped mid-month and ~110 KB at month's end,
+against 615 KB today. A rebuild reads ~3 rows × the month's plays, ~10,000 at most for the owner,
+against ~65,000. No segment of a normal listener comes near 2 MiB (a 100-plays-a-day month is
+~300 KB); an import produces many bounded months, and the catalog segment splits by size if it ever
+grows.
+
+The hard part is the version of a closed month. Old rows do change: `ctx_orphan` flips when a
+playlist's membership changes (`recomputeOrphanFlags`, `db.ts:724-751`), a context name resolves
+weeks later (`contexts`, GOTCHAS "Dead playback contexts"), a track is re-tagged, the backstop replay
+and history imports insert into past days, and an out-of-order insert re-opens its neighbours' skip
+verdicts (`db.ts:770-822`). Two ways to version it:
+
+- **Per-month counters bumped by the writes that touch the month.** Every one of those writes can
+  name its months cheaply: inserts carry `played_at`; the orphan pass can `UPDATE … RETURNING
+  played_at`; a context or track change can read its plays' months through `idx_plays_context` /
+  `idx_plays_track`. Correct and fine-grained; it adds a step to five write paths, and a missed bump
+  serves a stale month for as long as the browser keeps it (the same failure class as a missed
+  `write_seq` bump, `db.ts:337-340`).
+- **Immutable facts plus small mutable dictionaries.** Segments carry only what cannot change — the
+  identity, the minute, the context's index — and the mutable parts (context names, orphan flags,
+  re-tagged strings) ride in a small per-user dictionary that versions on its own. Closed months
+  then never change except by insert, but the payload format and the client merge change more.
+
+I lean to the per-month counters: they keep today's tuple format and the client merge, and each bump
+site has a known-answer test in `tests/` (write to an old month → that month's version moves, no
+other does).
+
+**O4. Fetch only what changed since the last visit (a cursor delta). S-M, needs O5.**
+`refreshHistoryAction` already returns the plays newer than the minute the client holds
+(`history-actions.ts:122-161`) and the client already merges them (`history-patch.ts`). Run the same
+read as a scoped GET when Home mounts, with the cursor taken from the stored copy, and a repeat visit
+moves ~150 store rows and a few KB instead of a whole body. Non-append changes still need O3's
+versions (or a full reload) to reach the client.
+
+**O5. Paint search from IndexedDB before the network (STORE_MIGRATION phase E). M, already planned
+(lanes 1905-1906).** **[measured, browser]** Reading today's two bodies back as stored objects takes
+18-20 ms at 4× and ~30 ms at 6× (5.5 ms at 1×); stored as text it is 12 ms to read plus 16 ms to parse
+at 4×. That is from the Mac's SSD with a warm OS cache, so a phone's storage adds an unknown amount.
+Today, phase E's 300 ms budget (R3) is mostly spent by `buildDays` (199 ms at 4×), not by
+IndexedDB.
+
+**O6. Cheaper client work. S-M each, independent of multi-user.**
+- *Lazy days.* Plays arrive sorted newest-first, so each local day is one contiguous run of the
+  `plays` array. Find a day's run by binary search on the minute bounds and build that day's rows
+  when it is selected (~100 rows), instead of every day's rows up front. That removes ~75% of today's
+  client work (199 of 264 ms at 4×) and makes the rest independent of history length.
+  `history-days.ts` is pure and already known-answer tested against `getPlaysByDay`
+  (`history-days.ts:1-5`, `den-home.tsx:239-246`), so the change has a ready check.
+- *A worker.* Parse and `buildEntries` (~65 ms at 4× today; ~0.2 s at the 3-year heavy size, scaled
+  from the 4× synthetic runs) can run in a Web Worker, with keystrokes answered there and the ≤ 400
+  results posted back. That only pays once lazy days are in and the sizes are past the typical user's.
+- *Render fewer rows per keystroke.* Matching is 10.5 ms at 4× for a one-letter query (§2.3); the
+  desktop keystroke-to-paint is 18-44 ms, so rendering 400 complete rows is the larger share. Painting
+  the first screenful and the rest on scroll is the lever for the 50 ms keystroke target on a phone.
+  Not measured on a device.
+
+**O7. The library half per playlist. M-L. Later.** For a repeat visit, the client sends the
+`(playlist, snapshot_id)` pairs it holds and the server returns only the playlists whose snapshot moved
+(Spotify's `snapshot_id` already gates the track cache, GOTCHAS "Playlist detail pages"). A cold visit
+keeps one body, chunked by playlist below 2 MiB for libraries past ~12,000 identities (75% of the
+limit). Worth it before 250 users (§4.2's last column assumes it). For the owner it depends on why
+`library_seq` moves several times a day (§8).
+
+**Not recommended.** Materializing each user's payload into the store on the write path, as
+`home_payload` does: it moves the build off the request, but every rebuild still scans the user's
+plays, stores multi-MB rows, and does nothing about the 2 MiB limit. Server-side search per
+keystroke: even indexed (SQLite FTS5), each keystroke pays a round trip (STORE_MIGRATION's R1 target is
+p50 ≤ 15 ms to the store, plus the request to Vercel) and the box gives up the instant answer it has
+today.
+
 ### 5.2 Recommendation and order of work
+
+1. **Now, single-user, before late December: O6 lazy days, and O3 with the catalog as its own segment**
+   — or **O2** as the stopgap if O3 cannot land by mid-December. The 2 MiB cliff hits the owner whether
+   or not anyone else ever signs in, and O3 is also the change that makes per-user rebuilds affordable
+   (§4.2).
+2. **With multi-user, blocking the second account: O1** and the six tests in §4.3.
+3. **STORE_MIGRATION phase E (O5), keyed by user and shape, storing segments rather than whole bodies,
+   plus O4's visit-start delta.** If phase E ships first with whole bodies, its store interface should
+   take `(user, kind, segment, version)` so segments drop in without a second migration of browser
+   data.
+4. **O7 and the worker** when a user's library passes ~12,000 identities or the phone budget below
+   fails on a real device.
+
+**Budget against the design targets [estimate, from §2.3 and above, 4× CPU as "a phone"]:**
+
+| step | repeat visit, owner today | first visit, typical 1-yr user |
+|---|---|---|
+| payload source | IndexedDB, ~20 ms | manifest: 1 round trip; segments in parallel, ~350 KB gzipped: ~0.3 s at 10 Mbit/s, ~1.8 s at 1.6 Mbit/s |
+| server | none on the critical path; manifest + delta after paint | each segment built once from an index range (~4,500 rows), then cached |
+| parse + search set | no parse (stored objects) + `buildEntries` ~47 ms | ~45 ms |
+| days | lazy: < 5 ms per day selected | the same |
+| search usable after the effect runs | **~80 ms** (R3: ≤ 300 ms) | **~0.8-1.2 s** at 10 Mbit/s, **~2.3 s** on slow 4G |
+| one-letter keystroke | 10.5 ms matching + rendering | ~7 ms matching + rendering |
+
+The first-visit target of 2 s on a phone holds on a normal mobile connection and misses on slow 4G for
+anything above a light user. That is set by compressed bytes, so the remaining lever is fewer of them
+on a cold visit, for example one art and album dictionary shared by all of a user's segments instead
+of one per segment (the 30% overhead above). Stripping the `https://i.scdn.co/image/` prefix is not
+that lever: it was measured at −16% raw but −1% gzip (`db.ts:1428-1431`), so it helps the 2 MiB and
+4.5 MB limits and not the download. Whether slow 4G is in the target is for the design lanes to set.
 
 ## 6. What multi-user needs from STORE_MIGRATION.md
 
