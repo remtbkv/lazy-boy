@@ -8,24 +8,28 @@
 // up the rest next time. The client polls the task for progress and refreshes periodically
 // so newly-cached data appears as it lands.
 import "server-only";
-import { auth, getValidAccessToken, spotifyAccessToken } from "@/lib/auth";
+import { getValidAccessTokenFor, spotifyAccessTokenFor } from "@/lib/auth";
 import { getLibrarySyncedAt, getSpotifyCooldownUntil } from "@/lib/db";
 import { spotifyClient } from "@/lib/spotify";
 import { syncLibrary } from "@/lib/sync/library";
-import { getTask, runTask, type Task } from "@/lib/tasks/registry";
+import type { Uid } from "@/lib/identity";
+import type { Gate } from "@/lib/session-gate";
+import { getTaskFor, runTask, type Task } from "@/lib/tasks/registry";
 
 // Gentle pacing between playlist-track fetches keeps the burst under Spotify's rate limit.
 const SYNC_PACE_MS = 150;
 
-// One sync at a time. Overlapping triggers (one per page as you navigate) collapse onto
-// the running task instead of each kicking off a fresh scan.
-let currentSyncId: string | null = null;
+// One sync at a time per user. Overlapping triggers (one per page as you navigate) collapse
+// onto that user's running task instead of each kicking off a fresh scan; keyed by uid so one
+// user's running scan never stands in for another's (multi-user PLAN.md §6.2 layer 4).
+const currentSync = new Map<Uid, string>();
 
-export async function startLibrarySync(): Promise<
+/** The caller gates first (requireRouteUser) and hands over who the scan is for. */
+export async function startLibrarySync(user: Gate): Promise<
   { taskId: string; skipped?: undefined } | { skipped: string; taskId?: undefined }
 > {
-  const session = await auth();
-  if (!session || session.error || !(await spotifyAccessToken())) throw new Error("unauthorized");
+  const { uid } = user;
+  if (!user.canCallSpotify || !(await spotifyAccessTokenFor(uid))) throw new Error("unauthorized");
 
   // A live Spotify penalty makes a scan pointless: its first call 429s, and because the
   // library then STAYS stale, every navigation re-kicks another doomed probe (api_log,
@@ -47,10 +51,11 @@ export async function startLibrarySync(): Promise<
     return { skipped: "fresh" };
   }
 
-  if (currentSyncId) {
-    const t = getTask(currentSyncId);
+  const running = currentSync.get(uid);
+  if (running) {
+    const t = getTaskFor(running, uid);
     if (t && (t.status === "running" || t.status === "queued")) {
-      return { taskId: currentSyncId };
+      return { taskId: running };
     }
   }
 
@@ -59,13 +64,15 @@ export async function startLibrarySync(): Promise<
   // Token getter, not the session's fixed token — a cold full-library scan can outlive
   // the ~1h access token (GOTCHAS: background tasks get a getter, or they 401 mid-run).
   const sp = spotifyClient(async () => {
-    const t = await getValidAccessToken();
+    const t = await getValidAccessTokenFor(uid);
     if (!t) throw new Error("Spotify session expired — log out and back in.");
     return t;
   }, true, "library-scan-bg");
-  const task: Task = runTask("library-sync", (onProgress) =>
-    syncLibrary(sp, onProgress, { paceMs: SYNC_PACE_MS }),
+  const task: Task = runTask(
+    "library-sync",
+    (onProgress) => syncLibrary(sp, onProgress, { paceMs: SYNC_PACE_MS }),
+    uid,
   );
-  currentSyncId = task.id;
+  currentSync.set(uid, task.id);
   return { taskId: task.id };
 }

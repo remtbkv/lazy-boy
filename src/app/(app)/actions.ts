@@ -5,6 +5,7 @@ import { after } from "next/server";
 import { unstable_rethrow } from "next/navigation";
 import { auth, signIn, signOut, getValidAccessToken, spotifyAccessToken } from "@/lib/auth";
 import { getSpotify } from "@/lib/session";
+import { gateFromSession } from "@/lib/session-gate";
 import { spotifyClient, SpotifyError, type Track } from "@/lib/spotify";
 import { intersect, keyOf, reinsertPositions, subtract } from "@/lib/spotify/domain";
 import { runTask, taskDone } from "@/lib/tasks/registry";
@@ -120,6 +121,9 @@ export async function startCleanAction(
     if (!session || session.error || !(await spotifyAccessToken())) {
       throw new Error("Not authenticated");
     }
+    // The background task below is owned by this user (multi-user Phase 1: task owners).
+    const user = gateFromSession(session);
+    if (user.kind !== "allowed") throw new Error("Not authenticated");
     // Background bulk work can outlive the access token → refreshing getter, not a fixed
     // string (a 1h+ clean would otherwise 401 mid-run). Patient: ride out rate limits.
     const token = refreshingToken();
@@ -144,8 +148,10 @@ export async function startCleanAction(
       // also get there, but only after the whole background pass).
       if (result.id) await recordNewPlaylist(result.id, result.name, result.kept);
       if (ctx.backupId) await recordNewPlaylist(ctx.backupId, ctx.backupName, result.removed);
-      const task = runTask("clean-reconcile", () =>
-        reconcileClean(spotifyClient(token, true, "action:clean"), ctx),
+      const task = runTask(
+        "clean-reconcile",
+        () => reconcileClean(spotifyClient(token, true, "action:clean"), ctx),
+        user.gate.uid,
       );
       // Keep the invocation alive for the detached reconcile (serverless may freeze it
       // once the action returns).
@@ -180,6 +186,9 @@ export async function deletePlaylistAction(
     if (!session || session.error || !(await spotifyAccessToken())) {
       throw new Error("Not authenticated");
     }
+    // The background task below is owned by this user (multi-user Phase 1: task owners).
+    const user = gateFromSession(session);
+    if (user.kind !== "allowed") throw new Error("Not authenticated");
     // Getter, not a fixed string: the delete is quick, but the fire-and-forget resync
     // below can outlive the token.
     const token = refreshingToken();
@@ -194,8 +203,10 @@ export async function deletePlaylistAction(
     revalidatePath("/playlists");
     if (alreadyGone) {
       // Background resync; after() keeps the invocation alive until it finishes.
-      const t = runTask("sync-backend", (onProgress) =>
-        syncLibrary(spotifyClient(token, true, "action:library-scan"), onProgress),
+      const t = runTask(
+        "sync-backend",
+        (onProgress) => syncLibrary(spotifyClient(token, true, "action:library-scan"), onProgress),
+        user.gate.uid,
       );
       after(taskDone(t.id));
     }

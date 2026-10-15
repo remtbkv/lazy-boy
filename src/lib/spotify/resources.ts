@@ -71,37 +71,17 @@ function chunk<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
-// The full playlist list paginates the whole library yet changes rarely, and
-// both the Me stats and the Playlists grid re-fetch it on every navigation.
-// Cache it briefly so revisiting a page is instant instead of re-scanning. One
-// process-wide entry: this is a single-user app, so keying by access token only bought
-// a guaranteed cache miss every hourly token rotation (and a leaked entry per rotation).
-// Native Spotify order is preserved; create/remove/unfollow bust it.
-const PLAYLISTS_TTL_MS = 60_000;
-let playlistsCache: { at: number; items: Playlist[] } | null = null;
-
 export class Resources {
   readonly http: HttpClient;
   constructor(token: TokenSource, patient = false, source = "untagged") {
     this.http = new HttpClient(token, patient, source);
   }
 
-  /** Whole library in native order, cached for a short TTL. */
+  /** Whole library in native order. It used to sit in a 60-second process-wide cache, the one
+   *  cache that would hand one user's library to another once there are two (multi-user
+   *  PLAN.md §6.2 layer 4, 01b A6); it saved at most a second /me/playlists read a minute. */
   private async allPlaylists(): Promise<Playlist[]> {
-    const fresh = this.peekPlaylists();
-    if (fresh) return fresh;
-    const items = (
-      await this.http.getAll<RawPlaylist>("/me/playlists?limit=50")
-    ).map(normPlaylist);
-    playlistsCache = { at: Date.now(), items };
-    return items;
-  }
-
-  /** Cached library if still fresh, else null — never triggers a fetch. */
-  private peekPlaylists(): Playlist[] | null {
-    return playlistsCache && Date.now() - playlistsCache.at < PLAYLISTS_TTL_MS
-      ? playlistsCache.items
-      : null;
+    return (await this.http.getAll<RawPlaylist>("/me/playlists?limit=50")).map(normPlaylist);
   }
 
   // ---- current user ----
@@ -172,9 +152,6 @@ export class Resources {
       // description, which is public-facing in the user's Spotify.
       description: "",
     });
-    // A new playlist makes the cached library stale; drop it so the next read
-    // (Me stats, grid) reflects the addition.
-    playlistsCache = null;
     return pl.id;
   }
 
@@ -184,9 +161,6 @@ export class Resources {
     for (const batch of chunk(uris, CHUNK)) {
       await this.http.post(`/playlists/${playlistId}/items`, { uris: batch });
     }
-    // The cached library list now carries a stale snapshot/trackCount for this playlist;
-    // drop it so a sync inside the TTL doesn't skip the re-fetch (mirrors removeItems).
-    playlistsCache = null;
   }
 
   /** Insert track URIs starting at `position` (playlist order), batched. Used by the
@@ -197,16 +171,12 @@ export class Resources {
       await this.http.post(`/playlists/${playlistId}/items`, { uris: batch, position: pos });
       pos += batch.length;
     }
-    // Same collection write as addItems — it moves snapshot_id and trackCount, so the
-    // cached playlist list is stale (this was the one mutation that didn't bust it).
-    playlistsCache = null;
   }
 
   /** Delete (unfollow) one of the user's own playlists. Spotify has no hard "delete";
    *  removing your follow is how a playlist disappears from your library. */
   async unfollowPlaylist(playlistId: string): Promise<void> {
     await this.http.delete(`/playlists/${playlistId}/followers`);
-    playlistsCache = null;
   }
 
   /** Replace a playlist's contents with the given URIs (clears, then adds). */
@@ -224,7 +194,6 @@ export class Resources {
         items: batch.map((uri) => ({ uri })),
       });
     }
-    playlistsCache = null;
   }
 
   // ---- library ----
