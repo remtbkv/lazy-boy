@@ -1,4 +1,5 @@
-import { auth, spotifyAccessToken } from "@/lib/auth";
+import { spotifyAccessTokenFor } from "@/lib/auth";
+import { requireRouteUser } from "@/lib/require-user";
 import { spotifyClient, SpotifyError } from "@/lib/spotify";
 import { storePlaylistTracks } from "@/lib/db";
 
@@ -8,9 +9,10 @@ import { storePlaylistTracks } from "@/lib/db";
 // cached one the client sent. An unchanged playlist costs a single request, not a full
 // re-scan — which is what keeps detail pages fast and off Spotify's rate limiter.
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const session = await auth();
-  // Short-circuited so an unauthenticated POST costs no tokens read.
-  const accessToken = session && !session.error ? await spotifyAccessToken() : undefined;
+  const user = await requireRouteUser();
+  if (user instanceof Response) return user;
+  // Short-circuited so a dead grant costs no tokens read.
+  const accessToken = user.canCallSpotify ? await spotifyAccessTokenFor(user.uid) : undefined;
   if (!accessToken) {
     return Response.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }

@@ -1,4 +1,5 @@
-import { auth, spotifyAccessToken } from "@/lib/auth";
+import { spotifyAccessTokenFor } from "@/lib/auth";
+import { requireUser } from "@/lib/require-user";
 import { SpotifyError, spotifyClient, spotifyCooldownMs } from "@/lib/spotify";
 import { getContextName, recordContexts } from "@/lib/db";
 
@@ -16,10 +17,16 @@ const reply = (playing: unknown) =>
   Response.json({ playing, build: process.env.NEXT_PUBLIC_BUILD_ID });
 
 export async function GET() {
-  const session = await auth();
+  const user = await requireUser();
+  // The identity check could not run: "could not tell" (a non-200 the poll ignores), never
+  // "nothing playing", which would make Home finish the current song.
+  if (user.kind === "unavailable") {
+    return Response.json({ error: "unavailable", retry: true }, { status: 503 });
+  }
   // Short-circuited: this route is public and polled every 6s, so a signed-out caller must
   // cost zero DB reads (it did before the token moved off the session — keep it that way).
-  const accessToken = session && !session.error ? await spotifyAccessToken() : undefined;
+  const accessToken =
+    user.kind === "allowed" && user.gate.canCallSpotify ? await spotifyAccessTokenFor(user.gate.uid) : undefined;
   // Deliberately 200 {playing:null}, not 401: the poll runs every 6s, and a just-expired
   // session would otherwise error-spam the console until re-login. Nothing leaks — the
   // signed-out answer is indistinguishable from "nothing playing".

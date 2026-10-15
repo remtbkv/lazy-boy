@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import { auth } from "@/lib/auth";
+import { requirePageUser } from "@/lib/require-user";
 import { getStoredPlaylists, getMeId, getPlaylistsSyncedAt, getUniqueSongCount } from "@/lib/db";
 import { PlaylistsSync } from "@/components/playlists-sync";
 import { PlaylistsGrid } from "./playlists-grid";
@@ -17,8 +17,10 @@ export default async function DraftPlaylistsPage() {
   // name and cover URL alongside `location: /login`. Every page that reads personal data
   // gates for itself, BEFORE it reads any (never in a Promise.all with the reads — that
   // fetches them anyway).
-  const session = await auth();
-  if (!session || session.error) redirect("/login");
+  // requirePageUser: refused → /login; identity check down → a retryable error, never a read.
+  // A dead Spotify grant still goes to /login (multi-user PLAN.md §5.4, decision 20).
+  const { canCallSpotify } = await requirePageUser();
+  if (!canCallSpotify) redirect("/login");
 
   const [playlists, meId, uniqueSongs, syncedAt] = await Promise.all([
     getStoredPlaylists(),
