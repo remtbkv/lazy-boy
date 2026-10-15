@@ -92,6 +92,10 @@ generate one). Nothing else changes for a single user.
 - **`cache: "no-store"`** on the two direct Spotify fetches: the sign-in profile read
   (`src/lib/spotify/userinfo.ts`, §5.1: a cached profile would bind one sign-in to another's
   account) and the token refresh. Static check S5 found the first.
+- **`/playlists/[id]`'s cold path** (PLAN.md T3's note): the Spotify fetch and the
+  `storePlaylistTracks` write moved out of the nested `Tracks` component into `loadColdTracks`,
+  which the gated page body starts and hands to `Tracks` as a promise. The list still streams
+  under Suspense; no nested component reads user data on its own.
 - **Docs**: `.env.example` (`OWNER_UID`), `CLAUDE.md`'s file map, two `GOTCHAS.md` bullets that
   this branch made wrong (the per-process playlist cache, where `refreshShared` lives).
 
@@ -116,6 +120,7 @@ fix and failed:
 | `process-state`: `/api/tasks/[id]` as B with A's task id | 200 with A's result, where 404 is required |
 | `static` S4 | `playlistsCache` and `currentSyncId`, module state keyed by nobody |
 | `static` S5 | the sign-in `/v1/me` fetch had no `cache: "no-store"` |
+| `static` S8 | `/playlists/[id]`'s nested `Tracks` called `getSpotify` and `storePlaylistTracks` |
 
 Tests of new modules were red by absence first. What proves those checks have teeth is the
 planted-bug self-test, which stays in the suite for good (PLAN.md §6.4, completeness M2): each
@@ -132,7 +137,7 @@ one and must pass.
 | `planted-bugs.test.ts` | the equal-counter check fails over an `unstable_cache` keyed without the user (uid in a closure) and passes over `userCache`; the forged-entry check fails over the pass-through stub and passes over the faithful one; the concurrent-refresh check fails over a core whose in-flight promise is shared by everyone (today's `auth.ts` shape) and passes over the real core |
 | `user-storage.test.ts` | per-user names differ between users; sign-out clears every user's entries, prefixed or legacy, and keeps the device-level keys; only the app's signed-out 401 clears, never a 503, a 500 or a plain 401; a body naming another user is not used |
 | `health.test.ts` | each condition turns the verdict red on its own and unmeasurable ones are listed, never read as healthy; the route refuses no secret, a wrong one and an empty bearer when a secret is unset, accepts either pinger's; red with no token row, green with a token and a recent harvest; the reply carries only `ok`, `reasons`, `unchecked` |
-| `static.test.ts` | S1 `unstable_cache` only in `user-cache.ts` (db.ts pending); S2 no `as Uid` outside `identity.ts`, `mintUid` imported only by the gate and `auth.ts`; S4 every mutated module-scope binding in `src/` on a reviewed list saying how it is keyed (db.ts's four pending); S5 every direct Spotify fetch `no-store`; S6 every browser storage name built by `userStorageName`, device-level, or pending (12 pending). A pending entry that disappears fails the check, so the lists shrink only on purpose |
+| `static.test.ts` | S1 `unstable_cache` only in `user-cache.ts` (db.ts pending); S2 no `as Uid` outside `identity.ts`, `mintUid` imported only by the gate and `auth.ts`; S4 every mutated module-scope binding in `src/` on a reviewed list saying how it is keyed (db.ts's four pending); S5 every direct Spotify fetch `no-store`; S6 every browser storage name built by `userStorageName`, device-level, or pending (12 pending); S8 no async component nested in a page calls the store, the session or the Spotify client (red on main's `/playlists/[id]`, whose `Tracks` called `getSpotify` and `storePlaylistTracks`). A pending entry that disappears fails the check, so the lists shrink only on purpose |
 | `entry-points.test.ts` | T3's census: every page, layout, route and `"use server"` module under `src/app` is gated (and its source calls `require*User`), exempt by name, or pending with a reason; a new entry point with no entry fails |
 | `now-playing-route.test.ts` (changed) | its session mock carries a uid; new: an unavailable identity check is a 503 |
 | `spotify-userinfo.test.ts` (changed) | the profile fetch's pinned arguments now include `cache: "no-store"` |
@@ -172,11 +177,9 @@ decision:
 - T10 and the scripts' required `--user` with its `scriptUser` minter: the import scripts are
   queued, and the helper needs `forUser`.
 
-**Not done, and not blocked**: two Phase 1 items in unqueued files that this lane did not reach. S8
-and moving `/playlists/[id]`'s Spotify fetch and `storePlaylistTracks` write out of the nested
-`Tracks` component into the gated page body (PLAN.md T3's note); and the Spotify client asserting
-that a token's owner is the caller and tagging `api_log` with the uid (§5.2's last row), which
-needs `TokenSource` to carry a `UserTokens` instead of a string.
+- the Spotify client asserting that a token's owner is the caller and tagging `api_log` with the
+  uid (§5.2's last row): the assertion only means something once callers hand the client a uid
+  and a uid-bound token, which is the mechanical edit; the `api_log` column is in `db.ts`.
 
 ## 5. How to review the branch
 
