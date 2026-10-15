@@ -1129,7 +1129,60 @@ policy, each a single point of failure for every user and none fixable by this a
 
 ## 13. Costs
 
+Money, a month, prices from 01f §2.2 and §4.2 (fetched Oct 14):
+
+| item | Phases 0-1 | Phases 2-3, five users | basis |
+|---|---|---|---|
+| Spotify | $0 | $0 | development mode; Rem's Premium is required either way |
+| Vercel | $0 (Hobby) | $0 if the team's Active CPU stays under ~2 of Hobby's 4 hours; otherwise Pro, $20 including $20 of usage | unmeasured; 01f §2.3 estimates lazy-boy alone at 0.5-2.4 CPU-hours |
+| Turso | $0 (Free) | $0 while §12.4's projection holds; Developer is $4.99 billed yearly or $5.99 monthly, then $1 per billion reads past 2.5B | 01f §4.2 |
+| cron-job.org | – | $0 | free tier |
+| the Zenbook | $0 | $0 | already runs for the store, the recorder and DiveLoop |
+| **total** | **$0** | **$0-26** | |
+
+A friend's own marginal cost on the free tiers is zero in money: an idle Turso database costs only
+its storage (01f §4.2), and the cron tick is one invocation whatever the number of users (01c
+§5.8). What a friend does consume is shared headroom, in Spotify's scarce bucket (§6.4), Turso's
+reads (§12.4) and Vercel's CPU. Friends cannot be asked to pay: Lazy Boy controls playback, which
+makes it a Streaming SDA, and those may not be used commercially (01f §1.5).
+
+Work, by phase [estimate, in the planning program's own lanes]: Phase 0 is two environment
+changes and a one-line guard. Phase 1 is the large one: a mechanical lane for M2-M3 and M6-M7
+with `tsc` as its oracle, a lane for the token core, the gate and the cron (M1, M4, M5, M8-M12),
+and an adversarial review of the combined diff. Phase 2 is one lane plus Rem's dashboard reads and
+decisions. Phase 3 is the brake, then whatever the measurements ask for.
+
 ## 14. Targets no design meets, and the options
+
+1. **T1 as briefed: 25 users in development mode.** Spotify allows five per app, and extended
+   quota mode takes only organizations with at least 250,000 monthly users (01f §1.2-1.3). The
+   options: five on this app (this design, $0); past five, each person runs their own copy with
+   their own Spotify developer app and Premium, their own Vercel Hobby and Turso Free, at $0 in
+   hosting and about an hour of setup each plus Rem's support, sharing nothing (01f §5.2 option E;
+   this design's code with `SIGNUPS=owner` is that copy). Several Client IDs are not an option:
+   the Developer Terms allow one Security Code per SDA, and the quota is per developer account
+   anyway (01f §1.3).
+2. **T2's first visit on slow 4G.** At 1.6 Mbit/s the owner's ~900 KB takes ~4.5 s and a typical
+   friend's ~620 KB ~3.1 s before any processing (§12.2). The lever is fewer bytes on a cold
+   visit: 01d's monthly segments with one art and album dictionary shared across a user's segments
+   (naive segments cost ~30% more on a cold visit, 01d §5.1), M-L work. Shortening the art URLs is
+   not that lever (−1% gzipped, `db.ts:1428-1431`). Recommendation: leave slow 4G outside the
+   target, as 01d §7 decision 3 does; after a first visit, phase E's copy makes every later one
+   ~80 ms on any network.
+3. **T3 for five heavy listeners if the quota is one pool.** No harvest schedule fits five
+   Rem-like users at 2-minute freshness inside ~450 calls a day (§6.4). The options: the brake,
+   at up to 30 minutes on the days it trips (this design, S-M); server-side provisional plays from
+   the player probe (01c §5.3 (ii)), which keeps ~2 minutes for everyone at ~47 calls per user per
+   day, but carries a provisional flag through the skip chain, the totals and both payloads plus a
+   reconciliation and its tests (M-L); or a smaller group. If the quota is per user, the problem
+   does not exist.
+4. **T4 on the free plan with four heavy friends a year in.** ~890M rows a month as built, ~465M
+   with the 60-minute gate, under R4's 250M only with the incremental all-time accumulator (M) and
+   segmented history (L) as well (§12.4). Or the Developer plan, $4.99-5.99 a month, where the same
+   load is 36% of the included reads.
+5. **T5's remaining shared fate.** Turso, Vercel, Spotify's standing for the app and Rem's
+   Premium each take every user down when they fail, and nothing at this app's scale removes them;
+   a second store vendor or region would cost more than the app does.
 
 ## 15. Decisions that are Rem's
 
