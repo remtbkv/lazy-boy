@@ -381,6 +381,53 @@ and no Spotify call for a user without a row.
 
 ## 6. Isolation, and the tests that prove it
 
+**One way in.** `db.ts` stops exporting per-user functions that reach a module-level client. Each takes
+a `UserDb` first: a branded type wrapping that user's libSQL client, minted only by `forUser(uid)`,
+whose `uid` comes from `requireUser()` (the verified session, §5) or from the cron's claim (§7.2),
+never from request input and never from an ambient "current user" (01e §5.1 explains why
+AsyncLocalStorage is the wrong tool here). App-database and telemetry functions stay module-level. A
+call site that forgets the user does not compile. The client cache (`g.__listenDbReady`,
+`db.ts:133-146`) becomes a small map of clients by database name, capped (64 entries, least recently
+used out) so a long-lived instance does not hold every user's connection.
+
+**What a per-user database leaves open**, and the change for each:
+
+| surface | today | change |
+|---|---|---|
+| Data Cache entries (`unstable_cache`) | 7, no user in any key (01a D26) | after §8-§9 only three remain (playlist grid, the server fallbacks for a day and for the all-time list); each takes `uid` as its first **argument**, never through a closure, because Next 16.2.6 keys on the callback's source text, the key parts and `JSON.stringify(args)` (01b §3.1); each carries a `user:<uid>` tag so deletion can purge it |
+| payload URLs and ETags | no user (01a D27) | the server reads the uid from the session only; a segment URL names a key and version, and a key the session's user lacks is a 404; ETags carry the uid |
+| process memory | `inflightRefresh`, `playlistsCache`, `currentSyncId`, `uniqueRecomputeKickedAt`, three `cache()` boxes (01b §3.3-3.4) | the refresh map and boxes keyed by uid; `playlistsCache` keyed by uid or removed; one running library sync per uid; the unique-count kick goes (§8.4); the rate-limit cooldown stays app-wide by bucket, which is correct (§7.5) |
+| tasks | no owner (01b B9) | an owner per task; `/api/tasks/[id]` answers 404 to anyone else |
+| browser storage | `lb-days`, `lb-nowplaying`, `clean:active`, the HTTP cache, the planned IndexedDB copy (01b §3.6) | stamped with the uid, cleared on sign-out by a client hook before the redirect and on any 401 |
+| operator surfaces | `/usage` for any session (01b B8) | admin only (`users.is_admin`, bootstrapped from `SPOTIFY_OWNER_ID`) |
+| Preview deployments and dev | production store variables (01b E4, 01e §5.9) | Preview gets none; dev gets its own app and user databases copied from production |
+
+**The tests** (vitest, the simulated environment in `tests/`):
+
+1. A two-user fixture: an app database file and one file per user, seeded with deliberately colliding
+   data (the same track at the same `played_at`, the same playlist id, one context URI named for A and
+   negative-cached for B, 01a §8.7) and a marker string per user in every table.
+2. A faithful `unstable_cache` stub, keyed as Next 16.2.6 keys, in place of today's pass-through
+   (`tests/stubs/next-cache.ts:4-10`, 01b S5). It must catch two planted bugs before it is trusted:
+   equal `write_seq` values for A and B sharing an entry, and a uid captured in a closure.
+3. Every entry point in 01b §2 (8 pages, 24 actions, 12 route files) called as B: none of A's markers in
+   any response, and A's database file unchanged (a checksum over every table's rows).
+4. The payload routes: B's request with A's ETag answers 200 with B's body; a segment key only A has is
+   a 404 for B.
+5. The token core: 01e's six tests (§5).
+6. The cron: two due users, B's refresh answering `invalid_grant` and B's Spotify answering 403 "not
+   registered"; A's harvest lands, the tick answers 200 with per-user outcomes, B ends in
+   `needs_reconnect` and `removed`.
+7. Process state: library syncs for A then B within 60 s in one process store B's own playlists; B
+   polling A's task id gets a 404.
+8. A structural test: parse `db.ts`'s exports and fail on any function that names a per-user table
+   without taking `UserDb` first (01b S3's allowlist idea, made mechanical).
+9. Deletion (§14): B's database file and rows gone, A untouched.
+10. Browser sign-out clearing, by hand with two dev accounts (no headless Spotify login, STORE_MIGRATION
+    §10).
+
+Isolation costs no round trip: the handle is a client object and the uid rides the cookie.
+
 ## 7. Sync: fan-out, freshness and Spotify's budget
 
 ## 8. The write path: derived data updated by append
