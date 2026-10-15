@@ -63,7 +63,13 @@ src/app/api/cron/usage-check/  Turso quota guard (logic in lib/usage-check.ts): 
                          route runs it every day. docs/READ_QUOTA.md
 src/app/api/cron/store-bench/  store round-trip timings from a production function (?store=
                          core|telemetry; STORE_MIGRATION R1). All cron routes: lib/cron-auth.ts
-src/lib/auth.ts          Auth.js config + Spotify token refresh (centralized)
+src/lib/auth.ts          Auth.js config; the session names a uid (multi-user Phase 1)
+src/lib/token-core.ts    Spotify token refresh (centralized), keyed by uid; token-store-owner.ts
+                         is Phase 1's store (the owner's meta row)
+src/lib/identity.ts      the uid, the branded Uid, the identity check; session-gate.ts and
+                         require-user.ts turn it into each entry point's answer
+src/lib/user-cache.ts    the only caller of unstable_cache (uid + owner stamp); isolation.ts
+                         records an event when a check catches a cross-user value
 src/lib/session.ts       getSpotify(): server-only authed Spotify client
 src/lib/spotify/         client.ts (fetch+pagination+429/403), resources.ts, domain.ts, types.ts
 src/lib/tasks/           in-memory task registry (clean-playlist progress); swappable iface

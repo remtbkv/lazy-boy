@@ -35,7 +35,8 @@ instead of re-investigating. (Pairs with `CLAUDE.md`, `AGENTS.md`, and the other
   token **rotates on every use**: with tokens in the cookie, a page refresh fires
   several concurrent requests that each refresh with the same (soon-invalidated)
   token, and the losers get `invalid_grant` → forced re-login. Now an in-process
-  lock (`refreshShared`) coordinates one refresh, writes the new tokens to the DB,
+  lock (`refreshShared`, in `src/lib/token-core.ts`, one per user since multi-user Phase 1)
+  coordinates one refresh, writes the new tokens to the DB,
   and everyone reads the latest from there. Within one request that read is deduped
   through a `cache()` promise box (`readTokensShared` in `auth.ts`) — layout + page
   `auth()` calls and both callbacks share a single primary read (measured 4 → 1 per
@@ -546,11 +547,11 @@ process*, not across a multi-instance deploy (e.g. Vercel):
   cross-instance gap needs the Redis/DB swap in ROADMAP Phase 3.)
 - **Spotify rate-limit cooldown** (`lib/spotify/client.ts`, `cooldownUntil`) — a 429 only
   backs off requests on the same instance.
-- **Playlist cache** (`lib/spotify/resources.ts`) — one process-wide entry (intentionally
-  not keyed by access token, which only caused a guaranteed miss + leak on each hourly token
-  rotation); each instance has its own.
+- **Playlist cache** — deleted (multi-user Phase 1): one process-wide entry would have served
+  one user's library to the next. Any new module-scope state must go on the reviewed list in
+  `tests/isolation/static.test.ts` (S4), saying how it is keyed.
 
-All three are acceptable for local/single-instance use. What genuinely *coordinates* across
+The remaining two are acceptable for local/single-instance use. What genuinely *coordinates* across
 instances is anything that goes through the DB — notably the token-refresh lock (`meta`
 table). When something must be correct multi-instance, put it in the DB, not module scope.
 
