@@ -528,6 +528,13 @@ the term proportional to new plays. No lane in STORE_MIGRATION builds it (§6).
 Light listeners cost far less: the strip read is about 16 days of that user's plays, and their
 recomputes are fewer.
 
+These figures come from days Rem barely opened Home. A user who keeps Home open through a listening
+day adds the history payload's rebuilds (`db.ts:1686-1730`, ~3.6 rows per stored play, up to 144 a
+day behind the slow marker): ~79,000 rows each for Rem, up to ~11M a day. The browser already
+patches its copy with the delta instead of refetching (`src/lib/history-patch.ts`); the server
+equivalent, appending each harvest's plays to a stored payload, is the same kind of lever as the
+accumulator.
+
 Writes: ~3,000 core rows a day for Rem (2.7), ~15,000 for five, ~0.45M a month (4.5% of 10M).
 `api_log` (~2,100 rows a day per user as logged, 4 rows written each) stays on the Zenbook under
 STORE_MIGRATION and needs the daily prune (01a D32).
@@ -542,11 +549,13 @@ against today's tables and two token rows; doing it single-user keeps them that 
    plays scan (~50,500 rows read per run), rebuilt after every sync that lands a play: 23 runs." The
    ~50,500-row statement is `orderedRealPlays` (`db.ts:854-862`), the all-time recompute, gated by
    `alltime_at` (`db.ts:577-583`). The history payload's statement (`db.ts:1690-1698`) ran 0 times on
-   UTC Oct 13 and once on Oct 14 (78,781 rows); the meter's 150-character truncation makes the two
-   look alike (2.8). The 144-a-day ceiling still holds, since both gates are 10 minutes, but two
-   things in §3 change: the recompute runs from the cron's landed ticks, so it reaches its ceiling on
-   a long listening day whether or not Home is open; and neither phase E (the browser cache) nor
-   lanes 1910-1911 (the orphan pass) reduce it. Edit §3 to name it.
+   UTC Oct 13 and once on Oct 14 (78,781 rows), because Home was barely open; the meter's
+   150-character truncation makes the two look alike (2.8). Both are real terms behind 10-minute
+   gates. The recompute runs from landed harvests whether or not Home is open: ceiling ~144 × 51,000
+   ≈ 7.3M a day. The payload rebuilds when an open Home fetches it after the slow marker moved:
+   ceiling ~144 × 79,000 ≈ 11M a day, so a long listening day with Home open all day can reach ~18M.
+   Phase E's browser cache saves the download, not the server rebuild that a changed version still
+   triggers, and lanes 1910-1911 touch neither. Edit §3 to name both.
 2. **R4 has no growth term.** The recompute costs ~2.3 rows per stored play per run, and history
    grows ~117 plays a day, so the term R4 projects rises ~12,000 rows a day for every day the app
    runs (5.9); at today's 44 runs a day it is ~6.6M a day a year from now, ~200M a month, before any
