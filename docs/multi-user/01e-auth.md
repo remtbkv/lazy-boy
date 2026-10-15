@@ -4,9 +4,52 @@ Lane 0221_lb_mu_ov_auth, Oct 14, 2026. Planning only: nothing here changed code,
 store or Vercel. Line numbers are against commit `ac6f7fe`. Every number says how it was measured or
 that it is an estimate.
 
-Status: outline — sections fill in order; each is committed as it lands.
+Status: complete (sections 0-8).
 
 ## 0. Summary
+
+**Today.** Auth.js v5 issues a 30-day, self-renewing JWT session cookie encrypted under `AUTH_SECRET`,
+with no server-side session state and no stable user id in it (§1.4). Sign-in is Spotify OAuth with
+PKCE and the client secret (§1.1). The Spotify grant lives in one plaintext `meta` row that every
+request reads and the cron uses (§2.1); refresh is coordinated by one in-process promise and a
+`meta`-table lock (§2.3); the owner guard runs only at sign-in (§1.2). The refresh path has no tests
+(§2.7).
+
+**Live problems found** (all outside this lane's planning-only remit to fix):
+
+- **F1.** Any browser that signed in before the guard, including the second account from Oct 14, still
+  acts as the owner: it reads the owner's history, edits the owner's playlists, and its log-out deletes
+  the owner's token. `AUTH_SECRET` is 133 days old, so nothing has ended those sessions. Rotating it
+  ends them at the cost of one sign-in.
+- **Production lacks `SPOTIFY_OWNER_ID`**, so the guard keys on the stored `me_id`. That value is
+  correct right now (it matches the pre-incident owner by hash). Setting the variable removes the
+  dependence on store state.
+- **F2.** Spotify does not rotate this app's refresh tokens (unchanged across two weeks of hourly
+  refreshes) and documents a six-month lifetime. Every copy of the token row is therefore a live
+  13-scope credential: 14 nightly snapshots on the Zenbook, 60 days of them on OneDrive, the Mac's
+  `data/replica.db`.
+- **F3.** The backstop recorder's grant may age out by Feb 6, 2027, silently.
+
+**What multi-user must change** (§5):
+
+- Key users by Spotify's `account_id`; Spotify now says the `id` field may change and must not be used
+  for linking.
+- Put the id and a session epoch on the JWT and check both on every request, in the same single query
+  that reads the tokens. Cookies without an id are refused.
+- One encrypted token row per user. Every lock, in-flight refresh and request box is keyed by user.
+  The in-process `inflightRefresh` is the change that would leak one user's Spotify token to another if
+  missed (A2).
+- AES-256-GCM, with the user id as associated data and the key held as a Vercel Secret. Vercel KMS
+  only signs; AWS KMS is not worth an AWS dependency here.
+- An app-side invite list. Development mode now caps new users at five (Feb 2026), so the program's
+  25-user design target needs extended quota.
+- Split log-out into sign out, sign out everywhere, and disconnect.
+- Revocation or expiry (both `invalid_grant`) marks only that user `needs_reconnect`. Users get a
+  reconnect prompt before the six-month expiry. Disconnect and deletion follow Spotify's policy.
+
+**STORE_MIGRATION** needs no change for auth before it runs (§6). Four small additions: strip token
+rows from backups and the archive, delete the cutover's plaintext copies on the Mac, ship the user-id
+claim before lane 1905, and take Preview off the production store before a second user exists.
 
 ## 1. Sign-in today, end to end
 
