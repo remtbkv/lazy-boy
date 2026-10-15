@@ -266,9 +266,15 @@ More Client IDs therefore buy no budget.
   not inflate those counts: harvest rows are not duplicated.
 - Since the harvest gate (Aug 17): at most ~415 recently-played calls a day including the recorder
   (Oct 8: 319 cron + 96), and no 429 on any endpoint in the last 30 days.
-- The player endpoints sit in a different bucket: the August bans stopped recently-played while the
-  player check kept answering, which is why the cron asks currently-playing first
-  (`route.ts:121-127`). Their limit has never been reached; the cron alone spends ~1,035-1,303 a day.
+- Which endpoints share that bucket (`api_log`, Aug 11-17, Appendix A probes 6-7): recently-played
+  took 83 429s and `/me` 38, both with `Retry-After` up to ~12 h (43,241 s and 43,040 s), on the same
+  days; the first `/me` ban (Aug 12 11:37:32Z) came two minutes before the first recently-played
+  ban. No player, playlist or Liked endpoint returned a 429 that week. After 5 of the 83
+  recently-played 429s a player call answered 200/204 within ten minutes; successful player polls
+  were only logged from Aug 16, so the other windows say nothing either way. So `/me`, which every
+  library rescan calls (`library.ts:40`), draws on the scarce bucket, and the player endpoints, which
+  the cron asks first for that reason (`route.ts:121-127`), answered during at least some bans.
+  Their own limit has never been reached; the cron alone spends ~1,035-1,303 a day.
 
 **The question the design turns on:** is the ~725-800 a day the developer account's, shared by every
 user of the app, or each user's? Every statement of the rule says the account's ("a single
