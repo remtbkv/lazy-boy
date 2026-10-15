@@ -26,6 +26,7 @@ describe("spotifyUserinfo", () => {
     expect(p.images).toEqual([]);
     expect(fetchMock).toHaveBeenCalledWith("https://api.spotify.com/v1/me", {
       headers: { Authorization: "Bearer at" },
+      cache: "no-store",
     });
   });
 
