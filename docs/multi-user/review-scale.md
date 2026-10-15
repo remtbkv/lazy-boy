@@ -352,7 +352,7 @@ does.
 |---|---|---|---|---|---|
 | allowlist places | 1 | 5 | 25 | 250 | **5** on one app (dev mode) |
 | scarce bucket, un-braked | ~145-165 harvests (§14.2), +~16 if the mid-session retry stays (finding 5) | ~745-830 | ~3,700-4,100 | ~37,000-41,000 | ~725-800 observed ban line; 450 planned |
-| scarce bucket at the brake's floor | ~35-40: 9 h × 2 batches + ~5 tails + ~7 idle backstops + ~5-10 open-app (§7.4-7.5) | ~505-560 (A §13.3), **holds** | ~875-1,000, **over the ban line: daily bans** | ~8,750-10,000, ~12× the line | the brake has no level below 30 minutes |
+| scarce bucket with the brake on | its floor is ~35-40 a user: 9 h × 2 batches + ~5 tails + ~7 idle backstops + ~5-10 open-app (§7.4-7.5) | ~505-560 for the day, 2-minute capture for ~60% of it (A §13.3): **holds** | everyone at the floor all day, ~875-1,000: **over the ban line, daily bans** | ~8,750-10,000, ~12× the line | the brake has no level below 30 minutes |
 | player bucket | 450-720 probes + 0-1,440 now-playing (finding 6) | ~2,250-10,800 | ~11,000-54,000 | ~112,000-540,000 | unknown; 1,336 the measured max day |
 | Spotify calls per 30 s | ~0.35 from the tick per active user (probe + harvest), 2-4 per visible tab, scans paced | ≤ ~25 | ~16-50 (5-10 tabs visible) | ~40-65 from ticks alone at a peak hour (100 active, 150 idle) | 56 measured without a 429; true limit unpublished |
 | Turso rows read | ~0.37-0.45M on a heavy day (§8.6 P4 column, finding 2 fixed) | ~64-70M a month (13-14%) | ~330M (66% of Free, over R4) | ~3.3B | Free 500M (R4 250M); Developer 2.5B |
@@ -374,8 +374,8 @@ What binds, in the order the users arrive (my recomputation):
    plan's Phase 0 read); Turso reads at R4's 250M bar at ~19 users (250M ÷ (0.44M × 30)) and at
    Free's 500M block at ~38, or at ~3 and ~6 if finding 2 is not fixed and app-heavy users leave "See
    all" open; Hobby's provisioned memory near 25 app-heavy users, which §14.3 does not list; Turso
-   Free's 100 databases past 98 users. Pro is $20 a
-   month and Developer $4.99, so none of these is a wall.
+   Free's 100 databases past 98 users. Pro is $20 a month and Developer $4.99, so none of these is a
+   wall.
 3. **The scarce bucket, under the shared reading.** At the brake's floor of ~35-40 harvests a user a
    day, the app exceeds the 450 planning budget at ~12 Rem-like users and the ~725-800 ban line at
    ~19-21, from where it is banned daily however the brake is tuned, and a heavy listener loses plays
@@ -392,7 +392,48 @@ and the player bucket (finding 6), which it does not.
 
 ## 3. What holds up
 
-(to fill)
+- **P1, the identity-first "From" predicate, on current data.** I re-ran design B's two scripts,
+  unchanged, on the Oct 14 backup copy (22,040 plays, the catalog rows included): the same verdict on
+  every play, 1,162 orphans each and 0 differing, which matches the stored count (01a §2); over the
+  12,044 plays from a cached playlist today's form walks **379.9 rows a play (max 1,184), the rewrite
+  2.6 (max 7)**, through `sqlite_autoindex_tracks_1`, `idx_tracks_artist_name` and
+  `idx_pltracks_track`. This is the check §8.2 left to lane 1910, on data two months newer than the
+  Aug 11 copy the plan used. Edit 6 needs only its known-answer test now.
+- **§8.6 and §14.4 add up as printed.** Re-summed: 19.07, 3.80, 1.57, 1.46 and 0.37M for Rem;
+  19.77, 4.50, 2.27, 1.79 and 0.44M for an app-heavy user; every §14.4 cell is (Rem's day + 4 × the
+  friend's day) × 30. The levers are the right ones and in the right order; what is missing is the
+  open-tab and Liked terms (findings 2 and 3).
+- **The December cliff and P3's deadline.** 2,097,152 − 1,815,171 = 281,981 bytes of headroom at
+  ~123,000 a month is ~2.3 months, late December (01d §3.2). P3 before mid-December, with the catalog
+  split as the stopgap, is the right call, and the plan's timeline (§13.3) clears it with weeks to
+  spare.
+- **The all-time accumulator.** It sums the same per-play value the chain walk computes, so 2.24M a
+  heavy day becoming a few thousand (§8.3) is right for tail appends, and it removes the one read
+  that grew every day.
+- **A database per user is read-neutral.** Turso meters rows per organization, each user's queries
+  keep today's plans (01a §9.2's user-led timings without a new index), and the tick stays 1,440
+  invocations a day whatever N is.
+- **The search arithmetic.** 1,083 KB gzipped at 10 Mbit/s is 0.87 s and a typical friend's 710 KB
+  is 0.57 s (§14.1); one-letter matching is 13.2 ms at Rem's size and 25.6 ms at twice it at 4×
+  (01d §2.3, §3.2). Two caveats. S3's render half (~10-20 ms for 50 rows at 4×) is unmeasured, which
+  Phase 0's `paint=` read on Rem's phone settles. And S1 on an iPhone needs a visit at least weekly:
+  Safari deletes a site's script-writable storage, IndexedDB included, "after seven days of Safari
+  use without user interaction on the site" (WebKit, https://webkit.org/blog/10218/, fetched Oct 15;
+  a web app added to the home screen keeps its own count), so a friend who opens Lazy Boy in Safari
+  less often than that gets S2's first-visit numbers each time.
+- **Storage, the claim-and-lease tick and per-user failure isolation** need nothing at five users;
+  the 25-s step deadline is right, and finding 4 only bounds the total.
+- **Planning for a pooled quota** is the safe reading, and the passive check (§7.9) is the right way
+  to learn which reading is true.
+
+**STORE_MIGRATION, through this lens.** Nothing in lanes 1901-1911 needs to change for scale before
+Oct 15, 8 PM. R1 (store round trip p50 ≤ 15 ms) is the premise of every latency in §14, and the
+migration's rule to stop if it fails (STORE_MIGRATION §2) is the right one. Edit 6 now has its
+equality check on current data (above). One addition for lane 1904, beside the optional archive of
+the meter's query logs (§10.2): copy the Zenbook's `~/lazyboy-cron/ping.log` daily. It keeps only its
+last 2,000 lines (about 2.75 days), and its per-tick `added` counts, matched to `api_log`, are the only
+record that measures Spotify's listing lag (finding 5), so the retry rate and F2's tail. Phase 3's
+soak needs the same measurement before and after.
 
 ## 4. What I ran
 
