@@ -359,9 +359,78 @@ the whole history body: ~270 KB gzipped for the typical user after a year, ~500 
 
 ## 4. What multi-user changes for search
 
+01a-data (D16 whole-table reads, D21 markers, D27 ETags, D28 module state) and 01b-surface (B2, B5,
+B10, C4, S6) already list every unscoped read, key and browser store. This section adds what is
+specific to the search path and what those censuses do not size.
+
 ### 4.1 Keys: every cache key, ETag and version marker that has no user in it
+
+| what | where | today | multi-user failure if only the data is scoped | needs |
+|---|---|---|---|---|
+| Data Cache key, library | `db.ts:1600-1604` | `["library-index", shape]` + `(library_seq, shape)` | per-user counters are small integers, so users A and B at the same count share one entry: B is served A's library. A leak, not staleness | the user's internal id in the key parts and the arguments |
+| Data Cache key, history | `db.ts:1615-1619` | `["history-index", shape]` + `(slow seq, shape)` | the same, with A's whole listening history | the same |
+| version markers | `db.ts:345, 374, 1550-1596` | one `write_seq`, `library_seq`, `slow_seq_pub` | with a global marker, every user's play moves every user's version (01a D21): each visit by anyone rebuilds | per-user markers; the 10-minute republish per user |
+| ETags | `library/route.ts:39`, `history/route.ts:26` | shape, version, UTC day | two accounts in one browser profile: B's revalidation carries A's tag, and if B's version string equals A's the server answers 304 and B's browser shows A's body | a keyed hash of the user id in the tag (01a D27); a per-user path or query segment so the two accounts do not share one HTTP cache entry and thrash it |
+| the in-memory patch | `history-actions.ts:140-161` → `den-home.tsx:766-780` | `searchHistory("", ≤50)`, newest plays of the whole table | other users' newest plays are patched into this user's search set and day list, and under STORE_MIGRATION phase E the patched body is what gets stored in IndexedDB, so the leak would persist across visits | the delta read scoped by user, with a `(user_id, played_at)` index (01a lists the read) |
+| the server fallback | `history-actions.ts:190-195`, `db.ts:884-904` | `LIKE` over every play | another user's songs in the results while the payloads load | scoped by user |
+| browser copies | `den-home.tsx:325-365` (`lb-days`), `now-playing-context.tsx:240, 376` (`lb-nowplaying`), the HTTP cache of both bodies, the planned IndexedDB copy | stamped by build or by age only | the next person on a shared browser sees the last one's days, song or payloads | stamped by user (phase E already keys IndexedDB by user id); cleared on sign-out in client code, with `Clear-Site-Data: "cache", "storage"` on the sign-out response where the browser supports it (support not checked) |
+
 ### 4.2 Server cache footprint and rebuild load with N users
+
+**[estimate]** Assumptions: the typical one-year user of §3.3 (18,250 plays, 8,800 memberships), 8 Home
+visits a day, the history version moved before every visit (it moves every 10 minutes while music
+plays) and the library version before half of them (the owner's moves several times a day, §2.2).
+Rows are store rows read by full rebuilds; Turso's free plan is 500M rows read a month
+(STORE_MIGRATION §3).
+
+| users | today's design | history in monthly segments, library whole | segments + a delta at visit start + library per playlist |
+|---|---|---|---|
+| 5 | ~76M a month (15% of free) | ~16M (3%) | < 1M |
+| 25 | ~380M (76%) | ~80M (16%) | ~2M |
+| 250 | ~3.8B (7.6× the plan) | ~800M (1.6×) | ~22M (4%) |
+
+Per visit behind each column: today 3 × 18,250 + ½ × 2 × 8,800 ≈ 63,500 rows. With the history in
+segments only the hot month rebuilds (~1,500 plays ≈ 4,500 rows), and the library half (≈ 8,800 a
+visit) becomes the larger term. With the visit-start delta (~50 new plays ≈ 150 rows), only the changed
+playlists rebuilt (~200 rows assumed) and a manifest (~20), a visit is ~370 rows. The visit rate is
+the weakest input: at 3 visits a day every figure is ×⅜, which still leaves today's design at ~140M a
+month for 25 users.
+
+The owner alone does not show this today because his visits are rare and his open tab patches in
+memory instead of re-fetching (§1.4 step 5).
+
+**Data Cache footprint.** Each rebuild writes a new entry of the body's size, and superseded entries
+stay until their 24 h TTL. For 25 typical users at 8 visits that is ~25 × 8 × (0.8 + 0.5) MB ≈ 260 MB
+written a day into a cache that Vercel's Hobby and Pro plans share across every project in the team,
+with LRU eviction past "a fixed storage limit" (https://vercel.com/docs/data-cache, "Storage scope by
+plan", "Storage and eviction"; the size is not stated there). Eviction turns a cache hit back into a
+rebuild. Segments shrink the churn to the hot month's entry.
+
+**Function time.** Each full rebuild holds a Vercel function for the store round trip plus the build
+(§2.2: ~0.85 s+ through the Funnel today). 01f-platform owns the cost of that.
+
 ### 4.3 Security of the payloads (cross-user leakage paths)
+
+The routes already refuse a request without a session (`library/route.ts:22`, `history/route.ts:16`)
+and mark the bodies `private` so no shared cache stores them. Multi-user adds these rules for the search
+path, each with the test that proves it:
+
+1. **The user comes from the session, never from the request.** A per-user path or query segment for
+   the HTTP cache may exist, but the server reads the user id from `auth()` and either ignores or
+   checks the segment. Test: a request for user B's segment with A's session returns A's data or 403,
+   never B's.
+2. **Every cache key that holds a payload carries the user id.** Test: in `tests/`, two users with
+   equal version counters; build A's payload, then request B's; B's body has none of A's identities.
+   This is the one that fails silently, because both bodies have the right shape.
+3. **An ETag never matches across users.** Test: the same two users; B's request with A's ETag answers
+   200 with B's body, never 304.
+4. **Deltas are scoped.** Test: A and B play the same song in the same minute; each one's
+   `refreshHistoryAction` delta contains only their own play (01a notes the `playKey` collision in
+   `recordPlays` for exactly that case).
+5. **A shared device forgets on sign-out.** Test (Playwright): sign in as A, load Home, sign out,
+   confirm IndexedDB, `lb-days` and `lb-nowplaying` are empty and the next payload request has no
+   `If-None-Match` from A.
+6. **The ETag does not reveal the Spotify id** (01a D27: a keyed hash).
 
 ## 5. What keeps it fast per user: caching and incremental updates
 
