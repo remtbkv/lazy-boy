@@ -776,8 +776,8 @@ measured (01d §2.1, §2.3, O3); network and server times are estimates.
 | typical, 1 year | ~700 KB | ~1.1 s | yes |
 | Rem today | ~1.08 MB | ~1.4 s | yes |
 | heavy, 1 year | ~1.3 MB | ~1.6 s | yes |
-| heavy, 3 years | ~2.35 MB | ~2.4 s | no; one art and album dictionary per user instead of per segment (−~30% of cold bytes, 01d §5.2) brings it to ~1.9 s |
-| Rem on slow 4G (1.6 Mbit/s) | ~1.08 MB | ~5.8 s | no; §17 |
+| heavy, 3 years | ~2.35 MB | ~2.6 s | no; one art and album dictionary per user instead of per segment removes the ~30% segment overhead (01d §5.2), ~2.3 s; loading the library and the newest months first makes the box usable in ~1.2 s with older months following (§17) |
+| Rem on slow 4G (1.6 Mbit/s) | ~1.08 MB | ~5.9 s | no; §17 |
 
 **Repeat visit**: IndexedDB read ~20 ms at 4× [measured, 01d O5] + building the set ~47 ms [measured]
 + the selected day < 5 ms: **~80 ms** against a 300 ms target. The manifest in the page then names the
@@ -795,6 +795,113 @@ rows), the library payload (~15,000) and the whole-history strip (~43,500). Here
 `home` and manifest ~8, one row per segment the device lacks: **≤ ~20 rows a visit** [estimate].
 
 ## 10. The store budget per user per day, and the plan that holds at 5, 25 and 250
+
+### 10.1 One more term the overviews did not size: the orphan predicate per play
+
+The stored "From" verdict (`ctx_orphan`) asks, for a play from a cached playlist, whether the song's
+identity is among that playlist's members. The predicate (`db.ts:700-709`) answers it by walking the
+playlist's members and probing `tracks` for each: ~M to 2M rows for a playlist of M members, for every
+play it judges. That is the ~130 rows per landed play the meter saw (01c §2.2), and it makes a pass
+scoped to one playlist cost (plays from that playlist) × M: for a playlist holding 300 songs with 3,000
+plays from it, ~900,000 rows [estimate; Rem's per-playlist play counts were not measured]. The meter
+cannot show this, because it counts an `UPDATE`'s correlated subqueries at about 1/40 of what Turso
+bills (01c §2.8), and lanes 1910-1911 scope the pass without changing the predicate.
+
+The design adds `playlist_tracks.ident` (lower-cased artist and title, the identity everything else
+uses) with an index on `(playlist_id, ident)`, filled by `storePlaylistTracks` from fields it already
+holds. The verdict becomes two index probes: ~5 rows per play [estimate], so ~5 per landed play and
+~5 × (plays from the playlist) per scoped pass. Storage: ~0.3 MB for Rem's 7,400 members [estimate,
+~40 bytes per entry]. §8.6's ~150 rows per landed play becomes ~20.
+
+### 10.2 Per Rem-like user per day
+
+At today's history (22,040 plays) and Rem's Oct 14 activity (129 plays landed, 716 ticks, ~30
+rescans). Everything is an estimate built from the measurements cited in §3, §7 and §8.
+
+| reads | rows a day | basis |
+|---|---|---|
+| landed plays, 129 × ~20 | ~2,600 | §8.6 with §10.1 |
+| tick state: the user's row on every tick | ~1,440 | §7.2 step 2 |
+| token refreshes | ~70 | §5 |
+| library rescans, ~23 × ~230 (the list probe reads 228 rows today, 01c §2.3) | ~5,300 | §7.6 |
+| changed playlists, ~3 a day: cached positions, a scoped orphan pass at ~5 rows per play from that playlist, the body patch | ~3,000-20,000 | §8.4, §10.1 |
+| Home visits, ~20 rows each: Rem ~5 a day, an app-heavy friend ~30 | ~100-600 | §9.4 |
+| daily chores: the `contexts` scan; the played-at convention check (owner only, ~2,400) | ~100-2,500 | §8.5 |
+| dirty months rebuilt, 0-2 a day at ≤ ~10,000 each | ~0-20,000, typically ~5,000 | §8.3 |
+| totals recomputed after an out-of-order insert, about weekly | ~3,000 averaged | §8.1 |
+| nightly backup dump of the user's database | ~45,800 | §3, row 13 |
+| **total** | **~65,000-100,000, typically ~70,000** | target ≤ 100,000 |
+
+Today [measured, 01c §2.7]: 4,252,260. Two-thirds of what remains is the backup, which every other
+design pays too; without it the user's own work is ~20,000-55,000 rows a day. The only terms that grow
+with stored history are the backup (+~117 rows a day per day) and the scoped orphan passes (plays per
+playlist); neither is on a request or sync path.
+
+| writes | rows a day | basis |
+|---|---|---|
+| landed plays, 129 × ~10 | ~1,300 | §8.6 |
+| probe state: one write per track change or state transition | ~150 | §7.2 |
+| token refreshes | ~72 | §5, 01e §5.2 |
+| rescans: artwork-only updates (198 on Oct 14, 01c §2.3) and stamps | ~220 | §7.6 |
+| changed playlists: member diffs, flipped orphan flags, the body patch | ~60 | §8.4 |
+| **total per user** | **~1,800** | target ≤ 2,500 |
+| shared, whatever N is: the tick lock (2 × 1,440) and the quota ledger (~2,000) | ~4,900 | §7.2, §7.4 |
+
+Today [measured]: ~3,000 core rows a day (01c §2.7), plus 8,472 `api_log` rows that stay on the
+Zenbook.
+
+| storage | Rem-like user | basis |
+|---|---|---|
+| core tables | 11.87 MB | [measured, 01a §2] |
+| added: `ident` + index, `listened_ms` | ~0.4 MB | [estimate] |
+| payload bodies: segments ~2.2 MB, library ~0.8 MB, Home ~30 KB | ~3.0 MB | [measured raw sizes, 01d §2.1 and O3] |
+| **total today** | **~15.3 MB** | |
+| growth | ~40 KB a day (plays ~33 KB, tracks ~2.4 KB, segment growth ~4.5 KB) | target ≤ 50 KB |
+
+A new user starts near 3.3 MB (01a §9.1) plus ~0.5 MB of bodies.
+
+### 10.3 Totals at 5, 25 and 250, against Turso's plans
+
+Every user Rem-like, typical day; the free plan's limits and the Developer plan's are from the
+pricing page (fetched 2026-10-14): Free 100 databases, 500M rows read, 10M written, 5 GB; Developer
+$4.99 a month billed yearly ($5.99 monthly), unlimited databases, 2.5B read, 25M written, 9 GB.
+
+| per month | 5 users | 25 users | 250 users |
+|---|---|---|---|
+| rows read | 10.5M: 2.1% of Free | 52M: 10% | 525M: 105% of Free, 21% of Developer |
+| rows read, heavy days (~100,000 a user) | 15M: 3% | 75M: 15% | 750M: 30% of Developer |
+| rows written | 0.42M: 4.2% of Free | 1.5M: 15% | 13.6M: 136% of Free, 54% of Developer |
+| storage, today's histories | 77 MB: 1.5% | 380 MB: 7.6% | 3.8 GB: 76% of Free, 42% of Developer |
+| storage growth a year | +73 MB | +365 MB | +3.7 GB |
+| databases (users + app + template) | 7 | 27 | 252: over Free's 100 |
+| **cheapest plan that holds** | **Free** | **Free** | **Developer**, $4.99-5.99 a month |
+
+Five users sit under 5% of the free plan on every dimension (T4). At 250 the free plan fails on writes,
+database count and reads; on Developer every dimension sits at or under 54%, and past its allowances
+the overage is $1 per million writes and $1 per billion reads, not a block. Replacing the nightly full
+dump with an incremental one (plays since the last backup through `(played_at)`, the small tables
+weekly) would take 250 users' reads to ~36-80% of Free, which still leaves writes and the database
+count over it.
+
+### 10.4 Spotify and Vercel at the same sizes
+
+| per day | per Rem-like user | 5 users | 25 users | 250 users | limit |
+|---|---|---|---|---|---|
+| recently-played + `/me` | 35-150 by F (§7.4) | ~379 with F ≈ 10 and the recorder | ~375, completeness only, no freshness | ~3,750 | ~725-800 measured, 450 planned; shared by the account |
+| player | ~450 + ~4 a minute per visible tab | ~2,250 + tabs | ~11,250 | ~112,500 | unmeasured; ≤ 2,500 planned at five |
+| library | ~100 | ~500 | ~2,500 | ~25,000 | unmeasured; never a 429 |
+| per 30 s, peak | – | ~3 from ticks + ~10 from five visible tabs | ~15 + tabs | ~63 from ticks alone | 18 observed safe |
+
+| per month | 5 users | 25 users | 250 users | Hobby allows |
+|---|---|---|---|---|
+| invocations: ticks 86,400 + ~6,000 browsing a user (01f §2.3) | ~116,000 | ~236,000 | ~1.6M | 1M; Pro past it |
+| Active CPU | unmeasured (01f: Rem alone 0.5-2.4 CPU-h estimated) | | | 4 CPU-h |
+| largest response | a segment, ≤ ~300 KB raw | | | 4.5 MB |
+
+The design moves server CPU off the request path (no full payload builds on a visit, no 22,000-row
+chain walks) and onto small JSON patches on the write path, ~5-10 ms per landed harvest for a
+month-end segment [estimate]. Whether five users fit Hobby's 4 CPU-hours is the number 01f says Rem
+can read on the dashboard in a minute; I could not measure it either.
 
 ## 11. The store choice, and what STORE_MIGRATION needs
 
