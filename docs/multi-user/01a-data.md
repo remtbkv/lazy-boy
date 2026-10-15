@@ -589,6 +589,60 @@ statement removes it. How the cron fans out across users is lane 01c's.
 
 ## 10. STORE_MIGRATION.md: what multi-user needs from it, and what should change before it runs
 
+**Run it as planned, and keep the multi-user schema out of it.** The cutover moves today's single-user
+schema to Turso and flips the env under code that expects that schema; its rollback is "flip the env
+back" (STORE_MIGRATION §8). Folding the user columns or a second database into the same night would put
+an untested schema change under a deployed app that does not know it, and would turn a reversible move
+into a migration. The multi-user schema change is a later step with its own fence and snapshot (§8.6).
+
+What the move already gives multi-user, from the data side:
+
+- Core data on Turso in the functions' region (R1), where a per-user database is a cheap object and the
+  per-statement round trip is short, which both §8 models need because every request reads at least a
+  token row and a payload.
+- The telemetry split (phase A items 1-3) puts the three global tables behind their own client, which
+  is where they belong in either model.
+- The daily route (phase A item 7) restores `api_log` and `client_metrics` retention (D32) before more
+  users multiply ~2,000 `api_log` rows a day each, and lands Turso's real usage in the ledger daily, the
+  number §9.3's budget has to be watched against.
+- Phase E keys the browser's IndexedDB copy by the signed-in user's id (STORE_MIGRATION §10), the right
+  shape already. The ETags it revalidates against still need D27's user component.
+- Lanes 1910-1911 scope the orphan pass. At five users that is the difference between ~570M and ~245M
+  rows read a month (§9.3).
+
+What I would change or add before Oct 15, 8 PM. All are small, none touches the cutover runbook, and
+each is the director's and Rem's call:
+
+1. **Archive the meter's pre-cutover logs (lane 1903 or 1904).** After the cutover the meter sees
+   telemetry only (STORE_MIGRATION §9), Turso reports one counter per database, and the ledger
+   undercounts: on Oct 13 the meter saw 23 history-payload rebuilds and the ledger recorded none (§4.1,
+   §11). The meter's per-statement `querylog/<day>.jsonl` files are the only exact per-path read record
+   of the owner's workload, and every multi-user budget will be built on them. Copy the last 14 days off
+   the Zenbook with the core snapshot. (Their retention on the Zenbook is not documented; I did not
+   check it.)
+2. **Make the ledger trustworthy, or label it a lower bound (phase A).** Item 4 keeps the existing
+   `void …catch()` call sites as they are. The ledger writes in route handlers that return right after
+   the read (`readHistoryIndex` `db.ts:1722`, `readLibraryIndex` `db.ts:1677`) are the ones being lost;
+   moving those into `after()`, as item 4 does for `/api/metrics`, would make per-path attribution
+   usable on Turso. If it stays as is, /usage should say the ledger is a lower bound.
+3. **Write the backup as a loop over databases (lane 1904).** Phase D backs up "Turso's core" as one
+   database. Under the per-user-database recommendation it becomes N+1; a list of database names costs
+   nothing now and saves a rewrite.
+4. **Note R4's scope.** R4 projects one user (STORE_MIGRATION §2). It holds for the cutover, and it
+   fails for five Rem-like users without lanes 1910-1911 and a cheaper history payload (§9.3); the
+   multi-user plan has to re-check it at N, not inherit it.
+
+Later, before any multi-user code is deployed (not part of this cutover): Preview deployments and
+`.env.local` point at the production store (STORE_MIGRATION §3 and step 15). Multi-user branch builds
+must not, because their migration changes the schema; they need a separate Turso database copied from
+production.
+
+On the open question in STORE_MIGRATION §4 (move the three log tables to Turso too), the data layer adds
+one fact: with more than one user, `client_metrics` holds other people's listening (`handoff` rows carry
+"artist — title" and the source playlist, `home/den-home.tsx:888-894`), and `api_log` would gain a user
+column. Wherever telemetry lives, it becomes personal data with a deletion duty. Dropping song names from
+the `handoff` beacon removes most of that whichever way the question is answered.
+
 ## 11. Measurement log and unknowns
 
 ## 12. Decisions that are Rem's
