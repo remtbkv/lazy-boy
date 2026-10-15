@@ -909,6 +909,59 @@ can read on the dashboard in a minute; I could not measure it either.
 
 ## 11. The store choice, and what STORE_MIGRATION needs
 
+### 11.1 Turso, as planned, one database per user
+
+The cheapest store that holds is the one STORE_MIGRATION already moves to: Turso's free plan in
+aws-us-east-1, beside Vercel's iad1. By §10.3 it holds five users at under 5% of every dimension and 25
+at under 16%; 250 need the Developer plan at $4.99-5.99 a month. The alternatives, from this design's
+angle:
+
+- **One shared Turso database with a user column.** The same plan at every size: Turso meters reads
+  and writes per organization, so 250 users' writes exceed the free plan either way, and only the
+  database count differs. It needs user-led indexes on every per-user table to keep per-query cost
+  flat (§4.1), and it gives up per-user usage numbers.
+- **Self-hosted sqld**, on the Zenbook as today or on a $5 VPS: unmetered, but the Zenbook is the
+  single point T5 removes, and a VPS is a machine to patch and back up for about the price of
+  Turso's Developer plan. STORE_MIGRATION §4 rejected AWS hosting on cost.
+- **A Postgres service**: a rewrite of the 3,212-line, SQLite-dialect `db.ts`, which no budget here
+  calls for.
+
+### 11.2 What multi-user takes from the migration
+
+- **Rem's database.** Turso `lazyboy` becomes Rem's user database as it stands; `users.db_name` names
+  it, so nothing is renamed.
+- **R1**, a store round trip of p50 ≤ 15 ms from the functions: every latency in §9 assumes it. The
+  row budgets in §10 do not depend on it. If R1 fails, STORE_MIGRATION stops before phase E by its own
+  rule (§2 there), and §9's numbers fail with it.
+- **Phase A's telemetry split**: two clients, telemetry never awaited on a user path. `api_log` and
+  `client_metrics` keep that shape and gain a uid.
+- **Phase A's daily route** (item 7), written as a loop over users from day one (01c §6 item 3): rebuild
+  dirty months, recompute dirty totals, read each user's Turso usage, prune telemetry.
+- **Phase D's backup**, written as a loop over database names (01a §10 item 3), one file per database,
+  token rows stripped (01e §6 item 1), with the derived-value check of §8 run against each dump.
+- **Phase E's browser copy**, keyed `(uid, kind, key, version, shape)` (01d §6 item 3), the uid coming
+  from the session (01b §7 item 1).
+
+### 11.3 What should change before Oct 15, 8 PM
+
+Nothing blocks the cutover, and none of these touches its runbook:
+
+1. **Correct §3's attribution.** The ~50,500-row statement that dominates reads is the all-time
+   recompute (`orderedRealPlays`, `db.ts:854-869`), not the history payload: the meter's own Oct 14
+   rollup counts 44 runs of it at ~51,000 rows against one history-payload rebuild (01c §2.2, §6 item 1;
+   01a §11.2; 01d §2.2). Phase E's browser copy does not touch it; §8.1's accumulator does.
+2. **Phase E's store key** gains the segment dimension now, so segments arrive without a second
+   migration of browser data (01d §6 item 3).
+3. **Phase D's backup** loops over database names and strips token rows (01a §10, 01e §6).
+4. **Lanes 1910-1911** should consider the `ident` index (§10.1) alongside the scoping: a pass scoped to
+   a busy playlist still costs plays × members, which the meter undercounts about 40× (01c §2.8). One
+   pass on the Turso copy, read off Turso's usage before and after (01c §8), measures it.
+5. **R4** gains a growth term and, for multi-user, a per-dimension bar at the planned N (01c §6 item 2).
+6. **Step 9 flips Production only**; Preview gets its own database or none (01b §7 item 2).
+
+The app database, the template and every user database join `lazyboy` in group `default`, so one group
+token reaches all of them. That is the blast radius of today's single store token, not a new one.
+
 ## 12. Uptime: the Zenbook and the other single points
 
 ## 13. Migrating Rem's data with nothing lost
