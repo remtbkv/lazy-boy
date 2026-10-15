@@ -284,10 +284,17 @@ The Data Cache (3.1) is the only shared server-side cache.
 Preview deployments are the wider surface. `vercel env ls` (section 9) shows `AUTH_SECRET`,
 `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` and `AUTH_URL`
 set for Production and Preview alike, and `docs/STORE_MIGRATION.md` §3 says "Preview deployments use
-the production store." Vercel builds previews with `NODE_ENV=production`, so they also use the
-production token key (`db.ts:2511-2512`). A preview of any pushed branch reads and writes production
-data and refreshes the production token today; with many users it would do that for all of them.
-Whether Vercel Deployment Protection gates preview URLs on this project I did not check.
+the production store." Vercel runs previews with `NODE_ENV=production`, so they also use the
+production token key (`db.ts:2511-2512`). What a preview can reach today is limited by two things:
+sign-in cannot complete on a preview host, because `AUTH_URL` is production's origin in both
+environments and the OAuth callback lands there, and `CRON_SECRET` is Production-only, so a
+preview's cron route refuses every caller. What it can do is run its branch's server code with
+production database credentials: the first request that touches the store (an anonymous `GET /home`
+does, through the pre-gate reads in 2.1) runs that branch's `init()` against production, and `init()`
+applies schema changes (`db.ts:153-297`, the `CREATE`/`ALTER` block). A multi-user branch that adds
+user columns would therefore migrate the production schema the first time anyone opens its preview
+URL. Previews need their own store before any multi-user branch is pushed. Whether Vercel Deployment
+Protection gates preview URLs on this project I did not check.
 
 ## 4. Entry points that would leak or mix data across users, as written
 
