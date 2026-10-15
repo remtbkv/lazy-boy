@@ -430,7 +430,155 @@ Isolation costs no round trip: the handle is a client object and the uid rides t
 
 ## 7. Sync: fan-out, freshness and Spotify's budget
 
-## 8. The write path: derived data updated by append
+### 7.1 The limits this section plans to
+
+- **The scarce bucket** (recently-played, and `/me`, which was banned beside it in August): ~725-800
+  calls per quota day for the whole app [measured, six bans Aug 11-16, 01f §1.4], resetting at about
+  10:50 AM ET, and documented as the developer account's budget, shared by every user (01c §4).
+  Planned to 450 a day, 60%, as 01c §5.1 does, because Spotify says the limits "are subject to
+  change". The owner's recorder, kept and run hourly (01c §5.7a), takes 24 of it.
+- **The player bucket**: never rationed here; Rem alone spends 1,035-1,303 a day today [measured,
+  01c §2.7]. Planned to stay under ~2,500 a day at five users, about twice a volume that has never
+  drawn a 429.
+- **The 30-second rate limit**, per app: 18 calls per 30 s has passed without a 429 (01f §1.4).
+  Planned to stay under 12.
+
+### 7.2 One tick a minute, any number of users
+
+Two pingers hit `/api/cron/sync` every minute: the Zenbook's timer (today every 2 minutes) and
+cron-job.org (§12). The tick:
+
+1. Takes a global tick lock, a compare-and-set on app `meta` `lock:tick` with a 55 s lease, the
+   pattern `acquireLock` already uses (`db.ts:2541-2557`). The second pinger's hit in the same minute
+   loses it and returns at once. This is also the tick's store health check: if the app database
+   does not answer, the tick ends instead of letting each user wait out the store fetch's three
+   15-second attempts (`src/lib/store-fetch.ts:28-29`).
+2. Reads every user's sync state and token in one batch (`sync_state` joined to `user_tokens`;
+   one row per user, 250 rows at 250 users). Who is due is computed, not stored: `active` users (a
+   play in the last 30 minutes) every 2 minutes and `idle` users every 5, offset by a hash of the uid
+   so users spread across the cycle. A user's state row is written only when something changed (a
+   track change, a state transition, a harvest, a failure), not on every tick.
+3. Processes the due users concurrently (up to 16 at a time), each under its own 25 s deadline, with
+   `Promise.allSettled`: refresh the token if under 60 s remain (§5), probe, harvest if the governor
+   says so (§7.4), record (§8).
+4. Runs at most one due library rescan (up to 8 at 250 users), under its own deadline, after the
+   harvests (§7.6).
+5. Answers 200 with per-user outcomes. Non-200 only when the tick could not run, or when the owner's
+   own capture is failing: the Zenbook timer's failed unit is Rem's only alarm today (01c §5.2).
+
+Each pinger hit is one invocation: 2,880 a day whatever N is. Tick-lock writes: 2 per tick, 2,880 a
+day in total [estimate]. Wall time: the slowest due user, about 1-3 s at five users through Turso;
+at 250 users ~125 users fall due per minute, ~0.5-1 s each at 16-way concurrency, ~4-8 s per tick
+[estimate]. The route sets `maxDuration = 60`; nothing under `src/app` sets one today, so the
+project's 300 s default applies (01f §2.1).
+
+### 7.3 The probe
+
+`/me/player` alone, one call: it reports the active device's track and answers 204 when there is
+none (GOTCHAS "Player simulation"), where today's idle tick spends two (currently-playing, then
+`/me/player` on its 204; 01c §2.1). The probe records the track id, progress and `is_playing` in the
+user's state; a **track change** is a different track id, or the same track with progress gone
+backwards (a repeat). Calls per Rem-like user a day: ~9 h active at one per 2 min (270) plus ~15 h
+idle at one per 5 min (180), ~450 [estimate] against 1,035-1,303 today.
+
+### 7.4 The harvest governor
+
+A user is harvested (one recently-played call, the last 50 plays) when any of these holds:
+
+| trigger | when | calls a day, Rem-like [estimate] |
+|---|---|---|
+| H1 session tail | the first probe that finds playback stopped (today's `>=` rule, `src/lib/harvest-gate.ts:20-24`) | ~5 |
+| H2 completeness | 25 track changes since the last harvest, half the 50-play window | 0 while F ≤ 30 min |
+| H3 backstop | 2 hours since the last harvest (devices the probe cannot see; 50 plays is ~2.5-3 h of nonstop listening) | ~7 (today hourly, 24) |
+| H4 open app | a visible tab's load or focus, if a track change was seen since the last harvest; ≥ 60 s apart | ~5 for Rem, ~20 for an app-heavy friend |
+| H5 freshness | a track change seen, and ≥ F minutes since the last harvest | 9 h × 60 / F, at most one per play |
+
+**F is the governor's one knob.** The quota ledger (§4.2) counts the scarce bucket's calls per quota
+day; every hour the governor compares the day's spend with a straight line from 0 to 426 (450 less the
+recorder's 24) across the quota day: ahead of the line, F doubles (to at most 30 minutes); behind it,
+F halves (to at least 2). With one or two users F sits at 2 and closed-app capture is what it is today.
+If the passive experiment (01c §7.3) shows the quota is per user, the budget becomes per user and F
+stays at 2 for everyone.
+
+The arithmetic, per Rem-like user (9 h playing, ~130 plays, H1+H3+H4 ≈ 17 a day):
+
+| F | H5 | per user | 1 user | 2 | 5 | 25 | 250 |
+|---|---|---|---|---|---|---|---|
+| 2 min | ~130 | ~150 | 150 ✓ | 300 ✓ | 750 ✗ | – | – |
+| 5 min | ~90 | ~107 | | | 535 ✗ | – | – |
+| 10 min | ~54 | ~71 | | | **355 ✓** | 1,775 ✗ | – |
+| 30 min | ~18 | ~35 | | | 175 ✓ | 875 ✗ | 8,750 ✗ |
+
+Against 426. So: F = 2 for up to two Rem-like users, about 10 at five. At 25, completeness alone (H1,
+H2 with no H5, H3 every 3 h: ~15 a user) is ~375, inside the budget with nothing left for freshness;
+at 250 completeness needs ~3,750, nine times the budget, and plays would be lost. Under the shared
+reading, Spotify's quota rules out 250 users independently of the user cap (T1).
+
+Today [measured, 01c §2.7]: 139-319 cron harvests a day plus the recorder's 96, for one user.
+
+### 7.5 429s by kind
+
+`client.ts` keeps one module-scoped cooldown and persists bans over 120 s to one global key
+(`src/lib/spotify/client.ts:43-48, 170-186`), and never reads the 429 body. The design reads it: a
+`QUOTA_EXCEEDED` sets that bucket's cooldown (`cooldown:<bucket>` in app `meta`) until `Retry-After` or
+the observed reset, while probes and rescans in other buckets carry on; any other 429 is the
+per-app rate limit and keeps today's app-wide pause (01c §5.4 item 5). `api_log` records the `reason`
+and the uid, which is how the passive experiment learns whose calls a ban followed (01c §7.3).
+
+### 7.6 Library rescans
+
+- Every 30 minutes while a user is active, every 3 hours while idle (01c §5.6); outside the harvest
+  deadlines; resumable, because rescans already commit per playlist.
+- No `/me`: the user's Spotify id is known from sign-in. That removes one scarce-bucket call per
+  rescan, 32 a day for Rem today (01c §5.1).
+- Every owned playlist's snapshot compared in the list probe the rescan already makes, through
+  `playlists.snapshot_id`, instead of ~110 serial `plsnap:` reads (`src/lib/sync/library.ts:65-66`).
+- The Liked list re-fetched in full when its count or newest `added_at` moved, and weekly rather than
+  daily as a safety net (today's daily refetch always counts as a change, `sync/library.ts:81-84`).
+- Spotify calls per Rem-like user a day: ~23 rescans × ~4 calls (three playlist pages, one Liked
+  probe) plus the changed playlists' item pages, ~100 [estimate] against ~127-175 today.
+- A new user's first full scan (Rem's library is ~150 calls, one to two minutes at 150 ms pacing,
+  01c §5.6) runs across several ticks, one rescan slot at a time.
+
+### 7.7 Open-app paths
+
+- `POST /api/sync` (on load, every 2 minutes, on focus; `src/components/sync-on-load.tsx:12-27`) runs
+  the same per-user step as the tick, under a per-user harvest lock (a compare-and-set on
+  `sync_state.lease_until`, written only when a harvest starts), and harvests only by H4. Today it
+  harvests whenever the last harvest is over a minute old (01c §2.4).
+- `refreshHistoryAction` stops calling Spotify and only reads the store (01c S6, §5.5).
+- Now-playing polls every 15 s mid-track, plus the existing end-of-track and visibility polls (01c
+  §5.5): at most ~4 calls a minute per visible tab. Five users with a visible tab each: ~10 per 30 s,
+  plus ~3 from the ticks' probes, inside the planned 12.
+- The browser's instant handoff (`src/lib/optimistic-play.ts`, `handoff.ts`) is unchanged; it is what
+  puts a finished track on screen the moment the tab sees it end.
+
+### 7.8 Freshness, step by step (T3)
+
+- **App opened after listening elsewhere.** First paint is the stored Home payload (§9). If the user's
+  state shows a track change since the last harvest, the on-load `/api/sync` harvests: one Spotify call
+  (a few hundred ms [estimate]), one read batch and one write batch on the user's database (~30 ms at
+  R1's 15 ms target), and the open tab patches in the delta through the existing
+  `refreshHistoryAction` → `patchHistoryPayload` path (`src/lib/history-patch.ts`). Every play that
+  ended before the open is on screen within ~1-2 s of first paint [estimate]. Observed target met.
+- **App open while listening.** A finished track appears at once as a provisional row; the stored row
+  follows within F.
+- **App closed.** Stored lag is at most one probe interval (2 min while active) plus whatever of F has
+  not elapsed: ≤ ~2 minutes at F = 2, ≤ ~12 at F = 10.
+- **Completeness.** H2 fires at 25 changes, H3 at 2 hours, H1 at every session end; at Rem's peak
+  (~20 plays an hour, 01c §5.7), 25 plays take 75 minutes, so H5 fires first whenever F ≤ 30. No play is
+  lost while a pinger runs.
+
+### 7.9 Failure isolation
+
+01c §5.4 lists the cases; each lands in this design as a state on one user's row. A user whose calls
+hang uses its 25 s and is retried at its next due time. `invalid_grant` clears that user's token row
+and sets `needs_reauth` (§5). A 403 "not registered" sets `removed`. The same error for every user at
+once (the owner's Premium lapsing, 01f §1.2) backs the whole tick off instead of marking anyone
+removed. A store failure ends the tick at step 1. Every write on this path is idempotent: the lease and
+the tick lock are compare-and-sets, counters are written as values, inserts have natural keys, and
+writes that outlive a response go through `after()` (01c §5.4 item 8; §2.8 there shows re-sent INSERTs
+happen).
 
 ## 9. Search: payloads, caching, and the budget for every step
 
