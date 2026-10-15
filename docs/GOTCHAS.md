@@ -123,6 +123,13 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   app's allowlist in the Spotify dashboard → User Management. **Not fixable in
   code.** Don't keep retrying or assume the user ID is wrong — it's a dashboard
   setting the user controls.
+- **Sign-in by an account outside that allowlist:** `/v1/me` answers 403 with a plain-text
+  body ("The user is not registered for this application..."). Auth.js JSON-parsed it and
+  showed its generic "problem with the server configuration" page (production, 2026-10-14).
+  `src/lib/spotify/userinfo.ts` now reads `/v1/me` for the provider and the signIn callback
+  sends that case to `/login?error=SpotifyNotRegistered`. Letting the person in is the
+  dashboard's User Management list, and the store is single-user (one global token), so
+  the owner-only guard (`lib/owner.ts`) refuses any other account even once allowlisted.
 - **The same song carries different track ids in different places (relinking /
   duplicate releases).** A track stored in a playlist and the *same* track as it
   comes back from `/me/player/recently-played` can have **different ids** (market
