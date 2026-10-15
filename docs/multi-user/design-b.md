@@ -313,8 +313,8 @@ per-user table carries the key.
 ### 4.6 Schema versions in place of `init()`
 
 `init()` runs `CREATE TABLE IF NOT EXISTS`, four `PRAGMA table_info` reads and three `CREATE INDEX`
-statements on every cold instance (`db.ts:153-297`); against N databases that is ~10 statements per
-database per cold instance, on the request path. Instead:
+statements on every cold instance (`db.ts:153-297`), eight round trips; against N databases that is
+eight round trips per database each instance touches, on the request path. Instead:
 
 - Every database carries `meta.schema_version`, mirrored in `users.schema_version`. Code declares the
   version it needs and never runs DDL on a request; a user whose database is behind gets a short
@@ -331,6 +331,53 @@ database per cold instance, on the request path. Instead:
   on Developer, pricing page fetched 2026-10-14).
 
 ## 5. Tokens: per user, encrypted at rest
+
+01e §5 specifies this part and I take it as written, with three changes that follow from the data
+model and the round-trip budget.
+
+**The session names the uid, and every request checks it in one statement.** At sign-in the jwt
+callback finds the user by `profile.account_id` (refusing a profile without one, 01e §5.5) and puts
+`uid` and `session_epoch` on the token, taken from the users row only. On every later request the
+callback runs one app-database statement through the request box:
+
+```sql
+SELECT u.status, u.session_epoch, u.db_name, u.schema_version, u.tz_zone, u.is_admin,
+       t.blob, t.expires_at, s.state, s.last_harvest_at,
+       (SELECT value FROM meta WHERE key = 'cooldown:recently-played') AS cooldown
+FROM users u
+LEFT JOIN user_tokens t ON t.uid = u.uid AND t.env = :env
+LEFT JOIN sync_state  s ON s.uid = u.uid
+WHERE u.uid = :uid
+```
+
+Primary-key probes only, ~4 rows read [estimate]. No `uid`, an unknown one, `disabled` or `deleting`,
+or a stale epoch returns `null`, which ends the session; this one rule closes F1 (01e §1, F1) and asks
+everyone to sign in once at rollout. `needs_reconnect` keeps a session that can read its stored history
+but makes no Spotify call (01b §2.4's recommendation). The same row carries what Home's chrome and
+capture banner need today from three separate reads (`home/page.tsx:78-83`: cooldown, capture health),
+so identity costs no round trip that today's token read does not already pay. The page's user-database
+reads start in parallel, from the uid in the decoded cookie, and nothing renders until both settle
+(01b S2).
+
+**Ciphertext bound to the uid.** AES-256-GCM, Node's built-in `crypto`, a random 12-byte IV per write,
+stored as `v1.<base64url(iv ‖ ciphertext ‖ tag)>`, associated data `lazyboy:tokens:<uid>:<env>`, keys in
+`TOKEN_KEYS` as a Vercel Secret in Production only; rotation re-encrypts at each user's next refresh,
+about hourly (01e §5.3). A blob copied into another user's row fails to authenticate. Cost: an AES-GCM
+pass over a ~600-byte blob, microseconds [estimate], against a ~15 ms round trip at STORE_MIGRATION's
+R1 target.
+
+**Refresh is per user everywhere.** The lock is `lock:spotify_refresh:<uid>:<env>`; the in-flight
+refresh is a map keyed the same way (01e A2: shared, it hands user A's tokens to user B); the request
+box is keyed by uid; `clearTokensIfStale` compares within one row; the cookie-held-token paths go
+(01e A18). The cron's claim statement (§7.2) joins `user_tokens` for every due user, so a tick reads
+all its tokens in one statement and refreshes only users whose access token has under 60 s left.
+Writes: ~24 refreshes a day per active user, each a lock acquire, a token write and a release, ~72
+rows [01e §5.2, estimate]; 1,800 a day at 25 users, 18,000 at 250.
+
+The token core moves out of `auth.ts` into a module the simulated environment can load, and 01e §5.2's
+six known-answer tests come first (01e A21): concurrent refreshes for two users, A's lock not blocking
+B, `invalid_grant` clearing one row, a moved ciphertext failing, the four ways a cookie is refused,
+and no Spotify call for a user without a row.
 
 ## 6. Isolation, and the tests that prove it
 
