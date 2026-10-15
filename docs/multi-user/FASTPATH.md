@@ -384,8 +384,8 @@ friend's sign-in to claim. If they sign in from a different browser, Rem sends t
 
 ## 6. What this lane ran
 
-On the Mac on Oct 15, from 2:36 PM to about 3:45 PM. Everything was read-only except this file, its
-commit, and one estimate-ledger row.
+On the Mac on Oct 15, from 2:36 PM to 3:05 PM. Everything was read-only except this file, its
+commits, and one estimate-ledger row.
 
 - **Read in full.** PLAN.md, RULINGS.md, PHASE1.md (`git show mu/phase1:docs/multi-user/PHASE1.md`),
   STORE_MIGRATION.md, the project's CLAUDE.md, the eleven 19xx lane briefs, gate.py and the store lanes'
