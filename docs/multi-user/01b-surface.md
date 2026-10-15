@@ -245,7 +245,7 @@ state is invisible across serverless instances").
 | task store and running-promise maps | `src/lib/tasks/registry.ts:21-23`, `:70` | tasks have no owner (`registry.ts:9-18`); `/api/tasks/[id]` returns any id it finds (`route.ts:13-15`). Ids are `crypto.randomUUID()` (`registry.ts:27`), so the risk is an id that leaks, and two leak paths exist: `currentSyncId` below and the browser's `clean:active` (3.6) | an owner on each task, checked by the route; the cross-instance gap stays as ROADMAP Phase 3 describes |
 | `currentSyncId` | `src/lib/playlists-sync.ts:22`, `:50-54`, `:69` | one library sync per instance for everyone: B's kick while A's sync runs returns A's task id, B polls A's progress, and B's own library never syncs | one entry per user, or a per-user DB lock in its place |
 | `inflightRefresh` | `auth.ts:188-196` | `refreshShared(refreshToken)` ignores its argument while a refresh is in flight, so B awaits A's refresh and receives A's tokens | a map keyed by user |
-| `playlistsCache` | `src/lib/spotify/resources.ts:76-81`, `:89-104` | one entry per instance for 60 s, deliberately not keyed ("this is a single-user app", 76-79). A library sync for B within 60 s of A's on the same instance reads A's playlist list and stores it as B's library under B's `me_id` (`src/lib/sync/library.ts:40-50`) | key by user, or delete it; its only callers are `myPlaylistsAll` and `myPlaylists` (`resources.ts:125-135`) |
+| `playlistsCache` | `src/lib/spotify/resources.ts:76-81`, `:89-104` | one entry per instance for 60 s, deliberately not keyed ("this is a single-user app", 76-79). A library sync for B within 60 s of A's on the same instance reads A's playlist list and stores it as B's library under B's `me_id` (`src/lib/sync/library.ts:40-50`). A cron fan-out that syncs users one after another in one invocation would hit this for every user after the first | key by user, or delete it; its only callers are `myPlaylistsAll` and `myPlaylists` (`resources.ts:125-135`) |
 | `cooldownUntil` and the persisted `spotify_cooldown_until` | `src/lib/spotify/client.ts:48`, `:157`, `:178`; `db.ts:2376-2392` | one user's 429 or ban holds back every user's calls | right only if Spotify's limit is per app; 01f owns that answer |
 | `uniqueRecomputeKickedAt` | `db.ts:1960-1965` | one throttle for every user's unique-song recompute | per user |
 | store client, `apiLogWrites` | `db.ts:133-146`, `:2601` | shared connection and a prune counter | ok |
@@ -293,7 +293,10 @@ production database credentials: the first request that touches the store (an an
 does, through the pre-gate reads in 2.1) runs that branch's `init()` against production, and `init()`
 applies schema changes (`db.ts:153-297`, the `CREATE`/`ALTER` block). A multi-user branch that adds
 user columns would therefore migrate the production schema the first time anyone opens its preview
-URL. Previews need their own store before any multi-user branch is pushed. Today `origin` has only
+URL. It may not even need a visitor: `GOTCHAS.md` ("Dev and benchmarks run against the LIVE
+production store") says `npm run build` prerenders hit the store, and Vercel builds previews with
+the Preview variables; I did not check which routes still prerender against it. Previews need their
+own store before any multi-user branch is pushed. Today `origin` has only
 `main` (`git ls-remote --heads origin`), so no preview is live; one appears with the first pushed
 branch or a `vercel deploy` without `--prod`. Whether Vercel Deployment Protection gates preview URLs
 on this project I did not check.
@@ -314,7 +317,7 @@ Spotify account, or A's history captures B's listening.
 | A3 | `startCleanAction`, `deletePlaylistAction`, `startLibrarySync`, `/api/cron/sync` | `actions.ts:46-57`, `auth.ts:278-289`, `playlists-sync.ts:61-65`, `cron/sync/route.ts:96`, `:115-119` | background getters refresh and return the global token | `getValidAccessToken(userId)`; the getter closes over the user id |
 | A4 | every `auth()` that refreshes; every background refresh | `auth.ts:170-181`, `:188-196`, `:204-238`, `:244-252` | one in-flight refresh per instance answers whoever asks; one lock; losers poll and clear the global row | the in-flight map, the lock name, the poll and the stale-clear all keyed by user |
 | A5 | `logout` | `actions.ts:63-69` | no gate; deletes the one token row, stopping capture for the stored account | a gate; delete only the caller's row, if anything (section 5, S11) |
-| A6 | library sync from the cron, `startLibrarySync`, `deletePlaylistAction`'s resync, a cold clean | `spotify/resources.ts:80-104` via `sync/library.ts:40-50` | within 60 s on one instance, B's sync reads A's playlist list and stores it as B's library | key the cache by user, or remove it |
+| A6 | library sync from the cron, `startLibrarySync`, `deletePlaylistAction`'s resync, a cold clean | `spotify/resources.ts:80-104` via `sync/library.ts:40-50` | within 60 s on one instance, B's sync reads A's playlist list and stores it as B's library; a sequential cron fan-out hits it for every user after the first | key the cache by user, or remove it |
 
 **B. Reading another user's stored data.**
 
