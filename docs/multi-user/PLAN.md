@@ -994,50 +994,73 @@ Vercel Hobby's Active CPU (per team, and an overrun stops every project for up t
   "a single developer account" and "a single budget"; one changelog sentence says "a user's quota"
   (01c §4). With one user the readings cannot be told apart. The plan is built for the shared
   reading, which the documentation states, and relaxes if the passive check (§7.9) shows otherwise.
-- **The player endpoints** have never returned a 429; Rem's cron alone spends 1,035-1,303 calls a day
-  on them [measured, deduplicated `api_log`, 01c §2.7]. Their limit is unmeasured.
-- **The 30-second rate limit** is per app and unpublished; 18 calls in 30 s have passed without a 429
-  (`db.ts:2655-2658`, 01f §1.4).
+- **The player endpoints** have never returned a 429. Rem's cron alone spends 1,035-1,303 calls a day
+  on them [measured, deduplicated `api_log`, 01c §2.7]; the busiest player day the app has had is
+  1,336 calls, on Oct 13 [measured, deduplicated `api_log`, Aug 17-Oct 14, scale 6]. Their limit is
+  unmeasured, and the probe that triggers every harvest lives in this bucket (§7.8).
+- **The 30-second rate limit** is per app and unpublished. The busiest 30-second windows in the
+  retained `api_log` held 56 calls (Aug 18, a cron library scan) and 54 (Sep 27), with no 429 within a
+  minute of either [measured, 84,260 calls after removing exact re-sends, scale 7]; the only 429s ever
+  logged are recently-played's and `/me`'s, during the August quota bans. The 18 calls quoted before
+  (`db.ts:2652-2658`) were the peak inside those ban windows, not a ceiling.
 
 ### 7.2 The tick
 
-Two pingers call `GET /api/cron/sync`: the Zenbook's timer on even minutes (`OnCalendar=*:0/2`, in
-place of today's drifting `OnUnitActiveSec=2min`) with `CRON_SECRET`, and cron-job.org on odd
-minutes with `CRON_SECRET_EXT` (B §7.2). With both alive the app ticks every minute; with either
-alone, every two minutes, today's cadence. The tick:
+From Phase 3, two pingers call `GET /api/cron/sync`: the Zenbook's timer on even minutes
+(`OnCalendar=*:0/2`, in place of today's drifting `OnUnitActiveSec=2min`) with `CRON_SECRET`, and
+cron-job.org on odd minutes with `CRON_SECRET_EXT` (B §7.2). With both alive the app ticks every
+minute; with either alone, every two minutes, today's cadence. From lane 1904 to Phase 3, today's
+route runs with an interim guard instead (§7.9). The tick:
 
-0. **The owner alarm, Zenbook caller only.** Today the Zenbook timer's failed unit is Rem's only alarm
-   that capture stopped (`route.ts:103-111`; the Oct 3 review's M1). The route answers that caller
-   503 when the admin has no token row or is `needs_reconnect`, read from the app database before
-   anything else, so the verdict does not depend on which pinger's tick did the owner's work this
-   minute (C §6.2's reason). cron-job.org always gets 200, because it disables a job after a run of
-   failures (`route.ts:174-178`).
-1. **Claim.** One statement leases every due user: `UPDATE sync_state SET lease_owner = :tick,
-   lease_until = :now + 50s WHERE next_probe_at <= :now + 30s AND (lease_until IS NULL OR lease_until
-   < :now) AND state NOT IN ('needs_reconnect', 'removed', 'paused') RETURNING uid`, joined to the
-   users' tokens and database names in the same round trip. A leased user is not due, so two ticks,
-   or a tick and an open tab, never work on one user at once. This is also the tick's store health
-   check: if it fails, the tick ends instead of letting each user wait out the store fetch's three
-   15-second attempts (`src/lib/store-fetch.ts:28-29`).
-2. **Steps, concurrently**, under `Promise.allSettled` and a 25-second deadline each. A step receives
+0. **The caller and the owner alarm.** The secret names the caller, compared in constant time as
+   today (`route.ts:45-66`). Only the Zenbook's caller can get a non-200: the route answers it 503 when
+   the admin has no token row or is `needs_reconnect`, or when two or more users, or the admin, failed
+   to decrypt in the last tick (§5.3), read from the app database before anything else, so the verdict
+   does not depend on which pinger's tick did the owner's work this minute (C §6.2's reason).
+   cron-job.org always gets a bare `{"ok":true}`: it disables a job after a run of failures
+   (`route.ts:174-178`), and it keeps response bodies in its execution history, where per-user
+   outcomes would be a minute-by-minute record of when each friend listens (security R14).
+1. **The stamp.** `UPDATE app_meta SET value = :now WHERE key = 'tick_at' AND CAST(value AS INTEGER)
+   < :now - 45000` (inserted if absent). No row changed means another tick ran within 45 s: the
+   route replies 200 at once and does nothing. Pingers 60 s apart both pass; a leaked secret called in
+   a loop gets one tick per 45 s, where without the guard 100 calls a second would write ~8.6M rows a
+   day against the free plan's 10M a month and block every write until the 1st (security R14). The open
+   app's fallback reads the same stamp (§7.6).
+2. **Claim.** One statement leases every due user whose `users.status` is `active` (and, under
+   `SIGNUPS=owner`, only the admin): `UPDATE sync_state SET lease_owner = :tick, lease_until = :now +
+   50s WHERE uid IN (SELECT s.uid FROM sync_state s JOIN users u ON u.uid = s.uid WHERE u.status =
+   'active' AND (:signups = 'invite' OR u.is_admin = 1) AND s.state <> 'paused' AND s.next_probe_at <=
+   :now + 30s AND (s.lease_until IS NULL OR s.lease_until < :now)) RETURNING uid`, joined to the
+   users' tokens and database names in the same round trip (security R2, completeness M3). A leased
+   user is not due, so two ticks, or a tick and an open tab, never work on one user at once. This is
+   also the tick's store health check, with one attempt and a 5-second timeout: if it fails, the tick
+   ends instead of waiting out the store fetch's three 15-second attempts (`src/lib/store-fetch.ts:28-29`).
+3. **Steps, concurrently**, under `Promise.allSettled` and a 15-second deadline each. A step receives
    its `Uid`, `UserStore`, a token getter bound to the uid and its deadline, and nothing else: refresh
    the token if under 60 s remain, probe (§7.3), harvest if the policy says so (§7.4-7.5), record into
    the user's database, then write the next due times and release the lease with a compare-and-set
    on `lease_owner`, so a step that outlived its lease writes nothing to the queue.
-3. **At most one library rescan**, for one user, under its own deadline, after the harvests (§7.7).
-4. **Reply 200** with one outcome per user (codes and counts, no data, as today, 01b §2.3).
+4. **At most one library rescan**, for one user, under its own deadline, after the harvests, and only
+   if at least 10 s of the tick's 20 s remain (§7.7).
+5. **Reply within 20 s.** cron-job.org times out at 30 s and disables a job that "subsequently fails
+   more than 25 times" (its FAQ, quoted in scale 4), and today's ticks already reach 29.1-34.2 s at
+   their maximum through the Funnel (01c §2.1). Whatever has not finished by 20 s is handed to
+   `after()`, which Vercel keeps alive to `maxDuration`. The Zenbook's caller gets one outcome per user
+   (codes and counts, no data, as today, 01b §2.3); cron-job.org gets the bare body.
+6. **The daily chores, when overdue.** If `app_meta.daily_at` is over 26 hours old, the tick takes
+   `lock:daily` and runs them in `after()` (§7.11).
 
 Cadence by state: `active` (a play in the last 30 minutes) is probed every 2 minutes; `idle` every 2
 minutes while there are at most two users, then every 5 minutes after 30 idle minutes once there are
 three or more (B §7.3: that keeps five users' probes near 2,250 a day); `backoff` 2, 4, 8 … 60
-minutes; `needs_reconnect`, `removed` and `paused` make no Spotify calls. Due times are offset by a
-hash of the uid so users spread across the minute, and counted due 30 s early so a late tick does not
-stretch two minutes to four.
+minutes; `paused` users, and users whose status is not `active`, make no Spotify calls. Due times are
+offset by a hash of the uid so users spread across the minute, and counted due 30 s early so a late
+tick does not stretch two minutes to four.
 
 Each pinger hit is one invocation: 1,440 a day whatever N is. The tick lasts as long as its slowest
-user's step: ~1-3 s at R1's target, under the 25-second deadline when a Spotify call hangs (01c §5.8).
-The route sets `maxDuration = 60`; nothing under `src/app` sets one today, so the project's 300 s
-default applies (01f §2.1).
+user's step: ~1-3 s at R1's target, 15 s at most when a Spotify call hangs (01c §5.8). The route sets
+`maxDuration = 60`; nothing under `src/app` sets one today, so the project's 300 s default applies
+(01f §2.1).
 
 ### 7.3 The probe
 
@@ -1048,9 +1071,11 @@ calls, currently-playing and then `/me/player` on its 204 (413 of Rem's 436 idle
 01c §2.1). Now-playing keeps its two-step read: it is the UI's path, and its cost is bounded
 separately (§7.6).
 
-The probe keeps the last track id, progress and time in the user's own `meta` (`probe`). A **track
-change** is a different track id, the same track with progress gone backwards (a repeat), or playback
-stopped since the last probe (the session tail).
+The probe keeps the last track id, progress, the time and when playback stopped in the user's own
+`meta` (`probe`), written only when the track or the play state changes: a repeat shows as progress
+lower than the time since the last probe allows, so a probe that changes nothing writes nothing
+(scale 8). A **track change** is a different track id, the same track with progress gone backwards (a
+repeat), or playback stopped since the last probe (the session tail).
 
 ### 7.4 When a harvest happens
 
@@ -1058,24 +1083,34 @@ A harvest is one recently-played call, which returns the last 50 plays. A user i
 
 | trigger | when | Rem-like calls a day [estimate] |
 |---|---|---|
-| track change | the probe saw one since the last harvest, subject to the brake's interval (§7.5) | ~117-130, one per play at most |
+| track change | the probe saw one since the last harvest, subject to the brake (§7.5) | ~117-130, one per play at most. The ceiling is one per probe, up to 30 an hour: a listener with music on 10-12 hours a day reaches ~200-240, a skip-heavy one ~300-360 (scale 1) |
 | session tail | the first probe that finds playback stopped (today's `>=` rule, `src/lib/harvest-gate.ts:20-24`) | ~5 |
-| retry | a change-triggered harvest landed nothing new: Spotify may list a play a little after the player has moved on, so the next tick harvests once more (C §6.2) | unmeasured; Phase 3's soak counts it |
+| tail retry | once, ~5 minutes after a session tail | ~5 |
 | completeness | 25 track changes since the last harvest, whatever the brake says (B §7.4: half of the 50-play window) | 0 unless the brake holds a user above 25 changes |
-| backstop | 2 hours idle since the last harvest, for devices the probe cannot see (today hourly; 50 plays is ~2.5-3 hours of nonstop listening, 01c §5.1) | ~7 |
+| backstop | 2 hours idle since the last harvest, for devices the probe cannot see (50 plays is ~2.5-3 hours of nonstop listening, 01c §5.1); hourly, as today, until the first friend (completeness L6) | ~7 (14 while hourly) |
 | open app | §7.6 | ~5 for Rem; more for an app-heavy friend |
 
-That is ~145-150 a day for a Rem-like user, before the retries, against 139-319 cron harvests plus
-the recorder's 96 today (01c §2.7). On Rem's day the tick harvested 280 times for 129 plays (01c
-§5.3); the rule predicts ~145 plus the retries, a number Phase 3's soak checks on his own traffic
-before anyone shares the bucket. The decision is a pure function next to `shouldHarvest`, with known
-answers in `tests/harvest-gate.test.ts`.
+**Late listings.** Spotify lists some plays only after the player has moved on: from Oct 12 to 14, 30
+of 225 of Rem's plays (13.3%) were not in the first harvest after they ended, with misses commonest in
+the first 30 seconds after a play's end (20%); end to stored was p50 72 s, p90 240 s, p95 300 s
+[measured from the Zenbook's `ping.log` matched to `api_log`, scale 5]. A retry one tick later landed
+only 7 of the 30, and mid-session it is not needed: the next track change's harvest lists the late
+play at no extra cost while it is among the last 50. So the plan drops the mid-session retry the Oct 14
+version had and spends one retry on the session tail, where nothing else would fire for two hours.
+F2's tail is Spotify's, and §1 states it.
+
+That is ~150 a day for a Rem-like user, against 139-319 cron harvests plus the recorder's 96 today
+(01c §2.7). On Rem's day the tick harvested 280 times for 129 plays (01c §5.3); the rule predicts
+~150, a number Phase 3's soak checks on his own traffic before anyone shares the bucket. Each harvest
+tags its trigger in `api_log.source` (`harvest:change`, `:tail`, `:tail-retry`, `:completeness`,
+`:backstop`, `:open-app`), which is what that soak reads (completeness L4). The decision is a pure
+function next to `shouldHarvest`, with known answers in `tests/harvest-gate.test.ts`.
 
 ### 7.5 The fair-share brake
 
 Under the shared reading, one person's heavy day can get every user's capture banned until ~10:50 AM
 (01f §1.4). No code makes the bucket private, so the plan decides who slows down first (A §6.4, with
-C's counting):
+C's counting and scale 1's per-user cap):
 
 1. Every recently-played and `/me` call increments the caller's `sync_state.rp_calls` for the quota
    day, **awaited before the call**, so a lost write cannot undercount; a re-sent increment overcounts,
@@ -1083,19 +1118,24 @@ C's counting):
    boundary `getRecentlyPlayedQuotaWindows` already uses. The app's total is the sum over at most five
    rows.
 2. Every user starts the day on track-change harvests.
-3. When the app's total reaches ¾ of 426 (~320), any user above an equal share (426 ÷ N) moves to one
-   harvest per 15 minutes of playback for the rest of the quota day.
-4. At 426, every user moves to one per 30 minutes of playback.
-5. In every mode, completeness (25 changes), the session tail and the 2-hour backstop still fire, so
-   no play leaves the 50-play window unseen (F3), and opening the app still harvests (§7.6), so what a
-   person sees on opening is current (F1).
+3. A user whose count reaches their share, 426 ÷ N (N = the users the claim can lease), moves to one
+   harvest per 15 minutes of playback for the rest of the quota day. Light listeners never reach it,
+   and a heavy listener cannot spend anyone else's share.
+4. When the app's total reaches 426, every user moves to one per 30 minutes of playback.
+5. In every mode, completeness (25 changes), the session tail and its retry, and the 2-hour backstop
+   still fire, so no play leaves the 50-play window unseen (F3), and opening the app still harvests
+   (§7.6), so what a person sees on opening is current (F1).
 
-Light listeners never slow down; the heaviest slows first; the app's total stays near the budget.
-It is a counter, a comparison and a branch, with known answers at each boundary. It ships before the
-third account (§13), since Rem plus one friend fits with room (§14.2). If the passive check (§7.9)
-shows the quota is per user, 426 becomes a per-user number and everyone stays on track-change
-harvests. The owner is not exempt (decision in §18): exempting him moves his ~150 calls a day out of
-everyone else's share, so the brake trips earlier for friends.
+It is a counter, a comparison and a branch, with known answers at each boundary. It counts from
+Phase 3 and **switches on with the first friend** (Phase 4, N = 2): Rem and one heavy friend can reach
+~365-525 calls on a day, past the 450 budget, so the first week anyone shares the bucket is the week
+it is needed (scale 1). At N = 2 the share is 213, which Rem passes only on his heaviest days (his
+busiest in 61 had 204 plays, ~230-250 harvests with the recorder). Five Rem-like users each reach
+their ~85 about 60% into their listening day, about when the total reaches 426, so on a heavy day
+everyone gets 2 minutes for ~60% of it and 30 after (A §13.3); mixed profiles slow the heaviest first
+(§14.2). If the passive check (§7.9) shows the quota is per user, 426 becomes a per-user number and
+everyone stays on track-change harvests. The owner is not exempt (decision 28): exempting him moves
+his ~150 calls a day out of everyone else's share, so the brake trips earlier for friends.
 
 ### 7.6 The open-app paths
 
@@ -1103,35 +1143,63 @@ everyone else's share, so the brake trips earlier for friends.
   runs the same per-user step under the same claim, so an open tab and the cron never harvest one
   user twice in a minute. On a load or a return to the tab it also harvests once if the probe saw a
   track change since the last harvest, at least 60 s apart (B's H4), which is the catch-up for
-  listening the probe could not see. When no tick has started in 5 minutes (`app_meta.last_tick_at`,
-  which every tick stamps: both pingers down, or every tick failing at its claim), the tab's own
-  2-minute timer makes the user due, so an open app keeps capturing on its own (C §6.3). Today the route harvests
-  whenever the last harvest is over a minute old, playing or not (`src/app/api/sync/route.ts:28-31`);
-  a friend with Home visible through an 8-hour workday would spend ~240 scarce calls a day that way
-  (C §6.3). The browser's zone is written only when it changes (today on every call, `:24-27`).
-- **`refreshHistoryAction`** stops calling Spotify and only re-reads the user's store; today it
-  harvests on every call with no debounce (`history-actions.ts:133`, 01c S6). The browser's
-  provisional plays (`src/lib/optimistic-play.ts`, `handoff.ts`) already cover the moment a track
-  ends. One visible change for Rem: the forced refresh at a track change finds the stored row only
-  after the next tick, up to ~2 minutes later, with the provisional row standing in until then.
-- **Now-playing** polls every 15 s mid-track instead of 6 s, keeping the end-of-track and focus polls
-  (01c §5.5): ~4-6 Spotify calls a minute per visible tab, so five users with a visible tab each make
-  ~10-15 calls per 30 s, plus ~2-3 from the ticks, at or under the 18 seen safe (the limit itself is
-  unpublished and higher). The chip already interpolates progress between polls. It ships in Phase 3, measured on Rem's call log before a friend shares the rate window,
-  because a rate-limit 429 pauses every user's capture for its duration.
+  listening the probe could not see. When no tick has stamped `app_meta.tick_at` in 5 minutes (both
+  pingers down, or every tick failing at its claim), the tab's own 2-minute timer makes the user due,
+  so an open app keeps capturing on its own (C §6.3). Today the route harvests whenever the last
+  harvest is over a minute old, playing or not (`src/app/api/sync/route.ts:28-31`); a friend with Home
+  visible through an 8-hour workday would spend ~240 scarce calls a day that way (C §6.3). The
+  browser's zone is written only when it changes (today on every call, `:24-27`).
+- **`refreshHistoryAction`** stops calling Spotify in Phase 3 and only re-reads the user's store;
+  today it harvests on every call with no debounce (`history-actions.ts:133`, 01c S6), which also makes
+  it one more concurrent writer of the derived state (migration 3). The browser's provisional plays
+  (`src/lib/optimistic-play.ts`, `handoff.ts`) already cover the moment a track ends. The one change
+  Rem sees: the forced refresh at a track change finds the stored row only after the next tick, up to
+  ~2 minutes later, with the provisional row standing in (decision 15). Its re-read is the open-tab
+  term of §8.6: it runs every 120 s while Home is visible, on every return to the tab and on each
+  track change (`den-home.tsx:748, 990-996`), and reads the strip at whatever width the client holds
+  (`history-actions.ts:139-146`; "See all" sends every day of history, `den-home.tsx:386-412, 760`)
+  plus today's rows, both live entries keyed on `write_seq`, so each marker move makes the next
+  refresh a real read: ~7,500 rows at the default width, ~46,000 with "See all" open [estimate, scale
+  2]. P4 answers it from the patched Home payload instead (§8.4).
+- **Now-playing** polls every 6 s from one leader tab per browser today (`now-playing-context.tsx:76`).
+  From the first friend (Phase 4, not Phase 3, so Rem's own app does not change weeks early,
+  completeness L6) it polls every 15 s mid-track, keeping the end-of-track and focus polls (01c §5.5),
+  and the server answers each user from a ~5-second memo, so a user's tabs and devices share one call
+  (§6.6). The chip already interpolates progress between polls; `tests/handoff.test.ts` re-runs at the
+  15-s cadence, since the instant handoff reads the chip's last poll. The 30-second window is not the
+  reason: five visible tabs at 6 s make 25-50 calls per 30 s, under the 56 measured. The daily player
+  volume is (§7.8): at 15 s an app-heavy friend's three visible hours add ~720-1,440 player calls to
+  their ~450-720 probes, so five such users would ask ~6,000-11,000 a day of a bucket that has never
+  been seen above 1,336 [estimate, scale 6]. Phase 5 adds a friend only while the measured player
+  volume stays inside what the app has already run without a 429 (§13.1).
 
 ### 7.7 Library rescans
 
-- One user per tick, outside the harvest deadlines, resumable (rescans commit per playlist and the
-  snapshot gate skips finished ones, `src/lib/sync/library.ts:64-71`); every 30 minutes while active,
-  every 2-3 hours idle (01c §5.6).
+- One user per tick, outside the harvest deadlines and only with ≥ 10 s left in the tick's budget,
+  resumable (rescans commit per playlist and the snapshot gate skips finished ones,
+  `src/lib/sync/library.ts:64-71`); every 30 minutes while active, every 2-3 hours idle (01c §5.6).
 - No `/me` call: the user's Spotify id is on the users row, refreshed at sign-in. That is one
   scarce-bucket call per rescan, 32 a day for Rem (01c §5.1).
 - Every playlist's stored snapshot read in one statement over the user's `plsnap:` keys instead of
   ~110 serial `getMeta` reads (`library.ts:65-66`; about half of the day's `meta` reads, 01c §2.3).
-- The Liked list re-fetched when its count or newest `added_at` moves, and weekly as the safety net
-  instead of daily; the daily refetch always counts as a change today (`sync/library.ts:81-84`) and so
-  triggers a ~39,000-row unique-song recount every day (B §3 row 6).
+- **Liked Songs, sized for a friend with thousands** (scale 3). Rem has 48, so nothing measured so far
+  exercised this path. Today `storeSavedTracks` diffs on `(addedAt, position)` (`src/lib/store-diff.ts:216-219`)
+  and Spotify lists Liked newest first, so one new like moves every row's position and rewrites all N
+  rows, though nothing reads `position` (`db.ts:1636-1638, 2296-2303`); and any change in the count or
+  the newest `added_at`, or a day passing (`sync/library.ts:79-84`), refetches the whole list,
+  unpaced, through `getAll`, which throws at its 501st page (`client.ts:255`), so a list over 25,000
+  songs would fail every scan. For a friend with 5,000 likes that is ~5,000 rows written and 100 calls
+  per like [estimate, scale 3]. Phase 3 changes it before anyone else signs in: `position` leaves the
+  diff, so a like writes one row; the list is read from the newest page until a stored `(track,
+  added_at)` appears, with a full refetch only when the count still disagrees afterwards; the daily
+  check stays daily and now costs one or two calls when nothing changed, which also stops the daily
+  ~39,000-row unique-song recount it triggers today (B §3 row 6); background pages are paced (§6.6);
+  and `getAll` takes a resumable cursor in place of the throw. `playlist_tracks` has the same
+  position-keyed shape (`db.ts:2069-2093`) at a lower rate, since Spotify appends at the bottom; it is
+  left as is.
+- The image-only tier stops bumping `write_seq` (`db.ts:1841`) in P4, and the playlist grid keys on a
+  marker of its own, so artwork rotation (198 updates on Oct 14, 01c §2.3) stops invalidating every
+  strip and day entry (scale 2).
 - A new user's first scan (~150 calls for a Rem-sized library, 1-2 minutes at 150 ms pacing, 01c §5.6)
   starts from their first Home visit or the cron, whichever comes first; the client kick also stamps
   `library_scan_attempt_at`, so the two never scan one user at once (C §6.6).
@@ -1140,39 +1208,106 @@ everyone else's share, so the brake trips earlier for friends.
 
 | failure | effect | who |
 |---|---|---|
-| a Spotify call hangs | the step is abandoned at 25 s; it can still write later, and everything it writes is safe to repeat | that user |
-| `invalid_grant` | token row cleared, `needs_reconnect`, no further calls (§5.4) | that user |
-| 403 "not registered" (removed from the dashboard's list) | `removed`, no further calls. Never applied to the admin, and never when every user failed the same way in one tick, which is what the owner's Premium lapsing looks like (01c §5.4 item 4): then the whole tick backs off | that user |
+| a Spotify call hangs | the step is abandoned at 15 s and may still write later: claims, leases and natural-key inserts are safe to repeat, and the derived totals move only by what an insert actually inserted (§8.3) | that user |
+| `invalid_grant` | §5.4's steps: stop and keep, confirm, then expiry, `revoked` or an app-wide event | that user, or nobody's data when two are hit |
+| 403 "not registered" (removed from the dashboard's list) | `removed`, no further calls; after 7 days the health check asks Rem to run the deletion, since the person can no longer sign in to ask (completeness M5). Never applied to the admin, and never when every user failed the same way in one tick, which is what the owner's Premium lapsing looks like (01c §5.4 item 4): then the whole tick backs off | that user |
 | Spotify 5xx or a timeout | `backoff` | that user |
 | 429, rate limit | the app-wide cooldown, seconds long (`client.ts:150-183`) | everyone, correctly: the limit is per app |
-| 429, `QUOTA_EXCEEDED` (the body's `reason`, which nothing reads today, 01c S4) | `cooldown:<bucket>` until `Retry-After` or the observed reset; probes and rescans in other buckets continue | everyone's harvests, correctly |
-| the app database unreachable | the tick ends at the claim | everyone; plays within each user's last 50 come back at the next tick |
-| a user database refused (wrong owner, behind on schema) | that user's step skips, logged | that user |
+| 429, `QUOTA_EXCEEDED` (the body's `reason`, which nothing reads today, 01c S4) | `cooldown:<bucket>` until `Retry-After` or the observed reset; probes and rescans in other buckets continue. While only one user has been refused this quota day, one other user's next harvest goes through first: refused too, the cooldown goes app-wide; accepted, the quota is per user, the cooldown stays that user's, and §7.9 has its answer (security R15) | everyone's harvests, or that user's |
+| a player-endpoint refusal | no track change can be seen, so every user active in the last 3 hours is harvested every ~30 minutes, now-playing polls at 30-60 s, and the health check reports it (scale 6) | everyone's freshness, not their completeness |
+| a token that will not decrypt | §5.3: that user's step skipped, no state written; two or more in one tick, or the admin's, answers the Zenbook caller 503 | nobody's state |
+| the app database unreachable | the tick ends at the claim; requests answer the retryable error (§5.1) | everyone; plays within each user's last 50 come back at the next tick |
+| a user database refused (wrong owner, behind on schema) | that user's step skips, recorded | that user |
 
-Writes on this path are idempotent: claims and leases are compare-and-sets with an owner token,
-inserts have natural keys (`plays` by `(track_id, played_at)` inside the user's own table), and
-writes that must outlive a response go through `after()`, not a bare `void` (01c §5.4 item 8). Each
-harvest records the lag of the plays it lands (`now − played_at`); the daily route rolls them into
-`lag_p50_s` and `lag_p95_s`, F2's instrument on `/usage`.
+The Oct 14 version called every write on this path idempotent. Claims and leases are compare-and-sets
+with an owner token, and inserts have natural keys (`plays` by `(track_id, played_at)` inside the
+user's own table); the derived totals and month counts were not, which §8.3 fixes by advancing them
+only with what an insert actually inserted (migration 3). Writes that must outlive a response go
+through `after()`, not a bare `void` (01c §5.4 item 8). Each harvest records the lag of the plays it
+lands (`now − played_at`); the daily chores roll them into `lag_p50_s` and `lag_p95_s`, F2's
+instrument on `/usage`.
 
 ### 7.9 Pingers, the recorder, and finding out how the quota is counted
 
-- **The second pinger** is the cron-job.org job `CRONJOB_JOB_ID` already names in Production,
-  updated with `CRON_SECRET_EXT` and an odd-minute schedule, so `ensureCronJobEnabled`
-  (`src/lib/cronjob.ts:14-48`) keeps re-enabling it if cron-job.org disables it; that chore moves to
-  STORE_MIGRATION's `/api/cron/daily` (C §6.5). It waits for Phase 3, because today's route has no
-  lease and two pingers would double every call (01c §5.7 b).
-- **The recorder** stays Rem's alone and runs hourly instead of every 15 minutes: 24 scarce calls a day
-  instead of 96, and an hour is well inside 50 plays of any listening (01c §5.7 a). Extending it to
-  friends would put their refresh tokens in a plain file on the Zenbook (01e §5.9). Its grant was
-  adopted on Aug 6 and may age out by Feb 6, 2027 under Spotify's six-month rule, silently (01e F3);
-  a fresh local sign-in copied into `~/lazyboy-recorder/tokens.json` restarts the clock.
+- **An interim second pinger, right after lane 1904** (migration 2; decision 8). Until Phase 3 the
+  Zenbook is the only frequent capture trigger, and from late August to late September it lost about
+  ten days of capture in four weeks: down Aug 30 to Sep 2 and Sep 3 to 5, then unable to resolve names
+  until Sep 9, 16 more hours on Sep 9 and 19.5 on Sep 25 (the Oct 3 review's item D2, quoted in
+  migration 2), with the pinger and the recorder failing together because its only resolver is
+  Tailscale's (`/etc/resolv.conf` lists `100.100.100.100` and `fd7a:115c:a1e0::53`, read Oct 15).
+  Phase 3 is six to seven weeks after the cutover [estimate, §13.3]. So right after lane 1904,
+  today's route gains three small things: it accepts `CRON_SECRET_EXT` beside `CRON_SECRET`; it
+  answers the owner alarm to the Zenbook's secret only; and it takes §7.2's stamp with a 90-second
+  window, so with the two pingers on alternate minutes every second tick runs and Spotify sees today's
+  two-minute cadence, while either pinger alone keeps it. Cost: one row written per tick that runs,
+  ~720 a day. Re-enabling the cron-job.org job that `CRONJOB_JOB_ID` already names in Production, with
+  the new secret, is Rem's step; `ensureCronJobEnabled` (`src/lib/cronjob.ts:14-48`) keeps it enabled
+  once it is, a chore that moves to the daily route (C §6.5).
+- **A resolver on the Zenbook that does not depend on tailscaled** (decision 9): an ops change outside
+  the lanes, which removes the failure that took the pinger and the recorder down together.
+- **The full second pinger** comes with Phase 3's claim: the 90-second window becomes 45 s and both
+  pingers' ticks run, one a minute (§7.2).
+- **The recorder** stays Rem's alone and runs hourly from Phase 3 instead of every 15 minutes: 24
+  scarce calls a day instead of 96, and an hour is well inside 50 plays of any listening (01c §5.7 a).
+  Extending it to friends would put their refresh tokens in a plain file on the Zenbook (01e §5.9). Its
+  grant was adopted on Aug 6 and may age out by Feb 6, 2027 under Spotify's six-month rule, silently
+  (01e F3); a fresh local sign-in copied into `~/lazyboy-recorder/tokens.json` restarts the clock. Its
+  file holds the only copy of 122 of Rem's plays until lane 1904 backs it up (§10.2 edit 7, §11.3).
 - **How the quota is counted** is found passively (01c §7.3): `api_log` records the caller's uid and
-  each 429's `reason` from Phase 3 on, friends join one at a time, and the first ban answers it
-  (everyone refused at once is one pool; one user refused is per-user quotas). With the brake holding
-  the total near 426, a ban may never come, and the plan is safe under both readings. A question on
-  Spotify's developer forum costs nothing. Driving a test account into a ban would risk Rem's own
-  capture for up to ~12 hours (01c §7 decision 3).
+  each 429's `reason` from Phase 3 on, friends join one at a time, and the first ban answers it:
+  §7.8's quota row lets one other user's harvest through after the first refusal, so "one user
+  refused" can actually be observed. With the brake holding the total near 426, a ban may never come,
+  and the plan is safe under both readings. A question on Spotify's developer forum costs nothing.
+  Driving a test account into a ban would risk Rem's own capture for up to ~12 hours (01c §7
+  decision 3).
+
+### 7.10 Alarms
+
+Today nothing that goes wrong notifies anyone. The Zenbook unit that is meant to "fail visibly" has an
+empty `OnFailure=` (read by completeness H1), `ping.sh` only appends each reply to `ping.log` (01c §1),
+and everything else ends on `/usage`, a page. STORE_MIGRATION's R6, "No new alerting mechanism", is
+the reason, and it is right for the cutover; it stops being right once friends' data, a breach-notice
+clock and a deletion clock depend on someone noticing (decision 14).
+
+The channel is the one the dormant usage-check route was built around (`docs/ARCHITECTURE.md:190-198`):
+a cron-job.org job with failure e-mail, here calling `GET /api/cron/health` hourly with
+`CRON_SECRET_EXT`. It answers 500, with a one-word reason and nothing about anyone's listening, when:
+
+- the `events` table has a row not yet reported (an isolation event, a decrypt failure, a drift);
+- the admin is `active` and his last successful tick is over 30 minutes old (before Phase 3, the
+  stamp in `lazyboy.meta`);
+- a user has been `revoked` or `deleting` for over a day, or a deletion's five-day check fails (§12.3);
+- a friend has been `needs_reconnect` or in `backoff` for over six hours, or `removed` for over seven
+  days;
+- the daily chores' `daily_at` is over 26 hours old;
+- Turso's month-to-date reads run ahead of the month's pace (the usage-check's own rule).
+
+A reported `events` row is marked so it e-mails once; standing conditions stay red while they hold.
+cron-job.org disables a job after a run of failures, so the daily chores re-enable the health job the
+way they re-enable the pinger. Each condition has a known answer. It is live from Phase 1, when
+isolation events begin, and costs $0.
+
+### 7.11 The daily chores
+
+STORE_MIGRATION's `/api/cron/daily` becomes the home of every once-a-day job: deletion retries and the
+automatic triggers (day 4 of `revoked`, 14-day invite expiry, the 60-day `dormant` move, twelve months
+without a sign-in, §12.3); Turso's usage read; re-enabling the two cron-job.org jobs; the lag
+roll-ups; the contexts pass; the telemetry prunes; re-encrypting blobs under an old key (§5.3); the
+sweep of `user_tokens` and `sync_state` rows whose uid has no `users` row (security R3); and the
+**drift heal**: per user, recompute the all-time totals and each month's play count from the stored
+columns, overwrite them, mark the Home payload for one rebuild, and record a `drift` event if anything
+differed (migration 3). The heal is one indexed pass over the user's plays, ~22,000 rows for Rem
+today [estimate], about 1% of the free plan at five users; a daily chore is one of the places rule 2
+of §3 allows a whole-history read.
+
+One Vercel cron a day is a thin hook for that much: Hobby fires it anywhere in its hour (01f §2.2),
+STORE_MIGRATION places it at `0 7 * * *`, an hour that contains the Zenbook's ~07:00-07:08 UTC reboot,
+and the block it replaces never ran for two months without anyone noticing (STORE_MIGRATION §3). So
+(migration 10): the cron moves to `0 9 * * *`; the chores stamp `app_meta.daily_at` when they finish;
+a tick that finds the stamp over 26 hours old runs them under `lock:daily` in `after()`, so either
+pinger covers a missed cron; a deletion's telemetry step retries on every tick until it succeeds,
+instead of once a day; each chore's outcome shows on `/usage`, and a stale stamp turns the health check
+red. Each chore is idempotent and resumable, so a run cut off at `maxDuration` finishes on the next.
 
 ## 8. Store cost: the write path and the read levers
 
