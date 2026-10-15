@@ -575,6 +575,37 @@ that lever: it was measured at −16% raw but −1% gzip (`db.ts:1428-1431`), so
 
 ## 6. What multi-user needs from STORE_MIGRATION.md
 
+Nothing in the planned move has to change for search before it runs. Five points for the lanes that
+carry it and for the multi-user design:
+
+1. **The move brings billed rows back, and search rebuilds are the term that grows with users.**
+   Turso's free plan counts rows read (500M a month, STORE_MIGRATION §3). One user's full rebuilds
+   are small (~80,000 rows per visit that moved both versions, 1-2 such visits a day lately). Per
+   user and per visit they are what §4.2 multiplies: ~380M a month at 25 typical users under today's
+   design. Multi-user on the free plan needs O3/O4 before it passes about five active users.
+2. **Schema.** The migration copies the single-user tables as they are, which is right: adding
+   `user_id` afterwards is an `ALTER TABLE` plus a backfill of ~22,000 `plays` rows (~0.2% of the free
+   plan's 10M monthly writes) and index builds. Search needs `plays (user_id, played_at)` for the
+   payload, the segment ranges and the deltas, and the library's three tables reachable by user. If
+   the index does not lead with `user_id`, a per-user rebuild reads every user's plays: N× §4.2.
+3. **Phase E (lanes 1905-1906).** It already keys the IndexedDB copy by user id and payload shape.
+   Two additions: give its store interface a `(user, kind, segment, version)` key now, so segments do
+   not need a second migration of browser data; and count `buildDays` in R3's budget, since at 4× it
+   is 199 of the 300 ms (§2.3, O5) — lazy days (O6) belong with phase E or before it.
+4. **R4's attribution.** §3 of STORE_MIGRATION sizes Turso headroom on "the history payload's plays scan
+   (~50,500 rows read per run)", 23 runs on Oct 13. The ledger records no search payload rebuild that
+   day, and the description fits the all-time recompute (§2.2). The headroom arithmetic still
+   holds whichever query it is; what changes is which query 1910-1911 or a follow-up should target,
+   and the all-time recompute is also a per-user, per-landed-sync scan under multi-user (01a D18,
+   01c). Check the meter log's SQL text before relying on it.
+5. **The 2 MiB cliff does not depend on the store.** It arrives around late December on the Zenbook or
+   on Turso. On Turso, an uncached history payload bills ~65,000 rows per Home open, ~20M a month at
+   10 opens a day for the owner alone [estimate], and each open waits for a full build (~850 ms
+   through the Funnel today by §2.2's estimate; not measured on Turso).
+
+The phase A bench route's `getHistoryIndex(null)` ×2 (STORE_MIGRATION §6 item 5) will give the first
+production-path timing of the full history build on Turso, which this document does not have (§8).
+
 ## 7. Decisions that are Rem's
 
 ## 8. Unknowns and what I did not measure
