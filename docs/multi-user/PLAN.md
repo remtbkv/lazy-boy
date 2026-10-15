@@ -2305,14 +2305,17 @@ throttle on the Mac; no real phone has been measured (01d §8).
 | after that, off the critical path: the moved months named by the manifest already in the page, and the visit-start delta | ~100-250 ms | one request each [estimate] |
 
 A heavy one-year user's set is ~1.45× Rem's (01d §3.3), which puts the build near 70 ms and the read
-near 30 ms: ~105 ms.
+near 30 ms: ~105 ms. S1 needs the IndexedDB copy: with the bodies `no-store` (§9.1), a device that has
+lost it pays S2. Safari deletes it after seven days of use without a visit (WebKit, quoted in scale §3;
+a web app added to the home screen keeps its own count), so a friend who opens Lazy Boy in Safari less
+than weekly gets S2's numbers each time.
 
 **S2, a first visit, 4× CPU, 10 Mbit/s:**
 
 | step | a typical one-year friend | Rem today | basis |
 |---|---|---|---|
 | first paint → requests start | ~100 ms | ~100 ms | fetch at mount (§9.2); today up to 2 s of idle wait, or 800 ms on Safari |
-| the gate and the bodies on the server, in parallel | ~50-300 ms | ~50-300 ms | identity ~15 ms; a Data Cache hit ~50 ms, a miss rebuilds one month from an index range (~4,500-10,000 rows) [estimate]; the current month always rebuilds after listening |
+| the gate and the bodies on the server, in parallel | ~50-300 ms | ~50-300 ms | identity ~15 ms, plus a TLS handshake in a cold process; a Data Cache hit ~50 ms, a miss rebuilds one month from an index range (~4,500-10,000 rows) [estimate]; the current month always rebuilds after listening |
 | transfer | ~710 KB gzipped → ~0.57 s | library 285 KB + segments 798 KB → ~0.87 s | 01d §2.1 and O3 [measured sizes]; 01d §3.3 [projected sizes] |
 | parse and build the set, at idle | ~50 ms | ~80 ms | 6.4 + 11.9 + 46.6 ms at 4× plus the segment merge (01d §2.3) |
 | the selected day | < 5 ms | < 5 ms | lazy days |
@@ -2325,7 +2328,8 @@ near 30 ms: ~105 ms.
 | Rem today | ~1.08 MB | ~1.1-1.4 s | yes |
 | heavy, one year | ~1.3 MB | ~1.3-1.6 s | yes |
 | heavy, three years | ~2.35 MB (B §9.4) | ~2.2-2.6 s | **no**: one art and album dictionary per user instead of per segment recovers the ~30% that segments add to a cold visit (01d O3), ~2.0-2.3 s; loading the library and the newest months first makes the box usable in ~1.2 s with older months following (B §17) |
-| Rem on slow 4G (1.6 Mbit/s) | ~1.08 MB | ~5.5 s | **no**: the same newest-first loading, ~2.5 s to a usable box; slow 4G stays a stated miss (§18) |
+| a five-year import, ~91,000 plays | ~2 MB in ~61 requests | ~3 s | **no**: the same newest-first loading, plus yearly segments for closed years; imports wait for both (§9.4, scale 9) |
+| Rem on slow 4G (1.6 Mbit/s) | ~1.08 MB | ~5.5 s | **no**: the same newest-first loading, ~2.5 s to a usable box; slow 4G stays a stated miss (decision 13) |
 
 The build row is the weakest estimate. The only Turso build timings on record (5.4 s for the library,
 2.6 s for the history, Aug 6) ran from the Mac across the public internet (`db.ts:1421-1425`), so they
@@ -2356,37 +2360,46 @@ lever is a Web Worker (01d O6).
 | the token | < 1 ms to decrypt; up to ~3 s when the hourly refresh lands on this tick | 3 s per token-endpoint attempt (`auth.ts:121`) |
 | the probe, then the harvest | ~0.5-1.1 s | two Spotify calls [estimate] |
 | record: insert, verdicts, Home payload | ~0.45 s today (~30 round trips); ~0.05 s after P4 (~3) | 01c §2.1; §8.4 |
-| **stored after the play ends** | **p50 ~1 minute, worst ~2 minutes 5 s** | F2: ~2 minutes |
+| Spotify lists the play | in the first harvest for ~87% of plays; for ~13%, at a later one: the next track change's, or the tail retry ~5 minutes after the session ends | §7.4 [measured, scale 5] |
+| **stored after the play ends** | **p50 ~1 minute, p95 ~5 minutes** | F2 |
 
-When Spotify lists a play only after the player has moved on, the retry stores it one probe later
-(§7.4); how often that happens is unmeasured and Phase 3's soak counts it. **F1**: an open app shows a
-finished track at once through its provisional play, and opening the app after listening elsewhere
-runs the on-load harvest and the delta patch, so plays that ended before the open appear within ~1-2 s
-of first paint [estimate, B §7.8]. **F3**: a harvest fires by 25 track changes, at every session's end,
-and every 2 hours idle; at Rem's peak of ~20 plays an hour (01c §5.7), 25 changes take ~75 minutes,
-longer than any brake interval, so no play leaves Spotify's 50-play window unseen while a pinger runs.
+The same cadence measured today: p50 72 s, p75 106 s, p90 240 s, p95 300 s, max 644 s, 88.4% within
+125 s (Rem's 225 plays, Oct 12-14, scale 5). Phase 3's `lag_p50_s` and `lag_p95_s` confirm it per
+user, and scale's scripts (`~/.claude/broke/scratch/lazyboy_mu/0224_review_scale/bin/`) re-run on a
+fresh backup and `ping.log` give the before and after. **F1**: an open app shows a finished track at
+once through its provisional play, and opening the app after listening elsewhere runs the on-load
+harvest and the delta patch, so plays that ended before the open appear within ~1-2 s of first paint
+[estimate, B §7.8], apart from Spotify's late listings, which the next harvest brings. **F3**: a
+harvest fires by 25 track changes, at every session's end and again ~5 minutes later, and after 2
+hours idle (hourly until the first friend); at Rem's peak of ~20 plays an hour (01c §5.7), 25 changes
+take ~75 minutes, longer than any brake interval, so no play leaves Spotify's 50-play window unseen
+while a pinger runs.
 
 **The scarce bucket, a quota day** [estimate, from §7.4; the friend profiles are 01d §3.3's and 01f
 §5.1's assumptions, not data]:
 
-| user | track changes | session tails | idle backstops | open-app catch-ups | recorder | total |
+| user | track changes | session tails and their retries | idle backstops | open-app catch-ups | recorder | total |
 |---|---|---|---|---|---|---|
-| Rem, ~117-130 plays | ~125 | ~5 | ~7 | ~5 | 24 | ~165 |
-| light friend, 40 plays | ~40 | ~5 | ~10 | ~10 | – | ~65 |
-| typical friend, 50 plays | ~50 | ~5 | ~9 | ~10 | – | ~75 |
-| Rem-like friend | ~125 | ~5 | ~7 | ~10 | – | ~145 |
+| Rem, ~117-130 plays | ~125 | ~10 | ~7 | ~5 | 24 | ~170 |
+| light friend, 40 plays | ~40 | ~10 | ~10 | ~10 | – | ~70 |
+| typical friend, 50 plays | ~50 | ~10 | ~9 | ~10 | – | ~80 |
+| Rem-like friend | ~125 | ~10 | ~7 | ~10 | – | ~150 |
+| a friend with music on 10-12 hours a day, or a skip-heavy one | ~200-360 | ~10 | ~5 | ~10 | – | ~225-385 |
 
-| users | demand a day | against 450 (426 + the recorder) | what the brake does | closed-app freshness |
+| users | demand a day | against 450 (426 + the recorder) | what the brake does (share = 426 ÷ N) | closed-app freshness |
 |---|---|---|---|---|
-| Rem alone | ~165 | 37% | nothing | ~2 min |
-| Rem + one friend, any profile | ~230-310 | 51-69% | nothing | ~2 min |
-| Rem + four light | ~425 | ~94% | the app passes ~320 late in the day; Rem, above 426 ÷ 5 ≈ 85, moves to 15-minute batches | ~2 min for everyone until then; ≤ 15 min for Rem after |
-| Rem + four typical | ~465 | ~103% | Rem moves to 15-minute batches past ~320; everyone to 30 near the day's end | ~2 min for most of the day, then ≤ 15-30 min |
-| Rem + four Rem-like | ~745 | ~166% | everyone is above their share at ~320, about 40% into the listening day, and moves to 15 minutes; 30 near the end; the day's total is held near 475-505 (A §13.3) | ~2 min for ~40% of the day, then ≤ 15-30 min |
-| any mix, if the quota is per user | – | – | nothing | ~2 min all day |
+| Rem alone | ~170 | 38% | nothing | p50 ~1 min, p95 ~5 min |
+| Rem + one light, typical or Rem-like friend, an ordinary day | ~240-320 | 53-71% | nothing: nobody reaches 213 | the same |
+| Rem on his heaviest day + a 10-12-hour friend | ~455-635 | 101-141% | each slows to 15-minute batches past 213; at 426 everyone goes to 30 | the same for most of the day, then ≤ 15, and ≤ 30 late |
+| Rem + four light | ~450 | ~100% | Rem passes his ~85 a little past halfway through his listening and moves to 15-minute batches; the friends never reach theirs | the friends as Rem alone, all day; Rem ≤ 15 min after his share |
+| Rem + four typical | ~490 | ~109% | the same: Rem slows, the friends stay under ~85 | the same |
+| Rem + four Rem-like | ~770 | ~171% | everyone reaches ~85 about 60% into their day, when the total nears 426, and moves to 30-minute batches; the day's total is held near ~505-560 (scale §2) | as Rem alone for ~60% of the day, then ≤ 30 min |
+| any mix, if the quota is per user | – | – | nothing | as Rem alone, all day |
 
 Today, for comparison: 139-319 cron harvests plus the recorder's 96 for Rem alone (01c §2.7). Five
-Rem-like users on today's policy would need ~800-1,700 a day (01c §5.1).
+Rem-like users on today's policy would need ~800-1,700 a day (01c §5.1). The Oct 14 version's row for
+five Rem-like users had everyone slowing to 15 minutes at ~320; its own source says the ¾ step it used
+could not fire for users of equal weight (A §13.3, scale 1), which is why the per-user cap replaced it.
 
 ### 14.3 Users (U)
 
@@ -2394,82 +2407,117 @@ Rem-like users on today's policy would need ~800-1,700 a day (01c §5.1).
 |---|---|---|---|
 | allowlist places | 1 | 5 | 5 (01f §1.2) |
 | Turso databases | 1 | 6, plus the old `lazy-boy` | 100 on Free |
-| recently-played and `/me` calls | ~145-165 | held near 450-505 by the brake | ~725-800 observed; 450 planned |
-| player calls | ~720 with up to two users; ~450 from three on (idle probes every 5 minutes) | ~2,250 | unmeasured; ≤ ~2,500 planned |
-| Spotify calls per 30 s, at peak | – | ~2-3 from ticks, ~10-15 from five visible tabs | 18 seen safe; the limit itself is unpublished |
-| Turso rows read | ≤ 1.5M on a heavy day (§8.6) | 26-258M a month by profile and step (§14.4) | 500M (R4: 250M) |
-| Turso rows written | ~4,100-4,700 | ~0.67M a month | 10M (R4: 1M) |
-| Vercel invocations | ~200 browsing; the tick is 1,440 a day in total | ~73,000 a month | 1,000,000 (Hobby) |
-| Vercel Active CPU | unmeasured; Rem's share today estimated at 0.5-2.4 CPU-hours a month (01f §2.3) | 2.5-12 if it scaled linearly, an upper bound | 4 (Hobby, team-wide) |
+| recently-played and `/me` calls | ~150-170 | held near ~505-560 by the brake | ~725-800 observed; 450 planned |
+| player calls | probes ~720 with up to two users, ~450 from three on; now-playing ~240-480 per visible hour per browser at 15 s | ~2,250 from probes, plus ~3,600-7,200 from five app-heavy users' visible tabs [estimate, scale 6] | unknown; 1,336 the busiest day so far, with no 429 |
+| Spotify calls per 30 s, at peak | – | ~2-3 from ticks, ~10-15 from five visible tabs at 15 s, background pages paced | 56 measured without a 429; the limit is unpublished |
+| Turso rows read | ≤ 1.5M on a heavy day after P4 (§8.6) | 29-306M a month by profile and step (§14.4) | 500M (R4: 250M) |
+| Turso rows written | ~4,500-5,000, index entries counted | ~0.72-0.8M a month | 10M (R4: 1M) |
+| Vercel invocations | ~200 browsing (Rem's measured profile) to ~1,000 (Home visible three hours, scale 11); the tick is 1,440 a day in total | ~73,000-195,000 a month | 1,000,000 (Hobby) |
+| Vercel provisioned memory | – | ~100-110 GB-h a month at five app-heavy users [upper bound, scale §2] | 360 GB-h (Hobby) |
+| Vercel Active CPU | unmeasured; Rem's share today estimated at 0.5-2.4 CPU-hours a month (01f §2.3), and an app-heavy user makes up to ~5× his invocations | 2.5-12 if it scaled with Rem's profile, more with app-heavy friends | 4 (Hobby, team-wide) |
 
-Five accounts fit every budget but one unknown, Active CPU, which Rem reads before the first friend
-(§13.2). Above five, possible only with a grandfathered list, things bind in this order: Active CPU
-(if the users are Rem-like), closed-app freshness (each share of the scarce bucket is 426 ÷ N), and
-Turso Free's reads under R4 at roughly 15-20 users after P4 [estimate: 250M ÷ (0.44M × 30)]; the first
-structural limit is Free's 100 databases.
+Five accounts fit every budget but two unknowns: Active CPU, which Rem reads before the canary
+(§13.2), and the player bucket, on which each Phase 5 addition gates (§13.1). §14.7 shows what binds
+past five.
 
 ### 14.4 Store reads, writes and growth (D1-D3)
 
-Per user on a heavy day, §8.6's table: Rem ~1.45M after P3 and ~0.36M after P4; an app-heavy Rem-like
-user ~1.79M after P3 and ~0.44M after P4. D1 (≤ 1.5M) is met by Rem after P3 and by everyone after P4;
-D2 holds after P4, when nothing on a per-play, per-tick or per-visit path grows with history.
+Per user on a heavy day, §8.6's table: Rem ~1.52M after P3 and ~0.38M after P4; an app-heavy Rem-like
+user ~2.17M after P3 and ~0.46M after P4. D1 (≤ 1.5M) is met by Rem at about P3 and by everyone after
+P4; D2 holds after P4, when nothing on a per-play, per-tick or per-visit path grows with history.
 
-Five users, a month, all friends app-heavy (eight Home visits a day). The friend profiles are
-assumptions [estimate, the same per-run costs applied to each profile's history and library]:
+Five users, a month, all friends app-heavy (eight Home visits a day, Home visible three hours). The
+friend profiles are assumptions [estimate, the same per-run costs applied to each profile's history
+and library]:
 
 | five users | per friend a day, after P3 / P4 | after P3 | after P4 |
 |---|---|---|---|
-| Rem + four light (40 plays a day, 7,200 plays, 2,000 library songs) | ~0.42M / ~0.13M | ~94M (19%) | ~26M (5%) |
-| Rem + four typical (50 a day, 18,250 plays, 8,000 songs) | ~0.9M / ~0.27M | ~152M (30%) | ~43M (9%) |
-| Rem + four app-heavy Rem-like, at Rem's history size | ~1.79M / ~0.44M | ~258M (52%) | ~64M (13%) |
-| the same a year in, ~42,000 plays each | ~2.4M / ~0.5M | ~337M (67%) | ~70M (14%) |
+| Rem + four light (40 plays a day, 7,200 plays, 2,000 library songs) | ~0.46M / ~0.15M | ~101M (20%) | ~29M (6%) |
+| Rem + four typical (50 a day, 18,250 plays, 8,000 songs) | ~0.95M / ~0.29M | ~160M (32%) | ~46M (9%) |
+| Rem + four app-heavy Rem-like, at Rem's history size | ~2.17M / ~0.46M | ~306M (61%) | ~67M (13%) |
+| the same a year in, ~42,000 plays each | ~2.78M / ~0.52M | ~379M (76%) | ~74M (15%) |
+| either of the last two with "See all" left open while listening | + ~1.84M a friend | past 500M: Free blocks every query until the 1st | unchanged |
 
-Each cell is (Rem's day + 4 × the friend's day) × 30 against the free plan's 500M. The light and
-typical friends' biggest term after P3 is the whole-history strip (~3 rows per real play per Home
-mount), which is why P4 ships before the second friend: it is the one per-visit read left that grows
-with each user's history. On the Developer plan (2.5B included, 01f §4.2) the largest cell is 13.5%,
-and even today's code at five Rem-like users on an average day (~1B a month [estimate: 5 × ~6.7M ×
-30, §8.6's today column with the orphan passes averaged]) fits with no block, which is why §15
-recommends it as insurance rather than as capacity.
+Each cell is (Rem's day + 4 × the friend's day) × 30 against the free plan's 500M. The open-tab term
+(§7.6) is ~0.04-0.05M a day for the light and typical friends, whose strips are smaller. The app-heavy
+friends' biggest terms after P3 are the whole-history strip and the open tab, which is why P4 ships
+before the second friend: they are the per-visit reads left that grow with each user's history. On the
+Developer plan (2.5B included, 01f §4.2) the largest cell is under a quarter of the allowance, and even
+today's code at five Rem-like users on an average day (~1B a month [estimate: 5 × ~6.7M × 30, §8.6's
+today column with the orphan passes averaged]) fits with no block, which is why §15 recommends it as
+insurance rather than as capacity.
 
-**D3**: ~4,100-4,700 rows written per Rem-like user a day (§8.6), ~0.67M a month at five, under 7% of
-the free plan. **Growth**: ~35 KB of core data a day for a Rem-like user (01a §6), ~12 KB for a light
-one; five heavy users add ~64 MB a year against 5 GB.
+**D3**: ~4,500-5,000 rows written per Rem-like user a day, index entries counted (§8.6), ~0.72-0.8M a
+month at five, 7-8% of the free plan; a friend with thousands of Liked Songs needs Phase 3's Liked
+change to stay inside it. **Growth**: ~35 KB of core data a day for a Rem-like user (01a §6), ~12 KB
+for a light one; five heavy users add ~64 MB a year against 5 GB.
 
 ### 14.5 Uptime (A1-A3)
 
 | failure | user requests | closed-app capture | plays lost |
 |---|---|---|---|
-| the Zenbook down, including the ~3 AM reboot (6-8 minutes daily, 0.47% of the meter's 48.5 hours, 01f §3.3) | unaffected; telemetry dropped; `/usage` shows its log sections empty | cron-job.org's ticks keep every user at 2 minutes | none |
-| the Zenbook frozen (103 stalls over 100 s in four weeks, STORE_MIGRATION §1) | unaffected: telemetry is never awaited on a user path and gives up at 4 s (R2) | as above | none |
+| the Zenbook down: the nightly reboot (~6-8 minutes around 07:00 UTC, 01f §3.3), and outages like late August and September's, about ten days in four weeks (migration 2) | unaffected after STORE_MIGRATION; telemetry dropped; `/usage` shows its log sections empty | from lane 1904, the interim pinger keeps everyone at 2 minutes; before it, capture stops, and Rem's recorder stops with it | none from lane 1904; before it, plays beyond the newest 50, recoverable only through Spotify's export, which takes days to weeks |
+| the Zenbook frozen (103 stalls over 100 s in four weeks, STORE_MIGRATION §1) | unaffected: telemetry is never awaited on a user path and gives up at 4 s (R2; static check S7) | as above | none |
 | the Funnel certificate (expires Nov 8; lane 1907) | `/usage`'s log sections | unaffected | none |
-| cron-job.org down | none | the Zenbook's timer | none |
-| both pingers down | none | an open app captures for its own user (§7.6); otherwise the daily Vercel cron (07:00 UTC ± 59 min) | each user's plays beyond their newest 50, ~2.5-3.5 hours of nonstop listening (01c §5.7), unless they open the app; Rem's recorder covers him unless the Zenbook is the one down |
+| cron-job.org down | none; the health check's e-mails stop | the Zenbook's timer | none |
+| both pingers down | none | an open app captures for its own user (§7.6); otherwise the daily Vercel cron on `/api/cron/sync` (07:00 UTC ± 59 min), kept beside `/api/cron/daily` (§10.2 edit 8); the health check e-mails Rem within the hour | each user's plays beyond their newest 50, ~2.5-3.5 hours of nonstop listening (01c §5.7), unless they open the app; Rem's recorder covers him unless the Zenbook is the one down |
 | one user's grant revoked, allowlist entry removed, database refused, or Spotify calls hanging | that user only | that user only | that user's, beyond 50, until they reconnect |
+| `lazyboy-app` unavailable: blocked, refused, or broken by a migration (migration 5) | everyone: the identity read answers the retryable error, nobody is signed out and no browser store is cleared (§5.1) | everyone: ticks end at the claim | the 50-play rule, everyone; a broken database is restored by §12.5 |
+| a wrong, truncated or missing token key deployed (migration 9) | everyone: the deploy refuses to serve at its sentinel check (§5.3) | everyone, until the variable is fixed and redeployed; no user's state changes | the 50-play rule; nobody has to sign in again |
 | Turso down | everyone | everyone | the 50-play rule, everyone |
 | Turso Free's read quota exceeded | everyone, until the 1st (01f §4.2) | everyone | the same; Developer with overages turns it into a bill |
 | Vercel down, or a Hobby allowance overrun | everyone; an overrun lasts up to 30 days and takes the team's other projects too (01f §2.2) | everyone | the same |
 | Spotify suspends the app, or Rem's Premium lapses | Spotify features, everyone | everyone | the same |
 | a recently-played `QUOTA_EXCEEDED` | none beyond history updates | harvests wait for the ~10:50 AM reset; probes and rescans continue | the 50-play rule; the brake makes it unlikely |
+| a player-endpoint refusal | the now-playing chip slows | harvests every ~30 minutes for users active in the last 3 hours (§7.8) | none while 30 minutes of listening stays under 50 plays |
 
-A1 and A2 hold once STORE_MIGRATION and Phase 3's second pinger are in; A3 holds by §7.8. What remains
-is shared fate on managed services and on Spotify's policy, none of which this app can remove at its
-scale (C §14 item 5).
+A1 holds once STORE_MIGRATION lands and stays held while the fault injection passes at each phase
+(§6.5). A2 holds from the interim pinger, after lane 1904; the Zenbook's resolver fix (decision 9)
+keeps the recorder alive through the same DNS failures. A3 holds by §7.8 from Phase 3. What remains is
+shared fate on managed services and on Spotify's policy, none of which this app can remove at its
+scale (C §14 item 5); `lazyboy-app` is new shared fate of the same kind, on every request.
 
 ### 14.6 Isolation and its cost (I, I$)
 
-I is met by §6.3: each class has a layer that prevents it and one that detects it, and the suite runs
-on every `npm test`. Its cost:
+I is met by §6.3: each class has a layer that prevents it and one that detects it, the suite runs on
+every `npm test` with its planted bugs, and the canary week exercises the runtime layers with two real
+users before any friend. Its cost:
 
 | what | per request | per tick | how known |
 |---|---|---|---|
-| identity, status, token, capture health and cooldown in one statement | no extra round trip where the gate already ran first; Home +1 sequential round trip (~15 ms) and three fewer reads | one claim; one token row per due user | from the code |
-| the owner check on a database's first open | none when warm; one statement per database per cold process, seven fewer than `init()`'s eight | the same | §4.5 |
+| identity, status, token, capture health and cooldown in one statement | no extra round trip where the gate already ran first; Home +1 sequential round trip (~15 ms), and in a cold process a TLS handshake to the app database's host (~30-45 ms in all [estimate, scale 10]); three fewer reads | one claim; one token row per due user | from the code |
+| the owner check on the first open per `(uid, db_name)` | none when warm; in a cold process it rides the first read's batch, so no extra round trip, where `init()` spends eight | the same | §4.5 |
 | token decrypt / encrypt | 1.67 µs / 2.67 µs | per due user | measured by A on the Mac (A §17) |
 | the owner stamp on cached values; the token-owner assertion | a few bytes and a compare; one compare per Spotify call | – | from the design |
-| uid in browser keys, ETags and URLs | none: a random uid needs no HMAC | – | §4.4 |
+| conditional token writes; the `events` table | a primary-key probe inside each token write; nothing while no event happens | – | §5.2, §4.2 |
+| uid in browser keys and ETags | none: a random uid needs no HMAC | – | §4.4 |
 
-I$ holds: one round trip on Home, microseconds elsewhere.
+I$ holds: one round trip on a warm Home, plus a handshake in a cold process; microseconds elsewhere.
+
+### 14.7 Past five users
+
+Spotify allows five accounts on this app (§1), so 25 and 250 exist only on a grandfathered list or a
+changed policy; past five the plan sends people to their own copies, which share nothing and scale
+without limit (01f §5.2 option E). The brief asked how things scale, so here is what would bind first
+if the cap moved, for app-heavy Rem-like users with the levers through P4 applied [estimate; scale §2
+has the full table at 5, 25 and 250]:
+
+1. **Spotify's allowlist at six**, a policy limit no design changes.
+2. **Money, in small steps**: Hobby's Active CPU somewhere between 2 and 25 users (unmeasured, read in
+   Phase 0); Turso reads at R4's 250M bar around 18 users and at Free's 500M block around 36 (250M ÷
+   (0.46M × 30)); Hobby's provisioned memory near 25; Turso Free's 100 databases past 98. Pro is $20
+   a month and Developer $4.99, so none of these is a wall.
+3. **The scarce bucket, under the shared reading**: at the brake's floor of ~35-40 harvests a user a
+   day (30-minute batches over ~9 hours of playback, plus tails, backstops and app opens), the app
+   passes the 450 budget at ~12 Rem-like users and the ~725-800 ban line at ~19-21. From there it is
+   banned daily however the brake is tuned, and a heavy listener loses plays during each ban: past ~20
+   users the brake can no longer protect completeness. Under the per-user reading it never binds.
+4. **Library rescans at ~30-45 active users**: one per tick is 1,440 a day, against 32-48 wanted per
+   active user; several rescans per tick under one shared deadline lifts it.
+5. **The 30-second window** from the ticks alone around 200-250 users, at the measured floor of 56.
+
+At 25, everything but the scarce bucket fits with money; at 250, the bucket, the rescan cadence and
+Vercel's plan would all need redesign, which is why the plan's answer past five is a copy per person.
 
 ## 15. Costs
 
