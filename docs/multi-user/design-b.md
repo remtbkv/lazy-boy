@@ -1001,6 +1001,52 @@ After STORE_MIGRATION no user request touches the Zenbook (its R2). What still r
 
 ## 13. Migrating Rem's data with nothing lost
 
+The migration adds columns, tables and databases; it rewrites no row of `plays`, `tracks` or the
+library except to fill new derived columns, and it deletes nothing until a week after it lands. It
+runs after STORE_MIGRATION's cutover and aftercare (lanes 1903-1904), and after lanes 1906 and 1911
+have shipped, since it touches the same files.
+
+**Before it.** F1 closed (`AUTH_SECRET` rotated, `SPOTIFY_OWNER_ID` set in production; 01e §7 decision
+1, 01b E1-E2), and the second account's plays that the Oct 14 incident recorded into Rem's history
+removed (01b E6): they are another person's listening and must not be labelled Rem's. They can be
+told apart by the incident window and by comparison with the recorder, which captured on Rem's own
+token chain throughout. Rem confirms the window; that is the one step a person has to check.
+
+**The fenced window** (~15 minutes, the discipline of STORE_MIGRATION §8 steps 2-3; Spotify's 50-play
+buffer covers any plays in it):
+
+1. Pause both pingers; wait for no writes for 5 minutes.
+2. Restore point: Turso's point-in-time restore (1 day on Free) plus a dump by the backup script.
+3. On `lazyboy`: add `plays.listened_ms`, `playlists.snapshot_id`, `playlist_tracks.ident` and its
+   index, the `payloads` table. Fill them: `listened_ms` by one chain walk in JS (the same pure
+   function the skip verdicts use), `snapshot_id` from the `plsnap:*` rows, `ident` from `tracks`, the
+   segments, the library body and the Home payload from the existing builders, the `alltime`
+   accumulator from today's `alltime_stats`.
+4. Create `lazyboy-app` and `lb-template`. In the app database: Rem's users row (a new uid; his
+   `account_id` read once from `/v1/me` with the stored token, never bound through `me_id`, 01e §5.5;
+   `db_name = 'lazyboy'`; `is_admin = 1`; `tz_zone = 'America/New_York'`); both token rows encrypted
+   into `user_tokens`; his `sync_state` from `last_sync`, `player_last_active`, `rp_last_harvest` and
+   `library_synced_at`. The plaintext token rows stay in `lazyboy.meta` for the week.
+5. Verify, each a known answer that has to match exactly: per-table row counts unchanged; the 7,529
+   backfill plays, 1,162 orphan flags and 481 skip verdicts unchanged (S-Oct14's counts, 01a §8.6, to be
+   re-counted on the day); `SUM(listened_ms)` over counted plays equal to `alltime_stats.durationMs`;
+   every month's segment equal to the same month's slice of `readHistoryIndex()` run on the same
+   snapshot; the library body equal to `readLibraryIndex()` plus the Liked flags; both token blobs
+   decrypting to their plaintext rows; `scripts/verify-derived.mjs` green with its new checks.
+6. Deploy the new code, still owner-only. Resume the pingers; three ticks land; Rem signs in once
+   (the uid and epoch check ends every older session, closing F1 for good).
+7. The recorder's plays from the paused window are present after the first harvest (STORE_MIGRATION
+   step 13's rule).
+
+**Rollback**: before step 6, redeploy the previous build: it reads the untouched plaintext token rows
+and ignores the new columns and tables. After step 6, the same, carrying any newer token back to the
+plaintext row (the later `expiresAt` wins, STORE_MIGRATION step 10's rule); plays written by the new
+code are ordinary rows the old code reads. On day 7, drop the plaintext token rows and the retired
+`meta` keys (§4.4).
+
+Cost on Turso, once [estimate]: ~100,000 rows read (the chain walk, the builders, the index build) and
+~25,000 written, under 0.3% of a month on the free plan.
+
 ## 14. Sign-up gating, privacy and account deletion
 
 ## 15. Rollout in reversible phases
