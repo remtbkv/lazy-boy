@@ -496,6 +496,49 @@ token.
 
 ## 7. What multi-user needs from STORE_MIGRATION.md
 
+The migration moves the tables as they are; nothing in lanes 1901-1911 blocks multi-user or is
+blocked by it, and I see no reason for them to wait. From the request surface, three passages should
+change before they run (the first lane starts no earlier than Oct 15, 8:00 PM), and one ordering
+rule follows.
+
+1. **§10 (lane 1905, the browser's search cache) keys IndexedDB by "the signed-in user's id", and no
+   such id reaches the browser.** Section 1.1: the session carries name, email and image, Auth.js's
+   `sub` is a fresh random UUID per sign-in, and the server's only id is the global `me_id`. Left to
+   choose, the lane would likely reach for one of those, and each fails differently: the email is
+   served at `/api/auth/session` and can change, the `sub` would clear the cache at every sign-in, and
+   `me_id` names whoever's token is stored. The passage should name the key: an opaque per-user value
+   rendered by the `(app)` layout (S6). Until S1 exists the layout can render a constant, so the lane
+   still builds the comparison and the clear-on-sign-out, and multi-user later swaps only the
+   source. "Sign-out clears the store" also needs a client-side hook: sign-out today is a server
+   action behind a form (`chrome.tsx:335`), so the clear has to run in the browser on submit, before
+   the redirect.
+2. **§8 step 9 flips `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` for Production and Preview.** That
+   carries E4 over to the new store. Flip Production only, and give Preview its own database, or no
+   store variables at all, in which case previews fail on their first store read. Nothing depends on
+   previews: `origin` has only `main` (3.7).
+3. **§6 item 8, the Zenbook meter's core fence, classifies statements by table name.** Multi-user
+   adds tables (users, per-user tokens, library membership). If the fence's core list and its test
+   are derived from the `CREATE TABLE` statements in `init()` rather than written out by hand, new
+   tables are fenced without anyone remembering to add them. Otherwise an old deployment still
+   pointed at the Zenbook after the cutover could write user rows there unfenced.
+
+Ordering: the cutover runbook compares a single token row on both stores (§8 steps 10 and 16:
+`meta.spotify_tokens` and `meta.spotify_tokens_dev`), and R5's "Rem stays signed in" rests on it. Land
+the multi-user token table after lane 1903's cutover, not before, and the runbook stays correct as
+written.
+
+Not changes, but things multi-user inherits: the new `/api/cron/daily` (§6 item 7) runs global chores
+(`recomputeAllTimeStats`, `rebuildHomePayload`, the prunes, the played-at check) that become per-user
+fan-outs (S12); `/api/cron/store-bench` returns timings and a hostname only and needs nothing; the
+cutover copies E6's foreign plays to Turso along with everything else, and they can be removed there
+as easily as on the Zenbook. Per-user payloads also stop the Data Cache from sharing one rebuild
+across everyone, which multiplies the read that dominates R4's budget (§3: the history payload's plays
+scan); 03 owns that arithmetic.
+
+E1-E3 (section 6) do not depend on the migration. Doing them before Oct 15, 8 PM keeps them out of the
+cutover window; a sign-in during the freeze would write a fresh token to the Zenbook after the
+snapshot, which step 10's compare already handles, but there is no reason to test that.
+
 ## 8. Unknowns and what I did not verify
 
 ## 9. What I ran
