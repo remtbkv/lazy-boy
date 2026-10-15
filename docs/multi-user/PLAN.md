@@ -1486,6 +1486,83 @@ STORE_MIGRATION phase D's nightly job (lane 1904) with edit 4 of §10.2, extende
   point-in-time recovery covers the last day (ten on Developer). Rem's backups are unchanged.
 ## 13. Rollout in reversible phases
 
+Every phase is its own deploy, and each has an exit check and a rollback measured in minutes. Until
+Phase 4, `SIGNUPS=owner` keeps everyone but Rem out, so Phases 1-3 change how the app is built and
+never who can reach it. Sizes as in the overviews: **S** one place; **M** a contract that callers
+follow; **L** a design change or a mechanical edit across many files.
+
+### 13.1 The phases
+
+| phase | ships | starts after | exit check | rollback | size |
+|---|---|---|---|---|---|
+| **0**, now | Rem: rotate `AUTH_SECRET` in Production and give Preview its own value; set `SPOTIFY_OWNER_ID` in Production and `.env.local`; read the dashboard's User Management list and Vercel's Active CPU (team → Usage, 30 days); approve §10.2's six edits. One lane: gate `logout` (01b E3); a dev sign-in at `127.0.0.1:3000` that logs the key names `/v1/me` returns, with and without the two scopes §12.1 drops. Rem: `/home?perf=1` on his phone, reading `paint=` (S3's unmeasured half) | – | an old cookie refused after the redeploy; Rem signed in; `SPOTIFY_OWNER_ID` listed by `vercel env ls production`; whether `account_id` arrives | re-set the variables; revert the one-line guard | S |
+| STORE_MIGRATION | lanes 1901-1911 with §10.2's edits; **P1** (the orphan predicate) inside 1910-1911 | Oct 15, 8 PM | its own R1-R6; P1's equality check on a current copy | its own (STORE_MIGRATION §8) | – |
+| foreign plays | §11.2 | lane 1904 | Rem's yes on the list; `verify-derived` green | restore from the snapshot taken first | S |
+| **P2** | `plays.listened_ms`, the accumulator, the fenced fill (§11.3) | lane 1911 | `SUM(listened_ms)` = `alltime_stats.durationMs`; Turso's per-database reads for the all-time term near zero; a week of capture matching the recorder | redeploy the previous build; the column is ignored | M |
+| **P3** | segments with their manifest and version bumps, lazy days, fetch at mount, `history-ready` on the history half, ≤ 50 painted rows, phase E's store keyed per segment | P2 and lane 1906; **before mid-December** (the catalog split, 01d O2, is the stopgap if it slips) | every month's segment equals that month's slice of `readHistoryIndex()` on one snapshot; 01d's throttled harness meets S1-S3 at 4×; `history-ready` on `/usage` | revert; browsers re-download once | L |
+| **1**, owner only | `identity.ts` and the branded `Uid`; `requireUser()` on every entry point; `OWNER_UID` and epoch 0 on the cookie, cookies without a uid refused (Rem signs in once); `forUser` over `lazyboy` with the versioned open; `userCache` with owner stamps; keyed `cache()` boxes and module state; `playlistsCache` deleted; task owners; uid in ETags, URLs, bodies and storage keys; sign-out clearing storage; the token core in its own module with keyed maps and owner-carrying tokens, still reading the plaintext row; §6.4's harness and T1-T3, T7, T8, T10, S1-S6, each shown failing first | P3 | `npm test` and `npm run build` green; an adversarial review of the diff; then a week with zero isolation events, capture matching the recorder, Rem signed in | redeploy the previous build: it ignores the cookie's extra claim and the two `meta` keys | L |
+| **2**, owner only | `lazyboy-app`, `app-db.ts`, the users row, encrypted tokens, the one-statement identity check, T5, T6, T9; §11.4's steps | Phase 1's week, lane 1904, the foreign-play cleanup | §11.4 step 6, then three days | §11.4's rollback | M |
+| **3**, owner only | `sync_state` and the claim; the per-user step; the `/me/player` probe; track-change harvests with the retry, completeness at 25 and a 2-hour backstop; the owner alarm by caller; per-bucket cooldowns and the 429 `reason`; the uid on telemetry; the open-app rules; `refreshHistoryAction` off Spotify; now-playing at 15 s; the rescan changes; the brake's counter, counting but inert; T4; then the second pinger and the recorder hourly | Phase 2's soak | a week in which Rem's harvests come to his plays plus ~30 and the retries (~160 against 280 on Oct 14, 01c §5.3), every tick answers 200, the open app harvests only catch-ups, no play is first stored by a backstop while Rem was listening (the check on `/me/player` alone), the recorder diff is empty; the second pinger proven by stopping the Zenbook timer for ten minutes | disable the second pinger, then revert the route | M-L |
+| **4**, the first friend | `/join`, the terms pages, `invite.mjs`, the claim (`SIGNUPS=invite`); the log-out split; the deletion job; per-database backups; admin-only `/usage`; `owner.ts` removed; T11 | Phase 3's week, plus the gates in §13.2 | after a week: each user's scarce-bucket calls near §14.2's table; Turso's per-database usage near §8.6; no `QUOTA_EXCEEDED`; isolation events at zero; the friend confirms Home shows only their own plays | `status = 'disabled'` (sessions die and sync stops at once) or `SIGNUPS=owner`; the deletion job if they leave | M |
+| **P4** and the brake | the Home payload patch, the strip from segments, the `contexts` scan, one marker bump per batch; the fair-share brake switched on | Phase 4's week, **before the second friend** | patched payload = rebuilt payload after a day of synthetic harvests; the brake's boundary known answers; the usage drop on Turso | redeploy; the brake has a flag | M |
+| **5**, friends two to four | one person at a time, a week apart | P4 and the brake | each addition: the last week's recently-played spend plus the newcomer's expected share under ~426, or the brake tripping rarely; the read projection under 50% of the plan; Active CPU inside the plan | per friend, as in Phase 4 | S each |
+
+The irreversible steps, each named where it happens: deleting the incident's foreign plays (§11.2,
+snapshot first, Rem's yes), deleting the plaintext token rows a week into Phase 2 (§11.4 step 7,
+still recoverable by decrypting), and a friend's account deletion once the four-day backups and
+Turso's undelete window have passed (§12.3), which is irreversible by design.
+
+### 13.2 Gates before the first friend
+
+- Phases 1-3 have each soaked on Rem alone.
+- **Vercel Active CPU** read (team → Usage → Active CPU over 30 days). No API open to Hobby reports
+  it, and overrunning a Hobby allowance stops the feature for up to 30 days for every project on the
+  team (01f §2.2-2.3). Stay on Hobby only if the team uses under ~2 of its 4 CPU-hours a month.
+- **The dashboard's User Management list** read: how many accounts it holds, whether more than five
+  survived Mar 9, and whether Rem's own account takes one of the five (01f §1.2).
+- **The Turso plan** decided, before the friend's first sync (§15, §18).
+- **Deletion proven** on a throwaway invite: create the row and its database, run the job, see the
+  database gone from `turso db list` and the rows gone.
+- **Preview without store variables and dev on its own app database**, both confirmed.
+- **Rem's decisions** on the policy text, retention, log-out, and the `invalid_grant` rule (§18).
+- **An adversarial review** of the whole multi-user diff in a fresh context, told to find a
+  cross-user path.
+
+### 13.3 Order and timing
+
+| step | waits for |
+|---|---|
+| Phase 0 | nothing; before Oct 15, 8 PM keeps it out of the cutover window (01b §7) |
+| STORE_MIGRATION | its own gates (Oct 15, 8 PM; STAT 139 first) |
+| the foreign-play cleanup | lane 1904 |
+| P2 | lane 1911 (both change `recordPlays`' neighbours and the derived checks) |
+| P3 | P2 (the segment tuple carries listened seconds) and lane 1906 (the same load path) |
+| Phase 1 | P3 (one lane in `db.ts` at a time; the mechanical edit should run over the final read paths) |
+| Phase 2 | Phase 1's soak, lane 1904, the cleanup |
+| Phase 3 | Phase 2's soak |
+| Phase 4 | Phase 3's soak and §13.2 |
+| P4 and the brake | Phase 4's week |
+| Phase 5 | P4 and the brake |
+
+[estimate, at the lane program's pace and with STAT 139 work first] STORE_MIGRATION through lane 1911
+takes about a week from Oct 15; P2 a few days; P3 one to two weeks with its review; Phases 1-3 three to
+five weeks with their soaks. That puts the first friend around early to mid-December at the earliest,
+and P3 comfortably ahead of its deadline. The only hard date in the plan is P3, or the O2 stopgap,
+before mid-December. If Phase 1 has to start before P3 for any reason, P3 is written against the
+uid-keyed interfaces of §6.2 with Rem's constant uid, as phase E is (§10.2 edit 3), so nothing is
+written twice.
+
+### 13.4 How it turns into lanes
+
+- The mechanical part of Phase 1, threading `forUser` through `db.ts` (74 async exports, 54
+  `getClient()` sites) and its callers (~235 call lines in `src/`, ~300 in `tests/`, upper bounds by
+  grep, C §2.2), suits a Sonnet lane at medium effort with `tsc --noEmit` as its oracle.
+- The pieces that carry the risk (the gate, the jwt callback and token core, the claim and the tick,
+  the open-app rules, the deletion job) are Opus lanes at high effort, each followed by an adversarial
+  review lane in a fresh context before deploy, the pattern of lanes 1902, 1906 and 1911.
+- One branch per phase, rebased on `origin/main` before it pushes; one lane in `db.ts` at a time.
+- Rem's own steps: Phase 0's environment changes and dashboard reads, the foreign-play list, the
+  policy text, each friend's dashboard entry, and the decisions in §18.
 ## 14. Each target, step by step, with its budget
 
 ## 15. Costs
