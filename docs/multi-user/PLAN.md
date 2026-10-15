@@ -1665,23 +1665,51 @@ host is a copy and a URL change per user.
 is and flips the env under code that expects it, with "flip the env back" as its rollback (STORE_MIGRATION
 §8). The database it creates, `lazyboy`, becomes Rem's user database unchanged, so nothing in this plan
 wants the move to do anything differently, and folding any multi-user schema into it would turn a
-reversible move into a migration (01a §10). Every overview and all three designs say the same. What the
-plan takes from the move: the user paths off the Zenbook (A1 rests on R2); R1's round trip, which
-every latency in §14 assumes; phase A's telemetry client, where `user_id` is added; the daily route,
-home of the per-user chores, the usage read and the deletion job's retries; lanes 1910-1911's scoped
-orphan pass; phase E's browser copy.
+reversible move into a migration (01a §10). Every overview, all three designs and all four reviews say
+the same. What the plan takes from the move: the user paths off the Zenbook (A1 rests on R2); R1's
+round trip, which every latency in §14 assumes; phase A's telemetry client, where `user_id` is added;
+the daily route, home of the per-user chores, the usage read and the deletion job's retries; lanes
+1910-1911's scoped orphan pass; phase E's browser copy.
 
-**Six edits before Oct 15, 8 PM**, each small and none touching the cutover's logic; each is the
-director's and Rem's call (§18 decisions 2 and 3):
+**Eight edits before Oct 15, 8 PM**, each small and none touching the cutover's logic; each is the
+director's and Rem's call (decisions 2 and 3):
 
 | # | where | edit | why | from |
 |---|---|---|---|---|
 | 1 | §3 and R4 (doc) | name the all-time recompute, not the history payload, as the ~50,500-row scan that dominates reads; give R4 a growth term (~12,000 rows a day more for every day of history at today's 44 runs, 01c §5.9) and note that R4 holds for one user and the multi-user plan re-checks it at N | it decides which lever comes next (P2, §8.3) and what lane 1908's outcome check should watch | 01a §11.2, 01c §6 items 1-2, 01d §6 item 4; A, B, C |
-| 2 | §8 step 9 (lane 1903) | flip Production only, and delete Preview's `TURSO_*` variables | as written it carries today's preview exposure to the new store: a preview's `init()` would run a branch's schema against production, and any preview could read every row (01b §3.7, E4). `origin` has only `main`, so nothing depends on previews | 01b §7 item 2, 01e §6 item 4; A, B, C |
-| 3 | §10 (lane 1905) | key IndexedDB by an opaque user key the `(app)` layout renders, a constant until Phase 1's uid replaces it; stamp each stored body with it; make the store's key `(userKey, kind, segment, version, shape)`; clear the store in the browser when the sign-out form submits | no user id reaches the browser today (01b §1.1), and the lane would otherwise reach for the email, the random `sub` or `me_id`, each wrong in its own way; the segment dimension now saves a second migration of browser data when P3 lands | 01b §7 item 1, 01d §6 item 3, 01e §6 item 3; A, B, C |
-| 4 | §9 (lane 1904) and lane 1909's archive | write the backup as a list of `(database, retention)` pairs, starting with `("lazyboy", 60 days)`; strip the `spotify_tokens%` and `lock:%` rows from every copy before it is compressed; check the counts against the dump itself rather than `count(*)` on Turso | a list costs nothing now and saves a rewrite; every copy today holds live 13-scope grants valid up to six months (01e F2); a `count(*)` per table reads every row a second time, ~45,800 rows a night at Rem's size. The cutover's own snapshot keeps the token rows (R5) | 01a §10 item 3, 01e §6 item 1, B §11.3 item 3, C §8.3 |
+| 2 | §8 step 9 (lane 1903) | flip Production only and delete Preview's `TURSO_*` variables; then `vercel env ls production` must show both store variables before any redeploy | as written it carries today's preview exposure to the new store: a preview's `init()` would run a branch's schema against production, and any preview could read every row (01b §3.7, E4). STORE_MIGRATION §3 records the variables as one Production + Preview pair, and Vercel's CLI page does not say what removing one environment from a shared variable does; a production build without them falls back to `file:data/listens.db` (`db.ts:127-128`) and fails every query (migration §2) | 01b §7 item 2, 01e §6 item 4; A, B, C; migration §2 |
+| 3 | §10 (lane 1905) | key IndexedDB by an opaque user key the `(app)` layout renders, a constant until Phase 1's uid replaces it; stamp each stored body with it; make the store's key `(userKey, epoch, kind, segment, version, shape)`; clear the store in the browser when the sign-out form submits | no user id reaches the browser today (01b §1.1), and the lane would otherwise reach for the email, the random `sub` or `me_id`, each wrong in its own way; the segment and epoch dimensions save a second migration of browser data when P3 lands | 01b §7 item 1, 01d §6 item 3, 01e §6 item 3; A, B, C; migration 1 |
+| 4 | §9 (lane 1904) and lane 1909's archive | write the backup as a list of `(database, retention)` pairs, starting with `("lazyboy", 60 days)`; run each database's retention prune first and unconditionally, and log it; strip the `spotify_tokens%` and `lock:%` rows from every copy before it is compressed; keep the source counts (`count(*)` per table on the store, against the loaded dump), and require the CLI's exit status and, for a `.dump`, the closing `COMMIT;` | a list costs nothing now and saves a rewrite; today's `backup.py` prunes only at the end of a successful run, so a failed night skips every prune (migration 11); every copy today holds live 13-scope grants valid up to six months (01e F2); the source comparison is what catches a dump that ended early, which counting the dump against itself cannot (migration 12). Its cost is ≤ ~45,800 rows a night if Turso charges a `count(*)` for every row, as READ_QUOTA's definitions say, and a few hundred if it counts pages as the Zenbook's sqld did (158 for 15,852 rows, READ_QUOTA "Measured reads", scale 11); one read of Turso's usage before and after settles which. The cutover's own snapshot keeps the token rows (R5) | 01a §10 item 3, 01e §6 item 1, B §11.3 item 3, C §8.3; migration 11-12 |
 | 5 | lane 1903's last step | delete the plaintext scratch copies on the Mac: the core snapshot (both token rows) and the mode-600 copy of `.env.local` (every secret) | the same exposure as edit 4 | 01e §6 item 2, C §8.3 |
-| 6 | lanes 1910-1911 | ship the identity-first orphan predicate with the scoping, after re-running the equality check on a current backup copy | the scoped pass with today's predicate still costs plays × members on a busy playlist; the rewrite makes it ~5-10 rows a play (§8.2) | B §10.1, §11.3 item 4; reproduced here |
+| 6 | lanes 1910-1911 | ship the identity-first orphan predicate with the scoping, pinned by a known-answer test | the scoped pass with today's predicate still costs plays × members on a busy playlist; the rewrite makes it ~5-10 rows a play (§8.2). The equality check now has current data: on the Oct 14 backup copy (22,040 plays) both forms give the same verdict on every play, 1,162 orphans each, and walk 379.9 rows a play against 2.6 (scale §3) | B §10.1, §11.3 item 4; reproduced twice |
+| 7 | §9 (lane 1904) | the nightly job also copies `~/lazyboy-recorder/backstop.db` (31 MB, one file), kept 60 days like Rem's store | it holds the only copy of 122 of Rem's plays (§11.3) and is the loss-repair path for every recorder window; `backup.py` copies the store's file alone, and nothing else names the recorder's file (migration 8) | migration 8 |
+| 8 | §6 item 7 (`vercel.json`) | add `/api/cron/daily` at `0 9 * * *`, beside `/api/cron/sync`'s existing daily entry, not in place of it | 07:00 UTC holds the Zenbook's nightly reboot (01f §3.3), which fails the chores' telemetry steps; the sync entry is the last-resort capture when both pingers are down (§14.5) | migration 10, 14 |
+
+**Notes for the lanes**, changing no lane's work:
+
+- STORE_MIGRATION's R6, "No new alerting mechanism", binds lanes 1901-1911 and not the multi-user
+  phases, whose alarm is §7.10 (completeness §2, decision 14).
+- Step 8's full-access, no-expiry `lazyboy` token is the credential Phase 2 invalidates before it
+  mints the group token (§11.4); dev gets a token of its own after that (security §3).
+- Lane 1903's step 11 expects fence 503s from "old deployments" that reload "through build-skew". Skew
+  Protection is a Pro feature, the team is on Hobby (01f §2.1), and production shows no pinning today
+  (no `dpl=` marker in `/login`, no `__vdpl` cookie, security §5): after the flip, old tabs reach the
+  new deployment, and old deployments answer only on protected URLs. Fence hits should come from dev
+  servers and scripts; an old deployment in the meter's log means someone reached a protected
+  deployment URL, which is worth a look rather than a wait (security §3). GOTCHAS "Deployment skew +
+  stale tabs" makes the same assumption and needs the same note.
+- From lane 1904 on, a backup carries no token rows, so restoring `lazyboy` from one brings back no
+  token: capture stops until Rem signs in, with the recorder covering him meanwhile (01e §6 item 1).
+  Lane 1904's restore drill should expect that sign-in (completeness §2).
+- Phase 0 lands before lane 1903's flip, so the deployment a one-click rollback could reach during
+  the cutover was built after the `AUTH_SECRET` rotation (security §3).
+
+**Optional for lane 1904, free**: copy the meter's per-statement logs (`~/lazyboy-sqld/querylog/*.jsonl`)
+with 1909's archive, the only exact per-path record of the single-user workload (01a §10 item 1);
+compare `api_log`'s row count with its distinct count for a day, a free test of 01c §2.8's re-send
+hypothesis; and copy the Zenbook's `~/lazyboy-cron/ping.log` daily. It keeps only its last 2,000 lines
+(about 2.75 days), and its per-tick `added` counts matched to `api_log` are the only record of
+Spotify's listing lag (§7.4), which Phase 3's soak re-measures (scale §3).
 
 **Considered and not recommended before the move**: deriving the Zenbook fence's table list from
 `init()` (01b §7 item 3), because the multi-user tables live in new databases that no pre-multi-user
@@ -1690,25 +1718,22 @@ loop over users now (01c §6 item 3), because Phase 1 threads the uid through ev
 the lane should just write each chore as a function of one user's store; an accumulator lane inside
 the migration (01c §6 item 2), which is P2 here, queued after lane 1911; and shipping the uid claim
 before lane 1905 (01e §6 item 3), since edit 3's constant gives 1905 the same interface without
-moving auth work in front of the cutover. Two free additions for lane 1904, optional: copy the meter's
-per-statement logs (`~/lazyboy-sqld/querylog/*.jsonl`) with 1909's archive, the only exact per-path
-record of the single-user workload (01a §10 item 1); and compare `api_log`'s row count with its
-distinct count for a day, since phase A's one-attempt telemetry client is a free test of 01c §2.8's
-hypothesis that 25-30% of rows are re-sent INSERTs.
+moving auth work in front of the cutover.
 
-**Ordering after the move.** Phase 2's token table lands after lanes 1903 and 1904, because the
-cutover compares one plaintext token row on both stores (STORE_MIGRATION §8 steps 10 and 16; 01b §7),
-and R5's "Rem stays signed in" rests on it. Phase 1's branch is cut after lane 1911 merges: the
-orphan scoping and the mechanical edit both rewrite `storePlaylists` and `recomputeOrphanFlags`, and
-both at once would make a merge nobody can review (C §11.2). If R1 fails and the move stops
-(STORE_MIGRATION §2), multi-user waits: on the Zenbook it fails A1 by construction.
+**Ordering after the move.** Right after lane 1904, and before P2: the interim second pinger (§7.9)
+and the 122-play replay (§11.3), both Rem's go-ahead. Phase 2's token table lands after lanes 1903
+and 1904, because the cutover compares one plaintext token row on both stores (STORE_MIGRATION §8
+steps 10 and 16; 01b §7), and R5's "Rem stays signed in" rests on it. Phase 1's branch is cut after
+lane 1911 merges: the orphan scoping and the mechanical edit both rewrite `storePlaylists` and
+`recomputeOrphanFlags`, and both at once would make a merge nobody can review (C §11.2). If R1 fails
+and the move stops (STORE_MIGRATION §2), multi-user waits: on the Zenbook it fails A1 by construction.
 
 **STORE_MIGRATION §4's open question**, whether the three log tables move to Turso too: from the
-multi-user side, keep them on the Zenbook (§18 decision 4). Telemetry becomes personal data with a
+multi-user side, keep them on the Zenbook (decision 4). Telemetry becomes personal data with a
 deletion duty wherever it lives, which the user column handles in both places (01a §10). On Turso,
 five users' `api_log` would be ~0.6M rows written a month even after Phase 3's call cuts (~1,000 calls
-a user a day, ~4 rows written per insert counting index entries, 01c §2.1) [estimate], which with the
-~0.67M core writes of §8.6 passes R4's 10% write bar. On the Zenbook the cost is `/usage`'s log
+a user a day, ~4 rows written per insert counting index entries, scale 8) [estimate], which with the
+~0.72-0.8M core writes of §8.6 passes R4's 10% write bar. On the Zenbook the cost is `/usage`'s log
 sections during an outage and a dependency on the Funnel certificate that lane 1907 renews.
 
 ## 11. Migrating Rem's data with nothing lost
@@ -1720,92 +1745,132 @@ database as it stands: the seven tables are not copied, rebuilt or re-keyed (A �
 
 | what | when | change | why nothing can be lost |
 |---|---|---|---|
-| the incident's foreign plays | after lane 1904, before Phase 2 | deleted, with Rem's yes on the list (§11.2) | snapshot first; nothing goes without his confirmation |
-| `plays.listened_ms` | P2 | a nullable column added and filled (§11.3) | additive; old code ignores it; verified by a sum that must match exactly |
-| `meta.owner_uid`, `meta.schema_version` | Phase 1 | written once | two new keys; no reader before Phase 1 |
-| `meta.user_tz`, `probe`, `seg_seq:*` | Phases 3 and P3 | written by the app's ordinary code | new keys |
-| the token rows | Phase 2 | encrypted into `user_tokens`; the plaintext rows stay a week as the way back (§11.4) | both copies hold the same grant (Spotify does not rotate this app's refresh token, 01e F2); the later `expiresAt` wins any compare |
+| 122 of his own plays that only the recorder holds | after lane 1904, before P2 | inserted by the backstop replay (§11.3), with his yes | a snapshot first; the script inserts only what is missing and was run on a snapshot copy before ("166 inserted … re-run 0", `.claude/QUEUE.md:16`) |
+| `plays.listened_ms` | P2 | a nullable column added and filled (§11.3); a NULL means pending | additive, so `min_reader` does not move and old code ignores it; verified by a sum that must match exactly |
+| `meta.owner_uid`, `schema_version`, `min_reader`, `store_epoch` | Phase 1 | written once | four new keys; no reader before Phase 1 |
+| `meta.user_tz`, `probe`, `seg_seq:*` | Phase 3 and P3 | written by the app's ordinary code | new keys |
+| the token rows | Phase 2 | encrypted into `user_tokens` by the runtime; the plaintext rows stay a week as the way back (§11.4) | both copies hold the same grant (Spotify does not rotate this app's refresh token, 01e F2); the later `expiresAt` wins any compare |
 | dead and moved `meta` keys | a week into Phase 2 | `spotify_tokens`, `spotify_tokens_dev`, `lock:spotify_refresh`, `spotify_cooldown_until`, `last_sync_added`, `pltracks_at:*` deleted | moved or never read (01a §3); `scripts/` reads no token row (C §16.3) |
 
-### 11.2 First, the incident's foreign plays
+### 11.2 No foreign plays: measured
 
-While the second account's token sat in the row, the cron recorded that account's plays into Rem's
-history (commit `044c9b6`; 01b E6), and `plays` has no column to tell them apart. Once the store has
-owners they would be filed as Rem's for good, inside his stats. The backstop recorder captured Rem's
-own plays throughout, on his own grant, every 15 minutes (01c §1, §2.6), so (A §9.2, C §9.5):
+The Oct 14 plan scheduled deleting the second account's plays from Rem's history, on the strength of
+commit `044c9b6`'s line that "the cron recorded its plays into the owner's history". No lane had
+measured it. The migration review did, read-only on the Zenbook's SQLite files on Oct 15 (migration
+7 and its §4):
 
-1. On a local copy of the latest verified nightly backup, list the plays from the start of Oct 14 to
-   Rem's first sign-in after the incident that are in the store and not in
-   `~/lazyboy-recorder/backstop.db`. A real play of Rem's missing from the recorder would need 50 plays
-   in a quarter hour or the recorder down; its timer's log shows the second. 01e's probe found `me_id`
-   back on Rem's account by 9:32 PM (01e §1.2), so the window closes before then; its exact bounds are
-   not in the repo.
-2. Show Rem the list (time, track, artist, context). Nothing is deleted without his yes.
-3. In one transaction: delete the confirmed rows; set `skipped = NULL` (and `listened_ms = NULL` once
-   P2 exists) on the play after each deleted run, since its verdict came from a foreign predecessor
-   (01a D18); reset `contexts` rows resolved during the window to unresolved, so Rem's token resolves
-   them again; bump `write_seq` (and the affected months' `seg_seq` once P3 exists).
-4. Let the next sync re-rule the reopened verdicts, recompute the all-time totals, and run
-   `scripts/verify-derived.mjs`.
+- **Store against recorder.** From Oct 13 00:00Z to Oct 15 03:45Z the store and the recorder hold the
+  same 264 plays, none on one side only, and all 96 recorder runs on Oct 14 finished without an error
+  line. Over the recorder's life (Aug 6 to Oct 15) the store-only plays are 54 on Aug 6, older than
+  the recorder's first capture, and 2 on Sep 9 and 4 on Sep 25, during recorder outages; none since.
+- **Insertion order.** `plays.id` orders inserts. Of the 1,500 rows inserted since the first Oct 1
+  play, none carries an earlier `played_at`; of the 267 since the first Oct 13 play, one does, an Oct
+  12 play the recorder also holds.
+- **The library.** Against the 08:40Z Oct 14 snapshot, taken before the second sign-in, the
+  playlists, the playlists owned by `me_id` and `playlist_tracks` match exactly; Liked went 48 → 49 and
+  `contexts` 114 → 117 by ordinary activity; `me_id` is unchanged.
 
-The library tables healed on Rem's next sync (`storePlaylists` rewrites the list and purges stale
-snapshot keys, 01b E6). Run it on Turso after lane 1904, before Phase 2, so the owner tag goes onto
-clean data.
+There is nothing to delete, so the plan's one irreversible step on Rem's history is gone, with
+decision 10, its rollout row and its Phase 2 precondition. What stays is the method, for any future
+cross-account write: the recorder diff over the whole range and the insertion-order query, both
+read-only, re-run once on the latest backup before Phase 2 (the review's scripts are in
+`~/.claude/broke/scratch/lazyboy_mu/0224_review/`). The Oct 14 method, a `played_at` window, would have
+missed such plays: a harvest on another account's token stores that account's last 50 plays with
+their own `played_at` (`src/lib/spotify/resources.ts:410`), which can predate the incident by days. If
+Rem knows whose account it was, asking them to remove Lazy Boy at spotify.com/account/apps ends that
+grant, which stays valid at Spotify until they do (01e §1.6, completeness L5).
 
-### 11.3 P2: filling `listened_ms`
+### 11.3 The 122-play replay, then P2's fill
 
-In a fenced window of ~15 minutes, STORE_MIGRATION §8 steps 2-3's discipline (Spotify's 50-play window
-covers plays in it): pause both pingers and wait for 5 minutes without writes; take a restore point
-(Turso's point-in-time, plus a dump by the backup script); add the column; fill it with one chain walk
-in JS through the same pure function the skip verdicts use; verify `SUM(listened_ms)` over counted
-plays equals `alltime_stats.durationMs`, and `verify-derived.mjs` green with its new check; deploy the
-code that writes the column on insert; resume the pingers; check that the recorder's plays from the
-paused window arrive with the first harvest (STORE_MIGRATION §8 step 13's rule). Rollback: redeploy the
-previous build, which ignores the column. Cost on Turso, once: ~45,000 rows read and ~14,500 written
+**The replay, first** (migration 8; decision 7). 122 of Rem's plays, 56 on Aug 9 and 60 on Aug 10 (the
+quick-tunnel outage, 01f §3.3) and 6 on Sep 8, exist only in `~/lazyboy-recorder/backstop.db` on the
+Zenbook, which nothing backs up today. Decision 6 copies the file off the Zenbook now; edit 7 backs it
+up nightly from lane 1904. After lane 1904, with a snapshot first, `scripts/backfill-from-backstop.mjs`
+inserts what is missing (the Oct 3 review's item D1, unblocked since `afb21d1` landed on Oct 14), and
+`importTailStmts` re-rules the edges. The Extended Streaming History import for the Aug 30-Sep 9 gap
+(`.claude/QUEUE.md:17`) goes in the same slot if its export has arrived, or after P2 once
+`importTailStmts` sets `alltime_dirty` (§8.3). Run before the fill, both are counted by it.
+
+**P2's fill.** With `listened_ms IS NULL` meaning pending (§8.3), the fill needs no quiet window, which
+P2 could not have had anyway: at P2 there is one pinger to pause, and pausing it freezes none of the
+other writers (an open tab's `/api/sync` every two minutes, `refreshHistoryAction`, a dev server),
+while after the cutover neither the meter's statement log nor its fence sees Turso (migration 4, 16).
+The steps:
+
+1. Take a restore point: Turso's point-in-time, plus a dump by the backup script.
+2. Add the column. It is additive, so `min_reader` does not move and the running build ignores it;
+   plays it inserts from here on are NULL, which is pending.
+3. Fill it with one chain walk in JS through the same pure function the skip verdicts use.
+4. Deploy the code that writes the column on insert, advances the totals with each insert (§8.3) and
+   fills pending NULLs in the pass that rules skips; it starts with `alltime_dirty` set, so its first
+   pass fills whatever step 2's window left and recomputes the totals from the stored columns.
+5. Verify: `SUM(listened_ms)` over counted plays equals `alltime_stats.durationMs` on one snapshot,
+   and `verify-derived.mjs` is green with its new check.
+
+Rollback: §13.5's recipe; the older build ignores the column, its plays stay NULL, and the first pass
+after rolling forward fills them. Cost on Turso, once: ~45,000 rows read and ~14,500 written
 [estimate, B §8.1], 0.01% and 0.15% of a free month.
 
 ### 11.4 Phase 1 and Phase 2: the owner tag and the tokens
 
 **Phase 1** (no app database yet) generates Rem's uid once and keeps it as a Production constant
-(`OWNER_UID`, not a secret). The jwt callback puts that uid and epoch 0 on the cookie when the signing-in
-profile passes today's owner guard; the identity check compares against the constants; cookies with
-no uid are refused, so Rem signs in once and the pre-guard sessions end for good. Before the deploy,
-one step writes `owner_uid` and `schema_version` into `lazyboy.meta`, which the first open of
-`forUser(OWNER_UID)` then checks. Those two keys are the only writes Phase 1 makes to Rem's data.
+(`OWNER_UID`, not a secret). The jwt callback puts that uid, epoch 0 and `auth_time` on the cookie
+when the signing-in profile passes today's owner guard; the identity check compares against the
+constants; cookies with no uid are refused, so Rem signs in once and the pre-guard sessions end for
+good. Phase 1's deploy also rotates `AUTH_SECRET` again: it costs nothing, since Rem signs in once
+anyway, and no pre-Phase-1 build can then read a post-Phase-1 cookie, so a rollback across the
+boundary signs people out instead of letting single-user code serve them (security R1). Before the
+deploy, one step writes `owner_uid`, `schema_version`, `min_reader` and `store_epoch` into
+`lazyboy.meta`, which the first open of `forUser(OWNER_UID)` then checks. Those four keys are the only
+writes Phase 1 makes to Rem's data. The health check of §7.10 goes live with Phase 1.
 
 **Phase 2** (A §9.3, with C's and B's checks). Preconditions: Phase 1 has soaked; lanes 1903 and 1904
-are done; §11.2 is done; a fresh verified backup exists.
+are done; §11.2's re-check on the latest backup is empty; a fresh verified backup exists. T12 rehearses
+every step first on a local backup copy with a synthetic token row planted (§6.4).
 
-1. On the Mac: create `lazyboy-app` in group `default` and apply the app schema; mint the runtime's
-   read-write group token and the backup job's read-only one, straight into mode-600 files (as
-   STORE_MIGRATION §8 step 8 does).
-2. Read Rem's `account_id` with one `GET /v1/me` on the stored production token. If it is absent, stop
-   before deploying anything: the design keys on it (§18 decision 25).
-3. Insert Rem's `users` row: `uid = OWNER_UID`, that `account_id`, `spotify_id = SPOTIFY_OWNER_ID`,
-   `db_name = 'lazyboy'`, `status = 'active'`, `is_admin = 1`, `session_epoch = 0`. Phase 1's cookies
-   name the same uid and epoch, so Rem stays signed in.
-4. Pause the pingers and wait for quiet. Encrypt the production token row into `user_tokens` for
-   Rem's uid with `granted_at` = now − 30 days (every session is at most 30 days old and every sign-in
-   re-authorizes, 01e §5.7), corrected at his next sign-in. Write his `sync_state` from `last_sync`,
-   `player_last_active`, `rp_last_harvest` and `library_synced_at`.
-5. Set Production's environment (the group token in place of `lazyboy`'s own, `TOKEN_KEYS`, the app
-   database's URL; C §9.2 step 4), values on stdin as STORE_MIGRATION §8 step 9 does, and deploy
-   Phase 2, still `SIGNUPS=owner`. Compare the two token copies on `expiresAt` and keep the later,
-   since an old instance may have refreshed in between (STORE_MIGRATION §8 step 10's rule). Pingers
-   on; three ticks answer 200 with Rem's outcome `ok`.
-6. Verify, each a known answer that must match exactly: the seven tables' counts at or above the
-   pre-migration counts and `max(played_at)` moving; `verify-derived.mjs` green; `lazyboy.meta`'s key
-   set unchanged (the moved keys go only in step 7); the blob decrypting to the plaintext row;
-   Rem still signed in; the recorder diff over the pause empty. This is test T12 run for real.
-7. A week later, delete the keys in §11.1's last row.
+1. On the Mac, with the platform token from the Keychain: create `lazyboy-app` in group `default`,
+   apply the app schema, and insert Rem's `users` row: `uid = OWNER_UID`, `account_id` NULL until his
+   next sign-in binds it (Phase 0's dev sign-in has shown whether Spotify sends `account_id`; if it does
+   not, stop here, decision 31), `spotify_id = SPOTIFY_OWNER_ID`, `db_name = 'lazyboy'`, `status =
+   'active'`, `is_admin = 1`, `session_epoch = 0`. Phase 1's cookies name the same uid and epoch, so
+   Rem stays signed in. Write the sentinel blob for the new key (§5.3) from the runtime's first boot,
+   not from the Mac.
+2. At a quiet hour: invalidate the `lazyboy` database's tokens. Invalidation is group-wide (C §8.2),
+   so this retires every token in the group, the cutover's production token and dev's included, and it
+   has to come before the new tokens, or it would retire them too (security R1). Then mint the
+   runtime's read-write group token and the backup job's read-only one straight into mode-600 files,
+   and set Production's environment: the group token in place of `lazyboy`'s own, `TOKEN_KEYS`
+   generated in a pipe, the app database's URL (values on stdin, as STORE_MIGRATION §8 step 9 does).
+   From the invalidation until the deploy lands, production has no store credential: a few minutes in
+   which Rem's pages fail and ticks fail at their claim, and plays inside his last 50 come back at the
+   next tick.
+3. Deploy Phase 2, still `SIGNUPS=owner`. Its first tick finds no `user_tokens` row for the admin and
+   encrypts `lazyboy.meta.spotify_tokens` into one, in the runtime, so the key never leaves Vercel
+   (security R9). Three ticks answer 200 with Rem's outcome `ok`.
+4. Mint dev a fresh `lazyboy`-only token, and check once that it gets a 401 from a throwaway
+   `lb-u-test` database created in the same group for the check and destroyed after (security R8).
+5. Verify, each a known answer: the seven tables' counts at or above the pre-migration counts and
+   `max(played_at)` moving; `verify-derived.mjs` green; the named `meta` keys (Phase 1's four present,
+   the moved keys still present until step 6, nothing else removed; ordinary activity adds and removes
+   `plsnap:` and `lock:clean:*` keys, so the whole key set is no check, migration 16); the runtime's log
+   line that the blob it wrote decrypts to the plaintext row; Rem still signed in; the recorder diff
+   over the window empty.
+6. A week later, delete the keys in §11.1's last row, from the Mac with dev's `lazyboy` token; no key
+   is needed.
 
-**Rollback.** Before step 7: redeploy Phase 1, which reads the plaintext row; if a refresh happened in
-between, the access token has expired and the unchanged refresh token renews it. If Spotify has
-started rotating refresh tokens by then, the old code's refresh fails, `clearTokensIfStale` deletes
-the row and Rem signs in once (C §9.4). After step 7: a script decrypts Rem's blob back into
-`meta.spotify_tokens`, then redeploy. Whenever a rollback lands on a build from before Phase 3, pause
-the cron-job.org pinger first: the older route has no lease, and two pingers would double Rem's
-Spotify calls (C §9.4). Nothing else in Rem's database changed, so nothing else needs undoing.
+Until Phase 3 writes `sync_state`, Rem's capture banner keeps reading `lazyboy.meta` as today
+(migration 16).
+
+**Rollback** follows §13.5: revert the merge and push, never Instant Rollback, because every
+pre-Phase-2 deployment holds the invalidated token. Before step 6: Phase 1's code runs on the group
+token, which reaches `lazyboy`, and reads the plaintext row; if a refresh happened in between, the
+access token has expired and the unchanged refresh token renews it. If Spotify has started rotating
+refresh tokens by then, the old code's refresh fails, `clearTokensIfStale` deletes the row and Rem
+signs in once (C §9.4). After step 6: set the rollback flag, so Phase 2's runtime writes Rem's
+plaintext row back from his blob (§5.3), then revert. A rollback to a build from before the interim
+pinger's guard pauses the cron-job.org job first: that route has no guard, and two pingers would
+double Rem's Spotify calls (C §9.4). Nothing else in Rem's database changed, so nothing else needs
+undoing.
 
 ## 12. Sign-up gating, privacy, deletion and backups
 
