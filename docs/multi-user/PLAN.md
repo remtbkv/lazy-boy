@@ -1155,7 +1155,8 @@ where they begin. §14.4 has the arithmetic.
 
 Writes: ~3,000 core rows a day for Rem (01c §2.7), plus ~72 for tokens, ~900-1,440 for claims and
 releases (two rows per probe, 450-720 probes a day), and ~150 counter increments: ~4,100-4,700 a day,
-inside D3's 5,000 [estimate]. Five users: ~0.63M a month, 6% of the free plan's 10M, inside R4's 10%.
+inside D3's 5,000 [estimate]. Five users, with the app-wide `last_tick_at` stamp (1,440 a day):
+~0.67M a month, under 7% of the free plan's 10M, inside R4's 10%.
 `api_log`, ~1,000 Spotify calls a user a day after Phase 3, stays on the Zenbook.
 
 ## 9. Search: per-user payloads, caching and the phone budget
@@ -1323,7 +1324,7 @@ multi-user side, keep them on the Zenbook (§18 decision 4). Telemetry becomes p
 deletion duty wherever it lives, which the user column handles in both places (01a §10). On Turso,
 five users' `api_log` would be ~0.6M rows written a month even after Phase 3's call cuts (~1,000 calls
 a user a day, ~4 rows written per insert counting index entries, 01c §2.1) [estimate], which with the
-~0.63M core writes of §8.6 passes R4's 10% write bar. On the Zenbook the cost is `/usage`'s log
+~0.67M core writes of §8.6 passes R4's 10% write bar. On the Zenbook the cost is `/usage`'s log
 sections during an outage and a dependency on the Funnel certificate that lane 1907 renews.
 
 ## 11. Migrating Rem's data with nothing lost
@@ -1761,7 +1762,7 @@ Rem-like users on today's policy would need ~800-1,700 a day (01c §5.1).
 | player calls | ~720 with up to two users; ~450 from three on (idle probes every 5 minutes) | ~2,250 | unmeasured; ≤ ~2,500 planned |
 | Spotify calls per 30 s, at peak | – | ~2-3 from ticks, ~10-15 from five visible tabs | 18 seen safe; the limit itself is unpublished |
 | Turso rows read | ≤ 1.5M on a heavy day (§8.6) | 26-258M a month by profile and step (§14.4) | 500M (R4: 250M) |
-| Turso rows written | ~4,100-4,700 | ~0.63M a month | 10M (R4: 1M) |
+| Turso rows written | ~4,100-4,700 | ~0.67M a month | 10M (R4: 1M) |
 | Vercel invocations | ~200 browsing; the tick is 1,440 a day in total | ~73,000 a month | 1,000,000 (Hobby) |
 | Vercel Active CPU | unmeasured; Rem's share today estimated at 0.5-2.4 CPU-hours a month (01f §2.3) | 2.5-12 if it scaled linearly, an upper bound | 4 (Hobby, team-wide) |
 
@@ -1795,9 +1796,9 @@ and even today's code at five Rem-like users on an average day (~1B a month [est
 30, §8.6's today column with the orphan passes averaged]) fits with no block, which is why §15
 recommends it as insurance rather than as capacity.
 
-**D3**: ~4,100-4,700 rows written per Rem-like user a day (§8.6), ~0.63M a month at five, 6% of the
-free plan. **Growth**: ~35 KB of core data a day for a Rem-like user (01a §6), ~12 KB for a light one;
-five heavy users add ~64 MB a year against 5 GB.
+**D3**: ~4,100-4,700 rows written per Rem-like user a day (§8.6), ~0.67M a month at five, under 7% of
+the free plan. **Growth**: ~35 KB of core data a day for a Rem-like user (01a §6), ~12 KB for a light
+one; five heavy users add ~64 MB a year against 5 GB.
 
 ### 14.5 Uptime (A1-A3)
 
