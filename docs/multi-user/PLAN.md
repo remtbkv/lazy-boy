@@ -1331,7 +1331,12 @@ the same work, 01c §2.8):
 | unique-song count (`db.ts:1969-1991`) | a library sync that changed anything | ~39,000 | 0.16M, 4 runs |
 | history payload rebuild (`db.ts:1686-1730`) | a browser fetch after the slow marker moved | ~79,000 | 1 run; up to ~11M on a day Home stays open (01c §6 item 1) |
 | whole-history strip, `dailyStatsAction(100000)` on every Home mount (`den-home.tsx:374-384`), re-read after any landed play | Home mounts after listening | ~43,500 [estimate, B §3] | ~0 that day |
+| an open Home tab's re-read of the strip and today's rows (`refreshHistoryAction`, `history-actions.ts:139-146`; §7.6) | each write-marker move while Home is visible: two or three per landed play (`db.ts:522, 749, 819`) and every image-only rescan (`db.ts:1841`) | ~7,500 at the default width; ~46,000 with "See all" open [estimate, scale 2] | small on Oct 14 (7 refreshes); 826,090 modeled rows on Aug 12 [measured, `usage_ledger`, scale 2] |
 | ticks and harvests that land nothing | 591 a day | ~3 and ~215 | ~0.06M |
+
+Oct 14 was the incident day, and its orphan row carries it: at least two of its three unscoped passes
+were most likely the second account's library replacing Rem's and being replaced back (§1, migration
+15). On an ordinary day the row is about three passes a week.
 
 STORE_MIGRATION §3 attributes the ~50,500-row daily scan to the history payload; it is the all-time
 recompute (01c §2.2 separated the two by their logged SQL prefixes, and 01a §11.2 and 01d §2.2 reached
@@ -1376,20 +1381,42 @@ settles the real counts (01c §8).
   stored play, one indexed read in the harvest's read batch, so both values are computed in JS and
   written with the insert (B §8.1). That also retires the post-insert `recomputeSkipFlags` round
   trips for tail appends.
+- **A NULL is pending, never zero** (migration 4). `listened_ms IS NULL` on a counted play means "not
+  yet ruled", as `skipped IS NULL` does today: a partial index (`WHERE listened_ms IS NULL AND
+  (context_type IS NULL OR context_type <> 'backfill')`) finds them, and the pass that rules skips
+  fills them and sets `alltime_dirty` whenever it fills one. A writer that does not know the column
+  (an older build during a rollback, an import script, a dev server) leaves a play the next pass
+  fills, not one the totals miss for good, so the fill needs no quiet window (§11.3).
 - **The accumulator** is `allTimeStats` (`skip-rule.ts:58-74`) applied one play at a time: for a
   counted play (real, not skipped), `plays + 1`, `durationMs + listened_ms`, `since` kept, and
   `uniqueTracks + 1` when no earlier counted play of that track id exists (an `EXISTS` on
   `idx_plays_track`). It equals the chain walk because `listened_ms` is the value the walk computes.
+  **It advances in SQL, in the insert's own batch, by what the insert inserted** (migration 3): each
+  `INSERT OR IGNORE` is followed by an update of the stored totals conditioned on `changes()`. Two
+  harvests landing overlapping batches, a re-sent batch (the store fetch retries any rejection, its own
+  timeout included, `src/lib/store-fetch.ts:80-83`; 01c §2.8 measured 25-30% of `api_log` rows as
+  re-sends) and a step abandoned at its deadline that writes later each add only the rows that were
+  new, in any order. A read-modify-write in JS, as the Oct 14 version described, would lose an
+  increment to a concurrent harvest or roll a total back with a late re-send. The lane first checks
+  that `changes()` behaves this way inside a Turso batch; the fallback is a `through_id` kept with the
+  totals and advanced over the rowid range of new plays (migration 3). T16 has the known answers.
 - **Non-append events keep today's path.** An out-of-order insert (the backstop replay, an import, a
   late play inside the 50-play window) re-opens its successor and rules it from its predecessor
   (`db.ts:547-561`), now rewriting its `listened_ms` too, and sets `alltime_dirty`; a duration change
   on a played track (`sync/library.ts:94-101`) re-rules that track's plays and their successors
   through `idx_plays_track`. A dirty flag makes the next tick recompute the totals from the stored
-  columns: one scan of that user's plays, without the `tracks` probes, only on those events.
-- **One-time fill on Rem's database**: one chain walk in JS with the same pure function (~45,000 rows
-  read, ~14,500 written [estimate, B §8.1]), verified by `SUM(listened_ms)` over counted plays equal
-  to `alltime_stats.durationMs` on the same snapshot, and by `scripts/verify-derived.mjs` extended
-  with a `listened_ms` check.
+  columns: one scan of that user's plays, without the `tracks` probes, only on those events. The import
+  scripts write raw SQL and close with `importTailStmts` (`scripts/import-tail.mjs`), so they never
+  reach that code: P2's lane adds `alltime_dirty` to `importTailStmts`, with known answers in
+  `tests/import-scripts.test.ts` (migration 4).
+- **The daily heal** (§7.11) recomputes the totals from the stored columns once a day and records a
+  `drift` event if they differed, so a drift the rules above miss lasts a day at most and is reported.
+  This is the check design B kept and the Oct 14 version dropped (design-b.md:178-179), moved to where
+  it is cheap.
+- **One-time fill on Rem's database** (§11.3): one chain walk in JS with the same pure function
+  (~45,000 rows read, ~14,500 written [estimate, B §8.1]), verified by `SUM(listened_ms)` over counted
+  plays equal to `alltime_stats.durationMs` on the same snapshot, and by `scripts/verify-derived.mjs`
+  extended with a `listened_ms` check.
 - **Effect**: 2.24M rows on Oct 14 become a few thousand a day, and the only read that grew every day
   stops growing (D2). The all-time card also stops lagging a listening session by up to 10 minutes.
 
@@ -1397,7 +1424,7 @@ P2 comes before the history segments (P3) so the segment tuple can carry each pl
 seconds from its first version (§9.1), which is what lets P4 move the whole-history strip into the
 browser without a second shape change.
 
-### 8.4 P4: the Home payload patched in place, and three smaller terms
+### 8.4 P4: the Home payload patched in place, the open tab, and three smaller terms
 
 Before the second friend (§13), or earlier if Turso's per-database usage at the first friend's month
 says so:
@@ -1406,12 +1433,22 @@ says so:
   read batch includes the `home_payload` row; JS applies the new plays to that day's entry in the
   strip (plays, `durationMs` from `listened_ms`, the unique count from the opening day's rows), to the
   opening day's song rows, and to the all-time totals from the accumulator; a new local day starts a
-  fresh opening day. Everything else falls back to today's rebuild: a play landing on a day other
-  than the opening day, an out-of-order insert, a time-zone or shape change, and any derived-column
-  event that touches a play in the payload's 16 days (a context name resolving, an orphan flip), which
-  marks the payload dirty. Today the rebuild after every landed play is what heals those two derived
-  columns; a patched payload needs the explicit mark or a stale "From" could sit in it for days.
-  ~7,500 rows read per landed play become ~1, and a landed tick's ~30 round trips become ~3.
+  fresh opening day. The write is a compare-and-set on a version kept in the payload, and a patch that
+  loses the race marks the payload dirty instead of overwriting a newer one (B §8.2, migration 3).
+  Everything else falls back to today's rebuild: a play landing on a day other than the opening day,
+  an out-of-order insert, a time-zone or shape change, and any derived-column event that touches a
+  play in the payload's 16 days (a context name resolving, an orphan flip), which marks the payload
+  dirty. Today the rebuild after every landed play is what heals those two derived columns; a patched
+  payload needs the explicit mark or a stale "From" could sit in it for days, and the daily heal
+  rebuilds it once a day regardless (§7.11). ~7,500 rows read per landed play become ~1, and a landed
+  tick's ~30 round trips become ~3. The exit check runs a scripted day that includes every
+  non-append event, not a day of appends (T17, completeness M6).
+- **The open tab** (scale 2). `refreshHistoryAction` returns the 14-day strip, the all-time totals
+  and today's rows from the patched `home_payload` (one `meta` read) plus the delta it already
+  computes, and ignores widths above 14; the expanded strip comes from the segments in the browser.
+  An open Home tab then costs ~1 row per landed play instead of ~7,500 per marker move at the default
+  width and ~46,000 with "See all" open (§7.6). The image-only playlist tier stops bumping `write_seq`
+  (`db.ts:1841`) and the grid keys on a marker of its own, so artwork rotation stops moving the marker.
 - **The whole-history strip** is built in the browser from the segments, which carry each play's
   listened seconds (B §9.3), replacing the `dailyStatsAction(100000)` prefetch on every Home mount;
   the server path stays as the fallback before the segments land.
@@ -1441,7 +1478,9 @@ Rows read on a heavy day (§1's definition) per user, Turso's terms, after each 
 move are §8.1's; "search" is the payload rebuilds a Home visit triggers after listening (~72,000 rows
 today: the history body at ~3 rows per play plus the library on half of visits, 01d §2.2, §4.2;
 ~13,000 with segments: the current month to date plus the library half). Every figure is an
-[estimate] built from the measured per-run costs above.
+[estimate] built from the measured per-run costs above. The "today" column carries Oct 14's three
+unscoped orphan passes, at least two of them the incident's (§1); an ordinary day has about three a
+week, so an ordinary "today" is ~4.5-9M. From P1 on an orphan pass costs little either way.
 
 | term | today | P1 | P2 | P3 | P4 |
 |---|---|---|---|---|---|
@@ -1451,66 +1490,88 @@ today: the history body at ~3 rows per play plus the library on half of visits, 
 | unique-song count | 0.16M | 0.16M | 0.16M | 0.16M | ~0.12M |
 | ticks, harvests, rescans, identity, claims | ~0.08M | ~0.08M | ~0.08M | ~0.08M | ~0.08M |
 | daily contexts pass | 0.04M | 0.04M | 0.04M | 0.04M | ~0 |
-| nightly backup dump (with §10.2's count-check edit) | 0.05M | 0.05M | 0.05M | 0.05M | 0.05M |
+| nightly backup dump (source counts kept, §10.2 edit 4) | 0.05M | 0.05M | 0.05M | 0.05M | 0.05M |
+| the daily heal (§7.11) | – | – | ~0.02M | ~0.02M | ~0.02M |
 | search, 2 visits (Rem) / 8 visits (an app-heavy user) | 0.14M / 0.58M | same | same | 0.03M / 0.10M | same |
 | whole-history strip, 2 / 8 mounts | 0.09M / 0.35M | same | same | same | 0 |
-| **total, Rem (2 visits)** | **~19.1M** | **~3.8M** | **~1.57M** | **~1.45M** | **~0.36M** |
-| **total, an app-heavy Rem-like user (8 visits)** | **~19.8M** | **~4.5M** | **~2.26M** | **~1.79M** | **~0.44M** |
+| open Home tab re-reads (§7.6), Rem / app-heavy at the default width | ~0.05M / ~0.36M | same | same | same | ~0 |
+| **total, Rem (2 visits)** | **~19.2M** | **~3.85M** | **~1.64M** | **~1.52M** | **~0.38M** |
+| **total, an app-heavy Rem-like user (8 visits)** | **~20.2M** | **~4.9M** | **~2.64M** | **~2.17M** | **~0.46M** |
 
-Against D1 (≤ 1.5M a heavy day): Rem meets it after P3 and with room after P4; an app-heavy Rem-like
-user needs P4. Against R4 at five users (≤ 250M a month): after P3, Rem plus four light friends is
-~94M (19% of the free plan), and Rem plus four app-heavy Rem-like friends at Rem's history size is
-~258M (52%, at the bar). The strip is the one per-visit term left that grows with history (~3 rows
-per real play per mount), so a year in, at ~42,000 plays each, the second case is ~337M (67%). After
-P4 it is ~64-70M (13-14%) at either size, because nothing left on a per-visit path grows with
-history. Friends start with no history and no catalog rows, so a year in is where they arrive, not
-where they begin. §14.4 has the arithmetic.
+The open-tab row is scale 2's: an app-heavy user with Home visible three hours of a day re-reads the
+strip and today's rows at least ~48 times (~45 landed plays and ~3 artwork rescans while visible), and
+with "See all" open each re-read covers the whole history, ~2.2M a day instead of ~0.36M. The August
+days with the most refreshes show the shape: Aug 12 had 169 strip reads (826,090 modeled rows) for 47
+landed ticks [measured, `usage_ledger` in the Oct 14 backup, a lower bound, scale 2].
 
-Writes: ~3,000 core rows a day for Rem (01c §2.7), plus ~72 for tokens, ~900-1,440 for claims and
-releases (two rows per probe, 450-720 probes a day), and ~150 counter increments: ~4,100-4,700 a day,
-inside D3's 5,000 [estimate]. Five users, with the app-wide `last_tick_at` stamp (1,440 a day):
-~0.67M a month, under 7% of the free plan's 10M, inside R4's 10%.
-`api_log`, ~1,000 Spotify calls a user a day after Phase 3, stays on the Zenbook.
+Against D1 (≤ 1.5M a heavy day): Rem is at the bar after P3 and well under it after P4; an
+app-heavy Rem-like user needs P4. Against R4 at five users (≤ 250M a month), after P3: Rem plus four
+light friends is ~101M (20% of the free plan), and Rem plus four app-heavy Rem-like friends at Rem's
+history size is ~306M (61%, over the bar), or past the free plan's 500M if they leave "See all" open
+while listening. After P4 it is ~67-74M (13-15%), because nothing left on a per-visit path grows with
+history. With one friend (Phase 4), after P3, it is ~110M (22%), or ~165M (33%) with "See all" open,
+which is why P4 can wait for the second friend and no longer. §14.4 has the arithmetic.
+
+Writes (scale 8's recount; libSQL bills each index entry an insert adds: `INSERT INTO api_log` wrote
+4 rows and `INSERT OR IGNORE INTO plays` 8 on every call of Oct 14 [measured, the meter's
+per-statement `rw`]): ~3,000 core rows a day for Rem (01c §2.7), plus ~72 for tokens, ~900-1,440 for
+claims and releases (two rows per probe, 450-720 probes a day, with `next_probe_at` unindexed), ~130
+for the `probe` key written only on a change, ~205 for the derived counters (one month-count upsert
+and one totals update per landed batch) and ~165 counter increments: **~4,500-5,000 a day**, at D3's
+5,000 [estimate]. Writing `probe` on every probe and indexing `next_probe_at` would make it
+~5,100-5,900. Five users, with the tick stamp (1,440 a day): ~0.72-0.8M a month, 7-8% of the free
+plan's 10M, inside R4's 10%. A friend with a large Liked list stays inside it only with Phase 3's
+Liked change: without it, three likes a day at 5,000 songs is ~15,000 rows written (§7.7). `api_log`,
+~1,000 Spotify calls a user a day after Phase 3, stays on the Zenbook.
 
 ## 9. Search: per-user payloads, caching and the phone budget
 
 Search keeps today's model: the browser holds the user's library and history and filters them on
-every keystroke with no request (`den-home.tsx:497-524`, 01d §1). Two things change. Every key, URL,
-ETag and stored copy carries the uid (§6.2 layer 6). And the history stops being one body, for a
-reason that applies to Rem alone: it is 1.79 MB raw, 86.6% of the Data Cache's 2 MiB item limit, and
-crosses it around late December 2026, after which every Home open rebuilds it with a full plays scan
-and nothing reports it (01d §3.2: Next 16.2.6 skips caching an item over the limit and only warns, in
+every keystroke with no request (`den-home.tsx:497-524`, 01d §1). Two things change. Every key, ETag
+and stored copy carries the uid (§6.2 layer 6). And the history stops being one body, for a reason
+that applies to Rem alone: it is 1.79 MB raw, 86.6% of the Data Cache's 2 MiB item limit, and crosses
+it around late December 2026, after which every Home open rebuilds it with a full plays scan and
+nothing reports it (01d §3.2: Next 16.2.6 skips caching an item over the limit and only warns, in
 runtime logs that age out within the hour). The step-by-step phone budget is §14.1.
 
 ### 9.1 What the browser fetches (P3)
 
 - **The manifest rides the page.** Home's server render already reads the user's database for the
-  Home payload; the same batch reads the manifest (each segment's key, version and play count, a few
-  hundred bytes; B §9.1), so the browser knows at first paint which segments it lacks. No extra
-  request.
+  Home payload; the same batch reads the manifest (each segment's key, version and play count, and
+  the database's `store_epoch`, a few hundred bytes; B §9.1), so the browser knows at first paint
+  which segments it lacks. No extra request.
 - **History in monthly segments** (01d O3): one body per (user, UTC month), plus the 7,529 catalog rows
   as a segment of their own, since they never change and are 58% of today's body (01d §2.1). Each is
   self-contained in today's tuple format with one field added: a play becomes `[trackIdx, minute,
   sourceIdx, listenedS]`, so the browser can build any day's totals (B §8.3), at ~4 bytes a play.
-  The URL is `/api/search/h/<uid>/<segment>?v=<version>&s=<shape>`, served `private,
-  max-age=31536000, immutable`. The server takes the user from the session, answers 404 when the path's
-  uid is not the session's, and builds from the session's database through `userCache`, keyed by
-  segment, version and shape; a miss reads one month through `idx_plays_played_at`, ~3 rows a play,
-  at most ~10,000 rows for Rem's busiest month (01d O3). If the month's version has moved past the
-  URL's (the current month after a new play), the route answers the current body with its version in
-  a header and `no-store`, so nothing is cached under the wrong URL (B §9.1).
-- **The library**, one body per user as today, `/api/search/l/<uid>?v=<library_seq>&s=<shape>`,
-  immutable per version; split per playlist when a library passes ~12,000 songs (01d O7, §8.5).
+  The URL is `/api/search/h/<segment>?v=<epoch>.<version>&s=<shape>`, served **`private, no-store`**
+  (security R12): the uid is not in the path, because the server takes the user from the session and
+  builds from the session's database through `userCache`, keyed by uid, epoch, segment, version and
+  shape. A miss reads one month through `idx_plays_played_at`, ~3 rows a play, at most ~10,000 rows
+  for Rem's busiest month (01d O3). If the month's version has moved past the URL's (the current month
+  after a new play), the route answers the current body with its version in a header (B §9.1).
+- **Why no-store.** An immutable response stays in a browser's HTTP cache for its lifetime, where no
+  page script can evict it, so a year of a person's listening would outlive their sign-out on a shared
+  computer. IndexedDB (phase E) is the repeat-visit store and S1's budget reads it (§14.1), and it is
+  cleared at sign-out. The cost: a device without the IndexedDB copy fetches every segment again, from
+  the Data Cache, at first-visit cost. Safari deletes a site's script-writable storage, IndexedDB
+  included, after seven days of use without visiting it (WebKit, quoted in scale §3; a web app added
+  to the home screen keeps its own count), so a friend who opens Lazy Boy in Safari less than weekly
+  gets S2's numbers, not S1's, each time.
+- **The library**, one body per user as today, `/api/search/l?v=<epoch>.<library_seq>&s=<shape>`, also
+  `private, no-store`; split per playlist when a library passes ~12,000 songs (01d O7, §8.5).
 - **A delta at visit start** (01d O4): the plays newer than the newest minute the browser holds, ~50
   rows, today's `refreshHistoryAction` read made a scoped GET.
-- **Phase E's IndexedDB copy** stores bodies under `(uid, kind, segment, version, shape)`, so a repeat
-  visit paints search from disk before the network (STORE_MIGRATION §10, 01d O5).
+- **Phase E's IndexedDB copy** stores bodies under `(uid, epoch, kind, segment, version, shape)`, so a
+  repeat visit paints search from disk before the network (STORE_MIGRATION §10, 01d O5), and a restored
+  database, whose versions start over, can never match a body stored before the restore (migration 1).
 
 **Segment versions** are per-month entries in the user's `meta` (`seg_seq:<YYYY-MM>`, holding the
 version and the month's play count), bumped by every write that can change a closed month (A §7.1,
 B §8.3). Keeping the count beside the version is what lets the manifest be one `meta` range read of a
 dozen rows; counting plays per month at render time would be a scan of the whole history on every
-Home open, the thing D2 forbids.
+Home open, the thing D2 forbids. The count advances in SQL with the insert's `changes()`, as the
+all-time totals do, and the daily heal recomputes it (§8.3, §7.11).
 
 | event | how its months are found |
 |---|---|
@@ -1518,14 +1579,15 @@ Home open, the thing D2 forbids.
 | `ctx_orphan` flips after a playlist's membership moved | `UPDATE … RETURNING played_at` on the scoped pass |
 | a context name resolves or changes | `SELECT DISTINCT substr(played_at, 1, 7) … WHERE context_uri = ?` on `idx_plays_context` |
 | a played track's name, artist, art, album or duration changes | the same on `idx_plays_track` |
-| the backstop replay, a history import, the catalog backfill | the scripts bump the months they wrote, and `catalog` |
+| the backstop replay, a history import, the catalog backfill | the scripts bump the months they wrote, and `catalog`, through `importTailStmts` (T10) |
 
 Each bump site gets a known-answer test: write to an old month, and that month's version moves and no
 other does. The manifest's play count per month lets the client catch a missed insert bump (its
 stored copy's count differs) and refetch. A missed bump on a derived column leaves a stale "From"
 label or name in that month until its next bump, the same failure class as a missed `write_seq` bump
 today (`db.ts:337-340`), and for one user only. Moving the shape token re-fetches every segment, the
-escape hatch for a bug in this list.
+escape hatch for a bug in this list, and the step that rolling P3 forward after a rollback takes,
+since an older build in between wrote plays without moving any month's version (migration 4).
 
 ### 9.2 What changes in the client
 
@@ -1552,17 +1614,26 @@ Every entry is one user's (`userCache`, §6.2), and with months as the unit no e
 however long a history grows: a 100-plays-a-day month is ~300 KB raw (01d O3), and an import becomes
 many bounded months. Vercel's Data Cache is one least-recently-used store shared by every project on
 the team (01f §2.2), so one user's entries can evict another's; an eviction costs one month's
-rebuild, ~4,500-10,000 rows, never correctness. Closed months mostly live in the browser (IndexedDB
-and the HTTP cache), so the server rebuilds one only for a device that lacks it.
+rebuild, ~4,500-10,000 rows, never correctness. Closed months mostly live in the browser's IndexedDB,
+so the server rebuilds one only for a device that lacks it; with the bodies `no-store`, the HTTP cache
+no longer stands in for a device whose IndexedDB copy is gone.
 
 ### 9.4 Order and the December deadline
 
 P3 must ship before mid-December. If it cannot, the catalog split alone (01d O2) is the stopgap: the
 history entry drops from 86.6% to 37.1% of the limit and the next crossing moves ~10.7 months out
 [measured, 01d §5.1]. P3's client edits touch the load path phase E rewrites (lane 1905), so P3
-starts after lane 1906 merges, never in a parallel branch (C §7.2). Friends' history imports wait for
-segments: a five-year import is a ~4.2 MB history body today, over the item limit on day one and near
-Vercel's 4.5 MB response cap (01d §3.3, §7 decision 2).
+starts after lane 1906 merges, never in a parallel branch (C §7.2).
+
+Friends' history imports need more than segments (scale 9). A five-year import is ~91,000 plays, 60
+monthly segments plus the catalog: ~61 requests on a cold visit, each its own invocation with its own
+identity read, and per-segment dictionaries repeat the art and album strings of every song heard that
+month (+24.8% raw, +29.8% gzipped over Rem's five months, 01d O3). At ~4.2 MB raw before that overhead
+(01d §3.3) it is ~2 MB gzipped, ~1.6 s at 10 Mbit/s plus ~1.1 s of parse and build at 4×: ~3 s
+[estimate]. Segments fix the 2 MiB cliff for an import, not S2. So an import waits for **newest-first
+loading** (the library and the newest months first, the box usable in ~1.2 s while older months
+follow, B §17) and **yearly segments for closed years**, one request per year instead of twelve
+(decision 30).
 
 ## 10. The store, and STORE_MIGRATION (lanes 1901-1911)
 
