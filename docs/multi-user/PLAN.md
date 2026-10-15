@@ -359,7 +359,8 @@ CREATE TABLE sync_state (        -- 01c §5.2's due queue
 CREATE INDEX idx_sync_due ON sync_state (next_probe_at);
 
 CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT);
--- keys: schema_version; cooldown:<bucket>; played_at_convention; lock:spotify_refresh:<uid>
+-- keys: schema_version; cooldown:<bucket>; played_at_convention; lock:spotify_refresh:<uid>;
+--       last_tick_at (stamped by every tick, read by the open app's fallback, §7.6)
 ```
 
 Choices in it: there is no `env` column on tokens, because dev runs its own app database (§5.5) and
@@ -924,9 +925,9 @@ everyone else's share, so the brake trips earlier for friends.
   runs the same per-user step under the same claim, so an open tab and the cron never harvest one
   user twice in a minute. On a load or a return to the tab it also harvests once if the probe saw a
   track change since the last harvest, at least 60 s apart (B's H4), which is the catch-up for
-  listening the probe could not see. When no tick has started in 5 minutes (read from the newest
-  lease time: both pingers down, or every tick failing at its claim), the tab's own 2-minute timer
-  makes the user due, so an open app keeps capturing on its own (C §6.3). Today the route harvests
+  listening the probe could not see. When no tick has started in 5 minutes (`app_meta.last_tick_at`,
+  which every tick stamps: both pingers down, or every tick failing at its claim), the tab's own
+  2-minute timer makes the user due, so an open app keeps capturing on its own (C §6.3). Today the route harvests
   whenever the last harvest is over a minute old, playing or not (`src/app/api/sync/route.ts:28-31`);
   a friend with Home visible through an 8-hour workday would spend ~240 scarce calls a day that way
   (C §6.3). The browser's zone is written only when it changes (today on every call, `:24-27`).
@@ -1640,6 +1641,10 @@ written twice.
   the open-app rules, the deletion job) are Opus lanes at high effort, each followed by an adversarial
   review lane in a fresh context before deploy, the pattern of lanes 1902, 1906 and 1911.
 - One branch per phase, rebased on `origin/main` before it pushes; one lane in `db.ts` at a time.
+- Each phase's lane updates the docs its change touches in the same branch: the `db.ts` header rule
+  ("ONE client" becomes the client factory and `forUser`), `CLAUDE.md`, `docs/ARCHITECTURE.md`,
+  `docs/GOTCHAS.md`, and `docs/SECURITY.md`, whose checklist still says development mode allows 25
+  users (01f §1.2).
 - Rem's own steps: Phase 0's environment changes and dashboard reads, the foreign-play list, the
   policy text, each friend's dashboard entry, and the decisions in §18.
 
@@ -1901,6 +1906,10 @@ brake M, each friend after that S.
   429 `reason` with per-user attribution shows the first sign.
 - **Rollbacks assume Spotify keeps not rotating this app's refresh tokens** (01e F2); if it starts, a
   rollback costs Rem one sign-in (§11.4).
+- **Cross-site scripting** acts as its victim only (the session cookie is httpOnly and server actions
+  run as the victim), and the text the app renders comes from Spotify, where anyone can name a
+  playlist; React's escaping stays the main defence. A nonce-based CSP stays on `docs/SECURITY.md`'s
+  checklist, not a multi-user blocker (01e §5.10).
 - **Policy.** Storing friends' history and showing derived listening stats sit against the Developer
   Terms' storage rule and the Policy's "derived listenership metrics" line (01f §1.5). The plan
   narrows the exposure (each user sees only their own stats; retention; deletion inside five days);
