@@ -8,9 +8,48 @@ with its source, or **[estimate]** with the arithmetic. Inputs: the six overview
 this directory, `docs/STORE_MIGRATION.md`, `docs/GOTCHAS.md`, `docs/SECURITY.md` and the code.
 I did not read the other two designs.
 
-Status: outline (sections fill in order; §0 is written last).
+Status: complete.
 
 ## 0. Summary
+
+- **Targets, refined (§1).** Five accounts, Rem included: Spotify's development mode allows five
+  users per app and extended quota mode takes only organizations with 250k monthly users, so the
+  brief's 25 is not reachable on one app; past five, each person runs their own copy. Search,
+  freshness, reads and uptime are restated as numbers a test can check.
+- **The design: a database per user (§2-3).** Each user's data sits in its own Turso database with
+  today's schema and today's SQL. Rem's is the `lazyboy` database STORE_MIGRATION's cutover
+  creates, untouched. A small app database holds the user list and the Spotify tokens, encrypted
+  with AES-256-GCM. Every per-user function takes the uid as a required parameter, so a forgotten
+  scope fails to compile, and the 17 SQL-level items of 01a's census (one user's sync deleting
+  everyone's playlists, plays dropped on a timestamp collision, skip verdicts chained across
+  users) need no change at all.
+- **Rem's data (§9).** Nothing moves but the token, whose original stays in place until a three-day
+  soak ends. Rollback is promoting the previous deployment: minutes, and at most one sign-in.
+- **Isolation (§5)** rests on one client function that fails closed, uid-keyed caches, ETags and
+  module state, and a test suite with deliberately colliding two-user data and a cache stub that
+  keys the way Next does.
+- **Sync (§6).** One cron tick serves every user, each under its own deadline, behind a 90 s lease;
+  it harvests on a track change, which should take Rem's harvests from 280 on Oct 14 to ~160 with
+  no loss of freshness. A second pinger on cron-job.org takes the Zenbook off the capture path. Rem
+  plus one friend fits Spotify's scarce recently-played budget with room; five heavy listeners do
+  not if the quota is one pool, so a brake ships before the third friend and on the days it trips
+  plays reach the store up to 30 minutes late.
+- **Search (§7, §12.2).** A database per user leaves each user's payload cost as it is today. On a
+  mid-tier phone at 10 Mbit/s a first visit is usable in ~1.45 s for Rem and ~1.1 s for a typical
+  friend, once two small single-user changes ship (fetch at mount, build days lazily); repeat visits
+  ~80 ms with phase E; a keystroke's match ≤ 15 ms. Rem's history entry still outgrows the Data
+  Cache around late December and needs its catalog rows split out, multi-user or not.
+- **Reads (§12.4).** The free plan holds Rem and four light or typical friends with one constant
+  changed (the all-time recompute every 60 minutes instead of 10). Four heavy friends a year in need
+  an incremental accumulator and segmented history, or Turso Developer at $4.99-5.99 a month.
+- **Uptime (§12.5).** The Zenbook leaves every user path with STORE_MIGRATION and the capture path
+  with the second pinger. Turso, Vercel, Spotify and Rem's Premium remain shared fate.
+- **STORE_MIGRATION (§8.3):** run it as planned and first, with four small edits before it runs:
+  flip Production only, name the browser cache's user key, write backups as a database list with
+  token rows stripped, and correct §3's dominant read.
+- **Cost (§13):** $0 through Phase 1; $0-26 a month at five users.
+- **Rem's decisions (§15):** 19, each with a recommendation. Now: Phase 0 (rotate `AUTH_SECRET`,
+  set `SPOTIFY_OWNER_ID`, gate `logout`) and the four edits. Before Phase 1: the data model.
 
 ## 1. Targets, as briefed and as refined
 
@@ -59,10 +98,11 @@ Zenbook: the telemetry store, Rem's backstop recorder, nightly backups of every 
 01a §8.1 lays out both data models; its census (§7) is the measure. Under a shared store with a
 `user_id` column, 17 of its 38 items are SQL-level (D4-D9, D12-D19, D21, D23, D25): five table
 rebuilds, five new user-led indexes on `plays` alone, a `user_meta` table, and more than fifty
-statements that each have to gain `user_id = ?`. The misses are not cosmetic. One user's library sync deletes every user's playlists (D12,
-`db.ts:1848-1883`); a play is dropped when another user played the same track in the same
-millisecond (D17); skip verdicts and listened time chain each play to the previous play of any
-user and are then stored (D18). No compiler or type checks a `WHERE` clause.
+statements that each have to gain `user_id = ?`. The misses are not cosmetic. One user's library
+sync deletes every user's playlists (D12, `db.ts:1848-1883`); a play is dropped when another user
+played the same track in the same millisecond (D17); skip verdicts and listened time chain each
+play to the previous play of any user and are then stored (D18). No compiler or type checks a
+`WHERE` clause.
 
 With a database per user, none of those statements changes: a statement sent to user 2's
 database cannot see user 1's rows. The meta keys that are per user (markers, stamps, payloads,
@@ -98,8 +138,8 @@ counted per organization, so the model does not change the read budget (01a §8.
 ### 2.3 The change list
 
 Sizes as in the overviews: **S** one place; **M** a function's contract changes and callers
-follow; **L** a mechanical edit across many files, or a loop over users. Every item cites the
-overview finding it answers.
+follow; **L** a mechanical edit across many files, or a loop over users. The last column points to
+the section with the detail, or for Phase 0 to the overview finding.
 
 | id | change | size | phase | detail |
 |---|---|---|---|---|
@@ -130,12 +170,13 @@ overview finding it answers.
 | M22 | a daily recently-played budget brake: past a threshold, one harvest per user per 30 min of playback | S-M | 3 | §6.4 |
 | M23 | library rescans stop calling `/me`; the recorder runs hourly | S + config | 2 | §6.4 |
 | M24 | read levers if the projection needs them: the all-time recompute gate 10 → 60 min, then an incremental accumulator | S, then M | 3 | §12.4 |
-| M25 | the now-playing poll 6 → 15 s mid-track, only if per-user call logs show visible tabs crowding Spotify's 30 s window | S | 3, if needed | §6.4 |
+| M25 | the now-playing poll 6 → 15 s mid-track, only if per-user call logs show visible tabs crowding Spotify's 30 s window | S | 3, if needed | §6.3 |
 
-Two items on the search target's path are single-user work with their own deadline, not part of
-the multi-user change: building the day list lazily (01d O6) and moving the 7,529 catalog rows
-into a body of their own (01d O2), before the owner's history entry outgrows the Data Cache's
-2 MiB item limit in late December (01d §3.2). §7 covers both.
+Three items on the search target's path are single-user work with their own deadline, not part
+of the multi-user change: fetching the payloads at mount, building the day list lazily (01d O6),
+and moving the 7,529 catalog rows into a body of their own (01d O2), before the owner's history
+entry outgrows the Data Cache's 2 MiB item limit in late December (01d §3.2). §7.2 lists them as
+S1-S3.
 
 ### 2.4 What stays exactly as it is
 
@@ -250,8 +291,9 @@ design follows 01e §5.1, with an integer uid in place of the `account_id` as th
 - **Sign-in.** The `signIn` callback (`auth.ts:344-347`) keeps its not-registered branch and
   replaces `isOwnerSignIn` with `admitSignIn(profile)`, which reads the app database: a user whose
   `account_id` equals `profile.account_id` and whose status is `active` or `needs_reconnect` is
-  admitted; so is an `invited` row whose `spotify_id` equals `profile.id` and whose `account_id`
-  is still empty. Everyone else gets AccessDenied, worded "not invited" on `/login`. A profile
+  admitted; so is a row whose `account_id` is still empty and whose `spotify_id` equals
+  `profile.id`, which is an invite, or Rem's own row before his first Phase 1 sign-in (§9.2).
+  Everyone else gets AccessDenied, worded "not invited" on `/login`. A profile
   without `account_id` is refused and logged, never keyed on `id` instead (01e §5.5), and a store
   error refuses, as `owner.ts` does today. An env flag `SIGNUPS=owner|invite` keeps Phase 1
   owner-only and gives Phase 2 a one-variable way back.
@@ -427,7 +469,7 @@ user's entry in a test instead of passing silently (01a D29, 01b S5).
 | `isolation/store.test.ts` | Seeds users 1 and 2 with deliberately colliding data: the same track at the same `played_at` (D17), interleaved timelines (D18), the same playlist id in both libraries (D12-D14), one context URI resolved for 1 and negative-cached for 2 (D25). Runs every exported per-user function as user 1. User 2's database file has the same sha256 before and after, and nothing user 1 reads contains a user-2 marker string. |
 | `isolation/cache.test.ts` | Users 1 and 2 with equal `write_seq`, `library_seq` and slow seq. Every cached read for 1, then for 2: 2 gets 2's rows. User 2's request carrying user 1's ETag answers 200 with 2's body. |
 | `isolation/routes.test.ts` | Mocks `@/lib/auth` to return user 2's session (the pattern `tests/now-playing-route.test.ts:13-16` uses), calls every route handler and server action, and finds no user-1 marker in any response and every write in user 2's file. |
-| `isolation/structural.test.ts` | Parses `db.ts` with the TypeScript compiler API (a dev dependency already): every export outside a named allowlist (telemetry, ledger) takes `uid` first. Calls every `"use server"` export and route handler with no session and asserts a refusal before `getClient` is called (01b S2's structural test). |
+| `isolation/structural.test.ts` | Parses `db.ts` with the TypeScript compiler API (a dev dependency already): every export outside a named allowlist (telemetry, ledger) takes `uid` first, and no call site in `src/` passes a numeric literal as a uid outside `getClient` and the setup script. Calls every `"use server"` export and route handler with no session and asserts a refusal before `getClient` is called (01b S2's structural test). |
 | `get-client.test.ts` | An unmapped uid throws; uid 2 never resolves to uid 1's URL; dev's file fallback is one file per uid. |
 | `tokens.test.ts` | 01e §5.2's six known answers: two users refresh concurrently in one process and each ends with their own token, one token-endpoint call each; user 1 holding the lock does not delay user 2; `invalid_grant` for 1 clears only 1's row; 1's ciphertext pasted into 2's row fails to decrypt; a cookie with no uid, an unknown uid, a disabled user or a stale epoch yields `null`; no row means `null` and no Spotify call. |
 | `cron-fanout.test.ts` | Three users: 1 playing, 2 answering `invalid_grant`, 3 answering 403 "not registered". One tick stores 1's play, marks 2 `needs_reconnect` and 3 `disabled`, answers 200 with three outcomes; a second tick inside 90 s does nothing. |
@@ -454,7 +496,7 @@ From 01c §4 and 01f §1.4, which quote Spotify's pages fetched on Oct 14:
 - **Shared or per user** is unknown. Spotify's pages say "a single developer account" and "a
   single budget"; one changelog sentence says "a user's quota" (01c §4). With one user the two
   readings cannot be told apart. This design plans for the shared reading, the one the
-  documentation states, and finds out passively (§15).
+  documentation states, and finds out passively (§11.4, §15 decision 16).
 
 01c §5.1 plans to 60% of the low end, ~450 recently-played calls a day; this design uses the same
 line.
@@ -554,7 +596,7 @@ boundary. T3's fallback is this brake: on a day it trips, plays reach the store 
 late (§14 has the options that avoid it and their cost).
 
 If the quota turns out to be per user, nothing here binds at five users and the brake never
-trips. §15 decision 6 is how to find out.
+trips. §11.4 and §15 decision 16 are how to find out.
 
 ### 6.5 Closed-app capture without the Zenbook (M19)
 
@@ -601,7 +643,7 @@ once per visit (01d §1). Under this design:
   measured what a shared store would need to match that: user-led indexes kept the history
   payload's scan at 32-36 ms from 25 to 100 users, against 130-527 ms without them. Here that
   property holds with today's indexes.
-- **Keys and tags** carry the uid (§5.2), which closes the two search-specific traps 01d §4.1
+- **Cache keys and ETags** carry the uid (§5.2), which closes the two search-specific traps 01d §4.1
   names: payload entries keyed on small per-user counters, and 304s across accounts on one
   browser.
 - **The in-memory delta patch** (`refreshHistoryAction` → `searchHistory("", ≤ 50)`,
@@ -659,7 +701,7 @@ a database per user there would need sqld namespaces and per-namespace routing t
 Funnel, which nobody has tried on this box.
 
 What the model needs from Turso, checked against Turso's documentation on Oct 14 (fetched with
-`curl` at about 10:08-10:10 PM; §16):
+`curl` at about 10:08-10:12 PM; §16.3):
 
 - **Enough databases.** The free plan includes 100 (01f §4.2, from the pricing page). This design
   uses six: `lazyboy`, `lazyboy-app`, `lazyboy-u2` to `-u5`. The old `lazy-boy` makes seven.
@@ -711,7 +753,8 @@ What the design takes from it: the core data on Turso (Phase 1 starts after lane
 and lane 1904's aftercare); phase A's telemetry client, which is where `user_id` is added (M10);
 phase A item 7's `/api/cron/daily`, the home of the per-user daily chores and the deletion job;
 lanes 1910-1911's scoped orphan pass, a precondition for Phase 2 because the unscoped pass reads
-~5M rows on Turso per run and ran three times on Oct 14 (01c §2.8); and phase E's browser copy.
+~5M rows on Turso per run and ran three times on Oct 14 (01c §2.3, §2.8); and phase E's browser
+copy.
 
 If R1 fails and the move stops (STORE_MIGRATION §2), multi-user waits. On the Zenbook the design
 would fail T5 and need sqld namespaces (§8.1).
@@ -732,9 +775,9 @@ Rem's call:
 3. **§9: backups as a list of databases, with token rows stripped.** `backup.py` takes
    `(database, retention)` pairs, starting with `("lazyboy", 60 days)`, and deletes the `meta`
    rows matching `spotify_tokens%` and `lock:%` from each copy before it compresses it. The first
-   costs nothing now and saves a rewrite (01a §10 item 3); the second removes six months of live
-   13-scope credentials from 60 days of OneDrive files today (01e F2, §6 item 1). The cutover's own
-   snapshot keeps the rows (R5).
+   costs nothing now and saves a rewrite (01a §10 item 3); the second takes live 13-scope
+   credentials, each valid up to six months, out of 60 days of OneDrive files (01e F2, §6 item 1).
+   The cutover's own snapshot keeps the rows (R5).
 4. **§3: name the dominant read correctly.** The ~50,500-row scan that ran 23 times on Oct 13 is
    the all-time recompute (`orderedRealPlays`, `db.ts:854-869`), not the history payload; 01a
    §11.2, 01c §2.2 (from the meter's per-statement log) and 01d §2.2 found it independently. R4's
@@ -771,7 +814,7 @@ passed a restore test (lane 1904); Phase 0 is done.
 5. **Rem signs in once**, because every older cookie lacks a uid (§4.1). The sign-in binds his
    `account_id` to row 1, which only happens when `profile.id` equals the row's `spotify_id`. If
    Spotify's `/v1/me` does not return `account_id` to this app (documented, never observed: 01e
-   §5.5), the sign-in is refused; that is a stop: roll back (§9.4) and take decision 9 in §15.
+   §5.5), the sign-in is refused; that is a stop: roll back (§9.4) and take decision 5 in §15.
 6. **Verify**: the seven counts at or above step 1's and `max(played_at)` moving; `scripts/
    verify-derived.mjs` green against `lazyboy`; uid 1's `last_sync` moving with each tick; every
    play the backstop recorder captured since the deploy present in `lazyboy` (STORE_MIGRATION §8
@@ -908,13 +951,13 @@ org settings, and in exchange a deletion cannot be forgotten. The alternative is
 `scripts/delete-user.mjs` with a five-day deadline and nothing to remind him. Rem's call (§15).
 
 **Backups** (M21) follow from §8.3 edit 3: one `(database, retention)` entry per database,
-`("lazyboy", 60 days)` as today, and `("lazyboy-app", 5 days)` and `("lazyboy-u<N>", 5 days)`, with
-the friends' entries read each night from the app database's `users` table through the read-only
-group token, so a destroyed database drops out of the list on its own.
-Five-day retention makes deletion reach the backups by itself, inside Spotify's window, with no
-per-file bookkeeping (01a §8.8, 01e §5.8). The cost: a friend's data lost more than five days back
-cannot be restored from a backup; Turso's own point-in-time history still covers the last day (ten
-on Developer). Rem's data and backups are unchanged.
+`("lazyboy", 60 days)` as today, and `("lazyboy-app", 5 days)` and `("lazyboy-u<N>", 5 days)`,
+with the friends' entries read each night from the app database's `users` table through the
+read-only group token, so a destroyed database drops out of the list on its own. Five-day
+retention makes deletion reach the backups by itself, inside Spotify's window, with no per-file
+bookkeeping (01a §8.8, 01e §5.8). The cost: a friend's data lost more than five days back cannot
+be restored from a backup; Turso's own point-in-time history still covers the last day (ten on
+Developer). Rem's data and backups are unchanged.
 
 ## 11. Rollout in reversible phases
 
@@ -967,8 +1010,9 @@ Gates, all before the invite:
   to Hobby reports it, and overrunning a Hobby allowance stops the feature for up to 30 days for
   every project in the team (01f §2.2-2.3). Stay on Hobby only if the team uses under ~2 of its 4
   CPU-hours a month; otherwise move to Pro first.
-- **Spotify's User Management list** read off the dashboard: how many accounts it holds, and
-  whether more than five survived Mar 9 (01f §1.2). It decides whether Rem counts toward five.
+- **Spotify's User Management list** read off the dashboard: how many accounts it holds, whether
+  more than five survived Mar 9, and whether Rem's own account takes one of the five; no fetched
+  page says (01f §1.2), and the dashboard is the authority.
 - The Turso plan decided (§15).
 - **The second pinger proven**: stop the Zenbook timer for ten minutes and watch ticks from
   cron-job.org land plays; restart it and watch the lease turn one of the two into no-ops.
@@ -1069,7 +1113,8 @@ Reads, in Turso rows. Rem's column comes from the meter's per-statement log for 
 §5.9). The friend columns apply the same per-run costs to assumed profiles (01d §3.3, 01f §5.1):
 **light** 40 plays a day with 6 months of history (7,200 plays); **typical** 50 a day, a year
 (18,250); **heavy** a Rem-like 115 a day, a year (42,000, no catalog rows). The visit term uses
-01d §4.2's assumption of eight Home visits a day with both versions moved, its weakest input.
+01d §4.2's assumption, its weakest input: eight Home visits a day, the history version moved before
+every one and the library's before half.
 
 | term, rows a day | Rem, Oct 14 | light | typical | heavy |
 |---|---|---|---|---|
@@ -1082,7 +1127,7 @@ Reads, in Turso rows. Rem's column comes from the meter's per-statement log for 
 | the same with M24's 60-minute gate | ~1.9M | ~0.4M | ~0.95M | ~3.4M |
 
 Rem's total leaves out the unscoped orphan pass, ~5M rows on Turso per run and three runs on Oct
-14 (01c §2.8); lanes 1910-1911 scope it before Phase 2 (§8.3). With it, Rem's month is the 135-170M
+14 (01c §2.3, §2.8); lanes 1910-1911 scope it before Phase 2 (§8.3). With it, Rem's month is the 135-170M
 01c §5.9 computes.
 
 Against Turso's free plan, 500M rows a month, with R4's bar at 50%:
@@ -1098,7 +1143,7 @@ four heavy friends only with the accumulator and segmented history as well. Frie
 history, so these are where a year of listening leads, not where Phase 3 starts; Turso reports
 usage per database, and the Phase 3 gate reads it monthly. The Developer plan includes 2.5B
 reads a month, which takes even the worst row to 36% of its allowance with no work at all (01f
-§4.2, §15 decision 5).
+§4.2, §15 decision 6).
 
 Writes: ~3,000 core rows a day for Rem (01c §2.7), roughly proportional to plays for friends; plus
 ~72 token writes per user, ~270 `probe` writes on a day like Rem's, and 720 lease writes for the
@@ -1167,8 +1212,8 @@ decisions. Phase 3 is the brake, then whatever the measurements ask for.
    visit: 01d's monthly segments with one art and album dictionary shared across a user's segments
    (naive segments cost ~30% more on a cold visit, 01d §5.1), M-L work. Shortening the art URLs is
    not that lever (−1% gzipped, `db.ts:1428-1431`). Recommendation: leave slow 4G outside the
-   target, as 01d §7 decision 3 does; after a first visit, phase E's copy makes every later one
-   ~80 ms on any network.
+   target, as 01d §7 decision 3 does; after a first visit, phase E's copy makes search usable
+   ~80 ms into every later one on any network.
 3. **T3 for five heavy listeners if the quota is one pool.** No harvest schedule fits five
    Rem-like users at 2-minute freshness inside ~450 calls a day (§6.4). The options: the brake,
    at up to 30 minutes on the days it trips (this design, S-M); server-side provisional plays from
@@ -1219,7 +1264,8 @@ Each with the recommendation and its reason, grouped by the phase it blocks.
 7. **Vercel plan.** Recommend reading Active CPU first and staying on Hobby only under ~2 of 4
    CPU-hours a month team-wide; otherwise Pro at $20 (01f §6 decision 3).
 8. **What "log out" means.** Recommend three actions: sign out (this browser), sign out everywhere
-   (the epoch), and disconnect (delete). Today one button stops capture and every device (§4.4).
+   (the epoch), and disconnect (delete). Today one button stops capture and signs out every
+   device (§4.4).
 9. **Retention for friends.** Recommend: kept while connected; deleted within five days of a
    disconnect or a revocation; deleted after twelve months without a sign-in. The twelve is the
    number to choose; Spotify says not to store content indefinitely (01f §1.5).
