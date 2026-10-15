@@ -398,7 +398,8 @@ query within about a second: the store fetch retries a rejected connection or a 
 with 250-500 ms pauses (`src/lib/store-fetch.ts:59-84`). **Frozen** (the Windows host stalls, the
 socket stays open) waits out each attempt: 15 s per attempt, three attempts (`store-fetch.ts:28-29`,
 fresh signal per attempt at `:50-57`), so **~46 s per query** before it fails, and serial queries
-stack.
+stack. Which shape an offline node presents through the Funnel relay, a fast error or a held
+connection, has not been measured; if the relay holds the connection, "down" behaves like "frozen".
 
 | path | store use | down | frozen |
 |---|---|---|---|
@@ -482,10 +483,130 @@ for CPU anyway.
 ## 4. The planned Turso move
 
 ### 4.1 What STORE_MIGRATION does, and when
+
+`docs/STORE_MIGRATION.md` moves the seven core tables (`tracks`, `plays`, `contexts`, `meta`,
+`playlists`, `playlist_tracks`, `saved_tracks`) to a new Turso database `lazyboy` on the free plan in
+`aws-us-east-1`, the AWS region Vercel's iad1 sits in (§4, §5). The three telemetry tables stay on
+the Zenbook, as do the pinger, the recorder and the backups. Nothing runs before 2026-10-15 8:00 PM;
+lanes 1901-1911 carry it (§7). The requirements that bear on multi-user: R1 (store round trip p50 ≤ 15
+ms target), R2 (a frozen Zenbook slows no user request by more than 50 ms), and R4, which sizes the
+free plan for **one** user: "≤ 50% of 500M rows read and ≤ 10% of 10M rows written per month",
+projected from a heavy day (§2).
+
 ### 4.2 Turso's plans and prices today
+
+From https://turso.tech/pricing, fetched 9:19 PM. The page renders with "Yearly" billing selected;
+the month-to-month price is the yearly price plus the "Save" figure printed beside it.
+
+| plan | price | databases | storage | rows read / month | rows written / month | point-in-time restore |
+|---|---|---|---|---|---|---|
+| Free | $0 | 100 | 5 GB | 500 million | 10 million | 1 day |
+| Developer | $4.99/mo yearly ($5.99 monthly) | unlimited | 9 GB, + $0.75/GB | 2.5 billion, + $1 per billion | 25 million, + $1 per million | 10 days |
+| Scaler | $24.92/mo yearly ($29 monthly) | unlimited | 24 GB, + $0.50/GB | 100 billion, + $0.80 per billion | 100 million, + $0.80 per million | 30 days |
+| Pro | $416.58/mo yearly ($499 monthly) | unlimited | 50 GB, + $0.45/GB | 250 billion, + $0.75 per billion | 250 million, + $0.75 per million | 90 days |
+
+> "Extra storage, reads, writes, and syncs beyond your plan are billed automatically once enabled, at
+> per-unit rates that drop as you scale up." (pricing page)
+
+> "In billing plans that include monthly quotas for row reads, row writes, and total storage, any
+> query that exceeds these limits will result in a failure, indicated by the BLOCKED error code."
+> (https://docs.turso.tech/help/usage-and-billing, fetched 9:19 PM)
+
+> "In SQLite, the term 'row read' actually refers to a 'row scan' during statement execution."
+> (same page)
+
+The org runs the free plan with "overages disabled" (STORE_MIGRATION §3), so the second quote is the
+operative one: August's block stopped every query for the rest of the month (READ_QUOTA.md, "What
+'rows read' means"). Turso does not price per user. A user costs their share of the org's reads,
+writes and storage, plus nothing per database: "Idle databases cost only storage".
+
 ### 4.3 Usage per user per month, from the meter
+
+The meter on the Zenbook records sqld's own per-statement counters, the ones Turso bills on
+(READ_QUOTA.md, "Measured reads"). `python3 ~/lazyboy-sqld/meter-report.py`, run read-only at 9:22 PM:
+
+| UTC day | store requests | rows read | rows written | note |
+|---|---|---|---|---|
+| 2026-10-13 (from 00:51) | 11,169 | 7,564,958 | 12,064 | 5,102,733 of the reads are one `SELECT count(*) FROM plays p WHERE (p.ctx_orphan ...` — STORE_MIGRATION's own measurement of the orphan pass (§3); production traffic was ~2.2M |
+| 2026-10-14 (complete) | 13,629 | 4,252,260 | 13,480 | normal production day |
+
+On Oct 14 the history payload's plays scan was 2,244,004 of the reads in 44 runs (~51,000 rows a run
+at 22,040 plays, ~2.3 rows read per play), and `INSERT INTO api_log` was 8,472 of the writes (63%).
+The report's 30-day projection from those two days is 177M reads (35% of free) and 383K writes; the
+Oct 14 day alone projects to ~128M. STORE_MIGRATION §3's heavy month for Rem is ~280M (56%), counting
+~3 unscoped orphan passes a week at ~5.1M each.
+
+**Per Rem-like user per month**, then:
+
+| dimension | per user | how measured |
+|---|---|---|
+| rows read | ~130M (normal) to ~280M (heavy) | Oct 14 × 30; STORE_MIGRATION §3 |
+| rows written, core tables only | ~130K | Oct 14's 13,480 minus `api_log` (8,472), `usage_ledger` (618) and `client_metrics`, × 30 |
+| rows written, telemetry (stays on the Zenbook) | ~255K | `api_log` inserts × 30 |
+| storage, core tables + indexes | ~11.9 MB at 22,040 plays and 15,859 tracks | `dbstat` over the snapshot copy: `plays` 6.07 MB, `tracks` 4.20 MB, `playlist_tracks` 1.45 MB, `meta` 0.07 MB, the rest under 0.04 MB each |
+| storage, telemetry | ~12.7 MB, of which `api_log` 12.4 MB (104,942 rows, never pruned, STORE_MIGRATION §3) | same |
+
+Reads do not scale with users so much as with each user's history. The dominant term is
+~2.3 × (the user's plays) × (payload rebuilds a day); rebuilds follow plays that land, at most one per
+10 minutes (the slow marker, READ_QUOTA.md fix 5), so a ceiling of 144 a day. A friend who signs up
+with no history costs little at first and grows into Rem's figure at their own play rate (Rem: 114
+plays a day over the last 31 days, 22,040 since 2026-05-30). Someone who imports Spotify's Extended
+Streaming History (`scripts/import-extended-history.mjs`) starts at full size. The unscoped orphan pass
+(~5.1M a run, O(plays × playlist members)) is the second term; lanes 1910-1911 scope it.
+
 ### 4.4 Where each plan runs out
+
+For Rem-like users on today's code (reads at ~130-280M per user-month):
+
+| plan | rows read | rows written (core) | storage |
+|---|---|---|---|
+| Free | **1.8 to 3.8 users**; the first month over 500M blocks every query, every user, until the 1st | ~75 users | ~420 users |
+| Developer | 9 to 19 users included; then $1 per billion, no block | ~190 users | ~750 users |
+| Scaler | 357 to 770 users included | ~770 users | ~2,000 users |
+
+Reads bind first on every plan, by two orders of magnitude, and nearly all of it is the history
+payload's full rebuild. Storage would shrink further if `tracks` (catalog metadata, the same for
+everyone) were shared rather than copied per user; that is a design choice for the next phase.
+
 ### 4.5 What multi-user needs from STORE_MIGRATION, and what should change before it runs
+
+**Nothing in lanes 1901-1911 needs to change before Oct 15, 8 PM.** The move is schema-preserving (a
+snapshot imported as-is, §8 steps 4-7), so it neither helps nor blocks a user dimension. Adding one
+afterwards on Turso costs about one read and one write per existing row (Turso's page: "Adding an
+index to an existing table triggers a full table scan, with one read per existing row"; an `UPDATE`
+reads and writes each row it modifies). At ~45,000 core rows that is under 0.5% of the free plan's
+monthly writes. My recommendation is to let the move land and verify first (1903's R5 checks are
+cleanest on a one-user store) and start schema work after 1904's aftercare.
+
+What does need to change, before anyone else's data arrives rather than before the move:
+
+1. **R4's headroom holds one user.** Rem alone projects to 35-56% of the free plan; one more Rem-like
+   user can cross 500M, and crossing it blocks every user until the 1st. Either upgrade to Developer
+   with overages enabled before the second user (~$5 a month; the block becomes a bill at $1 per
+   billion reads), or make the history payload's rebuild cost proportional to new plays instead of
+   all plays. The first is a decision for Rem (section 6); the second is design work and should happen
+   regardless, because it is also what keeps search fast as histories grow.
+2. **The daily usage reconciliation (phase A item 7) becomes the only view of a shared budget.** It
+   writes Turso's real month-to-date usage to the ledger and alerts no one (R6). With overages on, the
+   failure is money and that is enough. With overages off, a silent climb ends in an all-user outage;
+   then an alert path is worth reconsidering, which R6 rules out today. Rem's call.
+3. **Backups and the five-day deletion rule.** Phase D dumps Turso nightly to OneDrive and keeps 60
+   days (§9, BRIDGE.md). Developer Terms Appendix A §5 requires deleting a disconnecting user's data
+   within five days (1.5). Per-user deletion must reach the backups, or the backups must be split per
+   user, before the first friend signs in.
+4. **Database per user or one shared database.** Turso allows 100 databases on Free and unlimited on
+   paid plans, at no cost per idle database. One database per user gives isolation by construction (no
+   query can cross users), deletion by dropping the database, and per-user usage from Turso's own
+   numbers; it costs a token or URL per user, migrations run N times, any friends feature has to read
+   across databases, and the usage-check guard reads one database by name (`TURSO_DATABASE_NAME`,
+   §5). Phase C's `lazyboy` database works as either Rem's own database or the shared one, so the move
+   forecloses nothing. The design lanes own the choice.
+5. **Telemetry staying on the Zenbook suits multi-user.** At ~255K `api_log` writes per Rem-like user
+   per month, five users' telemetry on Turso would be 1.3M of the free plan's 10M writes, and 250
+   users' would exceed Developer's 25M. It needs a user column for per-user Spotify attribution (01c).
+6. **Phase E keys the browser cache on "the signed-in user's id"** and clears it on sign-out or a
+   change of user (§10), the shape multi-user needs. The key should be Spotify's `account_id`, not
+   `id` (1.5).
 
 ## 5. Costs at 5, 25 and 250 users
 
