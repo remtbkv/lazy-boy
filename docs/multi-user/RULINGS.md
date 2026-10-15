@@ -14,3 +14,10 @@ ruling here overrides the plan's recommendation where they differ.
 - **Decision 25, the privacy policy: later.** Not needed while Rem is the only user. Spotify's terms require a privacy
   policy and an end-user agreement shown before anyone else signs up (Section V), so both are due before Phase 4a's
   canary account; tracked in .claude/QUEUE.md.
+
+## Oct 15, 2026, 12:43 PM
+
+- **Decision 25, revised: make the privacy policy now, short and plain.** Rem: "go and make the privacy policy.
+  Have it be whatever ... just a different place to press accept." Lane 2011_lb_privacy builds /privacy and /terms
+  (with Spotify's required end-user terms) and a consent line beside the login page's connect button. Short, but
+  true to what the code does: it promises nothing the app does not have.
