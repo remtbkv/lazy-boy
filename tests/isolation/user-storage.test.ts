@@ -1,0 +1,66 @@
+// Browser storage per user (PLAN.md §6.2 layer 6, T7's client half). The search routes' ETags
+// and bodies (T7's server half) are in files queued lanes edit and are pending.
+import { describe, expect, it } from "vitest";
+import {
+  bodyIsFor,
+  clearUserStorage,
+  isSignedOutResponse,
+  userStorageName,
+  USER_DATA_NAMES,
+} from "@/lib/user-storage";
+import { A, B } from "./harness";
+
+function fakeStorage(init: Record<string, string>) {
+  const m = new Map(Object.entries(init));
+  return {
+    get length() {
+      return m.size;
+    },
+    key: (i: number) => [...m.keys()][i] ?? null,
+    removeItem: (k: string) => void m.delete(k),
+    keys: () => [...m.keys()].sort(),
+  };
+}
+
+describe("user storage", () => {
+  it("every per-user name differs between A and B", () => {
+    for (const n of USER_DATA_NAMES) expect(userStorageName(A, n)).not.toBe(userStorageName(B, n));
+  });
+
+  it("sign-out clears every user's data, prefixed or legacy, and keeps device-level keys", () => {
+    const local = fakeStorage({
+      "lb-nowplaying": "legacy",
+      [userStorageName(A, "lb-nowplaying")]: "A",
+      [userStorageName(B, "clean:active")]: "B",
+      "clean:active": "legacy",
+      "lb-build-reload-at": "1",
+      "lb-perf": "1",
+      "lb-nowplaying-extra": "not ours",
+    });
+    const session = fakeStorage({
+      "lb-days": "legacy",
+      [userStorageName(A, "lb-days")]: "A",
+      "lb-ring:https://i.scdn.co/x": "rgb",
+      "lb:metrics-session": "s",
+      "app-error-reload-at": "1",
+    });
+    clearUserStorage([local, session]);
+    expect(local.keys()).toEqual(["lb-build-reload-at", "lb-nowplaying-extra", "lb-perf"]);
+    expect(session.keys()).toEqual(["app-error-reload-at", "lb:metrics-session"]);
+  });
+
+  it("only the app's own signed-out 401 clears; a 503, a 500 or a plain 401 does not", () => {
+    const res = (status: number, h: Record<string, string> = {}) => ({ status, headers: new Headers(h) });
+    expect(isSignedOutResponse(res(401, { "x-lb-signed-out": "1" }))).toBe(true);
+    expect(isSignedOutResponse(res(401))).toBe(false);
+    expect(isSignedOutResponse(res(503, { "x-lb-signed-out": "1" }))).toBe(false);
+    expect(isSignedOutResponse(res(500))).toBe(false);
+  });
+
+  it("a body that names another user is not used", () => {
+    expect(bodyIsFor({ u: A, rows: [] }, A)).toBe(true);
+    expect(bodyIsFor({ u: B, rows: [] }, A)).toBe(false);
+    expect(bodyIsFor({ rows: [] }, A)).toBe(false);
+    expect(bodyIsFor(null, A)).toBe(false);
+  });
+});

@@ -11,14 +11,13 @@ import "server-only";
 import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { gateFromSession, type Gate, type GateResult } from "@/lib/session-gate";
+import { SIGNED_OUT_HEADER } from "@/lib/user-storage";
 
 export type { Gate };
 
 export async function requireUser(): Promise<GateResult> {
   return gateFromSession(await auth());
 }
-
-export const SIGNED_OUT_HEADER = "x-lb-signed-out";
 
 export class RetryableAuthError extends Error {
   constructor() {
