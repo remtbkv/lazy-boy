@@ -67,3 +67,4 @@ ruling here overrides the plan's recommendation where they differ.
   Have it be whatever ... just a different place to press accept." Lane 2011_lb_privacy builds /privacy and /terms
   (with Spotify's required end-user terms) and a consent line beside the login page's connect button. Short, but
   true to what the code does: it promises nothing the app does not have.
+- **Done (Oct 15):** /privacy, /terms and the consent line on /login exist, from commit 130cb13 (lane 2011).
