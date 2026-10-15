@@ -350,7 +350,92 @@ one sentinel blob per configured key and refuse to serve if any fails, so a bad 
 loudly. Known answer: a deploy with a wrong key leaves every user `active`, and capture resumes on the
 next correct deploy with no sign-in.
 
-(Medium and Low findings follow)
+### 10. (Medium) The daily route is one invocation a day that now owns deletions, the usage read and the second pinger
+
+**Evidence.** `/api/cron/daily` (STORE_MIGRATION phase A item 7, one Vercel cron at `0 7 * * *`)
+becomes the home of the deletion job's retries and of every deletion's telemetry step when the Zenbook
+is away (§12.3), the twelve-month inactivity deletions, Turso's usage read (§10.2), re-enabling the
+cron-job.org pinger (§7.9), the lag roll-ups (§7.8), the contexts pass and the prunes. Hobby fires it
+anywhere in 07:00-07:59 UTC (01f §2.2), an hour that contains the Zenbook's 07:00-07:08 UTC reboot
+(01f §3.3 notes the overlap), so its telemetry steps fail on some days. The block it replaces never ran
+for two months and nobody noticed (STORE_MIGRATION §3). One missed run delays every chore a day, and
+the deletion clock has less room than it looks: telemetry backups keep four days (§12.3), so rows
+deleted on day N survive in backups to day N+4, and a second missed retry carries them past Spotify's
+five days.
+
+**Fix.** Stamp `app_meta.daily_at` when the chores finish, and have a tick run them once, under a
+lease, when the stamp is over 26 hours old, so either pinger covers a missed Vercel cron. Move the
+Vercel cron to `0 9 * * *`, clear of the reboot. Let the deletion's telemetry step retry on every tick
+until it succeeds instead of once a day. Record each chore's outcome where `/usage` shows it.
+
+### 11. (Medium) "Gone by day four with no bookkeeping" depends on every night's backup job reaching its end
+
+**Evidence.** §12.3 step 4 relies on the nightly job's retention: "the last one is gone by day four
+with no bookkeeping" (PLAN.md:1510-1511). Today's `backup.py` prunes local snapshots and runs
+`rclone delete … --min-age 60d` only at the end of a successful run; an integrity failure, the
+row-loss check or a failed upload ends it with `sys.exit(1)` before either prune (read tonight, §4).
+A per-database loop written the same way skips every database's prune when any one database fails, and
+nothing prunes while the Zenbook is down (finding 2).
+
+**Fix.** Run the retention prune first and unconditionally, per database, or from its own timer, and
+log its result so `/usage` shows the oldest backup file per database. The deletion job's five-day check
+reads that record. If the Zenbook is down across a deletion, the runbook prunes from the Mac with the
+same `rclone delete` rule.
+
+### 12. (Medium) Edit 4 trades the backup's source check for 0.3% of the free plan
+
+**Evidence.** Edit 4 checks "the counts against the dump itself rather than `count(*)` on Turso", to
+save ~45,800 rows read a night (PLAN.md:1298), about 1.4M a month, 0.3% of the free plan. Counting the
+loaded dump against itself proves the file loads; it cannot see a dump that ended early, which is what
+the source comparison is for, and lane 1904 may export table by table over HTTP if Turso refuses
+`/dump` (`1904_lb_store_aftercare.txt`, item 1).
+
+**Fix.** Keep the source counts, the cheapest insurance in the plan. If the 0.3% matters, compare
+`plays`' `max(id)` (one row: `id` is a real column, so a dump keeps it) and the small tables' counts
+(about 500 rows), and require the CLI's exit status and, for a `.dump`, the closing `COMMIT;`.
+
+### 13. (Medium) R2's fault injection is A1's measure, and no phase re-runs it
+
+**Evidence.** A1 is "measured by STORE_MIGRATION R2's fault injection, repeated with two users" (§1,
+PLAN.md:91), but no exit check in §13.1 runs it. R2 is proven once, at the cutover (STORE_MIGRATION §8
+step 14). Phases 1-3 then add telemetry writes from new places: isolation events from the cache stamp,
+the owner check and the token assertion (§6.5), the uid on `api_log` and `client_metrics`, lag samples
+(§7.8). One of them awaited by mistake puts the Zenbook back on a user path, and nothing would show it
+until a stall. review-completeness H1 asks for each isolation event to be awaited in the app database
+as well; the telemetry half has to stay unawaited.
+
+**Fix.** Re-run step 14's SIGSTOP test as an exit check of Phases 1, 3 and 4 (minutes each), and add a
+static check next to S1-S6: no `await` on a telemetry-client call outside the daily route and `/usage`.
+
+### 14. (Low) §14.5's last-resort capture assumes `/api/cron/sync` keeps its daily Vercel entry
+
+§14.5 counts on "the daily Vercel cron (07:00 UTC ± 59 min)" when both pingers are down (PLAN.md:1811).
+STORE_MIGRATION §6 item 7 puts `/api/cron/daily` in `vercel.json` "at the existing `0 7 * * *`", which
+a lane can read as replacing today's only entry (`vercel.json` lists `/api/cron/sync` alone). Say which,
+in §10.2's edit list. An Instant Rollback also reverts crons to the rolled-back build's (Vercel's page,
+finding 6).
+
+### 15. (Low) The plan's "heavy day" is the incident day
+
+"A heavy day is Oct 14's activity … with three unscoped orphan passes (as that day had)" (PLAN.md:71-74).
+On UTC Oct 14 the second account's library replaced Rem's and was replaced back (`me_id` flipped and
+returned, 01b E6, and the library tables match the pre-incident snapshot tonight, finding 7). Each swap
+moved the playlist id set, which is what triggers an unscoped pass (01c §2.3), so at least two of the
+three passes were most likely the incident's; STORE_MIGRATION §3's ordinary rate is about three a week.
+The day's 129 landed plays are Rem's (finding 7). D1's ~19M baseline and §8.6's "today" column inherit
+the inflated orphan term. For the scale reviewer.
+
+### 16. (Low) Three runbook lines that would fail or mislead as written
+
+- §11.3 "pause both pingers" (PLAN.md:1374): at P2 there is one, and pausing pingers is not a write
+  freeze (finding 4).
+- §11.4 step 6 "`lazyboy.meta`'s key set unchanged" (PLAN.md:1414): ordinary activity changes it (a
+  rescan adds or purges `plsnap:` keys, a clean takes `lock:clean:*`). Check the named keys: the moved
+  ones still present, `owner_uid` and `schema_version` present, nothing else removed.
+- §11.4 step 4 writes Rem's `sync_state` once, and §5.1's identity statement reads capture health from
+  it from Phase 2 on, but nothing updates `sync_state` until Phase 3's claim. Rem's banner reads stale
+  times through Phase 2's soak. Keep capture health on `lazyboy.meta.last_sync` until Phase 3, or have
+  Phase 2's tick stamp `last_ok_at`.
 
 ## 2. STORE_MIGRATION, from this lens
 
