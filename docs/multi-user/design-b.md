@@ -949,7 +949,10 @@ Nothing blocks the cutover, and none of these touches its runbook:
 1. **Correct §3's attribution.** The ~50,500-row statement that dominates reads is the all-time
    recompute (`orderedRealPlays`, `db.ts:854-869`), not the history payload: the meter's own Oct 14
    rollup counts 44 runs of it at ~51,000 rows against one history-payload rebuild (01c §2.2, §6 item 1;
-   01a §11.2; 01d §2.2). Phase E's browser copy does not touch it; §8.1's accumulator does.
+   01a §11.2; 01d §2.2). 01f §4.3 reads the same 44 runs as the history payload from the meter's
+   report; 01c's lookup on the logged SQL text, whose prefixes differ (`SELECT p.played_at AS
+   playedAt…` against `SELECT t.name AS name…`), separates them. Phase E's browser copy does not
+   touch it; §8.1's accumulator does.
 2. **Phase E's store key** gains the segment dimension now, so segments arrive without a second
    migration of browser data (01d §6 item 3).
 3. **Phase D's backup** loops over database names and strips token rows (01a §10, 01e §6).
@@ -963,6 +966,38 @@ The app database, the template and every user database join `lazyboy` in group `
 token reaches all of them. That is the blast radius of today's single store token, not a new one.
 
 ## 12. Uptime: the Zenbook and the other single points
+
+After STORE_MIGRATION no user request touches the Zenbook (its R2). What still runs there: the
+2-minute pinger, which is every user's closed-app capture; telemetry and the log sections of
+`/usage`; the owner's recorder; the nightly backups; and the Funnel certificate that expires Nov 8
+(01f §3.1, §3.4; lane 1907 repairs it). The design changes four things:
+
+1. **A second, independent pinger.** cron-job.org (free; it drove this route until Aug 10, 01f §3.5)
+   hits `/api/cron/sync` every minute beside the Zenbook's timer, also moved to every minute. The tick
+   lock (§7.2) makes a doubled minute cost one extra invocation and nothing else; either pinger alone
+   keeps every user's capture running. Vercel Pro's per-minute cron is the alternative if Pro is
+   bought for other reasons (01f §6, decision 5). Each caller can hold its own secret so either can be
+   rotated alone (01e §5.9).
+2. **Quota protection lives on Turso.** The quota ledger and the per-bucket cooldowns sit in the app
+   database, not in telemetry, so the governor keeps working through a Zenbook outage.
+3. **Telemetry stays best effort**: one attempt, 4 s, never awaited (STORE_MIGRATION phase A). An
+   outage loses diagnostics, never a page or a play.
+4. **The app captures on open.** Even with both pingers down, a user who opens the app is harvested
+   on load (§7.7) and loses nothing within the last 50 plays.
+
+| failure | today | this design |
+|---|---|---|
+| Zenbook down, including the ~3 AM reboot (6-8 min daily, 0.47% of the meter's 48.5 h, 01f §3.3) | every authenticated page errors; capture stops | nothing a user sees; telemetry rows dropped; the owner's recorder and the backups wait |
+| Zenbook frozen | each store query waits ~46 s (01f §3.2) | nothing (R2: ≤ 50 ms) |
+| one pinger down | (one pinger today) | the other covers |
+| both pingers down for T hours | capture stops | capture waits; a user who listens more than ~25-50 tracks in that time and never opens the app loses the excess (50 plays is ~2.5-3.5 h of listening, 01c §5.7) |
+| Turso down | (after the move) everything | everything; accepted |
+| Turso quota block | (after the move) every query fails until the 1st | five users use under 5% of the free plan, so only a regression gets there; Developer with overages turns it into a bill (§18) |
+| a Vercel Hobby allowance overrun | up to 30 days down, for every project on the team (01f §2.2) | the same; Rem decides Hobby or Pro after reading Active CPU (§18) |
+| recently-played `QUOTA_EXCEEDED` | one global cooldown stops every Spotify call (01c S4) | that bucket waits for its reset; probes and rescans continue; the next harvest recovers up to 50 plays |
+| the owner's Premium lapses | the app stops (01f §1.2) | the same, by Spotify's rule; the tick backs off as one |
+| one user's token revoked, or the user taken off the allowlist | the tick answers 500 for everyone (01c S2) | that user's slot only |
+| the Funnel certificate lapses (Nov 8 unless fixed) | the whole app | telemetry only |
 
 ## 13. Migrating Rem's data with nothing lost
 
