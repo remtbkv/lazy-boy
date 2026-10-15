@@ -97,15 +97,341 @@ it per user and keeps one user's spend from becoming everyone's outage (§6.4, �
 
 ## 2. Where enforcement lives
 
+Six layers, from the store outwards, then the tables that have to stay shared. Each subsection
+says what the layer is, where it sits in the code, which classes of §1 it stops, what it does not
+stop, and what it costs.
+
 ### 2.1 Layer 1: one database per user
+
+**What.** Each user's data lives in a libSQL database of its own on Turso: Rem's is `lazyboy`, the
+database STORE_MIGRATION's cutover creates (its §4, §8 step 6), and each friend gets
+`lb-u-<12 random base32 characters>` in the same group (`default`, `aws-us-east-1`, next to Vercel's
+iad1). Each holds today's seven core tables unchanged (`tracks`, `plays`, `contexts`, `meta`,
+`playlists`, `playlist_tracks`, `saved_tracks`; `db.ts:158-243` less the three telemetry tables).
+A separate app database, `lazyboy-app`, holds what is shared by nature: the user list, the
+encrypted tokens, invites, the sync queue and two global settings (§3.1). Telemetry stays where
+STORE_MIGRATION puts it, on the Zenbook (its §4-5).
+
+**What it stops.** M1, by construction. A whole-table statement such as `storePlaylists`' `DELETE
+FROM playlists` (`db.ts:1848-1883`), the gap chains of `recomputeSkipFlags` (`db.ts:780-822`), or
+`recordPlays`' dedupe read (`db.ts:484-496`) is already correct when the table is one user's. 01a
+§8.1 counts what that removes: census items D4-D19, D21, D23 and D25 need no SQL change at all.
+It also stops the quiet half of M9's damage: two users can never end up interleaved inside one
+table, so a mistake in routing is a wrong-database error, never a corrupted shared table.
+
+**What it does not stop.** Choosing the wrong database (§2.2-2.3), caches (§2.4), process state
+(§2.4), tokens (§2.5), the browser (§2.6) and the shared tables (§2.7).
+
+**Why not one shared database with a user column.** It puts every statement under one rule,
+"remember the user", and the census shows what a single miss does (D12 deletes other users'
+playlists; D18 stores wrong verdicts for good). SQLite and libSQL have no row-level security, so the
+rule would live only in application code. A lint that checks every SQL string for `user_id` is
+brittle exactly where it matters: the orphan predicate is a correlated subquery inside an `UPDATE`
+(`db.ts:700-751`), and a lint has to understand every table reference in it. Postgres with
+row-level security would put the rule in the database, but it means leaving libSQL: rewriting
+SQLite-specific SQL across `db.ts`'s 3,212 lines (`INSERT OR IGNORE`, `date(played_at, '±N
+minutes')`, partial indexes), abandoning the STORE_MIGRATION plan the day after it runs, and taking
+on RLS's own failure mode, a pooled connection that runs a query before the user setting is
+applied. At five users that trade is not worth making.
+
+**Turso facts this rests on**, read from Turso's pages at 10:11-10:13 PM today (§17):
+
+- The free plan allows 100 databases; paid plans are unlimited; "Idle databases cost only storage"
+  (turso.tech/pricing). Rows read and written are counted per organization (01f §4.2), so the
+  number of databases does not change the read budget.
+- One token can reach every database in a group: `turso group tokens create` makes "a new token
+  that can be used to connect to any database in the group"; `turso db tokens create` makes one for
+  a single database; both take `--read-only` and `--expiration` (docs.turso.tech, CLI reference).
+- Multi-DB Schemas, which would have pushed one schema to many databases, is "now deprecated for
+  all new users" (docs.turso.tech/features/multi-db-schemas). Migrations therefore loop over the
+  databases (§3.5). At six databases that is a loop, not a system.
+- Deletion is cleaner per database. "PITR restores an existing database — it cannot bring back a
+  database that was deleted. On paid plans, deleted databases can be restored for up to five days"
+  (docs.turso.tech/features/point-in-time-recovery), while rows deleted inside a living database
+  stay restorable through point-in-time recovery for 24 hours on Free and "10, 30, or 90 days" on
+  Developer, Scaler and Pro. A shared database on Developer would keep a deleted user's rows
+  restorable for ten days, past Spotify's five-day deletion term (01f §1.5); destroying a user's own
+  database the day they leave stays inside it (§12).
+- The platform API reports usage per database (the docs list a per-database "Usage" endpoint), so
+  per-user rows read come free with this layout (target D).
+
+**Credentials for the user databases.** The runtime holds one group token (Production only, type
+Secret), and the backup job a read-only group token. I considered a token per user database: it
+does not narrow anything the runtime can do, because the runtime must reach every user's database
+to serve them, and it adds a second user-to-credential mapping that can itself be wrong. Not worth
+it at five.
+
+**Cost.** Per request, nothing: one user's reads go to one database, as today. Per cold process,
+each user database the process touches pays one check on open (§2.3), which replaces the eight
+serial statements `init()` runs today. Operationally, schema changes and backups run once per
+database (§3.5, §8).
+
 ### 2.2 Layer 2: a user id only the gate can mint
+
+**What.** A branded type in a new `src/lib/identity.ts`:
+
+```ts
+declare const brand: unique symbol;
+export type UserId = number & { readonly [brand]: "UserId" };
+```
+
+A plain number cannot be passed where a `UserId` is expected, so nothing can reach a user's data
+with an id it made up. Three functions mint one, and a static test (§5.3) pins the list of files
+allowed to import the minting helper:
+
+1. **`gate()`**, behind every page, action and route. It calls `auth()`; the jwt callback has
+   already checked, in its one store query, that the session's user exists, is active, has the
+   current `session_epoch`, and has a token (§4.2). `gate()` returns `{ uid, hk, admin, spotify }`
+   or `null`. Three thin wrappers give each kind of entry point its refusal: `requireUser()`
+   redirects a page to `/login`, `requireUserForRoute()` returns a 401, `requireUserForAction()`
+   returns `{ ok: false }`. `spotify` says whether the user's Spotify grant is live; reading one's
+   own stored history does not need it, calling Spotify does (01b §2.4's recommendation), so
+   `getSpotifyFor(user)` refuses when it is false.
+2. **`claimDueUsers()`**, the cron's claim on the sync queue (§6.2): the uids it returns are the
+   rows it just leased.
+3. **`scriptUser(argv)`**, for the import and maintenance scripts: `--user <id>` is required and
+   checked against `users` (§2.7).
+
+**What it stops.** M2 at compile time: `forUser(Number(params.id))` is a type error, and `npm run
+build` type-checks. M3: a store read needs a `UserId`, so it cannot run before the gate has
+returned one, which also ends the anonymous reads on `/home` (01b E5) because an anonymous request
+never gets a uid. M12 partly: the uid in the session comes from the users row at sign-in, never from
+the incoming token or the profile alone (§10.2).
+
+**What it does not stop.** A cast (`as UserId`), which the static test forbids outside
+`identity.ts`; and a correct `UserId` used for the wrong purpose inside the right user's own
+request, which is not a cross-user problem.
+
+**Home's parallel wave.** Today Home starts three reads in the same `Promise.all` as `auth()`
+(`src/app/(app)/home/page.tsx:78-83`), a deliberate latency choice (01b E5 cites commit `e5dd8bc`).
+Under this layer the payload read needs a `UserId`, so Home pays the gate first and the read
+second: one extra store round trip, ~15 ms at R1's target. If R1 misses badly after the move, a
+safe variant exists: decrypt the uid from the cookie without a store read, start the read, and
+release its result only once the gate confirms the same uid. I would hold that in reserve; it is a
+second way to reach user data, and 15 ms is under 1% of S2's budget.
+
 ### 2.3 Layer 3: the store handle, and a database that names its owner
+
+**What.** `db.ts` stops exporting per-user functions at module level. Its 74 async exports (01a D2)
+split three ways:
+
+- **per user**: reached only through `forUser(uid: UserId): UserStore`, an object whose methods are
+  today's functions bound to that user's client and passing `uid` into every cache key;
+- **app**: a new `src/lib/app-db.ts` holding every statement on the app database (§2.7);
+- **telemetry**: the client STORE_MIGRATION phase A creates (`getTelemetryClient()`, its §6 item 1).
+
+`forUser` gets its client from `userClient(uid)`: a per-process `Map<UserId, Promise<Client>>`
+filled from `users.db_url`, read once per process per user. On the first open in a process the
+client runs one statement on the user's database:
+
+```sql
+SELECT key, value FROM meta WHERE key IN ('owner_uid', 'schema_version')
+```
+
+and refuses the database, logs an `isolation` event and marks the user `backoff` if `owner_uid` is
+not the uid it was opened for, or the schema version is not the one the code expects.
+`owner_uid` is written once, when the database is provisioned (§10.1) or migrated (§9), and nothing
+in the app writes it again.
+
+**What it stops.** M9: a users row pointing at another user's database, a restore into the wrong
+database, a provisioning script run with the wrong argument. Each turns into a refused open and a
+logged event, never a request served from someone else's data. M1's residue: there is no
+module-level function left that could run against "the" database.
+
+**What it does not stop.** A uid that is itself wrong (Layer 2's job), and anything that never
+touches the store (§2.4-2.6).
+
+**Cost.** The check replaces `init()`, which today runs on every cold process: one
+`executeMultiple`, four `PRAGMA table_info` reads and three `CREATE INDEX IF NOT EXISTS`, eight
+serial round trips (`db.ts:153-297`). Rem's day had 28 cold starts (01c §2.1). So the owner check
+is seven round trips cheaper per cold open than what it replaces; schema changes move to an
+explicit migration (§3.5).
+
 ### 2.4 Layer 4: caches, process state and background tasks
+
+**The Data Cache.** One helper, `userCache` in a new `src/lib/user-cache.ts`, is the only place
+`unstable_cache` may be called (a static test, §5.3). For each call it creates
+`unstable_cache(fn, ["u", String(uid), ...keyParts], { revalidate, tags: ["u:" + uid] })` and
+invokes it as `fn(uid, ...args)`. Next 16.2.6 builds the key from the callback's source text, the
+key parts and `JSON.stringify` of the arguments (01b §3.1, read from the published package), so the
+uid separates entries twice over, and a closure-captured id, which Next cannot see, has no way in.
+The tag lets account deletion purge the user's entries (§12). Moving every key also strands all
+single-user entries at the first deploy, so none of them can be served to the new code (01b §3.1).
+All seven wrappers move onto it (`db.ts:983, 1082, 1176, 1181, 1600, 1615, 1906`); the shape tokens
+(`LIBRARY_INDEX_SHAPE`, `HISTORY_INDEX_SHAPE`) stay in the key parts as today.
+
+**The owner stamp.** `userCache` stores `{ o: uid, v: value }` and checks `o === uid` on every
+return. On a mismatch it logs an `isolation` event and returns `fn(uid, ...args)` uncached, the
+right user's data, slower. The check is what turns a cache-key mistake from a leak into a slow
+request, in production. It also covers a case no unit test sees: 01b §8 could not rule out that
+Preview and Production share the Data Cache, and a Preview built from a buggy branch would write
+entries under the same keys production reads, since a key carries the callback's source and not the
+deployment.
+
+**React `cache()` boxes.** `tokenBox` (`auth.ts:73`), `seqBox` (`db.ts:402`) and `orderedRealPlays`
+(`db.ts:854`) take the uid as their argument; React's `cache()` keys on arguments. Whether
+`cache()` is active inside a route handler is unverified (01b §3.3); keyed boxes make the answer
+irrelevant.
+
+**Module state.** Every piece of it, and what it becomes:
+
+| state | where | becomes |
+|---|---|---|
+| in-flight refresh | `auth.ts:188-196` | `Map<UserId, Promise<Tokens>>`; plus the owner check of §2.5, so a shared promise would fail an assertion rather than hand one user's tokens to another (01e A2) |
+| playlist-list cache | `src/lib/spotify/resources.ts:81-104` | removed. It saves a second `/me/playlists` read within 60 s on one instance, for a list the library sync reads every 30 minutes, and keyed or not it is the one cache that would store A's library as B's (01b A6) |
+| running library sync | `src/lib/playlists-sync.ts:22, 50-54` | `Map<UserId, string>` |
+| unique-song recompute throttle | `db.ts:1960` | per uid |
+| store-size memo for the ledger model | `db.ts:2887` | per uid |
+| Spotify cooldown | `src/lib/spotify/client.ts:48`; `meta.spotify_cooldown_until` | stays app-wide, split by bucket (01c S4): Spotify's rate limit is per app and its quota per developer account (01f §1.4), so a ban is everyone's |
+| task registry | `src/lib/tasks/registry.ts:21-23` | each task records its owner; `/api/tasks/[id]` answers 404 to anyone else (01b S7) |
+
+A static test lists every top-level `let`, module-scope `new Map(` and `globalThis` assignment under
+`src/` and fails on one that is not in a reviewed allowlist, where each entry says how it is keyed
+or why it is not per user (§5.3). If a per-user server cache is later added to now-playing (01c
+§5.5 suggests one to dedupe devices), it is keyed by uid like everything here; a shared one would
+show one person's live playback to another.
+
+**Background work.** The cron's per-user step (§6.2) receives its `UserStore`, its token getter and
+its deadline as arguments and touches nothing global except the app database's queue row and the
+app-wide cooldown. Background tasks bind their token getter to the uid when they are created (01e
+A16).
+
+**What this layer stops.** M4, M5, M8. **Cost.** A few bytes per cached value and one integer
+compare per cached read. Per-user entries share nothing across users, which loses nothing: no cached
+value today is legitimately the same for two users.
+
 ### 2.5 Layer 5: Spotify credentials that carry their owner
+
+- **Tokens carry their owner.** Decrypting a token row yields `{ uid, accessToken, refreshToken,
+  expiresAt }`. `setTokens(uid, t)` asserts `t.uid === uid`. `getSpotifyFor(user)` builds the
+  Spotify client from a token object and asserts its `uid` is the user's; the client attributes
+  every call to that uid in `api_log` (§3.4). A future refactor that shares a promise or a cache
+  across users fails an assertion on the first mixed call instead of acting on someone else's
+  account. Cost: one integer compare per Spotify call.
+- **The ciphertext is bound to its row.** AES-256-GCM with associated data
+  `lazyboy:tokens:v1:<uid>:<env>` (§4). A blob copied into another user's row fails to decrypt,
+  which I checked with the scheme itself (§17: the swapped associated data is refused). That catches
+  a row-level mix-up in SQL or by hand; it cannot catch the wrong plaintext encrypted for the right
+  user, which is what the owner field above is for.
+- **Locks and in-flight refreshes per user**: `lock:spotify_refresh:<uid>:<env>` in the app
+  database, and the in-flight map of §2.4 (01e A2, A4).
+- **The sign-in profile read is never cached.** `spotifyUserinfo` fetches `/v1/me` with no `cache`
+  option (`src/lib/spotify/userinfo.ts:29-31`) and relies on Next 16's default of not caching
+  `fetch`. It gets `cache: "no-store"` explicitly, because this is the one fetch whose cached answer
+  would bind one person's sign-in to another's account. The app's own Spotify client already sets
+  it (`src/lib/spotify/client.ts:107`).
+
+**What it stops.** M6, and M12 together with §10.2.
+
 ### 2.6 Layer 6: the browser
+
+The browser never learns a user id. The `(app)` layout renders an opaque key,
+`hk = base64url(HMAC-SHA256(HK_SECRET, "hk:" + uid))[0:16]`, computed on the server (0.86 µs,
+measured, §17), and everything below keys on it:
+
+- **ETags**: `"lib-<shape>-<hk>-<version>-<day>"` and the same for history (today
+  `src/app/api/search/library/route.ts:39`, `history/route.ts:26`). Per-user version counters are
+  small integers that collide across users (01a §5), so without `hk` a shared browser profile could
+  get a 304 for the previous user's body.
+- **Immutable segment URLs** (§7): `/api/search/h/<hk>/<segment>?v=<version>`, served with
+  `Cache-Control: private, max-age=31536000, immutable` (01d O3). Immutable means the browser never
+  asks again, so the per-user part has to be in the URL; a version alone would let user B's page
+  read user A's cached segment with no request at all. The server compares the path's `hk` with the
+  session's and answers 404 on a mismatch, and it builds every body from the session's database,
+  never from the path.
+- **Bodies carry their owner**: every payload includes `u: hk`, and the client drops any body, from
+  the network, the HTTP cache or IndexedDB, whose `u` is not the page's `hk`.
+- **Storage keys** are prefixed with `hk`: `lb-days`, `lb-nowplaying`, `clean:active`, phase E's
+  IndexedDB store, and the `lb-nowplaying-leader` Web Lock and BroadcastChannel names, so two users'
+  tabs in one browser neither read nor relay each other's state (01b §3.6).
+- **Sign-out** clears that storage in client code before the sign-out form submits, and the response
+  sends `Clear-Site-Data: "cache", "storage"` where the browser honours it (support not checked; the
+  client-side clear is the one relied on).
+
+`HK_SECRET` is its own Production secret. Rotating it changes every `hk`, which re-keys browser
+caches and costs one cold visit; it unlocks nothing.
+
+**What it stops.** M7. **Cost.** Microseconds on the server; on a shared browser, two users no longer
+thrash one HTTP cache entry.
+
 ### 2.7 The shared remainder: app database, telemetry, operator views, scripts
+
+Some state is shared by nature. The design keeps it small, in few places, and lists every
+statement.
+
+**The app database** (`src/lib/app-db.ts`, schema in §3.1). Fifteen functions, all of them in one
+file a reviewer can read in one sitting:
+
+| function | statement shape | takes a uid |
+|---|---|---|
+| `sessionRow(uid, env)` | `users LEFT JOIN user_tokens` on the uid: status, epoch, admin, db location, token blob | yes |
+| `userByAccount(accountId)` | point read on `users.account_id` (sign-in, returning user) | no: sign-in has no uid yet |
+| `claimInvite(spotifyId, accountId, terms)` | compare-and-set from `invited` to `active` (§10.2) | no: same |
+| `userDbLocation(uid)` | point read of `db_url` (client open) | yes |
+| `writeTokens`, `clearTokensIfStale` | upsert / conditional delete on `(uid, env)` | yes |
+| `acquireLock`, `releaseLock` | today's compare-and-set on `app_meta`, names carrying the uid | yes (in the name) |
+| `claimDueUsers(now, owner, leaseMs)` | one `UPDATE … RETURNING uid` over due rows | no: cross-user by design |
+| `releaseUser(uid, owner, next)` | lease release and next due times | yes |
+| `setStatus(uid, …)`, `bumpEpoch(uid)` | point updates | yes |
+| `listUsers()` | admin page and the backup job | no: admin only |
+| `getGlobal(key)`, `setGlobal(key, v)` | the two global settings (§3.3) | no: global by meaning |
+
+The six that take no uid are cross-user by design, and each has a test of its own (§5.2, T6).
+
+**Telemetry** (`api_log`, `client_metrics`, `usage_ledger`, on the Zenbook after STORE_MIGRATION).
+`api_log` and `client_metrics` gain a nullable `user_id`; only admins read them (`/usage`); account
+deletion deletes by `user_id` (§12); the `handoff` beacon stops sending song and playlist names
+(01a §10), so the operator's view holds operational data and almost no listening.
+
+**Operator views.** `/usage` and any admin page require `user.admin`, a column set for uid 1 by the
+migration (§9). It is never derived from `me_id` or anything a sync writes (01b E2, 01e §5.4).
+
+**Scripts** (`scripts/backfill-from-backstop.mjs`, `import-extended-history.mjs`, `import-tail.mjs`,
+`verify-derived.mjs`, `bench-reads.mjs`): `--user <id>` is required; the script opens only that
+user's database through the same owner check. `backfill-from-backstop.mjs` refuses any user but the
+admin, because the recorder captures only Rem (01c §5.7).
+
+**Preview and dev.** Preview deployments get no store variables (01b S14), so a branch's code can
+neither read production nor migrate it. Dev runs on local files (`data/app.db`,
+`data/<db_name>.db`) with a dev token key; once a friend exists, `.env.local` holds no production
+store token (01e §5.9). This is what keeps M11 from writing anyone's production rows.
+
 ### 2.8 Every bug class against the layers
+
+"Prevents" means the mistake cannot be written or does no harm; "detects" means a test fails or the
+running app refuses. Test ids are §5's.
+
+| class | prevents | detects |
+|---|---|---|
+| M1 statement forgets the user | per-user databases (2.1) | T1 (B's file unchanged by every A call) |
+| M2 id from request input | `UserId` brand (2.2) | static S2 (no casts); T3 (B's id in a path or body with A's session returns A's data or a refusal) |
+| M3 read before or without the gate | a read needs a `UserId` (2.2) | T3 (every entry point with no session: refused, zero store opens) |
+| M4 cache key without the user | `userCache` (2.4) | T2 (faithful stub, equal counters); owner stamp at runtime |
+| M5 shared process state | keyed maps, removed cache (2.4) | static S4 (module-state allowlist); T4 (two users in one invocation) |
+| M6 wrong token | per-user rows, locks, in-flight map (2.5) | owner assertion at runtime; T5 (bearer per user in the scripted fetch) |
+| M7 browser state across users | `hk` keys, URLs and stamps (2.6) | T7 (ETag, segment path, stamp, storage clear) |
+| M8 background work mixing users | per-user step with explicit arguments (2.4, §6) | T4 |
+| M9 wrong user-to-database mapping | random database names, written once (2.3, §10.1) | owner check on every open (runtime); T8 |
+| M10 shared tables and operator views | `app-db.ts` with 15 listed functions; admin flag (2.7) | T6; T3 for `/usage` as a non-admin |
+| M11 scripts and dev on production | `--user` required; dev on local files; Preview without store variables (2.7) | T10 (a script without `--user` refuses) |
+| M12 sign-in bound to the wrong account | `account_id` key, compare-and-set claim, no-store profile read (2.5, §10.2) | T9 (double claim, missing `account_id`, changed `id`) |
+| M13 shared quotas | per-user fair share of the scarce bucket (§6.4); plan choices (§15) | per-database usage on `/usage`; `api_log.user_id` attribution |
+
 ### 2.9 What isolation costs
+
+| what | per request | per cron tick | how known |
+|---|---|---|---|
+| identity, status and token in one query | no extra round trip: it replaces today's token read (`auth.ts:73-78`) with one join (01e §5.1) | the claim returns the due users; one token read per due user, as today | from the code |
+| gate before reads | Home only: +1 round trip, ~15 ms at R1's target (40-210 ms medians on today's Funnel, STORE_MIGRATION §1); other entry points already gate first | none | estimate |
+| owner check on open | none warm; 7 fewer round trips per cold open than `init()` | same | from the code (2.3) |
+| token decrypt / encrypt | 1.67 µs / 2.67 µs | the same per due user | measured, §17 |
+| `hk` | 0.86 µs | none | measured, §17 |
+| owner stamp on cached values | a few bytes and a compare | none | from the design |
+| a database per user | none | none | §2.1 |
+| migrations and backups | none | none; a loop over N+1 databases nightly and per schema change | §3.5, §8 |
+| tests | none | none | the isolation suite adds files to `npm test`; its time is unmeasured (no `node_modules` in this checkout) |
+
+Target I$ holds: one round trip on Home, microseconds elsewhere.
 
 ## 3. Data model: how every table and meta key gets a user
 
