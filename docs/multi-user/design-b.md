@@ -32,7 +32,8 @@ Status: complete, 2026-10-14.
 - **Results [estimates].** A landed play costs ~20 rows read and 3 round trips, against ~7,700 rows
   (59,000 with the all-time scan) and ~30 round trips today. Search is usable ~1.4 s after first paint
   on Rem's first visit, ~80 ms on a repeat visit; a keystroke paints in ~25-35 ms.
-- **Store.** Turso's free plan holds five users under 5% of every dimension and 25 under 16%; 250 need
+- **Store.** Turso's free plan holds five users under 5% of its reads, writes and storage, and 25 under
+  16%; 250 need
   the Developer plan, $4.99-5.99 a month (§10.3). At 250 it is Spotify that fails: its five-user cap,
   a shared recently-played budget that cannot keep 250 users complete, and a 30-second rate limit their
   probes alone exceed.
@@ -114,7 +115,7 @@ number. Refined, for a user who listens like Rem at today's history (22,040 play
   user's stored history (only the nightly backup and rare repair events read whole tables);
 - **writes ≤ 2,500 rows a day**; **storage growth ≤ 50 KB a day**.
 
-These put five users under 5% of Turso's free plan on every dimension and 250 users on a plan under
+These put five users under 5% of Turso's free reads, writes and storage, and 250 users on a plan under
 $10 a month (§10). Today [measured, the store meter, 01c §2.7]: 4,252,260 rows read on Oct 14, 53% of
 it one full `plays` scan repeated 44 times; 13,480 rows written, ~3,000 of them core; core data grows
 ~35 KB a day (01a §6). Checked by: Turso's per-database usage endpoint, which returns `rows_read`,
@@ -431,7 +432,7 @@ used out) so a long-lived instance does not hold every user's connection.
 
 | surface | today | change |
 |---|---|---|
-| Data Cache entries (`unstable_cache`) | 7, no user in any key (01a D26) | after §8-§9 only three remain (playlist grid, the server fallbacks for a day and for the all-time list); each takes `uid` as its first **argument**, never through a closure, because Next 16.2.6 keys on the callback's source text, the key parts and `JSON.stringify(args)` (01b §3.1); each carries a `user:<uid>` tag so deletion can purge it |
+| Data Cache entries (`unstable_cache`) | 7, no user in any key (01a D26) | after §8-§9 five small ones remain: the playlist grid, and the server fallbacks for the day strip, one day (frozen and live) and the all-time list; each takes `uid` as its first **argument**, never through a closure, because Next 16.2.6 keys on the callback's source text, the key parts and `JSON.stringify(args)` (01b §3.1); each carries a `user:<uid>` tag so deletion can purge it |
 | payload URLs and ETags | no user (01a D27) | the server reads the uid from the session only; a segment URL names a key and version, and a key the session's user lacks is a 404; ETags carry the uid |
 | process memory | `inflightRefresh`, `playlistsCache`, `currentSyncId`, `uniqueRecomputeKickedAt`, three `cache()` boxes (01b §3.3-3.4) | the refresh map and boxes keyed by uid; `playlistsCache` keyed by uid or removed; one running library sync per uid; the unique-count kick goes (§8.4); the rate-limit cooldown stays app-wide by bucket, which is correct (§7.5) |
 | tasks | no owner (01b B9) | an owner per task; `/api/tasks/[id]` answers 404 to anyone else |
@@ -536,12 +537,14 @@ nothing new reads and writes no user-database row (today ~215 rows read, §3 row
 §8.6's two batches. The `(track_id, played_at)` unique key stays the authority: a lost or stale key
 list only sends more candidates to §8.6, whose read batch finds the ones already stored.
 
-**F is the governor's one knob.** The quota ledger (§4.2) counts the scarce bucket's calls per quota
-day; every hour the governor compares the day's spend with a straight line from 0 to 426 (450 less the
-recorder's 24) across the quota day: ahead of the line, F doubles (to at most 30 minutes); behind it,
-F halves (to at least 2). With one or two users F sits at 2 and closed-app capture is what it is today.
-If the passive experiment (01c §7.3) shows the quota is per user, the budget becomes per user and F
-stays at 2 for everyone.
+**F is the governor's one knob.** Once a day the governor takes each user's measured harvests over
+the last week, projects what each would spend at a given F, and picks the smallest F (2, 5, 10, 15 or
+30 minutes) whose projected total fits 426, the 450 budget less the recorder's 24. Listening is not
+spread evenly across the day, so a projection beats pacing against a straight line, which would throttle
+a single listener during their own peak hours. A brake guards the projection: when the quota ledger
+(§4.2) shows 80% of 426 spent before the day's reset, F goes to 30 minutes until the reset. With one
+or two users F sits at 2 and closed-app capture is what it is today. If the passive experiment (01c
+§7.3) shows the quota is per user, the budget becomes per user and F stays at 2 for everyone.
 
 The arithmetic, per Rem-like user (9 h playing, ~130 plays, H1+H3+H4 ≈ 17 a day):
 
@@ -776,7 +779,7 @@ payload write that loses its compare-and-set anyway marks the row dirty for the 
 **No Data Cache for payloads.** One store row costs ~15 ms at R1's target, and dropping the Data Cache
 for these bodies removes three problems at once: the 2 MiB item limit (01d §3.2), the cross-deploy
 shape hazard (GOTCHAS "The Data Cache OUTLIVES THE DEPLOY"), and per-user entries in an LRU cache that
-Rem's other Vercel projects share (01f §2.2). The Data Cache keeps only the three small per-user reads
+Rem's other Vercel projects share (01f §2.2). The Data Cache keeps only the small per-user reads
 in §6, keyed by uid.
 
 ### 9.3 What changes in the client
@@ -922,7 +925,8 @@ $4.99 a month billed yearly ($5.99 monthly), unlimited databases, 2.5B read, 25M
 | databases (users + app + template) | 7 | 27 | 252: over Free's 100 |
 | **cheapest plan that holds** | **Free** | **Free** | **Developer**, $4.99-5.99 a month |
 
-Five users sit under 5% of the free plan on every dimension (T4). At 250 the free plan fails on writes,
+Five users sit under 5% of the free plan's reads, writes and storage (T4), and use 7 of its 100
+databases. At 250 the free plan fails on writes,
 database count and reads; on Developer every dimension sits at or under 54%, and past its allowances
 it bills $1 per million writes and $1 per billion reads instead of blocking. Replacing the nightly full
 dump with an incremental one (plays since the last backup through `(played_at)`, the small tables
@@ -954,8 +958,8 @@ can read on the dashboard in a minute; I could not measure it either.
 ### 11.1 Turso, as planned, one database per user
 
 The cheapest store that holds is the one STORE_MIGRATION already moves to: Turso's free plan in
-aws-us-east-1, beside Vercel's iad1. By §10.3 it holds five users at under 5% of every dimension and 25
-at under 16%; 250 need the Developer plan at $4.99-5.99 a month. The alternatives, from this design's
+aws-us-east-1, beside Vercel's iad1. By §10.3 it holds five users at under 5% of its reads, writes and
+storage, and 25 at under 16%; 250 need the Developer plan at $4.99-5.99 a month. The alternatives, from this design's
 angle:
 
 - **One shared Turso database with a user column.** The same plan at every size: Turso meters reads
@@ -1032,7 +1036,7 @@ After STORE_MIGRATION no user request touches the Zenbook (its R2). What still r
 | Zenbook down, including the ~3 AM reboot (6-8 min daily, 0.47% of the meter's 48.5 h, 01f §3.3) | every authenticated page errors; capture stops | nothing a user sees; telemetry rows dropped; the owner's recorder and the backups wait |
 | Zenbook frozen | each store query waits ~46 s (01f §3.2) | nothing (R2: ≤ 50 ms) |
 | one pinger down | (one pinger today) | the other covers |
-| both pingers down for T hours | capture stops | capture waits; a user who listens more than ~25-50 tracks in that time and never opens the app loses the excess (50 plays is ~2.5-3.5 h of listening, 01c §5.7) |
+| both pingers down for T hours | capture stops | capture waits; a user who plays more than 50 tracks after their last harvest and does not open the app loses the excess (50 plays is ~2.5-3.5 h of listening, 01c §5.7) |
 | Turso down | (after the move) everything | everything; accepted |
 | Turso quota block | (after the move) every query fails until the 1st | five users use under 5% of the free plan, so only a regression gets there; Developer with overages turns it into a bill (§18) |
 | a Vercel Hobby allowance overrun | up to 30 days down, for every project on the team (01f §2.2) | the same; Rem decides Hobby or Pro after reading Active CPU (§18) |
@@ -1132,7 +1136,7 @@ and the app's `invites` table, which also fails closed on a store error as `owne
    `user_tokens` rows, set `sync_state` to `removed` (the tick stops calling Spotify for them), and
    drop every table in the user's database with the group token. The data is gone within seconds; an
    empty database remains.
-2. `revalidateTag('user:<uid>')` purges the three cached reads (§6).
+2. `revalidateTag('user:<uid>')` purges the user's remaining cached reads (§6).
 3. Within five days, a job holding the platform token (the Zenbook's nightly backup job, or the script
    on Rem's Mac) deletes the database, the user's backup files on the Zenbook and OneDrive (one file
    per database, §11.2), the telemetry rows carrying the uid, and last the users row, so a crash midway
