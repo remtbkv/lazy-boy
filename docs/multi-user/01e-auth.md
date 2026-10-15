@@ -57,8 +57,9 @@ claim before lane 1905, and take Preview off the production store before a secon
 
 Library versions: `next-auth` 5.0.0-beta.31 and `@auth/core` 0.41.2 (`package-lock.json`). This
 checkout has no `node_modules`, so library behaviour below was read from those two published
-tarballs (`npm pack`, extracted to the lane's scratch); a citation like `@auth/core jwt.js:46` points
-into them.
+tarballs (`npm pack @auth/core@0.41.2 next-auth@5.0.0-beta.31`; the `.tgz` files are kept in
+`~/.claude/broke/scratch/lazyboy_mu/authjs_src_0221/`); a citation like `@auth/core jwt.js:46` is a
+path inside the extracted `package/` directory.
 
 ### 1.1 The provider
 
