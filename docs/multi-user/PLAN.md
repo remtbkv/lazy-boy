@@ -2523,26 +2523,42 @@ Vercel's plan would all need redesign, which is why the plan's answer past five 
 
 Money, a month, at 01f §2.2 and §4.2's prices (fetched Oct 14):
 
-| item | Phases 0-3, Rem alone | five users | basis |
+| item | until the first friend | five users | basis |
 |---|---|---|---|
-| Turso | $0 (Free) | **$4.99 billed yearly ($5.99 month to month)** on Developer with overages, recommended before the first friend; $0 if Rem stays on Free, which §14.4's projections hold once P4 ships | 01f §4.2 |
+| Turso | $0 (Free) | **$4.99 billed yearly ($5.99 month to month)** on Developer with overages, recommended from the canary's first sync (decision 17); $0 if Rem stays on Free, which §14.4's projections hold once P4 ships | 01f §4.2 |
 | Vercel | $0 (Hobby) | $0 if the team's Active CPU stays under ~2 of Hobby's 4 hours; otherwise Pro, $20 including $20 of usage | 01f §2.2-2.3 |
-| cron-job.org (the second pinger) | $0 | $0 | free tier |
+| cron-job.org: the second pinger from lane 1904, the hourly health check from Phase 1 | $0 | $0 | its free tier, which the app's earlier jobs used |
 | the Zenbook | $0 | $0 | runs anyway for the recorder, telemetry, backups and DiveLoop |
 | Spotify | $0; Rem's Premium is required for the app to work at all | $0 | friends cannot be charged: the app controls playback, which makes it a Streaming SDA, and those may not be used commercially (01f §1.5) |
 | **total** | **$0** | **$5-26 with Developer; $0-20 on Free** | |
 
 Isolation itself adds $0: the databases are free (100 on Free, unlimited on paid plans, idle ones cost
-only storage), encryption is Node's built-in `crypto`, and the tests run in the existing harness.
+only storage), encryption is Node's built-in `crypto`, and the tests run in the existing harness. The
+reviews' additions cost rows, not money: the interim pinger's stamp ~720 rows written a day, the daily
+heal ~0.02M rows read a day for Rem, the health check a handful of primary-key reads an hour (§8.6).
 
 What the Developer plan buys besides capacity, which is why it is recommended although five users fit
 Free after P4: a month's reads past the allowance become a bill ($1 per billion) instead of a block on
 every query for every user until the 1st, which is what August's regressions did (READ_QUOTA "Where
 August actually went"); ten days of point-in-time recovery for Rem's own data instead of one; and a
-five-day undelete for a destroyed database, which is the grace §12.3 relies on.
+five-day undelete for a destroyed database. The undelete is extra room after a deletion, not the grace
+the plan rests on: a revocation already waits four days before anything is destroyed (§12.3). It also
+keeps a deleted friend's database restorable at Turso until about day 9, which decision 21 weighs.
 
-The work is in §13.1's sizes: P2 M, P3 L, Phase 1 L, Phase 2 M, Phase 3 M-L, Phase 4 M, P4 and the
-brake M, each friend after that S.
+**Work**, in §13.1's sizes (**S** one place, **M** a contract callers follow, **L** a design change or a
+mechanical edit across many files), with Rem's own part of each [time is an estimate at the lane
+program's pace, §13.3]:
+
+| step | size | Rem's part |
+|---|---|---|
+| Phase 0 | S | ~30 minutes: two variables, three dashboard reads, deleting the old deployments a day later, a copy of `backstop.db`, `paint=` on his phone |
+| STORE_MIGRATION, with P1 | as planned, ~1 week | approving §10.2's edits (decisions 2-4) |
+| the interim pinger, the replay | S | re-enabling the cron-job.org job with the new secret; the replay's go-ahead |
+| P2, then P3 | M, then L; P2 a few days, P3 one to two weeks | none beyond the deploys |
+| Phases 1-3 | L, M, L; three to five weeks with their soaks | one sign-in at Phase 1; Phase 2's Mac steps with a lane (§11.4); creating the health check's cron-job.org job |
+| Phase 4a, the canary week | M-L, a week | the policy text, a canary account, the Zenbook's resolver and service account, the Turso plan, the dashboard entry |
+| Phase 4b, then each friend in Phase 5 | S each, a week apart | the dashboard entry and the invite |
+| P4, before the second friend | M | none beyond the deploy |
 
 ## 16. Unknowns and risks
 
@@ -2818,7 +2834,7 @@ decision changes what gets built or when it can run.
 | interim | the cron-job.org job going live (8); the replay (7); the resolver (9) | the route's second secret and 90-second guard, with tests |
 | P2, P3, P4 | P2 and P3's place before Phase 1 (12); P3's device and network target (13) | everything they contain |
 | 1 | the per-user database half: `forUser`'s client map and URL template, the owner stamp, the versioned open, `store_epoch`, and the harness's per-user files (11); the health check's cron-job.org job and e-mail (14); the second `AUTH_SECRET` rotation and `OWNER_UID` in Production, which are deploy steps | `identity.ts` and the branded `Uid`; `requireUser()` and its three outcomes; `auth_time`; keyed `cache()` boxes and module state; `playlistsCache` deleted; task owners; `userCache` with owner stamps; uid in ETags, bodies and storage keys; sign-out clearing storage; the token core in its own module with keyed maps and owner-carrying tokens; the `/api/cron/health` route; the harness's cache stub, scripted Spotify and planted-bug self-test |
-| 2 | `lazyboy-app` and the token move (11); where the platform token lives (24); `account_id` (31, only if absent) | the app-database module, the identity read, encryption with its sentinels and decrypt rules, conditional token writes, T5, T6, T9, T12 |
+| 2 | `lazyboy-app` as a database of its own, and §11.4's steps on Rem's data with T12's rehearsal of them (11); the platform token in the Keychain for those steps (24); `account_id` (31, only if absent) | the `users`, `user_tokens`, `sync_state` and `events` tables and the functions on them; encryption with its sentinels and decrypt rules; the identity read's three outcomes; conditional token writes; T5, T6, T9 |
 | 3 | the forced refresh (15); the recorder's cadence (26) | the claim, the step, the probe, the harvest policy, the Liked change, paced pages, the brake's counter, T4, T13 |
 | 4a, 4b, 5 | 16-25 and 27-29, §13.2's gates, and each invite | – |
 | a friend's history import | 30 | – |
