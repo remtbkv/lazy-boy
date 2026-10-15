@@ -72,7 +72,7 @@ Refined, using 01d's definitions (01d §2.3, §5.2, decision 3):
 
 - *A phone* is Chrome on the Mac with the CPU throttled 4× (Lighthouse's stand-in for a mid-tier
   Android, the setting 01d measured at) on a 10 Mbit/s connection. Slow 4G (1.6 Mbit/s) is a stated
-  miss for first visits above a light user (§17), not a target, unless Rem decides otherwise.
+  miss for first visits above a light user (§17) unless Rem decides otherwise.
 - *First payload* is Home's first paint to search usable over the user's whole library and history
   (`lb:history-ready`), on a first visit with an empty browser cache: **≤ 2 s**. A repeat visit:
   **≤ 300 ms** (STORE_MIGRATION R3).
@@ -96,7 +96,7 @@ numbers, because the quota cannot buy the second one for five heavy listeners:
   ≤ 2 minutes while Spotify's shared budget allows it** (one or two Rem-like users), **≤ 10 minutes at
   five Rem-like users** if the recently-played quota belongs to the developer account, as Spotify's
   docs say (01c §4).
-- *Completeness* is a floor, not a target: no play is lost while either pinger runs, because every
+- *Completeness* is a floor: no play is lost while either pinger runs, because every
   user is harvested before 25 tracks pile up, half of recently-played's 50 (GOTCHAS "`recently-played`
   only returns the last 50 plays").
 
@@ -222,8 +222,8 @@ them). What separates them at scale:
   130-527 ms from 25 to 100 users without user-led indexes, ×4 for ×4 users, and at 250 it would be
   another ×2.5 [estimate, linear]. In a per-user database that failure mode does not exist; the
   worst a forgotten scope can do is read the right user's own rows.
-- **Each user's cost is measured, not modeled.** Turso reports rows read, rows written and storage
-  per database (§1, T4). In a shared store the per-user split would come from the ledger and
+- **Turso measures each user's cost.** It reports rows read, rows written and storage per database
+  (§1, T4). In a shared store the per-user split would come from the ledger and
   `api_log`, which disagree by ~30% on the same events (01c §2.8).
 - **Every statement and plan carries over unchanged**, so §8's changes are measured against today's
   plans and the 50-plus unscoped statements need no user predicate (01a §8.1: D4-D19 vanish).
@@ -491,10 +491,10 @@ cron-job.org (§12). The tick:
    does not answer, the tick ends instead of letting each user wait out the store fetch's three
    15-second attempts (`src/lib/store-fetch.ts:28-29`).
 2. Reads every user's sync state and token in one batch (`sync_state` joined to `user_tokens`;
-   one row per user, 250 rows at 250 users). Who is due is computed, not stored: `active` users (a
+   one row per user, 250 rows at 250 users). Who is due is computed from the state: `active` users (a
    play in the last 30 minutes) every 2 minutes and `idle` users every 5, offset by a hash of the uid
    so users spread across the cycle. A user's state row is written only when something changed (a
-   track change, a state transition, a harvest, a failure), not on every tick.
+   track change, a state transition, a harvest, a failure).
 3. Processes the due users concurrently (up to 16 at a time), each under its own 25 s deadline, with
    `Promise.allSettled`: refresh the token if under 60 s remain (§5), probe, harvest if the governor
    says so (§7.4), record (§8).
@@ -618,8 +618,8 @@ and the uid, which is how the passive experiment learns whose calls a ban follow
 hang uses its 25 s and is retried at its next due time. `invalid_grant` clears that user's token row
 and sets `needs_reconnect` (§5). A 403 "not registered" sets `removed`. The same error for every user at
 once (the owner's Premium lapsing, 01f §1.2) backs the whole tick off instead of marking anyone
-removed. A store failure ends the tick at step 1. Every write on this path is idempotent: the lease and
-the tick lock are compare-and-sets, counters are written as values, inserts have natural keys, and
+removed. A store failure ends the tick at step 1. Every write on this path is idempotent: the harvest
+lock and the tick lock are compare-and-sets, counters are written as values, inserts have natural keys, and
 writes that outlive a response go through `after()` (01c §5.4 item 8; §2.8 there shows re-sent INSERTs
 happen).
 
@@ -679,10 +679,11 @@ and crosses it in late December (01d §3.2). Instead, 01d's monthly segments (O3
   rows. Each body is self-contained, in today's tuple format with one addition: a play becomes
   `[trackIdx, minute, sourceIdx, listenedS]` (shape `v3`), so the browser can build any day's totals
   exactly (§9). Cost [estimate]: ~4 bytes per play raw, ~+5% on Rem's body.
-- **Append.** The harvest's read batch includes the current month's row; JS merges the new
-  non-skipped plays with the function the browser already uses for the same job
-  (`patchHistoryPayload`, `src/lib/history-patch.ts:34-102`, known-answer tested), and the write batch
-  stores it with a compare-and-set on `version`. The first play of a month creates that month's row.
+- **Append.** The harvest's read batch includes the row of each month the new plays fall in (one, or
+  two across a month boundary); JS merges the new non-skipped plays with the function the browser
+  already uses for the same job (`patchHistoryPayload`, `src/lib/history-patch.ts:34-102`, known-answer
+  tested, extended for the fourth field), and the write batch stores it with a compare-and-set on
+  `version`. The first play of a month creates that month's row.
 - **Non-append events mark months dirty** (`dirty = 1`, `version + 1`); the daily route, or the next
   fetch, rebuilds just those months from an index range (~3 rows per play, at most ~10,000 for one of
   Rem's months, 01d O3):
@@ -696,8 +697,8 @@ and crosses it in late December (01d §3.2). Instead, 01d's monthly segments (O3
 | backstop replay, history import, catalog backfill | the scripts mark the months they wrote, and `catalog` |
 
 - **Safety net.** The nightly backup rebuilds every segment from its dump of the user's database and
-  compares; a mismatch marks the month dirty and records which month and field differed, so a missed
-  event path gets found, not only healed. Each event path also gets 01d's known-answer test: write to
+  compares; a mismatch marks the month dirty and records which month and field differed, which points
+  at the event path that missed its mark. Each event path also gets 01d's known-answer test: write to
   an old month, and that month's version moves and no other does.
 - Sizes [measured, 01d O3]: Rem's months are 220-303 KB raw (81-113 KB gzipped); the catalog 1.05 MB
   raw (358 KB gzipped). No normal month approaches 2 MiB, and segments no longer use the Data Cache
@@ -739,7 +740,7 @@ database, against a p50 of 30 store round trips per landed tick today [measured,
 
 | | today, per landed play [measured, 01c §2.2] | this design [estimate] |
 |---|---|---|
-| rows read | ~7,700, or ~59,000 when the all-time gate opens | ~20: the orphan verdict ~5 (§10.1; ~130 with today's predicate), the newest play, new track ids (~3 each), new contexts, the uniqueness probe, three payload and meta rows |
+| rows read | ~7,700, or ~59,000 when the all-time gate opens | ~20: the orphan verdict ~5 (§10.1; ~130 with today's predicate), the newest stored play, new track ids (~3 each), new contexts, the uniqueness probe, three payload and meta rows; up to ~50 more when a candidate is older than the newest stored play and its key must be checked |
 | rows written | 15-20 | ~10: the play with its index entries (~6), the `alltime`, `home` and segment rows, the marker |
 | round trips | ~30 | 3 |
 
@@ -752,7 +753,7 @@ payload write that loses its compare-and-set anyway marks the row dirty for the 
 
 - **The manifest rides the page.** Home's server render already reads the user's database for the
   `home` row; the same batch reads the manifest (`kind, key, version, bytes` for every `payloads` row:
-  ~7 rows for Rem today, ~40 after three years), so the browser knows at first paint which segments
+  ~8 rows for Rem today, ~40 after three years), so the browser knows at first paint which segments
   exist and which it lacks. No extra request.
 - **Segments by versioned URL**: `GET /api/search/seg/<kind>/<key>?v=<version>&s=<shape>`, served from
   the session's uid only, one `payloads` row read by primary key, `Cache-Control: private,
@@ -809,7 +810,7 @@ measured (01d §2.1, §2.3, O3); network and server times are estimates.
 | server render: identity (app DB) ∥ `home` + manifest (user DB), one round trip each, in parallel | ~15-30 ms of store time | R1 target, p50 ≤ 15 ms |
 | first paint → idle callback | ≤ 300 ms | after hydration; the 2 s timeout is only a ceiling |
 | all segment requests in parallel: identity + one row each | ~100-150 ms to first byte | a mobile round trip of 50-100 ms |
-| transfer: library 285 KB + history segments 798 KB gzipped | ~870 ms | 1.08 MB at 10 Mbit/s |
+| transfer: library 285 KB + history segments 798 KB gzipped | ~870 ms | 1.08 MB at 10 Mbit/s; listened seconds add a few percent [estimate] |
 | parse and build the search set | ~80 ms | 6.4 + 11.9 + 46.6 ms at 4× today, plus the segment merge |
 | build the selected day | < 5 ms | lazy days |
 | **search usable after first paint** | **~1.4 s** | target ≤ 2 s |
@@ -845,7 +846,8 @@ rows), the library payload (~15,000) and the whole-history strip (~43,500). Here
 The stored "From" verdict (`ctx_orphan`) asks, for a play from a cached playlist, whether the song's
 identity is among that playlist's members. The predicate (`db.ts:700-709`) answers it by walking the
 playlist's members and probing `tracks` for each: ~M to 2M rows for a playlist of M members, for every
-play it judges. That is the ~130 rows per landed play the meter saw (01c §2.2), and it makes a pass
+play it judges. That fits the ~130 rows per landed play the meter saw (01c §2.2; Rem's playlists
+average ~65 members, 7,400 / 114), and it makes a pass
 scoped to one playlist cost (plays from that playlist) × M: for a playlist holding 300 songs with 3,000
 plays from it, ~900,000 rows [estimate; Rem's per-playlist play counts were not measured]. The meter
 cannot show this, because it counts an `UPDATE`'s correlated subqueries at about 1/40 of what Turso
@@ -865,7 +867,7 @@ rescans). Everything is an estimate built from the measurements cited in §3, §
 | reads | rows a day | basis |
 |---|---|---|
 | landed plays, 129 × ~20 | ~2,600 | §8.6 with §10.1 |
-| tick state: the user's row on every tick | ~1,440 | §7.2 step 2 |
+| tick state: the user's state and token rows on every tick | ~2,900 | §7.2 step 2 |
 | token refreshes | ~70 | §5 |
 | library rescans, ~23 × ~230 (the list probe reads 228 rows today, 01c §2.3) | ~5,300 | §7.6 |
 | changed playlists, ~3 a day: cached positions, a scoped orphan pass at ~5 rows per play from that playlist, the body patch | ~3,000-20,000 | §8.4, §10.1 |
@@ -922,7 +924,7 @@ $4.99 a month billed yearly ($5.99 monthly), unlimited databases, 2.5B read, 25M
 
 Five users sit under 5% of the free plan on every dimension (T4). At 250 the free plan fails on writes,
 database count and reads; on Developer every dimension sits at or under 54%, and past its allowances
-the overage is $1 per million writes and $1 per billion reads, not a block. Replacing the nightly full
+it bills $1 per million writes and $1 per billion reads instead of blocking. Replacing the nightly full
 dump with an incremental one (plays since the last backup through `(played_at)`, the small tables
 weekly) would take 250 users' reads to ~36-88% of Free, which still leaves writes and the database
 count over it.
@@ -1003,7 +1005,7 @@ Nothing blocks the cutover, and none of these touches its runbook:
 6. **Step 9 flips Production only**; Preview gets its own database or none (01b §7 item 2).
 
 The app database, the template and every user database join `lazyboy` in group `default`, so one group
-token reaches all of them. That is the blast radius of today's single store token, not a new one.
+token reaches all of them: the same blast radius as today's single store token.
 
 ## 12. Uptime: the Zenbook and the other single points
 
@@ -1019,7 +1021,7 @@ After STORE_MIGRATION no user request touches the Zenbook (its R2). What still r
    bought for other reasons (01f §6, decision 5). Each caller can hold its own secret so either can be
    rotated alone (01e §5.9).
 2. **Quota protection lives on Turso.** The quota ledger and the per-bucket cooldowns sit in the app
-   database, not in telemetry, so the governor keeps working through a Zenbook outage.
+   database, so the governor keeps working through a Zenbook outage.
 3. **Telemetry stays best effort**: one attempt, 4 s, never awaited (STORE_MIGRATION phase A). An
    outage loses diagnostics, never a page or a play.
 4. **The app captures on open.** Even with both pingers down, a user who opens the app is harvested
@@ -1048,9 +1050,10 @@ have shipped, since it touches the same files.
 
 **Before it.** F1 closed (`AUTH_SECRET` rotated, `SPOTIFY_OWNER_ID` set in production; 01e §7 decision
 1, 01b E1-E2), and the second account's plays that the Oct 14 incident recorded into Rem's history
-removed (01b E6): they are another person's listening and must not be labelled Rem's. They can be
-told apart by the incident window and by comparison with the recorder, which captured on Rem's own
-token chain throughout. Rem confirms the window; that is the one step a person has to check.
+removed (01b E6): they are another person's listening, and once the store has owners they would be
+filed as Rem's. They can be told apart by the incident window and by comparison with the recorder,
+which captured on Rem's own token chain throughout. Rem confirms the window; it is the one step that
+needs a person.
 
 **The fenced window** (~15 minutes, the discipline of STORE_MIGRATION §8 steps 2-3; Spotify's 50-play
 buffer covers any plays in it). The rollout (§15) lands step 3 with the single-user phase P1 and step 4
@@ -1152,7 +1155,7 @@ L a design change.
 
 | phase | ships | removes or proves | verified by | size |
 |---|---|---|---|---|
-| P0, not this design | F1 and E2 (rotate `AUTH_SECRET`, set `SPOTIFY_OWNER_ID`), E3 (gate `logout`), STORE_MIGRATION's lanes | live exposures today (01b §6, 01e §7) | those lanes | – |
+| P0, before this design | F1 and E2 (rotate `AUTH_SECRET`, set `SPOTIFY_OWNER_ID`), E3 (gate `logout`), STORE_MIGRATION's lanes | live exposures today (01b §6, 01e §7) | those lanes | – |
 | P1a | `listened_ms`, the all-time accumulator, the Home payload patch, the `contexts` scan, one marker bump per batch, with §13's fenced fill | §3 rows 1, 2 and 9: ~75% of Rem's reads [estimate: (2.24M + 0.95M + ~0.04M) / 4.25M] | known-answer tests (accumulator = `allTimeStats` over fixtures with out-of-order inserts; patched payload = rebuilt payload after a day of synthetic harvests); `verify-derived.mjs` extended; Turso's usage before and after | M |
 | P1b | segments in `payloads`, the manifest in the page, the segment route, lazy days, the strip and the all-time list from segments, phase E keyed per segment | §3 rows 3-4, and the 2 MiB cliff; **must ship before mid-December** (01d §3.2) | segments equal `readHistoryIndex()` slices; 01d §2.3's throttled-browser harness; T2's numbers on `/usage` | L |
 | P1c | `/me/player`-only probe, harvest on track change (F = 2, one user), rescans through `snapshot_id`, no `/me`, weekly Liked refetch, `refreshHistoryAction` without Spotify, 15 s now-playing, 429s read by reason | §3 rows 8, 10, 11; Spotify calls roughly halved | `tests/harvest-gate.test.ts` extended; `api_log` counts per source before and after | M |
@@ -1186,8 +1189,8 @@ linearly from Rem's instance time). Here the tick is one invocation a minute of 
 renders are the unmeasured remainder in both. Friends cannot be charged: lazyboy is a Streaming SDA,
 and Spotify permits no commercial use of one (01f §1.5).
 
-The engineering cost is the phases of §15: four M-sized single-user steps and one L, then an M-L and an
-L before the first friend.
+The engineering cost is the phases of §15: three M-sized single-user steps and one L, then an M-L and
+an L before the first friend.
 
 ## 17. Scorecard: each target met or missed, and the options where missed
 
