@@ -72,10 +72,15 @@ Its limits:
   change, so this matters for the multi-user key (§5.1), not as a bug today.
 - The fallback, `me_id`, is rewritten by every library sync from whichever account's token is stored
   (`src/lib/db.ts:1804, 1817-1823`). That is how the Oct 14 incident flipped it, and why the env var
-  wins (`tests/owner-signin.test.ts:33-38`). `owner.ts:7` says `SPOTIFY_OWNER_ID` is set in production;
-  I did not read Vercel's env to confirm it. The Mac's `.env.local` does not set it (its key names,
-  read 2026-10-14), so a local dev server, which points at the production store, falls back to
-  production's `me_id`.
+  wins (`tests/owner-signin.test.ts:33-38`).
+- **Production runs on the fallback.** `owner.ts:7` says `SPOTIFY_OWNER_ID` is set in production, but
+  `vercel env ls production` (9:31 PM, names only) lists twelve variables and it is not one of them;
+  the Mac's `.env.local` lacks it too. So production's guard is whatever `me_id` holds. A read-only
+  probe (9:32 PM, §8) found the live `me_id` equal, by sha256 prefix, to the Oct 1 snapshot's `me_id`,
+  which owned 110 of that snapshot's 116 playlists: the guard admits the pre-incident library owner,
+  presumably Rem, today. It stays right only while no other account's token reaches the row, which the
+  guard itself now prevents. Setting `SPOTIFY_OWNER_ID` in production (one variable, then a redeploy)
+  removes the dependence on store state.
 
 ### 1.3 The jwt callback at sign-in
 
@@ -134,7 +139,9 @@ cookie that stays valid until 30 days after its last use. With the owner's token
 browser renders the owner's history and library, its server actions edit the owner's playlists and
 drive the owner's playback, and its "log out" deletes the owner's token row, which stops capture. Its
 chrome still shows the second account's name and avatar. This holds unless `AUTH_SECRET` was rotated
-after the incident; I could not check (I did not read Vercel's env, and no doc records a rotation).
+after the incident. Most likely it was not: `vercel env ls production` (9:31 PM) shows `AUTH_SECRET`
+created 133 days ago, no doc records a rotation, and a rotation would have signed Rem out. That column
+may not move on an in-place edit, so this is strong evidence, not proof.
 
 Smallest fix: rotate `AUTH_SECRET` in Vercel production (`openssl rand -base64 32`, Sensitive) and
 redeploy. Rem signs in once more; the token row and the cron are untouched. The lasting fix is §5.1's
@@ -276,26 +283,29 @@ the jwt callback are not. Making exactly this code per-user is the riskiest chan
 ### 3.1 Inventory
 
 Sources: the env names the code reads (`grep process.env` over `src/`), `.env.example`, the key names
-(not values) in the Mac's `.env.local`, docs/STORE_MIGRATION.md §3 for Vercel, docs/SECURITY.md:49-54
-for `CRON_SECRET`, docs/quota-forensic/BRIDGE.md:165-182 and an `ls -la` on the Zenbook for its files
-(2026-10-14). I read no Vercel env, so where a secret sits there comes from those docs.
+(not values) in the Mac's `.env.local`, `vercel env ls production` (names, targets and ages only,
+9:31 PM), docs/SECURITY.md:49-54 for `CRON_SECRET`, docs/quota-forensic/BRIDGE.md:165-182 and an
+`ls -la` on the Zenbook for its files (2026-10-14).
 
 | secret | read by | held in | unlocks today |
 |---|---|---|---|
-| `AUTH_SECRET` | Auth.js (`next-auth lib/env.js:22`) | Vercel; Mac `.env.local` | minting a session cookie, which today is full owner access (F1) |
-| `SPOTIFY_CLIENT_SECRET` (+ public `SPOTIFY_CLIENT_ID`) | `auth.ts:100, 310` | Vercel; Mac `.env.local`; Zenbook `~/lazyboy-recorder/config.json` (0600) | refreshing any stored refresh token; impersonating the app at Spotify |
-| `TURSO_AUTH_TOKEN` (+ `TURSO_DATABASE_URL`) | `db.ts:128-129` | Vercel Production and Preview (STORE_MIGRATION.md:69-71); Mac `.env.local`; Zenbook `~/lazyboy-sqld/jwt-token.txt` (0600) | the whole store, read and write, token rows included, from anywhere (the hostname is public) |
+| `AUTH_SECRET` | Auth.js (`next-auth lib/env.js:22`) | Vercel Production and Preview; Mac `.env.local` | minting a session cookie, which today is full owner access (F1) |
+| `SPOTIFY_CLIENT_SECRET` (+ public `SPOTIFY_CLIENT_ID`) | `auth.ts:100, 310` | Vercel Production and Preview; Mac `.env.local`; Zenbook `~/lazyboy-recorder/config.json` (0600) | refreshing any stored refresh token; impersonating the app at Spotify |
+| `TURSO_AUTH_TOKEN` (+ `TURSO_DATABASE_URL`) | `db.ts:128-129` | Vercel Production and Preview; Mac `.env.local`; Zenbook `~/lazyboy-sqld/jwt-token.txt` (0600) | the whole store, read and write, token rows included, from anywhere (the hostname is public) |
 | sqld signing key | sqld (`--auth-jwt-key-file` holds the public half) | Zenbook `~/lazyboy-sqld/jwt-private.pem` (0600, BRIDGE.md:169) | minting store tokens: same as the row above |
 | `TURSO_PLATFORM_TOKEN` (+ `TURSO_ORG`) | `/usage` render (`src/app/(app)/usage/page.tsx:85-86`), `/api/cron/usage-check` (`route.ts:124-136`) | Vercel Production; Mac `.env.local` | the Turso org's platform API; after STORE_MIGRATION, minting a token for the core database |
-| `CRON_SECRET` | `cron/sync/route.ts:61-66` (constant-time compare), `cron/usage-check/route.ts:120` | Vercel (Sensitive); Mac `.env.local`; Zenbook `~/lazyboy-cron/env` (0600); stale copies in the cron-job.org job and `/etc/lazyboy-sync.env` (SECURITY.md:49-54) | running the sync and usage-check routes on demand |
+| `CRON_SECRET` | `cron/sync/route.ts:61-66` and `cron/usage-check/route.ts:120-121`, both constant-time | Vercel Production (Sensitive per SECURITY.md); Mac `.env.local`; Zenbook `~/lazyboy-cron/env` (0600); stale copies in the cron-job.org job and `/etc/lazyboy-sync.env` (SECURITY.md:49-54) | running the sync and usage-check routes on demand |
 | `CRONJOB_API_KEY` (+ `CRONJOB_JOB_ID`) | `src/lib/cronjob.ts:17-36` | Vercel Production | the cron-job.org account's jobs (that branch has not run since Aug 10, STORE_MIGRATION.md:72-77) |
 | Vercel CLI token | the tunnel updater, retired | Zenbook `~/lazyboy-tunnel/env` (0600, BRIDGE.md:175); dead since Aug 9 (STORE_MIGRATION.md:363) | nothing while dead; a live one reads and writes every secret above |
 | rclone OneDrive token | `backup.py` | Zenbook rclone config | the 60 days of backups, which hold token rows (F2) |
 | Spotify refresh tokens | §2 | §2.1's table | the user's Spotify account, 13 scopes |
 
-Not secrets, for completeness: `SPOTIFY_OWNER_ID`, `AUTH_URL`, `TURSO_DATABASE_NAME`. The repo is
-public (`gh repo view`: `PUBLIC`) and BRIDGE.md:182 states no secret value is committed; a pattern scan
-for JWT, Spotify-token and PEM shapes (`git grep -E 'eyJ…|AQ…|BQ…|-----BEGIN'`) found none.
+Not secrets, for completeness: `SPOTIFY_OWNER_ID` (absent from production, §1.2), `AUTH_URL`,
+`TURSO_DATABASE_NAME`, `LAZYBOY_NO_REPLICA`. Preview holds the same `AUTH_SECRET`, client secret and
+store token as Production, so a Preview build of any branch can read the store's token row and mint
+cookies that production accepts. The repo is public (`gh repo view`: `PUBLIC`) and BRIDGE.md:182
+states no secret value is committed; a pattern scan for JWT, Spotify-token and PEM shapes
+(`git grep -E 'eyJ…|AQ…|BQ…|-----BEGIN'`) found none.
 
 ### 3.2 Blast radius and rotation, and what N users changes
 
@@ -683,8 +693,9 @@ out of the Vercel runtime when the second user arrives; it serves `/usage` and a
 
 ## 7. Decisions that are Rem's
 
-1. **F1, now:** rotate `AUTH_SECRET` in production. Recommend yes, tonight: it costs one sign-in and
-   closes a live cross-account hole.
+1. **F1, now:** rotate `AUTH_SECRET` in production, and in the same redeploy set `SPOTIFY_OWNER_ID`
+   there (§1.2). Recommend yes, tonight: it costs one sign-in and closes a live cross-account hole, and
+   the owner guard stops depending on what `me_id` holds.
 2. **What "log out" means:** today it stops capture and signs out every device. Recommend splitting
    it into sign out, sign out everywhere, and disconnect (§5.6).
 3. **Data after an ambiguous `invalid_grant`:** recommend stopping all processing at once and purging
@@ -704,10 +715,11 @@ out of the Vercel runtime when the second user arrives; it serves `/usage` and a
 
 ## 8. Unknowns and what I did not verify
 
-- Whether `AUTH_SECRET` was rotated after the Oct 14 incident, which decides whether F1 is open. A
-  look at its "updated" time in Vercel would answer it; I read nothing from Vercel.
-- Whether `SPOTIFY_OWNER_ID` is set in production (`owner.ts:7` says it is), and whether production
-  uses the same client id as dev.
+- Whether `AUTH_SECRET` was edited in place after the incident (the env listing shows it created 133
+  days ago; F1).
+- Whether production uses the same Spotify client id as dev (values are not readable).
+- Whether `SPOTIFY_OWNER_ID` exists as a team-level shared variable that `vercel env ls` does not list;
+  the guard's behaviour is the same either way only if it does not.
 - Whether `/v1/me` returns `account_id` to this development-mode app (documented, not observed).
 - Whether this app's refresh tokens can be refreshed without the client secret (§3.2).
 - Whether revoking at spotify.com stops the current access token at once, and whether a password
@@ -721,8 +733,13 @@ out of the Vercel runtime when the second user arrives; it serves `/usage` and a
 - Every library-internal claim comes from the `@auth/core` 0.41.2 and `next-auth` 5.0.0-beta.31
   tarballs; a different installed version could differ.
 
-Read-only measurements in this file, all on 2026-10-14 between 9:12 and 9:25 PM: `ls -la` of three
+Read-only measurements in this file, all on 2026-10-14 between 9:12 and 9:33 PM: `ls -la` of three
 Zenbook directories; key names of the recorder's two JSON files; the hash-prefix probe of three
 Zenbook snapshots and `tokens.json` (§2.1); `rclone listremotes` (names only); `sqlite3 -readonly` on
 the Mac's `data/replica.db` and `data/listens.db`; key names of the Mac's `.env.local`; a client-id
-hash-prefix comparison; `gh repo view` for visibility. No query touched the production store.
+hash-prefix comparison; `gh repo view` for visibility; `vercel env ls production` (names, targets,
+ages); and one query on the live store, `SELECT value FROM meta WHERE key = 'me_id'`, sent to sqld
+over the Zenbook's loopback (127.0.0.1:8092, not through the meter), whose result was printed only as a
+hash prefix beside the Oct 1 snapshot's `me_id` and playlist owners (§1.2). The two probe scripts are
+`token_rotation_probe.py` and `owner_probe.py` in this lane's scratch
+(`~/.claude/broke/scratch/lazyboy_mu/authjs_src_0221/`).
