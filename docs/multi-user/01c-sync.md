@@ -627,3 +627,52 @@ against today's tables and two token rows; doing it single-user keeps them that 
 - How friends listen. Every budget here uses a Rem-like worst case.
 
 ## Appendix A: exactly what I ran
+
+All on 2026-10-14 between ~9:15 and ~9:50 PM ET (01:15-01:50Z Oct 15). Nothing wrote to any store,
+file or service. Scripts lived in a scratch directory on the Mac, were piped to `python3 -` over
+`ssh ubuntu`, and were deleted afterwards.
+
+**Files read on the Zenbook:** `ls -la ~/lazyboy-recorder ~/lazyboy-cron` (token and env files
+filtered out of the listing); `systemctl --user list-timers --all | grep lazyboy`; `systemctl --user
+cat` of `lazyboy-recorder.{timer,service}` and `lazyboy-cron-sync.{timer,service}`;
+`~/lazyboy-recorder/recorder.py`; `~/lazyboy-cron/ping.sh` (long tokens redacted with `sed` before
+printing; it holds none, it sources `env`). Not read: `tokens.json`, `config.json`, `env`.
+
+**Log files on the Zenbook (no store access):**
+
+- `~/lazyboy-cron/ping.log`: `grep -c` tallies of status codes and reply kinds over its 2,000 lines,
+  and over the lines starting `2026-10-14`.
+- `python3 ~/lazyboy-sqld/meter-report.py 2026-10-14`.
+- A rollup of `~/lazyboy-sqld/querylog/2026-10-13.jsonl` and `2026-10-14.jsonl`: calls, rows read,
+  rows written and query ms per statement fingerprint.
+- A prefix lookup in the same logs (`SELECT p.played_at AS playedAt…`, `SELECT t.name AS name…`):
+  calls and rows per call.
+- Tick wall times: each `ping.log` line of the day (plus 999 ms, since its stamp is floored to the
+  second) matched to the meter's requests in the preceding 45 s.
+
+**Store reads**, through the meter on the Zenbook (`POST http://127.0.0.1:8090/v2/pipeline`, the
+sqld JWT read from `~/lazyboy-sqld/jwt-token.txt` inside the script and never printed). All are
+`SELECT`s on `api_log` over a `ts` range (`idx_api_log_ts` or `idx_api_log_path_ts`). Rows read as
+sqld reported them:
+
+| # | statement | rows read |
+|---|---|---|
+| 1 | calls by `source`, `path` with 429 and error counts, `ts` in UTC Oct 14 | 4,253 |
+| 2 | `COUNT(*)`, `MIN(ts)`, `MAX(ts)`, `MAX(retry_after)` of recently-played 429s, last 30 days | 6,887 |
+| 3 | recently-played calls per UTC day and source, last 14 days | 6,279 |
+| 4 | 429s by path, last 30 days (none) | 106,607 |
+| 2' | `[id,] ts, path, status` of sources `cron-player-check`/`cron-sync`, UTC Oct 14, grouped into ticks in the script (run four times: shapes, statuses, deduplicated, timestamps) | 4 × 2,120 |
+| 4' | per UTC day (Oct 6, 8, 10-14): `COUNT(*)` and the count of `DISTINCT ts, path, status, source` | 30,304 |
+| 5 | deduplicated calls per UTC day and source since Oct 1 | 52,577 |
+| 6 | Aug 11-18: deduplicated calls by path family and status; for each recently-played 429, whether a player call answered 200/204 within 10 min | 20,667 + 4,778 |
+| 7 | Aug 11-18: 429s by path with first, last and max `Retry-After`; recently-played 429s per day | 10,457 + 4,759 |
+
+Total ~256,000 rows, about 6% of a normal day's reads. They are in the meter's
+`2026-10-15.jsonl`; anyone measuring Oct 15's production reads should subtract them.
+
+**Web:** `curl -sL` of the five Spotify pages cited in §4 (rate limits, quota modes, the February
+2026 migration guide, the July 2026 changelog, the July 23, 2026 blog post), text extracted locally;
+one web search to find the blog post.
+
+**Repo:** code and docs as cited, at `ac6f7fe`; the sibling overviews 01a, 01b, 01e and 01f as
+they stood at ~9:30 PM, for their ids and 01f's August ban counts.
