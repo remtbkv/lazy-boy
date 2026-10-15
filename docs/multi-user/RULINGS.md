@@ -15,6 +15,29 @@ ruling here overrides the plan's recommendation where they differ.
   policy and an end-user agreement shown before anyone else signs up (Section V), so both are due before Phase 4a's
   canary account; tracked in .claude/QUEUE.md.
 
+## Oct 15, 2026, 1:17 PM
+
+- **Decision 8, the second pinger: yes.** Rem sets up the cron-job.org job (every 2 minutes, GET
+  /api/cron/sync with its own bearer secret); the route learns the second secret and the 90-second guard first.
+- **Decision 9, a DNS resolver on the Zenbook that does not need Tailscale:** explained to Rem (a settings change, no
+  cost); the Zenbook also runs DiveLoop's camera rig, so it is scheduled with DiveLoop's orchestrator.
+- **Decision 17, Turso's paid plan: no.** "We're not going to go on any $5 month plan ... I'm sure we can make this
+  super optimized. Even with five people, we're not going to go over the limit because it should all be bounded."
+  Stay on the free plan by design: reads and writes bounded by what the app can do.
+- **Decision 18, Vercel Pro: no.** "We just need to optimize our system, maybe offload some more of the CPU work to
+  my Zenbook ... minimize the usage on there on Vercel and Turso ... while keeping maximum speed." So recurring and
+  heavy work (the 2-minute capture tick's work, payload rebuilds, scans) runs on the Zenbook where it can; Vercel and
+  Turso serve what must be fast for a person waiting.
+- **Decision 19, revised: two options.** "Log out" signs this person out of every browser (capture continues);
+  "Disconnect" (that name only) removes the account. Rem: "if you want to do all browsers at that point, just
+  disconnect."
+- **Decision 20, revised.** A session whose Spotify grant has died shows a short, helpful error saying what happened
+  and what to do, then the sign-in page; never a silent redirect.
+- **Decision 21: yes, and never Rem's.** A friend who revokes access has their data deleted on day 4 unless they
+  reconnect. Rem's own data is never deleted by any automatic path.
+- **Decision 28: two-minute updates for everyone.** The brake stays only as the safety valve the plan describes,
+  engaging if the app's shared daily Spotify allowance runs low.
+
 ## Oct 15, 2026, 12:46 PM
 
 - **Sign-up is a request form, and Rem adds people by hand.** Spotify's User Management allows five accounts, Rem
