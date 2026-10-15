@@ -1354,8 +1354,155 @@ list, named and each with its owner in §16.
 
 ## 14. Rollout in reversible phases
 
+Each phase ships behind the previous one's exit check. Until phase 4 nobody but Rem can sign in,
+because the owner guard (`src/lib/owner.ts`) stays in place, so phases 1-3 change how the app is
+built, never who can reach it.
+
+| phase | what ships | exit check | how it is undone |
+|---|---|---|---|
+| **0, now** (no multi-user code) | rotate `AUTH_SECRET`, Preview gets its own (01b E1, 01e F1); set `SPOTIFY_OWNER_ID` in Production and `.env.local` (01b E2); gate `logout` (01b E3); STORE_MIGRATION with §8.3's six edits; lazy days and history segments before December (§7.4); measure S3's render at 4× (§13.2); read Vercel's Active CPU and the allowlist (§16); the foreign-row cleanup after lane 1904 (§9.2) | Rem signed in on the new secret; STORE_MIGRATION's own R1-R6; the cleanup's `verify-derived` green | env changes and deploys revert; the cleanup restores from its snapshot |
+| **1, identity and isolation scaffolding** (single-user) | `UserId` and the gate on every entry point; `uid: 1`, `ep: 0` on the cookie for the owner, cookies without a uid refused (Rem signs in once, which is F1's lasting fix); `forUser(1)` over today's one database, `owner_uid = 1` written; `userCache` with owner stamps; keyed React boxes and module state; `playlistsCache` removed; task owners; `hk` in ETags, URLs, bodies and storage; the token core out of `auth.ts`; tests T1-T3, T5, T7, T8 and S1-S6 green with a simulated uid 2 | the suite green; a week of production with zero isolation events and capture unchanged (play counts against the recorder) | revert the deploy: old code ignores the extra cookie claim and the two new `meta` keys |
+| **2, the app database and the tokens** (single-user) | `lazyboy-app`; users row 1; the token encrypted into `user_tokens`; the jwt callback's one join (§4.2); the steps of §9.3 | §9.3 step 7 | §9.3's rollback |
+| **3, the sync queue** (single-user) | `sync_state` with claims and leases; the per-user step; cooldowns per bucket; the fair-share counters (inert at one user); `/api/sync` through the step; `refreshHistoryAction` off Spotify; now-playing at 15 s; the rescan changes; then the second pinger; the recorder hourly; tests T4, T6 | a week of capture matching the recorder, no harvest doubled by two pingers | revert the route code; disable the second pinger |
+| **4, the first friend** | the invite script, `/join` with the policy and agreement, the claim (§10); disconnect and deletion (§12); one backup file per database; admin-only `/usage`; `owner.ts` removed; Preview without store variables and dev on local files, both confirmed; the Turso plan decided (§16) before the friend's first sync; tests T9-T11; an adversarial review of the whole change | a week with one friend: isolation events at zero, the friend's quota spend visible per user (`api_log.user_id`), no ban | set the friend `disabled` (their sessions die and their sync stops at once); if they leave, the deletion job |
+| **5, up to five** | one friend at a time | each after a week without a quota ban and with isolation events at zero, read against 01c §7.3's passive quota check | per user, as phase 4 |
+
+The irreversible steps, all named where they happen: deleting the incident's foreign plays (§9.2,
+snapshot first, Rem's yes on the list), deleting the plaintext token row a week into phase 2 (§9.3
+step 8, still recoverable by decrypting), and a friend's account deletion once Turso's recovery
+window has passed (§12), which is irreversible by design.
+
 ## 15. Costs
+
+**Money, a month, at five users** (01f §5.3's prices, checked against the pricing page at 10:11 PM):
+
+| item | cost | note |
+|---|---|---|
+| Turso | $0 on Free if the accumulator and the in-place strip ship (§13.4); **$4.99 billed yearly ($5.99 monthly)** on Developer with overages enabled | five Rem-like users fit Free only with the two levers (~120M against 500M) and fit Developer's 2.5B included reads without them. Crossing Free's quota blocks every query for every user until the 1st (01f §4.2) |
+| Vercel | $0 on Hobby if the team's Active CPU fits; $20 on Pro otherwise | unmeasured; overrunning Hobby stops every project on the team for up to 30 days (01f §2.2) |
+| cron-job.org (second pinger) | $0 | phase 3 |
+| the Zenbook | $0 | power is not metered (01f §5.2) |
+| Spotify | $0 | friends cannot be charged: the app controls playback, which makes it a Streaming SDA, and the policy allows such apps no commercial use (01f §1.5) |
+| **total** | **$0-26** | the same range as 01f §5.3 |
+
+**What isolation adds to that: $0.** The per-user databases are free (100 on Free, unlimited on
+paid, idle ones cost only storage, §2.1); encryption is Node's built-in `crypto`; the tests run in
+the existing harness. Every dollar above is a plan choice any multi-user design faces.
+
+**Work**, as relative sizes rather than hours (S one place, M a contract with callers to follow, L a
+design change), so the director can turn them into lanes:
+
+| phase | size | the big pieces |
+|---|---|---|
+| 1 | L | `db.ts`'s 74 exports behind `forUser`, with every caller touched once (01a D2); the gate on 8 pages, 24 actions and 12 routes (01b §2); `userCache`; the test harness and T1-T8 |
+| 2 | M | `app-db.ts`, the token core extracted and encrypted, the migration script |
+| 3 | M-L | 01c §5's queue, step and policies |
+| 4 | M | invite, join and claim; deletion; the backup loop; admin gating |
+
+Against a shared-database design the work is of a similar size but lands in different places: a
+row-level design rewrites more than fifty statements and their indexes, rebuilds four tables in a
+migration over live data (01a §8.6), and needs no client map, app database or provisioning script.
+This design changes no statement in the seven tables and adds the plumbing. The difference that
+decides it is §2.1's: where a mistake lands when one is made.
 
 ## 16. Decisions that are Rem's
 
+Each with my recommendation and the reason.
+
+**Now, whether or not anyone else ever signs in**
+
+1. **Rotate `AUTH_SECRET`, set `SPOTIFY_OWNER_ID` in Production, and gate `logout`.** Yes, before
+   STORE_MIGRATION's freeze: a browser that signed in before the guard can still act as you until
+   about Nov 13, and its log-out can stop your capture (01b E1-E3, 01e F1). One sign-in.
+2. **STORE_MIGRATION's six edits (§8.3).** Make them before lane 1901 starts; none touches the
+   cutover, and each saves doing the same work twice later.
+3. **Delete the incident's foreign plays from your history** after reading the list (§9.2). Yes:
+   they are someone else's listening inside your stats.
+4. **Two one-minute dashboard reads**: Spotify's User Management list (how many accounts, any
+   grandfathered above five, whether you count toward the five) and Vercel's Active CPU per project
+   over 30 days. They settle target U and the Vercel plan (01f §6.2).
+
+**The design**
+
+5. **Five accounts, not 25.** Yes: Spotify's cap, which no money changes (01f §1.2-1.3). More people
+   run their own copies (§13.6).
+6. **One database per user.** Yes: a forgotten filter is impossible rather than unlikely, deletion
+   reaches Turso's recovery window cleanly, and your data does not move (§2.1, §9). Revisit only if
+   cross-user features become the priority.
+7. **Closed-app freshness if the quota is shared**: accept §6.4's fair share (2 minutes until the
+   day's budget runs low, then 15-30 minutes, opening the app always current) rather than build
+   server-side provisional plays now. Revisit after the passive quota check (01c §7.3).
+
+**Before the first friend**
+
+8. **Turso Developer with overages, $4.99 a month billed yearly.** Yes: crossing Free's quota is an
+   outage for everyone until the 1st, and the levers that keep five users on Free should not be
+   tested by that outage.
+9. **Vercel**: Hobby if the team uses under ~2 of its 4 CPU-hours, else Pro at $20 (01f §6.3).
+10. **What "log out" means.** Split it into sign out, sign out everywhere, and disconnect and delete
+    (01e §5.6): with friends, signing out of a shared computer should not stop someone's history.
+11. **`invalid_grant` within six months of a grant**: treat it as a disconnect, delete after a
+    five-day grace unless they reconnect, you exempt (01e §5.7). The alternative keeps data on an
+    ambiguous signal, outside the Terms.
+12. **Retention for friends**: kept while connected, deleted five days after a disconnect, deleted
+    after twelve months without a sign-in (§11). The twelve months is the number to choose.
+13. **Backups**: one file per database, a friend's deleted with their account (§8.3, §12). Yes.
+14. **The platform token stays in the runtime** for same-day database destruction and the daily
+    usage read, Production only (§12). The alternative, a Mac script, puts the five-day deletion
+    clock on a laptop that is not always on.
+15. **Turso's "Allow restore" stays on**: a mistaken delete is recoverable for five days, which still
+    fits inside Spotify's five when the destroy runs the same day (§12).
+16. **The privacy policy and end-user agreement**: yours to write or approve; §11 lists what they
+    must say. And whether friends see derived stats (listened time, skips) at all, given the
+    Developer Policy's line on derived listenership metrics (01f §1.5); this design shows each
+    person only their own.
+
+**Smaller**
+
+17. **The recorder stays yours alone and runs hourly** (01c §5.7, 01e §5.9). Yes.
+18. **A second pinger on cron-job.org** in phase 3. Yes; free, and it ends the Zenbook as the only
+    capture trigger (§6.7).
+19. **A canary account in phase 4**, only if you have a spare Spotify account: it holds one of the
+    five places while it exists (§5.4).
+20. **Friends' history imports** wait for segments (01d §7.2): a five-year import is a ~4.2 MB body
+    today.
+
 ## 17. What I ran, and what I do not know
+
+### 17.1 What I ran
+
+Nothing ran against the production store, the Zenbook, any Turso database, Vercel or Spotify.
+
+- **Repo reads**: the six overviews in full, `docs/STORE_MIGRATION.md`, `docs/SECURITY.md`,
+  `docs/GOTCHAS.md`, and the code cited above. `git diff --stat ac6f7fe HEAD -- src scripts ops tests
+  vercel.json next.config.ts` (empty, so the overviews' line numbers hold); `git show --stat 044c9b6`
+  and `git log` over Oct 14 for the incident's commits.
+- **Turso's pages**, 10:11-10:13 PM, `curl -sSL` with a desktop user agent into a scratch
+  directory, then a one-off Python pass that stripped the HTML and printed the passages quoted in
+  §2.1 and §12: `docs.turso.tech/cli/group/tokens/create`, `/cli/db/tokens/create`,
+  `/features/multi-db-schemas`, `/api-reference/databases/create`,
+  `/features/point-in-time-recovery`, `/features/recover-deleted-databases`,
+  `/api-reference/databases/delete`, and `turso.tech/pricing`. All answered 200.
+- **A crypto micro-benchmark** (`~/.claude/broke/scratch/lazyboy_mu/0222_design_a/bin/crypto_bench.mjs`,
+  Node 24.5.0 on the Mac, arm64, synthetic token strings, 7 runs of 20,000-50,000 operations,
+  medians): AES-256-GCM encrypt 2.67 µs (2.61-2.93), decrypt 1.67 µs (1.62-2.34) for a 450-byte
+  blob; HMAC-SHA256 0.86 µs (0.85-0.91). The same script checks that a ciphertext decrypted under
+  another uid's associated data is refused: it was.
+
+### 17.2 What I do not know
+
+- **Whether Spotify's development-mode quota is one pool or per user** (01c §4). §6.4 is built for
+  the pool and relaxes if it is per user.
+- **Whether `/v1/me` returns `account_id` to this app**: documented, not observed (01e §8). Phase 2's
+  step 2 finds out before anything depends on it; whether `user-read-private` is needed for it is
+  not documented either (§11).
+- **Vercel's Active CPU** for this team, and **the allowlist's size**, both dashboard reads (§16).
+- **R1 on Turso**: every store time here uses its 15 ms target; lanes 1902-1903 measure it.
+- **Keystroke render time on a phone** (§13.2): unmeasured anywhere; phase 0 measures it.
+- **Whether Preview and Production share the Data Cache, and whether React's `cache()` is active in
+  route handlers** (01b §8): the owner stamp and the keyed boxes make the design correct either way.
+- **Next 16's `revalidateTag` signature** and **the fields of Turso's per-database usage endpoint**:
+  to check at implementation; I read the endpoint's existence from the docs' navigation only.
+- **What "Turso is joining Supabase" means** for plans and prices (§8.1).
+- **The incident's exact window**: the recorder diff of §9.2 finds the rows without it.
+- **The time the isolation suite adds to `npm test`**: this checkout has no `node_modules`.
