@@ -15,6 +15,16 @@ ruling here overrides the plan's recommendation where they differ.
   policy and an end-user agreement shown before anyone else signs up (Section V), so both are due before Phase 4a's
   canary account; tracked in .claude/QUEUE.md.
 
+## Oct 15, 2026, 1:33 PM
+
+- **Decision 19, revised again: logging out stops capture, and says so.** Rem: "when you log out, you stop capturing.
+  That should be kind of like a thing. Like a note saying, after you logged out, it said, stopped logging listening
+  history as well." So "Log out" signs the person out of every browser and stops recording their listening history,
+  and the page after it says so plainly, with how to resume (sign in again). Plays during the gap come back only as far
+  as Spotify's recently-played list reaches (its last 50) at the next sign-in.
+- **Decision 9: go.** Dispatched as DiveLoop lane 2202_dl_dnsfb (6.5, outside practice windows), since the Zenbook
+  also runs the camera rig.
+
 ## Oct 15, 2026, 1:17 PM
 
 - **Decision 8, the second pinger: yes.** Rem sets up the cron-job.org job (every 2 minutes, GET
