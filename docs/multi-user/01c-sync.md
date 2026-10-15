@@ -272,9 +272,11 @@ More Client IDs therefore buy no budget.
   ban. No player, playlist or Liked endpoint returned a 429 that week. After 5 of the 83
   recently-played 429s a player call answered 200/204 within ten minutes; successful player polls
   were only logged from Aug 16, so the other windows say nothing either way. So `/me`, which every
-  library rescan calls (`library.ts:40`), draws on the scarce bucket, and the player endpoints, which
-  the cron asks first for that reason (`route.ts:121-127`), answered during at least some bans.
-  Their own limit has never been reached; the cron alone spends ~1,035-1,303 a day.
+  library rescan calls (`library.ts:40`), either shares the scarce bucket or has its own that the
+  August failure storm exhausted the same way (a failing rescan was retried on every tick until the
+  2026-08-19 audit, `route.ts:33-36`); this document treats it as shared. The player endpoints,
+  which the cron asks first for that reason (`route.ts:121-127`), answered during at least some
+  bans. Their own limit has never been reached; the cron alone spends ~1,035-1,303 a day.
 
 **The question the design turns on:** is the ~725-800 a day the developer account's, shared by every
 user of the app, or each user's? Every statement of the rule says the account's ("a single
@@ -285,10 +287,141 @@ is how to find out without risking Rem's own capture.
 
 ## 5. Running it for N users
 
+N is at most 5 (§4). The worst case below is five users who listen like Rem: ~117 plays a day on
+average over the last 30 days (01a §6), 129 on Rem's day, with something playing for ~9 hours.
+Every figure in this section is an estimate built from §2's measurements; the arithmetic is shown.
+
 ### 5.1 The budget, per user and in total
+
+**The scarce bucket (recently-played, and `/me`).** Budget ~725-800 calls a quota day (01f §1.4). A
+budget whose "specific groupings and limits are subject to change" should not be planned at 100%;
+this section plans to ~60%, ~450 a day.
+
+| harvest policy (defined in 5.3) | recently-played calls a day, one Rem-like user | five such users | against ~450 |
+|---|---|---|---|
+| today: every 2-min tick while playing, the session tail, an hourly backstop | 139-319 (cron, measured) + 96 (recorder) | 1,200-2,100 with a recorder each; ~700-1,600 with only the owner's | over |
+| (i) harvest when the player probe sees the track change | ~117-130 plays + ~5 tails + 24 backstops ≈ 150 | ~750 (+96 for the owner's recorder) | over, ~1.7× |
+| (iii) one harvest per 15 min of playback | 9 h × 4 + 5 + 24 ≈ 65 | ~325 | fits |
+| (ii) provisional plays from the probe, one harvest per 30 min of playback | 9 h × 2 + 5 + 24 ≈ 47 | ~235 | fits, ~2× margin |
+
+Two smaller terms in the same bucket: each library rescan calls `/me` (`library.ts:40`), 32 a day for
+Rem, so ~160 a day at five users, for a value that never changes (the user's Spotify id); and the
+hourly backstop, 24 a day per user, which could be every 2 hours (12) because 50 plays is ~2.5-3 hours
+of nonstop listening. Dropping the rescan's `/me` and halving the backstop frees ~220 a day at five
+users, more than the whole of policy (ii).
+
+Under the per-user reading every row fits, and the plan can keep today's policy.
+
+**The player bucket.** Today ~1,035-1,303 calls a day per user, two on every idle tick (§2.1). Asking
+`/me/player` alone (it reports the active device's track, and 204 when there is none; GOTCHAS
+"Player simulation") halves the idle tick, ~720 a day. Probing every 5 minutes once a user has been
+idle for 30 minutes brings it to ~9 h × 30 + 15 h × 12 ≈ 450 a day. Five users: ~2,250 a day against
+an unmeasured limit, about twice what one user spends today.
+
+**The library endpoints** (`/me/playlists`, `/me/tracks`, playlist items): ~130 a day per user
+today, ~650 at five. No 429 on them, ever, in the retained `api_log`.
+
+**The 30-second rate limit (per app).** The cron's player probe for five users in the same second is
+5-10 calls; spread across the minute (5.2) it is ~2-3 per 30 s. Open tabs are the risk: one visible
+tab polls now-playing every 6 s, 10-20 calls a minute. Five users with a visible tab each is 25-50
+calls per 30 s, above the 18 per 30 s this app has seen pass without a 429 (01f §1.4). 5.5 caps it.
+
 ### 5.2 Scheduling: a per-user due queue
+
+One state row per user (01a's `user_meta`, D9/D23, or a small table of its own):
+
+| field | what |
+|---|---|
+| `state` | `active` (playing, or played in the last 30 min), `idle`, `backoff`, `needs_reauth` (refresh token dead), `removed` (Spotify answers 403 "not registered") |
+| `next_probe_at`, `next_harvest_at`, `next_rescan_at` | when each piece is next due; jittered by a hash of the user id so users spread across the minute |
+| `last_probe_track`, `last_probe_progress`, `last_active_at`, `last_harvest_at` | what the change gate (5.3) compares against; replaces today's two global gate stamps |
+| `failures`, `last_error`, `last_ok_at` | the circuit breaker (5.4) and the per-user capture-health banner |
+| `lease_owner`, `lease_until` | a claim, so an overrunning tick and the next one never process the same user twice |
+
+The tick, once a minute from the pinger:
+
+1. Claim the due users in one statement: an owner-tokened compare-and-set on the lease, the pattern
+   `acquireLock` already uses (`db.ts:2541-2557`). This is also the tick's store health check: if it
+   fails, the tick ends at once instead of letting N users each wait out the store fetch's three
+   15-second attempts (`store-fetch.ts:28-29`).
+2. Process the claimed users concurrently (at most 5, which is all of them), each under its own 25 s
+   deadline, with `Promise.allSettled`: token, probe, harvest if the policy says so, record, then
+   write the user's next due times and release the lease.
+3. Run at most one user's due rescan, under its own deadline, outside the harvest deadlines (S13).
+   Rescans already commit per playlist and resume where they stopped.
+4. Answer 200 with a per-user outcome list. Answer non-200 only when step 1 failed, or when the
+   owner's own capture has stopped (the owner's pinger failure is Rem's only alarm today, M1 of the
+   Oct 3 review; other users' dead tokens show on their own banners instead).
+
+Cadence by state: `active` probes every 2 min; `idle` every 2 min for the first 30 min, then every
+5; `backoff` 2, 4, 8 … 60 min; `needs_reauth` and `removed` make no Spotify calls until the user signs
+in again. Rescans every 30 min while active, every 2-3 hours idle.
+
+One invocation for all users, not one per user: at N ≤ 5 it keeps invocations at 1,440 a day
+whatever N is, and the pinger needs no list of users (it holds one secret and nothing else).
+
 ### 5.3 Freshness from the player, completeness from batched harvests
+
+Completeness needs a harvest before 50 plays pile up; freshness, Rem's 2-minute choice (BRIDGE.md,
+"The cron sync pinger"), needs one shortly after each track ends. Today both come from harvesting on
+every playing tick, two harvests per landed play on Rem's day (264 playing harvests, 129 plays).
+Three policies:
+
+- **(i) Harvest on a track change.** Keep the last probe's track id and progress per user; harvest
+  when the track changed, progress went backwards on the same track (a repeat), or playback stopped
+  (the session tail). One harvest per play at most, and any changes a probe missed are inside the 50
+  returned. Freshness unchanged. Small change in the cron route and the gate (`harvest-gate.ts`).
+  Halves the bucket spend; not enough alone for five heavy users under the shared reading.
+- **(iii) Batch the harvest.** One harvest per 15 min of playback. Plays reach the store up to 15 min
+  late when the app is closed; an open app still shows them at once through its own provisional
+  plays (`src/lib/optimistic-play.ts`, `handoff.ts`, the instant handoff in `den-home.tsx`). Trivial to
+  build.
+- **(ii) Provisional plays on the server.** When the probe sees track A give way to track B, record a
+  provisional play of A ending at about B's start (now − B's progress); a harvest every 30 min of
+  playback replaces provisionals with Spotify's rows and drops the ones it does not confirm (Spotify
+  leaves very short plays out of recently-played). Closed-app freshness stays at ~2 min. The cost is
+  real: a provisional flag the skip chain, the all-time totals and both payloads must respect, and a
+  reconciliation the browser has but the server does not. A track shorter than the probe interval and
+  played in full between two probes gets no provisional row; the next harvest still records it.
+
+Recommendation: build (i) for everyone now; it costs nothing in freshness. If the quota proves
+shared, add (iii) for every user, the owner included, unless Rem wants closed-app freshness kept at
+2 minutes for everyone, which is what (ii) buys. The budget does not allow today's policy for the
+owner and a slower one for friends: the owner alone is ~150 a day after (i), a third of the planning
+budget. That is Rem's call (§7, decision 2).
+
 ### 5.4 Failure isolation
+
+One user's failure must cost that user's slot and nothing else:
+
+1. **Per-user deadline and `allSettled`** (5.2). A user whose Spotify calls hang uses its 25 s and
+   is retried at its next due time; today's single path has no per-user bound (Spotify fetch timeouts
+   are 10 s per attempt with up to three retries, `client.ts:8, 109, 121-124`).
+2. **Per-user tokens, refresh and lock** (S3; 01e). A refresh token that answers `invalid_grant`
+   deletes that user's token row (`clearTokensIfStale`, `auth.ts:170-181`, made per-user), sets
+   `needs_reauth`, and stops all calls for that user. A user who revokes the app in their Spotify
+   account settings arrives the same way.
+3. **De-allowlisted users.** "API requests with an access token associated to that user and app will
+   receive a 403 status code error" (quota modes). Today the client retries a 403 once
+   (`client.ts:20, 197-201`), the harvest throws, and the route answers 500 for the whole tick
+   (`route.ts:180-183`). Read the body ("not registered"), set `removed`, stop.
+4. **Owner's Premium lapses.** "If the owner's Premium subscription lapses, the app will stop
+   working" (migration guide). Every user then fails the same way at once; the tick must see "all
+   users, same error" and back off as one, not mark five users `removed`.
+5. **429s by kind** (S4). A rate-limit 429 is app-wide: one shared cooldown, as today. A
+   `QUOTA_EXCEEDED` 429 is a bucket event: a cooldown for that bucket (until the observed reset at
+   ~10:50 AM ET; the client's 30-minute persisted cap, `client.ts:27`, already limits re-probes to one
+   per half hour), while probes and rescans in other buckets carry on.
+6. **Spotify 5xx or timeouts for one user:** that user's `backoff`; the others are untouched.
+7. **The store down:** step 1 of the tick fails fast for everyone, which is correct, because nothing
+   can be recorded. Plays are not lost while it lasts for any user whose outage is shorter than 50
+   plays (5.7).
+8. **Idempotent writes only.** §2.8 shows re-sent INSERTs happen on this path. A claim is a
+   compare-and-set with an owner token, a counter is written as a value rather than incremented, and
+   every insert has a natural key (`plays` already does). Writes that must outlive the response go
+   through `after()`, as `/api/playlists/sync` does (`route.ts:14-16`), not a bare `void`.
+9. **A new user's first rescan** (possibly hundreds of playlist pages) never runs inside the harvest
+   deadline (S13, 5.6).
 ### 5.5 The open-app paths
 ### 5.6 The library rescan
 ### 5.7 The recorder and the loss floor
