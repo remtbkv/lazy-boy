@@ -580,6 +580,128 @@ the tick lock are compare-and-sets, counters are written as values, inserts have
 writes that outlive a response go through `after()` (01c §5.4 item 8; §2.8 there shows re-sent INSERTs
 happen).
 
+## 8. The write path: derived data updated by append
+
+Plays arrive at "now" in almost every case, so almost every write is an append. Each derived value
+below is updated from the harvest already in hand, and rebuilt from rows only inside a bounded scope
+when a non-append event (§8.3's table) touches it.
+
+### 8.1 `listened_ms` and the all-time accumulator
+
+Today the skip verdict is stored per play but listened time is re-derived by walking the gap chain:
+the all-time recompute walks every real play (~51,000 rows, up to 144 times a day) and the Home
+payload walks 16 days per landed harvest (§3, rows 1-2).
+
+- **Store `listened_ms` beside `skipped`.** Both come from the same `min(gap, duration)`
+  (`src/lib/skip-rule.ts:33-46`; `listenedMs` adds the 5-second floor). For a tail append (every new
+  play newer than everything stored) the predecessor is the newest stored play, one indexed read in
+  the harvest's read batch, so both values are computed in JS and written with the insert. That also
+  retires the post-insert `recomputeSkipFlags` round trips and the two partial-index updates per play.
+- **Out-of-order inserts** (the backstop replay, imports, a late offline play inside the 50-play
+  window) keep today's path: re-open the successor and rule it from its predecessor
+  (`db.ts:547-561`), now rewriting its `listened_ms` too, and set `alltime_dirty`.
+- **The accumulator** is `allTimeStats` (`skip-rule.ts:58-74`) applied one play at a time: for a
+  non-skipped real play, `plays += 1`, `durationMs += listened_ms`, `since` kept, and `uniqueTracks += 1`
+  when no earlier counted play of that track id exists (an `EXISTS` probe on `idx_plays_track`; real
+  plays average ~3.4 per track id [estimate: 14,511 / 4,279, 01a §6]). It equals the chain walk
+  because `listened_ms` is the value the walk computes.
+- **A duration change on a played track** (a library sync can rewrite `duration_ms`, the case
+  `sync/library.ts:94-101` guards today) recomputes that track's plays and their successors through
+  `idx_plays_track`, and marks their months dirty (§8.3).
+- **`alltime_dirty`** makes the next tick recompute the totals from the stored columns: one scan of
+  that user's plays (~22,000 rows for Rem), only on that event.
+- One-time cost at migration: a full chain walk to fill `listened_ms` (~22,000 rows read, ~14,500
+  written for Rem [estimate]), verified by `SUM(listened_ms)` equalling today's `alltime_stats` on
+  the same snapshot.
+
+### 8.2 The Home payload, patched in place
+
+Today it is rebuilt after every landed harvest: the 16-day strip read and the opening day's plays,
+~7,500 rows (`db.ts:1315-1343`; 01c §2.2). Instead, the harvest's read batch includes the `home` row,
+and JS applies the new plays: the day's entry in `daily` (plays, `durationMs` from `listened_ms`, the
+unique count from the opening day's rows), the opening day's song rows (`plays`, `lastPlayed`,
+`source`, or a new row from the fields in hand), and `allTime` from the accumulator. A new local day
+starts a fresh opening day from the plays in hand. Anything else falls back to today's rebuild: a play
+landing on a day other than the opening day (a late arrival, or the first harvest after midnight), an
+out-of-order insert, a time-zone change, a shape change. Cost: 1 row read instead of ~7,500, the same
+1 row written.
+
+### 8.3 History segments, appended on write
+
+Today the history payload is one body rebuilt by a full scan (~79,000 rows) on a fetch after the slow
+marker moved (`db.ts:1686-1730`); at 1.79 MB raw it is 86.6% of the Data Cache's 2 MiB item limit
+and crosses it in late December (01d §3.2). Instead, 01d's monthly segments (O3), materialized:
+
+- One `payloads` row per UTC month (`hist`, `2026-10`) plus `hist`/`catalog` for the 7,529 backfill
+  rows. Each body is self-contained, in today's tuple format with one addition: a play becomes
+  `[trackIdx, minute, sourceIdx, listenedS]` (shape `v3`), so the browser can build any day's totals
+  exactly (§9). Cost [estimate]: ~4 bytes per play raw, ~+5% on Rem's body.
+- **Append.** The harvest's read batch includes the current month's row; JS merges the new
+  non-skipped plays with the function the browser already uses for the same job
+  (`patchHistoryPayload`, `src/lib/history-patch.ts:34-102`, known-answer tested), and the write batch
+  stores it with a compare-and-set on `version`. The first play of a month creates that month's row.
+- **Non-append events mark months dirty** (`dirty = 1`, `version + 1`); the daily route, or the next
+  fetch, rebuilds just those months from an index range (~3 rows per play, at most ~10,000 for one of
+  Rem's months, 01d O3):
+
+| event | how its months are found |
+|---|---|
+| out-of-order insert, and the successor it re-opens | the two `played_at` values |
+| `ctx_orphan` flips after a playlist's membership moved | `UPDATE … RETURNING played_at` on the scoped orphan pass |
+| a context name resolves or changes | `SELECT DISTINCT substr(played_at, 1, 7) … WHERE context_uri = ?` on `idx_plays_context` |
+| a played track's name, artist, art, album or duration changes | the same on `idx_plays_track` |
+| backstop replay, history import, catalog backfill | the scripts mark the months they wrote, and `catalog` |
+
+- **Safety net.** The nightly backup rebuilds every segment from its dump of the user's database and
+  compares; a mismatch marks the month dirty and records which month and field differed, so a missed
+  event path gets found, not only healed. Each event path also gets 01d's known-answer test: write to
+  an old month, and that month's version moves and no other does.
+- Sizes [measured, 01d O3]: Rem's months are 220-303 KB raw (81-113 KB gzipped); the catalog 1.05 MB
+  raw (358 KB gzipped). No normal month approaches 2 MiB, and segments no longer use the Data Cache
+  at all (§9.2).
+- Cost: one row read and one written per landed harvest, the body at most ~300 KB raw at a month's
+  end; Turso counts rows, not bytes.
+
+### 8.4 The library body, patched per changed playlist
+
+Today the library payload is rebuilt from every membership (~15,000 rows) on a fetch after
+`library_seq` moved, and every list rewrite moves it, including rewrites that change no membership
+(01d §8); the unique-song count re-reads every member (~39,000 rows) on any library change.
+Instead, `payloads` row `lib` is built once at migration and then patched where `storePlaylistTracks`
+already computes each playlist's diff (`diffPositions`): drop the playlist from identities that left,
+add it to identities that joined, add new identities from the fields in hand, remove identities in no
+playlist and not liked, and keep the unique-song count (identities in at least one playlist) in the
+same pass. A rename patches one string; artwork-only or count-only changes do not touch it; a Liked
+change patches a per-identity flag (shape `v2`). `library_seq` moves only when the body did. Cost: 1
+row read and 1 written per changed playlist [estimate], instead of ~15,000 + ~39,000. The nightly
+dump check covers drift, as for segments.
+
+### 8.5 The smaller terms
+
+- **Daily contexts pass**: a scan of the `contexts` table for negative rows due a recheck (114 rows
+  for Rem) instead of a full `plays` scan. Never-seen contexts already come in through the per-batch
+  check (`unseenContexts`, `db.ts:619-638`); the import scripts register their own contexts instead of
+  relying on the daily scan to find them.
+- **Orphan verdict for a new play**: computed in the read batch with the song's identity bound as
+  parameters, then written with the insert. The stored predicate (`db.ts:700-709`) looks the identity
+  up in `tracks`, which has no row yet for a never-seen track in the same batch. Same ~130 rows.
+- **The write marker**: one bump per landed batch, where today a landed tick bumps two or three times
+  (the insert batch, the orphan flags, the skip verdicts: `db.ts:522, 749, 819`).
+
+### 8.6 One landed harvest, end to end
+
+Two round trips on the user's database (a read batch and a write batch) and one write on the app
+database, against a p50 of 30 store round trips per landed tick today [measured, 01c §2.1].
+
+| | today, per landed play [measured, 01c §2.2] | this design [estimate] |
+|---|---|---|
+| rows read | ~7,700, or ~59,000 when the all-time gate opens | ~150: the orphan predicate ~130, the newest play, new track ids (~3 each), new contexts, the uniqueness probe, three payload and meta rows |
+| rows written | 15-20 | ~10: the play with its index entries (~6), the `alltime`, `home` and segment rows, the marker |
+| round trips | ~30 | 3 |
+
+The cron harvest and an open tab's `/api/sync` serialize on the per-user harvest lock (§7.7); a
+payload write that loses its compare-and-set anyway marks the row dirty for the daily rebuild.
+
 ## 9. Search: payloads, caching, and the budget for every step
 
 ## 10. The store budget per user per day, and the plan that holds at 5, 25 and 250
