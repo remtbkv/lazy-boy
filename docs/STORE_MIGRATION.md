@@ -228,6 +228,10 @@ in `~/.claude/broke/scratch/lazyboy_store/markers/`: `<lane>.done` means its pas
 | 1910 L10 | scope the orphan-flag pass to changed playlists, with the identity-first predicate (§3) (R4 headroom) | high | L3 | --stat-first |
 | 1911 L11 | adversarial review of L10, deploy | xhigh | L10 | --stat-first |
 
+Rem, Oct 15, 6:21 PM (docs/multi-user/RULINGS.md): through Friday Oct 16, lanes 1901-1906 and 1910-1911 run
+alongside STAT. Their briefs call gate.py without `--stat-first`, and 1901 no longer waits on `stat_idle`; STAT lanes
+still start first, by name order. 1908 and 1909 keep `--stat-first`.
+
 A LaunchAgent on the Mac, `com.remtbkv.lazyboy-statwatch`, runs `gate.py --mark-idle` every 10
 minutes and writes `markers/stat_idle` the first time STAT has nothing running, waiting or due, so
 the chain's first lane waits on a file instead of being spawned and deferred all evening; lane 1904

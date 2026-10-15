@@ -68,3 +68,22 @@ ruling here overrides the plan's recommendation where they differ.
   (with Spotify's required end-user terms) and a consent line beside the login page's connect button. Short, but
   true to what the code does: it promises nothing the app does not have.
 - **Done (Oct 15):** /privacy, /terms and the consent line on /login exist, from commit 130cb13 (lane 2011).
+
+## Oct 15, 2026, 6:21 PM
+
+Rem: "I approve of all the previous stuff you told me for the recommendations. Just keep things going." That
+approves, as recommended to him on Oct 15:
+
+- **Decisions 2-7, 11, 13-16, 23-24, 26-27 and 29-30, as PLAN.md section 18 recommends them,** with decision 16
+  as a 48-hour canary (FASTPATH.md). Decisions 2-3's eight STORE_MIGRATION edits landed in d3ac1f7.
+- **The fast path (FASTPATH.md section 4.1): the first friend connects Tuesday Oct 20 in the evening,** or Wednesday
+  if tonight's cutover misses its slot.
+- **Store lanes alongside STAT through Friday Oct 16.** Lanes 1901-1906 and 1910-1911 run without `--stat-first`;
+  STAT lanes still start first (STORE_MIGRATION section 7).
+- **A standing go-ahead for phase deploys** whose tests, build and adversarial review are green. Each deploy is
+  reported to Rem when it lands.
+- **Agents stay off friends' rows.** Spotify's Developer Policy: "Do not … ingest Spotify Content into a machine
+  learning or AI model." Agent sessions debug on Rem's own rows, and /privacy says so. The roadmap's AI playlists
+  wait for a closer reading of that clause before anyone builds them.
+- **Backups keep only Rem's rows** (.claude/QUEUE.md, after store phase D), because /privacy promises a departed
+  friend's data is gone within 5 days, backups included.
