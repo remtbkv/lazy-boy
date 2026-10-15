@@ -611,8 +611,77 @@ What does need to change, before anyone else's data arrives rather than before t
 ## 5. Costs at 5, 25 and 250 users
 
 ### 5.1 The per-user assumptions
+
+Two profiles. Only the first is measured; the second is my assumption, there to show how much the
+answer depends on who the users are.
+
+| per user per month | Rem-like (measured, today's code) | light friend (assumed: 40 plays a day, 6 months of history ≈ 7,200 plays, ~10 payload rebuilds a day) |
+|---|---|---|
+| Turso rows read | 130-280M (4.3) | ~8-10M: 2.3 × 7,200 × 10 rebuilds ≈ 0.17M a day, plus ~159 rows per idle cron tick × 720 ticks ≈ 0.11M a day (tick cost from BRIDGE.md, "Posture change": "took the sync tick from ~14.25K rows to 159 measured") |
+| Turso rows written (core) | ~130K | ~40K (assumed in proportion to plays) |
+| storage | ~12 MB after 5 months | ~4 MB |
+| Vercel invocations | ~6,000 browsing + 21,600 cron if ticks are per user | fewer browsing; the same 21,600 cron |
+| Vercel Active CPU | 0.5-2.4 CPU-hours (estimate, 2.3) | unknown, smaller |
+| Vercel provisioned memory | ~19.4 GB-hours (linear upper bound; fluid compute shares instances, so real growth is lower) | lower |
+| Spotify calls | ~2,116 a day + 96 from the recorder | ~1,734 a day: the player check runs for every user every tick, listening or not |
+
+"Users" below are Rem-like unless stated, which makes the totals an upper bound for today's code. The
+design lanes will change the dominant term (the history payload's rebuild), so these are prices for
+the system as it stands, not for the one they will propose.
+
 ### 5.2 The options, priced
+
+**A. Today's stack** (Vercel Hobby + sqld on the Zenbook through the Funnel): $0 a month. Capacity is
+set by Spotify (five accounts), the Hobby allowances (Active CPU first), and the Zenbook's uptime for
+everyone. The laptop's power is not metered and the box runs for DiveLoop regardless; the move's
+rejected alternatives price a small always-on server at ~$60-125 a year (STORE_MIGRATION §4: "EC2
+~$125/yr, Lightsail ~$60/yr").
+
+**B. After STORE_MIGRATION, free tiers** (Hobby + Turso Free + the Zenbook for the pinger, recorder,
+telemetry and backups): $0. Holds Rem and a few light friends; one more Rem-like user risks the
+org-wide block.
+
+**C. B with Turso Developer and overages on**: $4.99 a month billed yearly, $5.99 month-to-month, then
+$1 per billion reads and $1 per million writes past 2.5B and 25M.
+
+**D. Vercel Pro + Turso Developer or Scaler**: $20 a month for Pro, which includes $20 of usage
+credit, then on-demand rates (2.2); per-minute crons retire the Zenbook pinger.
+
+**E. Each person runs their own copy** (federated): per person, their own Spotify developer app (their
+own Premium required, 1.2), their own Vercel Hobby team, Turso Free and an external pinger. $0 hosting
+each, no multi-user code at all (each copy is today's single-user app), nothing shared between
+people, and a setup of roughly an hour per person plus Rem's support. It is the only option that goes
+past five people on Spotify's terms.
+
+Arithmetic for D at the two larger sizes, all Rem-like users, using 2.2's rates and 5.1's per-user
+figures:
+
+- 25 users. Invocations 25 × 6,000 + 21,600 (ticks batched) ≈ 172K, or 690K if per user: under
+  $0.42. Active CPU 12.5-60 h: $1.60-7.68. Provisioned memory 485 GB-h: $5.14. Total ~$7-13, inside
+  Pro's $20 credit, so **$20**. Turso reads 3.25-7B on Developer: 0.75-4.5B over, **$5.74-10.49** at
+  the monthly price.
+- 250 users. Invocations ~1.52M batched (6.9M per user): $0.91-4.14. Active CPU 125-600 h: $16-77.
+  Provisioned memory 4,850 GB-h: $51. Total **~$68-132** (the $20 fee is absorbed by the credit). Turso
+  reads 32.5-70B: Developer would be $35-73 plus write overage (32.5M core writes against 25M,
+  $7.50), Scaler includes it at **$24.92-29**.
+
 ### 5.3 The table
+
+Monthly, all users Rem-like (upper bound), today's code:
+
+| users | Spotify | Vercel | Turso | Zenbook | total |
+|---|---|---|---|---|---|
+| **5** | $0; the cap for one app | Hobby $0 if Active CPU fits (2.5-12 CPU-h vs 4; unmeasured), else Pro $20 | Free is over (0.65-1.4B reads) → Developer $4.99-5.99 | $0: pinger, recorder, backups, telemetry | **$5-26** |
+| 5 (Rem + 4 light) | $0 | Hobby likely, same CPU caveat | Free holds: ~170-320M reads, up to 64% of the plan on Rem's heavy month | $0 | **$0-20** |
+| **25** | **not possible on one app**; option E only | Pro $20 (usage inside the credit) | Developer $5.74-10.49 | $0, or retired by Pro's cron | $26-31 if Spotify allowed it |
+| **250** | **not possible on one app**; option E only | Pro ~$68-132 | Scaler $24.92-29 | – | ~$93-161 if Spotify allowed it |
+| any N, option E | each person's own app | $0 each (Hobby) | $0 each (Free) | none | **$0**, plus each person's Premium and setup time |
+
+Two notes on reading it. Every dollar is Rem's: lazyboy controls playback, which makes it a Streaming
+SDA, and the Developer Policy permits no commercial use of those (1.5), so friends cannot be charged.
+And the 25 and 250 rows price infrastructure that Spotify's policy does not allow this app to serve;
+they are there because the question asked for them, and they show that money is not what limits this
+app.
 
 ## 6. Decisions that are Rem's
 
