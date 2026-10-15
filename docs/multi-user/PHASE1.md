@@ -97,7 +97,45 @@ generate one). Nothing else changes for a single user.
 
 ## 3. The tests, and what each proves
 
-pending
+All in the simulated environment (`npm test`): local SQLite files and scripted fetches, no store,
+no Spotify, no Vercel. 61 tests in `tests/isolation/`, plus three changed elsewhere. The baseline
+on `main` at `6577f4b` already fails two tests, the date time-bombs in `store-plays.test.ts` and
+`sync-history.test.ts` (QUEUE.md T1, assigned to STORE_MIGRATION lane 1901), and because vitest
+fails first, `npm test`'s `&&` chain never reaches its three node suites. Each commit on this
+branch was gated on: `tsc --noEmit` clean, lint clean, vitest failing on exactly those two and no
+others, and the three node suites run separately and passing. `npm run build` passes with no store
+variables set.
+
+**Red first.** Tests of behaviour that already existed were run against `main`'s code before the
+fix and failed:
+
+| test | failed on main because |
+|---|---|
+| `process-state`: B's library read within 60 s of A's | B got `A-only list`: the process-wide playlist cache |
+| `process-state`: a task is visible to its owner only | no owner existed (`getTaskFor` absent) |
+| `process-state`: `/api/tasks/[id]` as B with A's task id | 200 with A's result, where 404 is required |
+| `static` S4 | `playlistsCache` and `currentSyncId`, module state keyed by nobody |
+| `static` S5 | the sign-in `/v1/me` fetch had no `cache: "no-store"` |
+
+Tests of new modules were red by absence first. What proves those checks have teeth is the
+planted-bug self-test, which stays in the suite for good (PLAN.md §6.4, completeness M2): each
+check runs against a deliberately broken implementation and must fail there, and against the real
+one and must pass.
+
+| file | what it proves |
+|---|---|
+| `identity.test.ts` | uids are uid-shaped and do not repeat (2,000 draws); `mintUid` refuses anything else. `checkIdentity`: allowed for a live cookie; refused with no uid or a malformed one (with zero lookups), an unknown uid, a stale epoch, `auth_time` over 30 days old, missing or in the future, every status but `active` and `needs_reconnect`, and a non-admin under `SIGNUPS=owner`; unavailable when the lookup throws. The callbacks' decisions: sign-in stamps the owner's uid, epoch 0 and `auth_time`; refused signs out (null); allowed and unavailable keep the cookie; only allowed puts a uid on the session; `gateFromSession` mints only from a uid-shaped session |
+| `token-core.test.ts` | two users' expired tokens refreshed at once in one process each end with their own token after one token call each; four concurrent calls for one user share one refresh; A's lock held elsewhere does not delay B (under 1 s); `invalid_grant` for A clears A's row and writes nothing of B's; no row means no Spotify call; a fresh token returns with its owner and no call; a token object naming another user is refused |
+| `token-store-owner.test.ts` | over the real `meta` row: the owner's uid reads it; another uid reads null and cannot write, clear or lock it; no owner configured means nobody has a row; the owner's lock is today's `spotify_refresh` lease |
+| `process-state.test.ts` | the red rows above, now green; `requireRouteUser` answers 401 with the signed-out marker when refused, 503 without it when unavailable, and the gate otherwise |
+| `user-cache.test.ts` | over a cache stub keyed the way Next 16.2.6 keys: with equal version counters A and B each get their own value and each is cached; uid and epoch are in every key; a forged entry under B's key stamped with A is refused, B served uncached, one `cache-stamp` event recorded for B; two wrappers cannot share a name; two wrappers whose callbacks differ only in their closures are told apart |
+| `planted-bugs.test.ts` | the equal-counter check fails over an `unstable_cache` keyed without the user (uid in a closure) and passes over `userCache`; the forged-entry check fails over the pass-through stub and passes over the faithful one; the concurrent-refresh check fails over a core whose in-flight promise is shared by everyone (today's `auth.ts` shape) and passes over the real core |
+| `user-storage.test.ts` | per-user names differ between users; sign-out clears every user's entries, prefixed or legacy, and keeps the device-level keys; only the app's signed-out 401 clears, never a 503, a 500 or a plain 401; a body naming another user is not used |
+| `health.test.ts` | each condition turns the verdict red on its own and unmeasurable ones are listed, never read as healthy; the route refuses no secret, a wrong one and an empty bearer when a secret is unset, accepts either pinger's; red with no token row, green with a token and a recent harvest; the reply carries only `ok`, `reasons`, `unchecked` |
+| `static.test.ts` | S1 `unstable_cache` only in `user-cache.ts` (db.ts pending); S2 no `as Uid` outside `identity.ts`, `mintUid` imported only by the gate and `auth.ts`; S4 every mutated module-scope binding in `src/` on a reviewed list saying how it is keyed (db.ts's four pending); S5 every direct Spotify fetch `no-store`; S6 every browser storage name built by `userStorageName`, device-level, or pending (12 pending). A pending entry that disappears fails the check, so the lists shrink only on purpose |
+| `entry-points.test.ts` | T3's census: every page, layout, route and `"use server"` module under `src/app` is gated (and its source calls `require*User`), exempt by name, or pending with a reason; a new entry point with no entry fails |
+| `now-playing-route.test.ts` (changed) | its session mock carries a uid; new: an unavailable identity check is a 503 |
+| `spotify-userinfo.test.ts` (changed) | the profile fetch's pinned arguments now include `cache: "no-store"` |
 
 ## 4. Left for Rem's decisions, or for the phase's turn
 
