@@ -224,9 +224,12 @@ All check `auth()` and 401 on no session, except `cron/sync` (cron secret, no se
 ## Player simulation
 
 - **Now-playing bar** (`components/now-playing.tsx`, mounted in the `(app)` layout): the
-  shared `NowPlayingProvider` (`now-playing-context.tsx`) polls `/api/now-playing` every 6s
-  **while the tab is visible**; the bar interpolates the progress locally each second between
-  polls. Renders only when there's genuine active playback. No active device → nothing shown.
+  shared `NowPlayingProvider` (`now-playing-context.tsx`) polls `/api/now-playing` from one
+  leader tab (a visible one whenever one exists), on the schedule in `lib/now-playing-poll.ts`:
+  every 6s while playing and visible, ~300 ms after the track's predicted end with a short
+  burst if Spotify has not moved yet, every 15s paused or idle, boundaries only while hidden,
+  and Retry-After on a 429 (docs/NOW_PLAYING_LATENCY.md). The bar interpolates the progress
+  locally each second between polls. Renders only when there's genuine active playback. No active device → nothing shown.
 - **Track right-click menu** (`components/track-context-menu.tsx`): Add to queue / Save to
   Liked / Open in Spotify, via `addToQueueAction` / `saveToLikedAction`.
 

@@ -14,7 +14,7 @@ export function spotifyClient(token: TokenSource, patient = false, source = "unt
   return new Service(token, patient, source);
 }
 
-export { SpotifyError } from "./client";
+export { SpotifyError, spotifyCooldownMs } from "./client";
 export type { TokenSource } from "./client";
 export type { Track, Playlist, SpotifyUser } from "./types";
 export type { CompareEntry } from "./service";

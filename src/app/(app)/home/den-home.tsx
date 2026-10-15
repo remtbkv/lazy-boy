@@ -876,6 +876,11 @@ export function DenHome({
      *  reopened tab, a device left loaded) carries progress it earned long ago — crediting
      *  it on the next song change is the paused-seed phantom. */
     sawPlaying: boolean;
+    /** When the last PLAYING observation predicted the song would end (receipt time +
+     *  duration − progress). The handoff beacon's value is finish() minus this: for a song
+     *  that ran out, how long the change took to reach this list (docs/NOW_PLAYING_LATENCY.md);
+     *  negative for a skip. */
+    endAt: number | null;
   } | null>(null);
   useEffect(() => {
     const prev = lastPlayingRef.current;
@@ -885,12 +890,14 @@ export function DenHome({
       // the store alone — the 2026-08-19 phantom took store archaeology to rule paths out.
       // One event per song change while the tab is open; meta carries the inputs the
       // guards judged.
+      const vsEnd = p.endAt === null ? undefined : Date.now() - p.endAt;
       const verdict = (v: string) =>
         recordAppEvent(
           "handoff",
           `${v}|${p.artist} — ${p.title}|gap=${Math.round((Date.now() - p.seenAt) / 1000)}s|prog=${
             p.durationMs > 0 ? `${Math.round((p.maxProgress / p.durationMs) * 100)}%` : "?"
-          }|from=${p.source ?? ""}`,
+          }|end=${vsEnd === undefined ? "?" : `${(vsEnd / 1000).toFixed(1)}s`}|from=${p.source ?? ""}`,
+          vsEnd,
         );
       // The guards live in src/lib/handoff.ts (pure, known-answer tested — they killed
       // three separate phantom-play bugs and must never regress silently again).
@@ -960,6 +967,7 @@ export function DenHome({
           prev.maxProgress = Math.max(prev.maxProgress, playing.progressMs);
           prev.seenAt = Date.now();
           prev.sawPlaying = true;
+          prev.endAt = playing.durationMs > 0 ? Date.now() + playing.durationMs - playing.progressMs : null;
         }
       } else {
         if (prev) finish(prev);
@@ -976,6 +984,10 @@ export function DenHome({
           maxProgress: playing.isPlaying ? playing.progressMs : 0,
           seenAt: Date.now(),
           sawPlaying: !!playing.isPlaying,
+          endAt:
+            playing.isPlaying && playing.durationMs > 0
+              ? Date.now() + playing.durationMs - playing.progressMs
+              : null,
         };
       }
     } else if (prev) {

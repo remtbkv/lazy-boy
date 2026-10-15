@@ -1,5 +1,5 @@
 import { auth, spotifyAccessToken } from "@/lib/auth";
-import { spotifyClient } from "@/lib/spotify";
+import { SpotifyError, spotifyClient, spotifyCooldownMs } from "@/lib/spotify";
 import { getContextName, recordContexts } from "@/lib/db";
 
 // Live "what's playing right now". Returns { playing: null } when nothing is
@@ -59,7 +59,16 @@ export async function GET() {
     // Spread first, then overwrite the raw {type,uri} context with the resolved
     // {name,type} one (later keys win).
     return reply({ ...playing, context });
-  } catch {
+  } catch (e) {
+    // Rate-limited: say so, with how long to wait, so the poller backs off for that long
+    // instead of asking again on its steady cadence (src/lib/now-playing-poll.ts).
+    if (e instanceof SpotifyError && e.status === 429) {
+      const retryAfterS = Math.max(1, Math.ceil(spotifyCooldownMs() / 1000));
+      return Response.json(
+        { error: "rate-limited" },
+        { status: 429, headers: { "Retry-After": String(retryAfterS) } },
+      );
+    }
     // A failure (Spotify 429/timeout, a store blip resolving the context) is NOT "nothing
     // playing": a 200 null here made Home finish() the current song and mint a provisional
     // play mid-song. Non-200 tells the poll to keep its last state (pollOnce skips !res.ok).

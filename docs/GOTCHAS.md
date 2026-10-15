@@ -450,6 +450,14 @@ the ones quoted in the commit history.
   `/me/player` still reports the active device's track in that window and itself 204s when
   there's truly no active device, so the fallback stays live. The bar (`now-playing.tsx`,
   mounted in the `(app)` layout) renders only when a track comes back.
+- **A faster steady poll is not how a song change shows fast.** A natural end is predictable
+  (duration − progress), so the leader's poll is timed to it and bursts until Spotify moves
+  (`lib/now-playing-poll.ts`); only a manual skip waits on the 6 s cadence. Every steady poll
+  is one or two Spotify player calls and a Vercel invocation (Hobby's Active CPU is the
+  team-wide limit), so lowering `STEADY_MS` multiplies all three — the costed options are in
+  docs/NOW_PLAYING_LATENCY.md. Any server-side memo of `/api/now-playing` (the multi-user
+  plan's ~5 s one) must expire at the memoized track's end, or it answers the boundary poll
+  with the old song.
 - **Add to queue** needs an active device; Spotify 404s otherwise → the action returns a
   friendly "no active device" message. Same dev-mode caveats don't apply (it's your own player).
 
@@ -590,8 +598,8 @@ makes. But **Vercel skew protection pins a client's requests to the deployment t
 it**, which is what kept the burner tab on pre-fix server actions for a day: a pinned tab's
 poll answers with the pinned tab's *own* id, so its "match" means nothing and that beacon
 alone would never fire. The escape is the cookie that does the pinning. At most every 5 min,
-whichever tab is polling (the leader, or a starved follower on its rescue poll — no second
-timer) also fetches `/api/build` with `credentials: "omit"`; no cookie goes out, so the request lands on the *current* deployment
+whichever tab is polling (the leader — a starved visible follower takes the lead — or a
+follower's one-off refresh; no second timer) also fetches `/api/build` with `credentials: "omit"`; no cookie goes out, so the request lands on the *current* deployment
 and its answer can be believed. Hence the asymmetry in the decision module: an authoritative
 match clears the streak, a poll match clears only a streak no probe has contradicted, and a
 probe saying "stale" while the poll says "current" is not a tie — that divergence *is* the

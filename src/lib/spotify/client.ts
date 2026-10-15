@@ -47,6 +47,12 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // of all of them retrying into the throttle at once.
 let cooldownUntil = 0;
 
+/** How long this instance's shared 429 cooldown has left (0 = none). /api/now-playing turns it
+ *  into the Retry-After its poller backs off by. */
+export function spotifyCooldownMs(): number {
+  return Math.max(0, cooldownUntil - Date.now());
+}
+
 // A bearer token, or a getter that returns a currently-valid one. Interactive callers
 // pass the request's token (fresh for the request's lifetime); long-running background
 // work passes a getter so a token that expires mid-run is refreshed, not used dead.

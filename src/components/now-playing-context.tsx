@@ -18,6 +18,12 @@ import {
   type SkewSource,
   type SkewStreak,
 } from "@/lib/build-skew";
+import {
+  leaderElection,
+  PollLoop,
+  STEADY_MS,
+  type PollOutcome,
+} from "@/lib/now-playing-poll";
 
 export type NowPlayingTrack = {
   id: string;
@@ -73,15 +79,10 @@ const LEADER_LOCK = "lb-nowplaying-leader";
 // stamped — the throttle that keeps a broken beacon from reload-looping.
 const BUILD_ID = process.env.NEXT_PUBLIC_BUILD_ID;
 const RELOAD_STAMP_KEY = "lb-build-reload-at";
-const POLL_MS = 6000;
-// A track boundary is predictable (progress + duration are both known), so instead of
-// waiting up to POLL_MS for the steady interval to notice a song change, the poller that
-// owns real network calls (leader, or the sole tab in the no-Web-Locks fallback) schedules
-// ONE extra poll timed to land just after the current track is expected to end. This is
-// additive, not a faster steady rate: at most one extra Spotify call per track, and it's
-// rescheduled (not stacked) on every poll.
-const END_OF_TRACK_BUFFER_MS = 1000;
-const MAX_SCHEDULE_MS = 20 * 60 * 1000; // sanity cap — no real track runs this long
+// The follower rescue's clock. The leader's own schedule — steady while playing, the poll timed
+// to a track's end and its burst, the paused/idle and 429 back-offs — is PollLoop's
+// (src/lib/now-playing-poll.ts; docs/NOW_PLAYING_LATENCY.md).
+const POLL_MS = STEADY_MS;
 
 // When the player first KNOWS what to show on this page load — the first live answer about
 // what's playing, whether that is a track or nothing. Idle counts: "there is nothing playing"
@@ -125,11 +126,10 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     playingRef.current = playing; // keep the ref current for toggle() without reading state in render
   }, [playing]);
 
-  // The pending end-of-track timer, and a ref-indirection to pollOnce so scheduling it
-  // doesn't create a circular useCallback dependency (pollOnce schedules it; it calls
-  // pollOnce back).
-  const endTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pollOnceRef = useRef<() => Promise<void>>(async () => {});
+  // The leader's poll loop (null while this tab follows), and a ref-indirection to pollOnce for
+  // the BroadcastChannel handlers and the rescue timer, which outlive any one pollOnce.
+  const loopRef = useRef<PollLoop | null>(null);
+  const pollOnceRef = useRef<() => Promise<PollOutcome>>(async () => ({ kind: "skipped", retryInMs: 0 }));
 
   // Monotonic guard for our own fetches: a slow older response must not overwrite a newer one.
   const refreshSeq = useRef(0);
@@ -258,38 +258,26 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     if (aliveRef.current) setPlaying(p);
   }, []);
 
-  // Arm (or re-arm) the one-shot end-of-track poll from a freshly polled state. Only the
-  // tab actually doing real network calls (leader, or the fallback path's sole tab — both
-  // mark themselves via isLeaderRef) should call this; every poll result rearms it, so it
-  // always reflects the current track rather than stacking timers across song changes.
-  const scheduleEndOfTrackPoll = useCallback((p: Playing) => {
-    if (endTimerRef.current) {
-      clearTimeout(endTimerRef.current);
-      endTimerRef.current = null;
+  // One network poll (the leader's PollLoop, a follower's rescue, ad-hoc refresh()). On
+  // success, updates locally AND broadcasts so every other tab updates without its own fetch.
+  // The outcome is what the loop schedules the next poll from.
+  const pollOnce = useCallback(async (): Promise<PollOutcome> => {
+    if (Date.now() < suppressUntil.current) {
+      return { kind: "skipped", retryInMs: suppressUntil.current - Date.now() + 50 };
     }
-    if (!p?.isPlaying || p.durationMs <= 0) return;
-    const remaining = p.durationMs - p.progressMs;
-    if (remaining <= 0) return;
-    const delay = Math.min(remaining + END_OF_TRACK_BUFFER_MS, MAX_SCHEDULE_MS);
-    endTimerRef.current = setTimeout(() => {
-      endTimerRef.current = null;
-      void pollOnceRef.current();
-    }, delay);
-  }, []);
-
-  // One network poll (used by the leader's interval, its end-of-track timer, visibility/focus
-  // re-polls, and ad-hoc refresh()). On success, updates locally AND broadcasts so every other
-  // tab updates without its own fetch.
-  const pollOnce = useCallback(async () => {
-    if (Date.now() < suppressUntil.current) return;
-    // Whichever tab is polling probes too — the leader, or a starved follower on its rescue
-    // poll. A leader-only probe left a visible stale follower of a hidden idle leader with no
+    // Whichever tab is polling probes too — the leader, or a follower's one-off refresh (a
+    // starved follower now takes the lead instead). A leader-only probe left a visible stale follower of a hidden idle leader with no
     // probe at all (review K1). Other tabs get the reading off this tab's broadcast.
     if (probeDue(Date.now(), lastProbeAtRef.current)) void probeCurrentBuild();
     const seq = ++refreshSeq.current;
     try {
       const res = await fetch("/api/now-playing", { cache: "no-store" });
-      if (!res.ok) return;
+      if (!res.ok) {
+        const retryAfterS = res.status === 429 ? Number(res.headers.get("Retry-After")) : NaN;
+        return Number.isFinite(retryAfterS) && retryAfterS > 0
+          ? { kind: "error", retryAfterMs: retryAfterS * 1000 }
+          : { kind: "error" };
+      }
       const data = (await res.json()) as { playing: Playing; build?: string };
       // The answer is here. Marked before the ordering/suppression guards below for the same
       // reason checkSkew is: those decide whether to DISPLAY this reply, not whether it landed.
@@ -309,26 +297,25 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
           authBuild: authBuildRef.current,
           authAt: authBuildAtRef.current,
         });
-        // Only the owner of real polling schedules the next boundary poll — otherwise every
-        // open tab would independently hit Spotify at track boundaries, multiplying the rate
-        // the leader election exists to prevent.
-        if (isLeaderRef.current) scheduleEndOfTrackPoll(data.playing);
       }
+      return { kind: "ok", playing: data.playing };
     } catch {
       /* transient — keep the last known state rather than flicker */
+      return { kind: "error" };
     }
-  }, [broadcast, scheduleEndOfTrackPoll, checkSkew, probeCurrentBuild]);
+  }, [broadcast, checkSkew, probeCurrentBuild]);
 
-  // Keep the ref-indirection current so scheduleEndOfTrackPoll's timeout always calls the
-  // latest pollOnce without depending on it directly (see the comment above it).
   useEffect(() => {
     pollOnceRef.current = pollOnce;
   }, [pollOnce]);
 
-  // Ad-hoc refresh (after next/prev, or when an optimistic action fails). Any tab may run a
-  // one-off fetch — it's user-initiated and rare, so it doesn't reintroduce the poll storm.
+  // Ad-hoc refresh (after next/prev, or when an optimistic action fails). The leader routes it
+  // through its loop (one request in flight; an answer already on its way may predate the
+  // action, so the loop asks once more after it). A follower runs a one-off fetch — it's
+  // user-initiated and rare, so it doesn't reintroduce the poll storm.
   const refresh = useCallback(() => {
-    void pollOnce();
+    if (loopRef.current?.running) loopRef.current.kick();
+    else void pollOnce();
   }, [pollOnce]);
 
   useEffect(() => {
@@ -338,33 +325,34 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       typeof navigator !== "undefined" &&
       "locks" in navigator;
 
+    const isVisible = () => document.visibilityState === "visible";
+    const loop = new PollLoop(() => pollOnceRef.current(), isVisible);
+    loopRef.current = loop;
+    let election: ReturnType<typeof leaderElection> | null = null;
+
     // Coming back to the tab is exactly when a stale display is most visible to the user, so
-    // re-poll immediately on return instead of waiting out the rest of the steady interval.
-    // Gated the same way as the end-of-track timer: only the tab actually doing real network
-    // calls acts on it.
+    // re-poll immediately on return instead of waiting out the rest of the cadence. A follower
+    // coming into view takes the lead first (a hidden leader only polls track boundaries).
     const onVisible = () => {
-      if (document.visibilityState === "visible" && isLeaderRef.current) void pollOnce();
+      if (!isVisible()) return;
+      if (isLeaderRef.current) loop.wake();
+      else election?.claim();
     };
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("focus", onVisible);
 
     // Fallback for browsers without Web Locks / BroadcastChannel: poll per tab (old behavior).
-    // This tab is its own de-facto leader — there's no election to lose — so it also owns the
-    // end-of-track and visibility polls.
+    // This tab is its own de-facto leader — there's no election to lose.
     if (!canCoordinate) {
       isLeaderRef.current = true;
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      void pollOnce();
-      const id = setInterval(() => {
-        if (document.visibilityState === "visible") void pollOnce();
-      }, POLL_MS);
+      loop.start();
       return () => {
         aliveRef.current = false;
         isLeaderRef.current = false;
-        if (endTimerRef.current) clearTimeout(endTimerRef.current);
+        loop.stop();
+        loopRef.current = null;
         document.removeEventListener("visibilitychange", onVisible);
         window.removeEventListener("focus", onVisible);
-        clearInterval(id);
       };
     }
 
@@ -442,7 +430,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
             authAt: authBuildAtRef.current,
           });
         } else {
-          void pollOnceRef.current();
+          loop.wake();
         }
       }
     };
@@ -453,49 +441,41 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     // Follower self-rescue: every poll trigger is gated on the LEADER's visibility, so a
     // visible follower whose leader is hidden used to freeze — its chip showed the last
     // broadcast forever (audit 2026-08-19, T2.15). A visible tab that hasn't applied a
-    // fresh state in 4 poll periods fetches once itself; the result broadcasts, so one
-    // rescue also feeds every other starved tab.
+    // fresh state in 4 poll periods takes the lead (its first poll broadcasts, so one rescue
+    // feeds every other starved tab). The visibilitychange steal covers a tab brought forward;
+    // this covers a window that was already visible when the leader's window was hidden.
     const rescue = setInterval(() => {
       if (document.visibilityState !== "visible" || isLeaderRef.current) return;
-      if (Date.now() - lastAppliedAt.current > POLL_MS * 4) void pollOnceRef.current();
+      if (Date.now() - lastAppliedAt.current > POLL_MS * 4) election?.claim();
     }, POLL_MS * 2);
 
-    // Leader election: the tab that acquires the lock is the sole poller and holds the lock
-    // until it unmounts/closes; then a queued tab takes over.
-    const ac = new AbortController();
-    let release: () => void = () => {};
-    const held = new Promise<void>((res) => {
-      release = res;
+    // Leader election: the lock holder is the sole poller. A visible tab takes the lock (from a
+    // hidden holder too); a hidden one queues and takes over when the holder closes. A new
+    // leader holding a state under one steady period old continues that schedule rather than
+    // asking again at once — tab switches between two app tabs cost no extra request.
+    election = leaderElection(navigator.locks, LEADER_LOCK, isVisible(), (lead) => {
+      isLeaderRef.current = lead;
+      if (!lead) {
+        loop.stop();
+        return;
+      }
+      const at = lastAppliedAt.current;
+      loop.start(Date.now() - at < POLL_MS ? { playing: playingRef.current, at } : undefined);
     });
-    let leaderInterval: ReturnType<typeof setInterval> | null = null;
-
-    navigator.locks
-      .request(LEADER_LOCK, { signal: ac.signal }, async () => {
-        isLeaderRef.current = true;
-        void pollOnce(); // immediate
-        leaderInterval = setInterval(() => {
-          if (document.visibilityState === "visible") void pollOnce();
-        }, POLL_MS);
-        await held; // hold leadership until this tab unmounts
-      })
-      .catch(() => {
-        /* aborted on unmount before we got the lock — fine */
-      });
 
     return () => {
       aliveRef.current = false;
       isLeaderRef.current = false;
       clearInterval(rescue);
-      if (leaderInterval) clearInterval(leaderInterval);
-      if (endTimerRef.current) clearTimeout(endTimerRef.current);
+      loop.stop();
+      loopRef.current = null;
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
-      ac.abort(); // stop waiting for the lock if we never got it
-      release(); // release the lock if we held it → another tab becomes leader
+      election?.dispose(); // release the lock if we held it → another tab becomes leader
       bc.close();
       bcRef.current = null;
     };
-  }, [pollOnce, applyShared, broadcast, checkSkew, probeCurrentBuild]);
+  }, [applyShared, broadcast, checkSkew, probeCurrentBuild]);
 
   // Show a track as playing immediately (e.g. double-click a song); the next poll confirms.
   const playOptimistic = useCallback(
@@ -533,11 +513,11 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       const r = await playerSetPlayingAction(nextPlaying);
       if (!r.ok) {
         suppressUntil.current = 0; // failed → drop the optimistic flip, show real state
-        void pollOnce();
+        refresh();
       }
       return r;
     },
-    [broadcast, pollOnce],
+    [broadcast, refresh],
   );
 
   return (
