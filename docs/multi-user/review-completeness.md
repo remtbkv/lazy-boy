@@ -56,7 +56,8 @@ than 30 minutes; a user has sat in `deleting` for over a day or a key rotation i
 friend has been `needs_reconnect`, `removed` or in `backoff` for over six hours; or Turso's month-to-date
 reads run ahead of pace. Write each isolation event as one awaited row in the app database as well as
 to telemetry, so the check cannot miss one. cron-job.org disables a job after repeated failures, so the
-daily route re-enables it (`ensureCronJobEnabled`, `src/lib/cronjob.ts:14-48`). Known answers for each
+daily route re-enables it with the helper that already does this for the sync job
+(`ensureCronJobEnabled`, `src/lib/cronjob.ts:14-48`), given the health job's id. Known answers for each
 condition. It has to exist by Phase 1, which is when isolation events start.
 
 #### H2. A friend's history is destroyed, and the friend locked out, on a signal the plan calls "most likely"
@@ -162,7 +163,140 @@ the owner's, 01f §1.2), and removing it frees its place unless the list is gran
 
 ### Medium
 
-(to be filled)
+#### M1. T3 cannot see nested server components, and new entry points get only half of it
+
+T3 runs "every page, every `"use server"` export and every route handler, found by globbing `src/app`"
+(PLAN.md:756). Calling a page function runs its own body and returns JSX; an async server component
+nested in that JSX never executes. `/playlists/[id]`'s cold path does its Spotify fetch and its
+`storePlaylistTracks` write inside the nested `Tracks` component (`src/app/(app)/playlists/[id]/page.tsx:141-143`,
+`152-200`), so T3's "A's file unchanged, every Spotify call on B's bearer" never runs the path 01b B4
+names for reading a private playlist by id. No test renders a page today: `tests/` imports route
+handlers, actions and lib modules only. Second, the glob finds new entry points and the no-session case
+needs no inputs, but "B with A's identifiers in the input" needs to know which arguments are identifiers;
+an action added later silently gets the first check and not the second. Layouts are outside the glob,
+though the `(app)` layout will render the uid (§5.1, PLAN.md:507-509).
+
+**Fix.** Either render pages through React's server renderer in the harness, or (cheaper) add a static
+check that no nested async server component reads user data or calls Spotify, move `Tracks`' fetch into
+the gated page body, and test it as B with A's playlist id. Keep a fixture registry keyed by entry point
+that fails the suite when the glob finds one without an identifier-input entry. Add layouts to the glob.
+
+#### M2. T1 has no positive control, its instrument is a file hash, and the planted bugs are thrown away
+
+T1 calls every `UserStore` method, "enumerated from the object so a new method is covered automatically"
+(PLAN.md:754). Enumeration supplies the method, not inputs that reach its writes: a method called with
+placeholder arguments that returns early leaves B's file unchanged and passes, and nothing checks that
+the call did its work on A. The instrument is a sha256 of B's database file (PLAN.md:750, 754, 761,
+764). The harness pins no journal mode (`tests/setup.ts` sets only the URL), and under WAL a committed
+write sits in the `-wal` file until a checkpoint while the main file's bytes stay the same. Which mode
+`@libsql/client` 0.17 uses for `file:` URLs I could not check (this checkout has no `node_modules`). The
+planted-bug rule (PLAN.md:736-738) is a one-time act: once the suite is green nothing shows it can still
+fail, so a later edit, say the cache stub drifting back to today's pass-through
+(`tests/stubs/next-cache.ts:4-10`), leaves T2 passing with nothing behind it.
+
+**Fix.** A fixture per method with a positive control: every write method changes A's content, every
+read returns an A marker, and a method with no fixture fails the suite. Compare an ordered logical dump of
+every table instead of file bytes, and pin the journal mode in the harness. Keep the planted bugs as a
+permanent harness self-test (an unkeyed `unstable_cache`, a shared in-flight map, a URL template that
+ignores the uid), each asserting the suite reports it.
+
+#### M3. The one-variable way back does not stop friends already inside, and there is no incident runbook
+
+`SIGNUPS=owner` is "Phase 4's one-variable way back" (PLAN.md:478, 1451, 1587), but as written it acts at
+sign-in (§5.1). Friends already signed in keep their 30-day sessions, and the cron keeps capturing them.
+The per-user `status = 'disabled'` does stop a friend, but it is a write to the app database for which
+the plan names no admin action or script. The plan names the 24-hour Spotify duty (§12.2) and no steps
+for a suspected cross-user exposure. Rolling Phase 4's code back to Phase 3's also removes the deletion
+job, so a deletion in flight stops counting toward its five days; the rollback cell does not say so.
+
+**Fix.** Make `SIGNUPS=owner` also refuse non-admin uids at the identity check and skip them at the claim,
+so one environment change and a redeploy freezes every friend, with a test. Add
+`scripts/user.mjs --disable | --enable | --remove`. Add a short runbook (in §13 or `docs/SECURITY.md`):
+freeze; keep the evidence (isolation codes, `api_log` by uid); work out whose data reached whom; notify
+Spotify within 24 hours and the affected friend directly; move the affected shape tokens; re-run T1-T12;
+unfreeze. Note in Phase 4's rollback that in-flight deletions are finished by script.
+
+#### M4. The plan never says what a friend gets
+
+Rem asked to "scope out multi user support"; the plan scopes the engineering and leaves the product a
+friend receives unwritten.
+
+- **Playback needs the friend's own Premium.** Spotify's start-playback page: "This API only works for
+  users who have Spotify Premium" (fetched tonight, §4). The app's play, queue, resume and
+  play-from-playlist actions call those endpoints (01b §2.2, `actions.ts:310-356, 526-541, 557-663`).
+  Development mode no longer returns `product` from `/me` (01e §1.1), so the app cannot check first, and
+  the client retries the 403 once and surfaces a generic error (`src/lib/spotify/client.ts:196-201`).
+  Spotify's quota-modes page requires Premium only of the owner.
+- **The invite needs the friend's Spotify login e-mail.** The same page: "enter the name and Spotify
+  email address of the user that you want to enable to use your app". §12.1's flow names only the Spotify
+  id (PLAN.md:1437-1443), §12.2 says there is no e-mail (PLAN.md:1482-1483), and the policy's list of
+  what is collected (PLAN.md:1487-1493) leaves it out. Rem will hold every friend's address, which is
+  also the notice channel the plan says does not exist, once the friend agrees to it at `/join`.
+- **First run.** A friend's history starts with the first harvest's last 50 plays; the first library
+  scan takes one to two minutes (§7.7); the strip and the all-time card start nearly empty; and no
+  recorder backs their capture (§7.9), so their loss floor is the 50-play window alone. None of this is
+  in a test or in what the invite tells them.
+- Compare-a-friend and the static `/friends` page do nothing in development mode for anyone (01f §1.2:
+  `GET /users/{id}/playlists` is gone with "No replacement").
+
+**Fix.** A short "what a friend gets" section, written once and reused as the invite text: the feature
+list with what needs Premium, the history start, the loss floor, retention, the five-person cap. A 403
+from a player endpoint answers "needs Spotify Premium" in the UI. The e-mail goes in the policy's list,
+with an opt-in for account notices at `/join`. A harness test renders Home for a freshly provisioned user
+with no plays. Hide or label the features development mode killed.
+
+#### M5. Five ways a friend's lifecycle goes wrong
+
+- **A friend removed from Spotify's allowlist cannot delete.** The cron marks them `removed` (§7.8,
+  PLAN.md:967), which is not a deletion trigger (§12.3, PLAN.md:1497-1500). They can no longer sign in
+  (`/v1/me` answers 403), so "Disconnect and delete" is out of reach, and their data stays until twelve
+  months after their last sign-in.
+- **An inactive friend is captured for six months, then deleted without notice.** Capture runs off the
+  stored grant until it expires, up to six months after the last sign-in (§5.4), spending the shared
+  recently-played budget (§7.5). The data then sits until month twelve and is deleted, with "every
+  notice" confined to an app the person no longer opens (PLAN.md:1478-1483).
+- **Backups cover only `active` friends** (PLAN.md:1556-1559). A friend in `needs_reconnect` or
+  `disabled` still has a database and, four days later, no backup of it.
+- **Nothing exports a friend's history** before a deletion, requested or automatic.
+- **Invites never expire.** An `invited` row holds a provisioned database and counts toward five in
+  `invite.mjs` (PLAN.md:1438-1441), and the plan has no revoke command. If the dashboard shows a
+  grandfathered list above five, removing anyone from it is permanent: "These limits only restrict what
+  you can create or add going forward" (01f §1.2).
+
+**Fix.** Seven days in `removed` raises H1's alarm and prompts Rem to run the deletion; the policy names
+a way to request deletion outside the app. Capture pauses after about 60 days without a sign-in
+(`dormant`, resumed at the next sign-in, the gap's plays beyond 50 being the honest cost). Back up every
+user not in `deleting`. An export of the user's own history segments (the JSON bodies §9.1 already
+serves) on the disconnect page and before any automatic deletion. `invite.mjs --revoke`, and a 14-day
+expiry the daily route enforces. Put the grandfathering consequence next to decision 5's dashboard read.
+
+#### M6. P4's exit check skips the events the plan says need the dirty mark
+
+The Home payload patch falls back to a rebuild for out-of-order inserts, time-zone and shape changes, and
+"any derived-column event that touches a play in the payload's 16 days (a context name resolving, an
+orphan flip)"; without the mark "a stale 'From' could sit in it for days" (§8.4, PLAN.md:1093-1100). The
+exit check is "patched payload = rebuilt payload after a day of synthetic harvests" (PLAN.md:1588). A day
+of appends passes with every dirty-mark path broken.
+
+**Fix.** Run the equality over a scripted day that includes each non-append event: an out-of-order
+insert, a context name resolving for a play inside the 16 days, an orphan flip from a playlist change, a
+time-zone change and a duration change, with patched = rebuilt after each.
+
+#### M7. No bootstrap for an empty install, which "run your own copy" and every new checkout need
+
+Target U says that past five, "each person runs their own copy, which is the one-user case of the same
+code" (PLAN.md:79). The README offers a deploy button and a three-step local start (`README.md:26-45`),
+and `npm run setup` promises that a new user "only has to paste their Spotify Client ID + Secret"
+(`scripts/setup.mjs:1-3`). After Phase 2 the app needs an app database, a `users` row for its owner,
+`OWNER_UID`, `TOKEN_KEYS` and a database named through the URL template; §11.4 creates those for Rem by
+hand, and nothing creates them for an empty install. Dev's own app database (§5.5) has no seeding step
+either. So the "own copy" path, which is the plan's whole answer to more than five people, stops working
+at Phase 2.
+
+**Fix.** On an empty app database, the first sign-in that matches `SPOTIFY_OWNER_ID` provisions the admin
+row and a user database (or `npm run setup` does), with a harness test that boots from nothing. The phase
+that breaks the README updates it. Decision 6 states what an own copy costs each person: their own
+Premium, developer app, Turso database and pinger, and about an hour of setup (01f option E).
 
 ### Low
 
