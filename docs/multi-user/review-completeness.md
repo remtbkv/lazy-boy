@@ -300,7 +300,60 @@ Premium, developer app, Turso database and pinger, and about an hour of setup (0
 
 ### Low
 
-(to be filled)
+**L1. T12 cannot rehearse the token step on a backup copy.** T12 runs the Phase 2 migration "on a local
+copy of a nightly backup" against §11.4 step 6, which checks "the blob decrypting to the plaintext row"
+(PLAN.md:765, 1412-1415). Edit 4 strips the `spotify_tokens%` rows from every backup (PLAN.md:1298), so
+the copy has no token row and the rehearsal skips the one step that decides whether Rem stays signed in.
+Fix: T12 inserts a synthetic token row (a dummy grant, never a real one) into the copy before the run.
+
+**L2. Key rotation breaks restores for four days, and losing the key costs more than a sign-in.** §12.3
+rotates `TOKEN_KEYS` within five days of each friend's deletion and drops the old key
+(PLAN.md:1540-1543), while §12.4 says the app database's backups keep the ciphertext so "a restore keeps
+everyone signed in" (PLAN.md:1561-1562). Every app-database backup taken before a rotation holds blobs
+under the dropped key, so for four days after each rotation a restore leaves every user without a token.
+"Losing the key costs every user one sign-in and nothing else" (PLAN.md:551-552) leaves out that
+closed-app capture stops for everyone until they sign in, which for a friend who does not open the app
+that day is every play past their last 50. Fix: take an app-database backup right after each
+re-encryption, and state both consequences in §5.3 and §12.4.
+
+**L3. The twelve-month clock is a sign-in clock.** Deletion after twelve months keys on
+`users.last_sign_in` (PLAN.md:331, 1478-1481). That tracks use only because sessions are a fixed 30 days
+and never renewed (PLAN.md:573). The day someone makes sessions renew on use, an active friend stops
+producing sign-ins and is deleted at month twelve. Fix: key the rule on a last-seen stamp written at most
+daily from the identity read, or pin the coupling with a test that names the deletion rule.
+
+**L4. Two of Phase 3's exit checks read data nothing records.** Phase 3 exits on "the open app harvests
+only catch-ups" and "no play is first stored by a backstop while Rem was listening" (PLAN.md:1586; the
+second also answers an unknown, PLAN.md:1875). `plays` has no insert time or source (`db.ts:168-175` and
+its later `ALTER`s), and the plan does not tag harvests by trigger, so neither check can be read off the
+store or `api_log`. Fix: each harvest logs its trigger in `api_log.source` (`harvest:change`, `:tail`,
+`:retry`, `:completeness`, `:backstop`, `:open-app`), and the soak reads that.
+
+**L5. The foreign-play cleanup leaves copies.** §11.2 deletes the incident's plays from the live database
+after lane 1904 (PLAN.md:1346-1369). The same rows, and any `contexts` names resolved with the second
+account's token, stay in every nightly backup from Oct 15 until the delete (60 days on OneDrive), in the
+cutover's snapshot and in lane 1909's archive. `client_metrics` may hold `handoff` rows naming that
+account's songs ("artist — title", 01a §2), and its prune has not run since August
+(STORE_MIGRATION §3). The second
+account's grant also stays valid at Spotify until its owner removes the app (01e §1.6). Fix: name these
+copies in §11.2 with when each ages out; delete the window's `handoff` rows; if Rem knows who the second
+account was, ask them to remove Lazy Boy at spotify.com/account/apps.
+
+**L6. Phase 3 changes Rem's own app weeks before any friend, outside §18.** Phase 3 ships to Rem alone:
+now-playing polls every 15 s mid-track instead of 6 s (PLAN.md:939-943); `refreshHistoryAction` stops
+harvesting, so at a track change the stored row arrives up to ~2 minutes later behind the provisional
+one (PLAN.md:934-938); the cron's idle backstop goes from hourly to every two hours (PLAN.md:887); the
+Liked safety-net refetch from daily to weekly (PLAN.md:954-956). Each exists to share Spotify's budget
+with friends who will not exist for weeks; each is small; none is in §18. Fix: list them in §18 for
+Rem's yes, or switch them on with the second active user. Re-run `tests/handoff.test.ts` at the 15 s
+cadence, since the instant handoff reads the chip's last poll.
+
+**L7. Decision 8 states its benefit and not its cost.** It recommends the single-user track (P2, then
+P3) before Phase 1 (PLAN.md:1971-1974), and §13.3's date for the first friend, early to mid-December,
+follows from that order (PLAN.md:1628-1631). By the plan's own durations (P2 a few days, P3 one to two
+weeks) the order moves the first friend back by about one and a half to two and a half weeks [estimate].
+P3 alongside Phase 1 is ruled out by "one lane in `db.ts` at a time" (PLAN.md:1621), so this is a real
+trade between the friend's date and merge risk, and decision 8 should say so.
 
 ## 2. What holds up
 
