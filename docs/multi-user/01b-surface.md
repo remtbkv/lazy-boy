@@ -349,6 +349,91 @@ later read wrong for someone.
 
 ## 5. What the surface needs for multi-user
 
+Requirements any design has to meet at the request surface, each with where it lands and how a test
+can prove it. The schema itself is 01a's; tokens at rest are 01e's; sync fan-out is 01c's.
+
+**S1. Identity in the session.** On sign-in the `jwt` callback stores `account.providerAccountId`,
+the Spotify id, in the token (`auth.ts:352-377`), and every later call refuses a token without it.
+That refusal ends every session minted before the change, once, the owner's included, which also
+closes E1 (section 6). Keep the id off the `Session` type unless the browser needs it: whatever
+`Session` carries is served at `GET /api/auth/session` (`docs/SECURITY.md`, "Tokens never reach the
+browser"). The browser gets an opaque per-user key instead (S6).
+
+**S2. One gate.** A server-only `requireUser()` that returns the session's Spotify id or refuses
+(redirect for a page, 401 for a route, `{ ok: false }` for an action), called first by every entry
+point in section 2. Every read takes the id as an argument (S3), so no read can run before the gate.
+Home keeps its single parallel wave this way: the id comes from decoding the cookie, which needs no
+store round trip, so the user-scoped payload read can start alongside the token check in `auth()` as
+it does today (`home/page.tsx:78-83`), provided nothing renders until both finish. Proof: a
+structural test that imports every `"use server"` module and route handler, calls each export with no
+session, and asserts it refuses before the store is touched.
+
+**S3. A store API that cannot be called without a user.** Every exported function in `db.ts` takes
+the user id as a required first parameter, apart from a named allowlist of system functions
+(telemetry, the ledger, cron bookkeeping). A test can parse `db.ts`'s exports and fail on any
+function outside the allowlist that lacks it.
+
+**S4. Tokens per user.** One token row per Spotify id; `spotifyAccessToken()` reads the session
+user's row; `getValidAccessToken(userId)` and `refreshingToken(userId)` replace the argument-less
+forms; the in-flight refresh, the `spotify_refresh` lock, `waitForFreshToken` and
+`clearTokensIfStale` are all keyed by user (A1-A4).
+
+**S5. Cache keys that carry the user.** Every `unstable_cache` wrapper takes the user id as an
+argument, never through a closure (3.1); the version markers become per user (3.2); the shape tokens
+move in the same commit; a per-user tag makes deletion purgeable. Proof: today's test stub turns
+`unstable_cache` into a pass-through (`tests/stubs/next-cache.ts:4-10`), so the simulated environment
+cannot see a key collision at all. Replace it with a memo that builds keys the way Next 16.2.6 does
+(callback source + key parts + `JSON.stringify(args)`), and a two-user test then catches both the
+closure trap and equal-counter collisions.
+
+**S6. Per-user ETags and browser storage.** Both search ETags gain an opaque per-user component;
+`lb-days`, `lb-nowplaying`, `clean:active` and the planned IndexedDB copy are stamped with the same
+key and cleared on sign-out (3.2, 3.6). The key is rendered by the `(app)` layout from the session
+(for example a keyed hash of the Spotify id), never taken from anything the browser can write.
+
+**S7. Tasks with owners.** A task records the user who started it; `/api/tasks/[id]` answers 404 to
+anyone else; the running-sync id is per user (B9). The cross-instance gap stays as ROADMAP Phase 3
+describes.
+
+**S8. No unkeyed module state.** `playlistsCache` keyed by user or removed (A6);
+`uniqueRecomputeKickedAt` per user; the three `cache()` boxes take the user id (3.3).
+
+**S9. Shared playlist tracks only behind an access check.** Track rows are catalog data and can stay
+shared. Playlist membership can be read only through the caller's own library rows; a playlist id the
+caller does not have is fetched live with the caller's token (B4). Whether the membership cache
+itself is shared or per user is a design choice with a cost on one side and the relinking risk on the
+other (C2); my recommendation is per-user membership rows over shared track rows, since a shared
+membership cache is the one place a private playlist could reach a stranger.
+
+**S10. Operator surfaces stay the operator's.** `/usage` and the telemetry tables become owner-only,
+with the owner taken from `SPOTIFY_OWNER_ID` and never from a stored value (E2). The cron routes keep
+the secret; once one secret drives every user's capture, separate secrets per cron route are worth
+their small cost.
+
+**S11. Sign-out that affects only the person signing out.** `logout` gets a gate and clears only the
+caller's browser state and cookie. Whether it also deletes that user's Spotify tokens, which stops
+history capture on every device, is Rem's call. My recommendation: sign-out ends the session only; a
+separate "disconnect Spotify" deletes the tokens and stops capture; account deletion removes the rows
+and purges the cache tag.
+
+**S12. Per-user background work.** The cron fans out over users with stored tokens, each with its own
+harvest gate, debounce and library stamps, so one revoked token cannot stall the rest (C3; 01c owns
+the schedule). Its responses keep to counts.
+
+**S13. Limits on the expensive entry points.** `dailyStatsAction`'s `days` (each distinct value is a
+scan and a new cache entry), `searchPlaysAction` (a `LIKE` scan per call) and
+`/api/playlists/[id]/tracks` (Spotify calls) need per-user rate limits and tighter input checks.
+`docs/SECURITY.md`'s checklist already lists both; multi-user makes them reachable by people other
+than Rem.
+
+**S14. Previews off the production store.** Before any multi-user branch is pushed, Preview gets its
+own store (or loses the store variables), so a preview's `init()` cannot migrate production (3.7).
+
+The test that proves S1-S9 together: seed users A and B in the simulated environment with
+distinguishable strings in every table, mock `@/lib/auth` to return B's session (the pattern
+`tests/now-playing-route.test.ts:13-16` already uses), call every entry point in section 2 as B, and
+assert that none of A's strings appears in any response and every write lands under B.
+
 ## 6. Exposures that exist today, single-user
 
 ## 7. What multi-user needs from STORE_MIGRATION.md
