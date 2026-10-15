@@ -51,8 +51,11 @@ one harvest per probe that sees a track change, and a probe every 2 minutes whil
 (§7.2), so up to 30 an hour. A friend with music on 10-12 hours a day and ~3-minute tracks is
 ~200-240 harvests a day; a shuffle-and-skip listener up to ~300-360 [estimate]. Rem (~165, §14.2)
 plus one such friend is ~365-525 against the 450 planning budget, up to 117%, before finding 5's
-retries. §14.2's row "Rem + one friend, any profile: ~230-310, 51-69%, the brake does nothing" holds
-for the three profiles it lists, not for any profile.
+retries. Rem's own heavy day is past the plan's figure too: his busiest day in 61 had 204 real plays
+(01a §6), ~230-250 harvests with the recorder, so Rem and a Rem-like friend on heavy days together
+reach the budget even with the listed profiles. §14.2's row "Rem + one friend, any profile:
+~230-310, 51-69%, the brake does nothing" holds for the three profiles on an average day, not for
+any profile and not for the heavy day D1 is defined on.
 
 **(b) The brake is inert for the first friend.** §13.1 ships "the brake's counter, counting but
 inert" in Phase 3, and switches it on in "P4 and the brake", which starts after "Phase 4's week,
@@ -92,7 +95,8 @@ concludes that after P4 "nothing left on a per-visit path grows with history".
   (`src/app/(app)/history-actions.ts:139-174`).
 - `days` is the strip's current width, sent by the client (`den-home.tsx:760` passes
   `daily.length`), and "See all" sets it to every day of history (`extendDays`,
-  `den-home.tsx:386-412`). §6.6 bounds `dailyStatsAction`'s width; this action's is unbounded.
+  `den-home.tsx:386-412`). §6.6 limits `dailyStatsAction` to the one width the client sends; this
+  action still takes any width from 14 to 100,000.
 - It runs every 120 s while Home is visible (`den-home.tsx:990-992`), on every return to the tab
   (`:993-996`), and on each track change, which the 45-s throttle exempts (`:748`).
 - Both reads are LIVE cache entries keyed on `meta.write_seq` (`db.ts:1082-1090`, `1186-1191`), so
@@ -103,7 +107,9 @@ concludes that after P4 "nothing left on a per-visit path grows with history".
 - [measured, `usage_ledger` in the Oct 14 backup] On the August days with the most refreshes, strip
   reads ran far ahead of landed plays: Aug 12, 169 strip reads (826,090 modeled rows) for 47 landed
   ticks and 285 refreshes; Aug 13, 161 for 76 (283 refreshes); Aug 16, 189 for 77 (397). On days
-  with few refreshes the two move together, since then the payload rebuild is the only reader.
+  with few refreshes, strip reads stay at or under the landed count, the payload rebuild being the
+  only reader (Oct 13: 95 for 145, 7 refreshes). The ledger's writes are fire-and-forget, so these
+  counts are lower bounds (01a §4.1).
 
 **Recomputed** [estimate, from the meter's per-run costs, 01c §2.2]. One re-read at the default width
 is the strip (~5,600 rows) plus today's rows (~1,900): ~7,500. With "See all" open the strip read
@@ -210,7 +216,7 @@ sessions lag every play: Oct 13 17:01-17:13Z, each harvest landed the play befor
 just ended. (The replay assumes `played_at` marks a play's end. I re-ran `playedAtConvention`,
 `src/lib/skip-rule.ts:87-107`, week by week on the copy: end-stamp matches outnumber start-stamp
 matches in every week through Oct 14, e.g. 359 to 16 in the week of Oct 5. The daily check that is
-meant to watch this has not run since Aug 10, 01c §1.)
+meant to watch this has not run since at least Aug 10, 01a §3.)
 
 **Consequences.**
 - The retry fires on ~13% of change-triggered harvests, ~16-17 calls a day for a Rem-like user, and
@@ -262,10 +268,10 @@ the refusal to §7.8, with a fallback harvest every ~30 minutes for users active
 **Evidence.** The comment at `db.ts:2652-2658` describes the August ban windows ("the burst window was
 never close (peak 18 calls/30s ...)"): 18 was the peak inside the windows before each quota ban.
 [measured, the whole retained `api_log`, Aug 10 to Oct 14: 104,942 rows, 84,260 after removing exact
-re-sends] The busiest 30-s windows held **56** calls (Aug 18 20:06Z), 54 (Sep 27 12:52Z) and 53
-(Aug 13 15:27Z), all library scans, none followed by a 429 within a minute. The only 429s ever logged
-are recently-played (83) and `/me` (38), Aug 12-17, both quota bans. The rate limit's measured floor
-is 56 per 30 s.
+re-sends] The busiest 30-s windows held **56** calls (Aug 18 20:06Z) and 54 (Sep 27 12:52Z), both
+cron library scans, and 53 (Aug 13 15:27Z, untagged: source tagging began Aug 16); none was followed
+by a 429 within a minute. The only 429s ever logged are recently-played (83) and `/me` (38), Aug
+12-17, both quota bans. The rate limit's measured floor is 56 per 30 s.
 
 **Consequences.** The 15-s poll is not needed for the 30-s window at five users (five visible tabs at
 6 s make 25-50 calls per 30 s); its case is finding 6's daily volume. The bursts that leave the
@@ -388,7 +394,7 @@ What binds, in the order the users arrive (my recomputation):
    calls; spreading probes and slowing idle users further moves it.
 
 At five every row fits except the two unknowns the plan already gates on (Active CPU, quota pooling)
-and the player bucket (finding 6), which it does not.
+and the player bucket (finding 6), which it does not gate on.
 
 ## 3. What holds up
 
@@ -437,4 +443,49 @@ soak needs the same measurement before and after.
 
 ## 4. What I ran
 
-(to fill)
+Oct 14, ~11:40 PM, to Oct 15, ~12:20 AM, on the Mac. Nothing ran against the production store (no
+SQL through the meter or the Funnel), Turso, Vercel or Spotify, and nothing was written anywhere but
+this file and a private scratch directory, `~/.claude/broke/scratch/lazyboy_mu/0224_review_scale/`
+(mode 700).
+
+- **Read in full:** `PLAN.md`, the six overviews (`01a`-`01f`), `docs/GOTCHAS.md`, the project's
+  `CLAUDE.md`; `docs/STORE_MIGRATION.md` §1-5 and `docs/READ_QUOTA.md`'s definitions and "Measured
+  reads". Spot-checked in the designs: A §13.3 (`design-a.md:1303`).
+- **Code, with `cat`/`sed -n`/`grep`:** `src/app/api/cron/sync/route.ts`, `src/lib/harvest-gate.ts`,
+  `src/lib/sync/history.ts`, `src/lib/sync/library.ts`, `src/lib/spotify/client.ts`,
+  `src/lib/spotify/resources.ts:225-250`, `src/app/(app)/history-actions.ts`,
+  `src/app/(app)/home/den-home.tsx:360-420, 730-830, 975-1005`, `src/app/(app)/home/page.tsx:40-140`,
+  `src/components/sync-on-load.tsx`, `src/components/now-playing-context.tsx` (timers),
+  `src/app/api/sync/route.ts`, `src/lib/cronjob.ts`, `src/lib/store-diff.ts:210-222`,
+  `src/lib/skip-rule.ts:82-107`, `src/lib/playlists-sync.ts`, and in `src/lib/db.ts` lines 150-600,
+  940-1160, 1755-2000, 2036-2112, 2205-2310, 2596-2760. `git diff --stat ac6f7fe HEAD -- src scripts
+  ops tests vercel.json next.config.ts package.json`: empty.
+- **A local copy of last night's backup:** `rclone lsl onedrive-backup:lazyboy-db`, then `rclone copy`
+  of `lazyboy-20261014-0840.db.gz` into the scratch directory, `gunzip -k`, `chmod 600`; every query
+  opened it as `file:...?immutable=1`. `PRAGMA integrity_check` ok; 22,040 plays; 104,942 `api_log`
+  rows from Aug 10 13:59Z to Oct 14 08:38Z.
+  - `rates.py`: `api_log` with exact re-sends removed (same ms, method, path, status, source: 84,260
+    calls), every 429 by path, the busiest rolling 30-s windows and whether a 429 followed within 60 s,
+    and player-endpoint calls per UTC day from Aug 17 (findings 6 and 7).
+  - `sqlite3` on `usage_ledger`: per day, `sync_tick_landed`, `day_strip`, `day_plays`,
+    `history_refresh` calls and modeled rows from Aug 12 (finding 2); plays in the last 16 days
+    (1,828), all non-backfill plays (14,511), `saved_tracks` (48) and `meta.liked_total` (48).
+  - Design B's `orphan_equal.sql` and `orphan_plans.sql`, unchanged, with `sqlite3 -readonly` (§3).
+  - `convention.py`: `playedAtConvention`'s rule (`skip-rule.ts:87-107`, 20-minute gap cap, 2-s match)
+    per ISO week (finding 5's premise).
+- **The Zenbook's pinger log, read-only over `ssh ubuntu`:** `wc -l`, `head -3` and `tail -3` of
+  `~/lazyboy-cron/ping.log`, then `cat` of it into the scratch directory (2,000 lines, Oct 12 09:00Z to
+  Oct 15 03:51Z; checked to hold no bearer token). `lagdbg.py` and `matchcheck.py` matched each
+  `cron-sync` recently-played call in `api_log` to its tick line (offsets −5 to +2 s, one to one; 505 of
+  564 calls matched); `lag2.py` replayed every harvest against the plays (finding 5); `trace.py`
+  printed two windows in full (Oct 12 14:36-14:58Z and Oct 13 16:56-17:14Z).
+- **The store meter's query log, read-only:** `ssh ubuntu python3 - < wcount.py`, a scan of
+  `~/lazyboy-sqld/querylog/2026-10-14.jsonl` that prints, per statement prefix, the distribution of
+  rows written and the median rows read, never arguments (finding 8).
+- **Web:** cron-job.org's FAQ (https://cron-job.org/en/faq/) and WebKit's tracking-prevention post
+  (https://webkit.org/blog/10218/), both fetched Oct 15.
+
+The backup copy, its archive and the `ping.log` copy were deleted when this file was finished (they
+hold the token rows and Rem's listening). The scripts stay in the scratch directory's `bin/`, so
+Phase 3's soak can re-run `lag2.py` against a fresh backup and `ping.log` to measure the retry rate
+and F2 before and after.
