@@ -13,7 +13,18 @@ PLAN.md §13.1 puts Phase 1 after P3; §13.4 lets a lane build a phase early on 
 only in new files and in files no queued lane edits. §18's last table names the Phase 1 work no
 decision of Rem's holds. This branch builds the intersection of the two.
 
-pending
+The files queued lanes edit, and which this branch therefore leaves alone (§13.4, STORE_MIGRATION
+§6 and §10): `src/lib/db.ts`, `src/lib/store-fetch.ts`, the cron routes that exist today
+(`/api/cron/sync`, `/api/cron/usage-check`), `/api/metrics`, the two search routes,
+`usage/page.tsx`, `instrumentation.ts`, `vercel.json`, the `(app)` layout, Home's load path
+(`home/*`, `history-actions.ts`), the import scripts and the Zenbook meter. One exception, flagged:
+`src/app/(app)/actions.ts`, where the Phase 0 lane gates `logout`; this branch changes two other
+hunks there (the task owner on the two `runTask` calls), which rebase cleanly against a change at
+lines 63-69.
+
+That boundary decides most of what is left for the phase's turn (§4): the mechanical `forUser`
+edit through `db.ts`, the seven cached reads moving onto `userCache`, the uid in the search ETags
+and bodies, and the reads and gates inside Home and the search routes.
 
 ## 2. What is built
 
