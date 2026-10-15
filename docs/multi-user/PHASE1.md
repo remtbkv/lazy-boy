@@ -4,8 +4,8 @@ Lane 0226_lb_mu_phase1, Oct 15, 2026, branch `mu/phase1` (worktree
 `~/projects/lazyboy-wt/mu-phase1`), cut from `main` at `6577f4b`. Nothing here is merged, pushed or
 deployed, and nothing touched production data, the Zenbook store or Vercel.
 
-Status: in progress. Sections are filled in as each piece lands; a section still reading "pending"
-was not reached.
+Status: complete for this lane, Oct 15, 2026, 1:30 AM. §2 is what landed, §3 what proves it, §4 what is
+left and why.
 
 ## 1. What this branch is
 
@@ -183,4 +183,28 @@ decision:
 
 ## 5. How to review the branch
 
-pending
+```bash
+cd ~/projects/lazyboy-wt/mu-phase1
+git log --oneline main..mu/phase1          # one commit per piece, docs last
+git diff main...mu/phase1 --stat
+npx vitest run tests/isolation             # the isolation suite alone
+npm test                                   # fails only on the two T1 date tests, as main does
+npx tsc --noEmit && npm run lint
+```
+
+Read in this order: `src/lib/identity.ts` and `src/lib/session-gate.ts` (the rules), the
+callbacks at the bottom of `src/lib/auth.ts` (where they run), `src/lib/token-core.ts` against
+`main`'s `auth.ts` (`git diff main...mu/phase1 -- src/lib/auth.ts` shows what moved; the refresh
+rules are meant to be identical apart from the uid), then `tests/isolation/planted-bugs.test.ts`
+and `static.test.ts`. To see a check fail on purpose, copy `main`'s version of a fixed file over
+this one (`git show main:src/lib/spotify/resources.ts > src/lib/spotify/resources.ts`), run the
+suite, and copy it back from `git show mu/phase1:…`; §3's red table lists which tests that turns
+red.
+
+Still owed before this reaches production, by PLAN.md §13.1's Phase 1 row: an adversarial review
+of the whole Phase 1 diff in a fresh context told to find a cross-user path (this lane did not run
+one, and the diff is not finished until the items of §4 land); the rollback rehearsal; and
+STORE_MIGRATION step 14's fault injection. When Phase 1's turn comes, rebase onto `origin/main`:
+expect conflicts in `CLAUDE.md` and `docs/GOTCHAS.md` (queued lanes edit both) and in
+`actions.ts` beside the Phase 0 lane's `logout` gate; the code in the new files should not
+conflict.
