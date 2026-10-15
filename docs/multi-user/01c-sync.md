@@ -10,16 +10,16 @@ the exact commands are in Appendix A. "Rem's day" below means UTC 2026-10-14 unl
   Zenbook's own 15-minute recorder; the daily Vercel cron is the only trigger off that machine, and
   its daily chores never run (§1). Open tabs add `/api/sync`, Home's refresh and a 6-second
   now-playing poll.
-- **What one user costs today** (Rem, measured): ~1,530-1,690 Spotify calls a day, two-thirds of
-  them the tick asking the player what is playing, plus 139-319 recently-played harvests, ~150
-  rescan calls and the recorder's 96 (§2.7). The sync paths read ~3.9M store rows a day, and the
+- **What one user costs today** (Rem, measured): ~1,530-1,690 logged Spotify calls a day (~70% of
+  them the tick asking the player what is playing, 139-319 recently-played harvests, ~150 rescan
+  calls), plus the recorder's 96 (§2.7). The sync paths read ~3.9M store rows a day, and the
   biggest single read is the all-time recompute (53% on Oct 14), a full `plays` scan up to 144 times
   a day that grows with history (§2.2).
 - **N is at most 5.** Development mode allows five users per app and extended quota mode is closed to
   individuals (§4). The 25 and 250 in the planning brief are not reachable.
 - **The binding limit is Spotify's recently-played quota**, ~725-800 calls a day in August (01f),
   which Spotify's docs say belongs to the developer account, shared by every user. Rem alone spends
-  ~235-415. Five Rem-like users on today's policy need ~1,200-2,100. They fit only if harvests are
+  ~235-415. Five Rem-like users on today's policy need ~800-1,700. They fit only if harvests are
   batched (one per 15 min of playback) or freshness comes from the player probe with server-side
   provisional plays (§5.1, §5.3). That trades closed-app freshness and is Rem's call (§7.2), as is
   how to find out whether the quota is really shared (§7.3).
@@ -35,8 +35,9 @@ the exact commands are in Appendix A. "Rem's day" below means UTC 2026-10-14 unl
 - **STORE_MIGRATION:** run it as planned and first. Before lane 1901: correct §3, which names the
   history payload as the dominant read when it is the all-time recompute; add a growth line to R4
   and an accumulator lane; write `/api/cron/daily` as a per-user loop (§6).
-- **Two measurement findings:** 25-30% of `api_log` rows are re-sent duplicates (§2.8), and the store
-  meter undercounts the unscoped orphan `UPDATE` ~40× against what Turso billed (§2.8).
+- **Two measurement findings:** 25-30% of `api_log` rows are re-sent duplicates, and the store meter
+  counts the unscoped orphan `UPDATE` at ~1/40 of what the same work reads as a `SELECT` and of what
+  Turso billed for it in August (§2.8).
 - **Uptime:** after the move a Zenbook outage still stops closed-app capture for every user; a second
   pinger off the Zenbook fixes that once the per-user lease exists, and the recorder should stay
   owner-only and run hourly (§5.7).
@@ -150,9 +151,10 @@ the last full fetch is over a day old.
 
 `POST /api/sync`: the session's token read, a `user_tz_offset` write on every call
 (`src/app/api/sync/route.ts:24-27`), the `last_sync` read, and when due a full harvest (2.1). An
-open tab therefore harvests only when the cron has not stamped `last_sync` in the last minute, which
-is whenever the cron's gate is closed. Browsing the app with nothing playing costs a recently-played
-call every 2 minutes.
+open tab therefore harvests whenever the last harvest is over a minute old: always while the cron's
+gate is closed, and about every other poll during playback, since the cron harvests every 2 minutes.
+Browsing Home with nothing playing costs one or two recently-played calls every 2 minutes, because
+this and `refreshHistoryAction` (below) run on independent timers.
 
 `refreshHistoryAction`: always a harvest (no debounce), then the strip (`getDailyStats`, served
 from Next's data cache unless `write_seq` moved), the all-time totals (one `meta` read), a one-row
@@ -185,7 +187,7 @@ Spotify calls per day, deduplicated `api_log`, Oct 1-14 (Appendix A, probe 5): 1
 | `cron-player-check` | 1,035-1,303 | the tick's player question, 2 calls on every idle tick |
 | `cron-sync` | 139-319 | recently-played harvests (plus the rare context name) |
 | `cron-library-scan` | 127-175 | rescans |
-| `now-playing`, `home-sync`, `onload-sync` | 0-109 | the open app; near zero for Rem |
+| `now-playing`, `home-sync`, `onload-sync` | 0-96 | the open app; near zero for Rem |
 | the recorder (not in `api_log`) | +96 recently-played, ~+24 token refreshes | |
 
 Recently-played calls for the app: ~235-415 a day (cron 139-319 plus the recorder's 96). No 429 on
@@ -447,8 +449,8 @@ One user's failure must cost that user's slot and nothing else:
    per half hour), while probes and rescans in other buckets carry on.
 6. **Spotify 5xx or timeouts for one user:** that user's `backoff`; the others are untouched.
 7. **The store down:** step 1 of the tick fails fast for everyone, which is correct, because nothing
-   can be recorded. Plays are not lost while it lasts for any user whose outage is shorter than 50
-   plays (5.7).
+   can be recorded. A user loses nothing as long as they play fewer than 50 tracks while it lasts
+   (5.7).
 8. **Idempotent writes only.** §2.8 shows re-sent INSERTs happen on this path. A claim is a
    compare-and-set with an owner token, a counter is written as a value rather than incremented, and
    every insert has a natural key (`plays` already does). Writes that must outlive the response go
@@ -456,6 +458,7 @@ One user's failure must cost that user's slot and nothing else:
    not a bare `void`.
 9. **A new user's first rescan** (possibly hundreds of playlist pages) never runs inside the harvest
    deadline (S13, 5.6).
+
 ### 5.5 The open-app paths
 
 - **`/api/sync`** runs the same per-user step as the cron (5.2), under the same lease and the same
@@ -468,7 +471,8 @@ One user's failure must cost that user's slot and nothing else:
 - **Now-playing** needs a per-user cap of about 6 Spotify calls a minute to keep five users under
   ~15 per 30 s. The simplest way: poll every 15 s instead of 6 while a track is mid-play, and keep the
   existing end-of-track and visibility polls, which are what make a track change feel instant; the
-  chip already interpolates progress between polls. A user with two devices visible doubles it; a
+  chip already interpolates progress between polls, and the build-skew beacon that rides the poll
+  waits 3 minutes of mismatch before acting anyway. A user with two devices visible doubles it; a
   short per-user server cache would fix that if it turns out to matter. Either way the cache or the
   poll keys by user (01b covers the browser-side `lb-nowplaying` copy).
 
@@ -661,9 +665,10 @@ against today's tables and two token rows; doing it single-user keeps them that 
 
 ## Appendix A: exactly what I ran
 
-All on 2026-10-14 between ~9:15 and ~9:50 PM ET (01:15-01:50Z Oct 15). Nothing wrote to any store,
-file or service. Scripts lived in a scratch directory on the Mac, were piped to `python3 -` over
-`ssh ubuntu`, and were deleted afterwards.
+All on 2026-10-14 between ~9:10 and ~9:50 PM ET (01:10-01:50Z Oct 15). Nothing I ran wrote to a
+store or changed a service; the meter logged my `SELECT`s as it logs every statement. Scripts lived
+in a scratch directory on the Mac, were piped to `python3 -` over `ssh ubuntu`, and were deleted
+afterwards.
 
 **Files read on the Zenbook:** `ls -la ~/lazyboy-recorder ~/lazyboy-cron` (token and env files
 filtered out of the listing); `systemctl --user list-timers --all | grep lazyboy`; `systemctl --user
