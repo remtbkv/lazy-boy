@@ -375,10 +375,109 @@ from the included $20 credit first. Section 5 estimates what each tier would use
 ## 3. The Zenbook: sqld behind a Tailscale Funnel, a single point of failure
 
 ### 3.1 What runs there
+
+The Zenbook (hostname `ASUSZenbook`, Ubuntu under WSL on a Windows host, STORE_MIGRATION §1) holds
+every piece of production state and two of its schedulers. From BRIDGE.md and ARCHITECTURE.md
+("The store lives on the Zenbook"), checked read-only over `ssh ubuntu` at 9:20 PM (section 7):
+
+| unit | does | read at 9:20 PM |
+|---|---|---|
+| `lazyboy-sqld` + `lazyboy-meter` | the store: sqld 0.24.32 on `127.0.0.1:8092`, the meter on `:8090`, published as `https://ubuntu.tail026729.ts.net` | SQLite file 24.8 MB, sqld `wallog` 66 MB |
+| `lazyboy-cron-sync.timer` | the 2-minute pinger to `/api/cron/sync`, the only closed-app capture path that runs more than daily | last run 9:21:22 PM |
+| `lazyboy-recorder.timer` | backstop: recently-played every 15 min into `~/lazyboy-recorder/backstop.db`, its own token chain, Rem only | last run 9:15:08 PM |
+| `lazyboy-backup.timer` | nightly 4:40 AM snapshot, integrity check, gzip, rclone to OneDrive (60 days), 14 days local | last: `2026-10-14T08:40:13Z ok ... 7439KB plays=22040` |
+| `lazyboy-readmeter.timer` | samples sqld's cumulative counters every 15 min | – |
+
+The box is up since 03:04:57 this morning (`uptime -s`), and it is shared: BRIDGE.md's file table notes
+the DiveLoop units on it were left untouched.
+
 ### 3.2 What fails today when it is down, path by path
+
+Two failure shapes behave differently. **Down** (offline, off the tailnet, or rebooting) fails a store
+query within about a second: the store fetch retries a rejected connection or a 502/503/504 twice
+with 250-500 ms pauses (`src/lib/store-fetch.ts:59-84`). **Frozen** (the Windows host stalls, the
+socket stays open) waits out each attempt: 15 s per attempt, three attempts (`store-fetch.ts:28-29`,
+fresh signal per attempt at `:50-57`), so **~46 s per query** before it fails, and serial queries
+stack.
+
+| path | store use | down | frozen |
+|---|---|---|---|
+| `/login`, `/api/build`, static assets | none (`src/app/api/build/route.ts:11-12`) | works | works |
+| every `(app)` page: `/home`, `/playlists`, `/playlists/[id]`, `/friends`, `/usage` | layout `auth()` (`src/app/(app)/layout.tsx:48`), whose jwt callback reads the token row (`src/lib/auth.ts:381`); then the page's own reads | the jwt callback swallows the failed read and keeps the session (`auth.ts:382-386`), then the page's reads throw: "An error occurred in the Server Components render", which is what Rem saw on Aug 9-10 (BRIDGE.md, "Funnel cutover") | ~46 s for the token read alone, ~46 s more per serial page read, until an error page or Vercel's 300 s cut-off |
+| `/api/now-playing` (every 6 s while a tab is visible) | the token read | `spotifyAccessToken()` swallows the error (`auth.ts:270-271`) and the route answers `{playing:null}` (`src/app/api/now-playing/route.ts:22-28`): the bar vanishes | each poll hangs |
+| `/api/sync`, `/api/search/*`, `/api/playlists/*`, server actions | reads and writes | fail; search's fallback is the server-side search, which needs the store too | hang |
+| sign-in | the owner guard reads `SPOTIFY_OWNER_ID` from env before the store (`src/lib/owner.ts:11`); the token write | succeeds: a failed token write keeps the tokens in the cookie for a later migration (`auth.ts:368-375`) | ~46 s on the write |
+| `/api/cron/sync` | the token read | its 2-minute pinger runs on the Zenbook, so no tick arrives at all; the daily Vercel cron (07:00 UTC ±59 min) fails the read and answers 200 `skipped: "no token"` (`src/app/api/cron/sync/route.ts:96-112`) | same |
+| error recording | `onRequestError` awaits a `client_metrics` write for each failed request (`src/instrumentation.ts:14-25`) | fails fast | adds ~46 s per failed request |
+| backstop recorder, nightly backup | same box | stop | stop |
+
+**Data loss.** None while an outage is shorter than ~50 plays of listening: the first sync after it
+re-reads Spotify's last 50 (GOTCHAS, "`recently-played` only returns the last 50 plays"; 50 ≈ 3 h of
+nonstop listening). Past that, plays are lost for good, because the recorder that would back them up
+is on the same box. The recorder protects against everything except a Zenbook outage.
+
 ### 3.3 How often it is down
+
+- **A daily reboot at about 3 AM.** The meter log is the best clock here: the 2-minute pinger drives a
+  store request at least every ~2 min, so a longer silence means the box, the pinger or the store was
+  not serving. Over its whole history, 48.5 hours from 2026-10-13 00:51 UTC, there are exactly three
+  gaps over 150 s, all at the reboot: Oct 13 06:58:19 to 07:04:15 UTC (two gaps, ~6 min) and Oct 14
+  07:00:18 to 07:08:05 UTC (7.8 min). That is 13.7 min, 0.47% of the window, about 3.5 hours a month.
+  (Script in section 7; it reads the log and writes nothing.)
+- **Host stalls**, which the meter does not see as gaps because the requests complete late: "103
+  gaps over 100 s from 2026-09-14 to 2026-10-12, five of them on Oct 12" on the Windows-side monitors,
+  one of which coincided with an 18.4 s first paint (STORE_MIGRATION §1).
+- **Past outages**: a day and a half on Aug 9-10, from the quick tunnel's rotating hostname, a failure
+  mode the Funnel removed (BRIDGE.md, "Funnel cutover").
+- **A dated one ahead**: the Funnel's certificate "expires 2026-11-08 19:57 UTC and has failed every
+  renewal since Oct 10" (STORE_MIGRATION §3; lane 1907 is queued to fix it). Unfixed, every request
+  through the Funnel fails TLS from that minute: the whole app today, telemetry only after the move.
+
+One overlap worth knowing: the daily Vercel cron fires at 07:00 UTC with Hobby's ±59 min precision,
+and the reboot sits at 07:00-07:08 UTC. Some days the backstop tick lands in the one window the store
+is guaranteed to be away.
+
 ### 3.4 The Funnel's own limits and the certificate
+
+From https://tailscale.com/kb/1223/funnel (redirected to
+https://tailscale.com/docs/features/tailscale-funnel, fetched 9:18 PM):
+
+> "Tailscale Funnel is currently in beta."
+
+> "Funnel can only listen on ports 443, 8443, and 10000. Funnel only works over TLS-encrypted
+> connections. Traffic sent over a Funnel is subject to non-configurable bandwidth limits."
+
+> "It is possible to frequently request a new certificate and exceed Let's Encrypt's rate limits. As a
+> result, you may find yourself waiting 34 hours until you can try again."
+
+The bandwidth limits are not published, so whether five users' payload rebuilds fit is unknown. The
+cost of the hop is measured: `SELECT 1` takes 0.8 ms on the Zenbook's loopback and 40-210 ms median
+(58-840 ms p90) through the Funnel, growing with the Zenbook's load (STORE_MIGRATION §1). The last
+point bears on certificate repair: a retry loop that orders certificates too often can lock renewal
+out for a day and a half, which is why lane 1907's runbook backs up and orders once (STORE_MIGRATION
+§11).
+
 ### 3.5 What multi-user changes about it
+
+- **Blast radius.** Every user is down whenever the Zenbook is. Today that is one person who owns the
+  laptop; with friends it is everyone, at 3 AM every night and during every stall.
+- **The pinger stays on the Zenbook after the move.** STORE_MIGRATION takes the user paths off the box
+  (R2: a frozen Zenbook may add at most 50 ms), but Hobby cannot run a 2-minute cron (2.2), so
+  closed-app capture for every user still depends on `lazyboy-cron-sync.timer`. An outage longer than
+  a user's last ~50 plays loses that user's plays permanently, and only Rem has the recorder.
+- **The recorder does not extend to others for free.** Backing up a friend means a second refresh-token
+  chain per friend on a laptop in Rem's apartment. 01e owns whether that is acceptable.
+- **The Zenbook's CPU is part of every query until the move.** The brotli incident shows how
+  CPU-sensitive it is (26,436 ms vs 648 ms for the same scan, GOTCHAS "Never let the store compress
+  with brotli"). Five users' payload rebuilds are five times the scans on that CPU.
+
+Ways to take the pinger off the Zenbook, cheapest first: a second, independent pinger on cron-job.org,
+the free service that ran this app's 2-minute job until Aug 10 (`.env.example`, "the every-2-min
+cron-job.org pinger"; its old job still holds a stale secret, SECURITY.md), with the route skipping a
+tick that lands within ~90 s of the last so Spotify calls do not double; or Vercel Pro's per-minute
+cron at $20 a month. GitHub Actions was tried and dropped for multi-hour gaps (GOTCHAS, the sync
+bullet). My recommendation is the second pinger for five users, and Pro's cron only if Pro is bought
+for CPU anyway.
 
 ## 4. The planned Turso move
 
