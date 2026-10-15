@@ -18,7 +18,7 @@ Status: revision in progress, Oct 15, 2026. Sections not yet revised still read 
 **What it takes.** Each person gets their own Turso database (yours is the `lazyboy` database the store
 migration creates, unchanged), plus one small app database for identity, encrypted Spotify tokens and
 scheduling. Every request carries a random user id, checked against the app database before any read;
-the sync tick claims users one at a time inside Spotify's shared budget; and a single-user performance
+the sync tick leases each due user and works on them in parallel inside Spotify's shared budget; and a single-user performance
 track ships first, so five people's reads fit Turso's free plan and search stays fast. No friend gets
 in until a canary account has run beside you for a week.
 
@@ -1495,8 +1495,8 @@ week, so an ordinary "today" is ~4.5-9M. From P1 on an orphan pass costs little 
 | search, 2 visits (Rem) / 8 visits (an app-heavy user) | 0.14M / 0.58M | same | same | 0.03M / 0.10M | same |
 | whole-history strip, 2 / 8 mounts | 0.09M / 0.35M | same | same | same | 0 |
 | open Home tab re-reads (§7.6), Rem / app-heavy at the default width | ~0.05M / ~0.36M | same | same | same | ~0 |
-| **total, Rem (2 visits)** | **~19.2M** | **~3.85M** | **~1.64M** | **~1.52M** | **~0.38M** |
-| **total, an app-heavy Rem-like user (8 visits)** | **~20.2M** | **~4.9M** | **~2.64M** | **~2.17M** | **~0.46M** |
+| **total, Rem (2 visits)** | **~19.1M** | **~3.85M** | **~1.64M** | **~1.53M** | **~0.39M** |
+| **total, an app-heavy Rem-like user (8 visits)** | **~20.1M** | **~4.9M** | **~2.65M** | **~2.17M** | **~0.46M** |
 
 The open-tab row is scale 2's: an app-heavy user with Home visible three hours of a day re-reads the
 strip and today's rows at least ~48 times (~45 landed plays and ~3 artwork rescans while visible), and
@@ -1745,7 +1745,7 @@ database as it stands: the seven tables are not copied, rebuilt or re-keyed (A �
 
 | what | when | change | why nothing can be lost |
 |---|---|---|---|
-| 122 of his own plays that only the recorder holds | after lane 1904, before P2 | inserted by the backstop replay (§11.3), with his yes | a snapshot first; the script inserts only what is missing and was run on a snapshot copy before ("166 inserted … re-run 0", `.claude/QUEUE.md:16`) |
+| 122 of his own plays that only the recorder holds | after lane 1904, before P2 | inserted by the backstop replay (§11.3), with his yes | a snapshot first; the script inserts only what is missing (`1ac38fa`) and was run on a snapshot copy before ("166 inserted … re-run 0", `.claude/QUEUE.md:16`, uncommitted on Oct 15) |
 | `plays.listened_ms` | P2 | a nullable column added and filled (§11.3); a NULL means pending | additive, so `min_reader` does not move and old code ignores it; verified by a sum that must match exactly |
 | `meta.owner_uid`, `schema_version`, `min_reader`, `store_epoch` | Phase 1 | written once | four new keys; no reader before Phase 1 |
 | `meta.user_tz`, `probe`, `seg_seq:*` | Phase 3 and P3 | written by the app's ordinary code | new keys |
@@ -1770,8 +1770,8 @@ measured it. The migration review did, read-only on the Zenbook's SQLite files o
   playlists, the playlists owned by `me_id` and `playlist_tracks` match exactly; Liked went 48 → 49 and
   `contexts` 114 → 117 by ordinary activity; `me_id` is unchanged.
 
-There is nothing to delete, so the plan's one irreversible step on Rem's history is gone, with
-decision 10, its rollout row and its Phase 2 precondition. What stays is the method, for any future
+There is nothing to delete, so the plan's one irreversible step on Rem's history is gone, with the Oct
+14 version's decision 10, its rollout row and its Phase 2 precondition. What stays is the method, for any future
 cross-account write: the recorder diff over the whole range and the insertion-order query, both
 read-only, re-run once on the latest backup before Phase 2 (the review's scripts are in
 `~/.claude/broke/scratch/lazyboy_mu/0224_review/`). The Oct 14 method, a `played_at` window, would have
@@ -1899,7 +1899,8 @@ the cost control.
 - **`scripts/user.mjs --disable | --enable | --remove <uid>`** is the only way to change another user's
   status (security R11, completeness M3). The runtime holds no admin mutation, so a stolen admin
   cookie, or a script injected into the admin's page, cannot destroy a friend's data. `--remove` runs
-  the deletion job of §12.3 from the Mac.
+  the deletion job of §12.3 from the Mac. Every change it makes also appends a line to the telemetry
+  store's lifecycle log, which §12.5 re-applies after an app-database restore (migration 1).
 - **`/join`** needs no session. It shows the privacy policy and the end-user agreement, which the
   Developer Terms require before sign-up (§V, 01f §1.5), and asks whether the person agrees to account
   notices by e-mail at the address Rem already holds; "I agree" sets a short-lived signed cookie naming
@@ -2022,7 +2023,7 @@ reviews showed the price: a Spotify-side event that invalidates many grants woul
 friend's history in one run, an expiry could be filed as a revocation, and on Free nothing can be
 undeleted (security R4, completeness H2). §5.4 now confirms the signal, refuses to act on an
 app-wide one, and waits until day 4, when the person may have signed in again. The cost, stated: on a
-paid plan the destroyed database stays undeletable at Turso until about day 9, which the strictest
+paid plan the destroyed database stays restorable through Turso's undelete until about day 9, which the strictest
 reading of the Terms would count; on Free there is no undelete. Rem's call (decision 21).
 
 **Two copies outside the friend's database**, which none of the designs closed:
@@ -2410,7 +2411,7 @@ could not fire for users of equal weight (A §13.3, scale 1), which is why the p
 | recently-played and `/me` calls | ~150-170 | held near ~505-560 by the brake | ~725-800 observed; 450 planned |
 | player calls | probes ~720 with up to two users, ~450 from three on; now-playing ~240-480 per visible hour per browser at 15 s | ~2,250 from probes, plus ~3,600-7,200 from five app-heavy users' visible tabs [estimate, scale 6] | unknown; 1,336 the busiest day so far, with no 429 |
 | Spotify calls per 30 s, at peak | – | ~2-3 from ticks, ~10-15 from five visible tabs at 15 s, background pages paced | 56 measured without a 429; the limit is unpublished |
-| Turso rows read | ≤ 1.5M on a heavy day after P4 (§8.6) | 29-306M a month by profile and step (§14.4) | 500M (R4: 250M) |
+| Turso rows read | ≤ 1.5M on a heavy day after P4 (§8.6) | 30-306M a month by profile and step (§14.4) | 500M (R4: 250M) |
 | Turso rows written | ~4,500-5,000, index entries counted | ~0.72-0.8M a month | 10M (R4: 1M) |
 | Vercel invocations | ~200 browsing (Rem's measured profile) to ~1,000 (Home visible three hours, scale 11); the tick is 1,440 a day in total | ~73,000-195,000 a month | 1,000,000 (Hobby) |
 | Vercel provisioned memory | – | ~100-110 GB-h a month at five app-heavy users [upper bound, scale §2] | 360 GB-h (Hobby) |
@@ -2422,7 +2423,7 @@ past five.
 
 ### 14.4 Store reads, writes and growth (D1-D3)
 
-Per user on a heavy day, §8.6's table: Rem ~1.52M after P3 and ~0.38M after P4; an app-heavy Rem-like
+Per user on a heavy day, §8.6's table: Rem ~1.53M after P3 and ~0.39M after P4; an app-heavy Rem-like
 user ~2.17M after P3 and ~0.46M after P4. D1 (≤ 1.5M) is met by Rem at about P3 and by everyone after
 P4; D2 holds after P4, when nothing on a per-play, per-tick or per-visit path grows with history.
 
@@ -2432,7 +2433,7 @@ and library]:
 
 | five users | per friend a day, after P3 / P4 | after P3 | after P4 |
 |---|---|---|---|
-| Rem + four light (40 plays a day, 7,200 plays, 2,000 library songs) | ~0.46M / ~0.15M | ~101M (20%) | ~29M (6%) |
+| Rem + four light (40 plays a day, 7,200 plays, 2,000 library songs) | ~0.46M / ~0.15M | ~101M (20%) | ~30M (6%) |
 | Rem + four typical (50 a day, 18,250 plays, 8,000 songs) | ~0.95M / ~0.29M | ~160M (32%) | ~46M (9%) |
 | Rem + four app-heavy Rem-like, at Rem's history size | ~2.17M / ~0.46M | ~306M (61%) | ~67M (13%) |
 | the same a year in, ~42,000 plays each | ~2.78M / ~0.52M | ~379M (76%) | ~74M (15%) |
@@ -2876,9 +2877,12 @@ does what the finding asks, or an equivalent named in the row; "partly" and "not
 
 Overlaps were merged where they ask for the same change (security R4 with completeness H2, security
 R6 with migration 5, security R7 with completeness H1, security R1 with migration 6); each row names
-its twin. Two findings changed a recommendation of the Oct 14 plan, not only its mechanics: an
-`invalid_grant` no longer destroys a friend's database at once (decision 21), and a token-key
-rotation after each deletion is no longer recommended (decision 23).
+its twin. Four findings changed a recommendation of the Oct 14 plan, not only its mechanics: an
+`invalid_grant` no longer destroys a friend's database at once (decision 21); a token-key rotation
+after each deletion is no longer recommended (decision 23); the canary is no longer optional, and the
+first friend waits a week behind it (decision 16); and the deletion of foreign plays is gone, since
+there are none (§11.2). The reviews cite the Oct 14 plan's decision numbers, and the first column
+quotes them; the other columns use §18's.
 
 ### 19.1 Security (`review-security.md`)
 
@@ -2899,7 +2903,7 @@ rotation after each deletion is no longer recommended (decision 23).
 | R13 now-playing and the player actions have no server bound | Fixed. A per-uid memo on `/api/now-playing` (~5 s) and a per-uid token bucket on the player actions, both in-process | §6.2, §6.6, §7.6 |
 | R14 cron hardening | Fixed. The tick stamp is a compare-and-set that doubles as the rate limit; `CRON_SECRET_EXT` opens `/api/cron/sync` and `/api/cron/health` only; cron-job.org gets a bare `{"ok":true}`; T13 | §5.5, §7.2, §6.4 |
 | R15 smaller gaps | Fixed: the owner check is cached per (uid, `db_name`) with a T8 case; the uid goes on the session; with no uid in any path, `server-error` rows carry none and age out with the 30-day prune; S4 uses the TypeScript compiler API; `/usage` shows friends' rows aggregated by endpoint template; after one user's quota ban, one other user's harvest goes through before the cooldown goes app-wide | §4.5, §5.1, §6.2, §6.4, §7.8 |
-| R16 land Phase 0 before the next push | Taken into decision 1. The repo is public, `main` is 225 commits ahead of `origin/main`, and its reflog shows pushes at 7:05 AM on Oct 13 and 14 | §0, decision 1 |
+| R16 land Phase 0 before the next push | Taken into decision 1. The repo is public, `main` is 238 commits ahead of `origin/main` (1 AM Oct 15), and its reflog shows pushes at 7:05 AM on Oct 13 and 14 | §0, decision 1 |
 | §3 STORE_MIGRATION notes | Fixed: Phase 0 before lane 1903's flip; step 8's `lazyboy` token named as the one Phase 2 invalidates; lane 1903 step 11's expectation of fence hits from old deployments corrected (no Skew Protection on Hobby) | §10.2 |
 
 ### 19.2 Performance and scale (`review-scale.md`)
@@ -2927,11 +2931,11 @@ rotation after each deletion is no longer recommended (decision 23).
 |---|---|---|
 | 1 (High) restores have no runbook | Fixed. The per-process client map is keyed by `db_name` and compared with the `db_name` every identity read and claim returns; roles come from `users`, never the string `lazyboy`; a random `store_epoch` in each database's `meta` goes into every version token; a restore runbook per kind of database; a rehearsal before the canary | §4.2, §4.5, §6.2, §9.1, §12.5, §13.2 |
 | 2 (High) the Zenbook stays the only frequent pinger for weeks | Fixed. An interim second pinger after lane 1904, with a 90-second guard in today's route (decision 8); a resolver on the Zenbook outside Tailscale (decision 9); §14.5 restated with the August-September outages | §7.9, §13.1, §14.5 |
-| 3 (High) the new derived state is read-modify-write | Fixed. Totals and month counts advance in SQL, conditioned on the insert's `changes()` in the same batch; the Home payload patch compare-and-sets on a version and marks itself dirty on a lost race; the daily chores recompute the totals and month counts from the stored columns and log any drift | §8.3, §8.4, §9.1, §7.11 |
+| 3 (High) the new derived state is read-modify-write | Fixed. Totals and month counts advance in SQL, conditioned on the insert's `changes()` in the same batch; the Home payload patch compare-and-sets on a version and marks itself dirty on a lost race; the daily chores recompute the totals and month counts from the stored columns, overwrite what drifted and log it. The heal runs on Turso rather than in the backup job the review suggested, because the backup holds a read-only token and a check that cannot write leaves the drift in place; it costs ~0.02M rows a day for Rem (§8.6) | §8.3, §8.4, §9.1, §7.11 |
 | 4 (High) the unfenced fill, rollback windows and the import scripts | Fixed. `listened_ms IS NULL` on a counted play is pending and filled by the pass that rules skips; `importTailStmts` sets the dirty mark and bumps the months it wrote; the two queued imports run before P2's fill | §8.3, §11.3 |
 | 5 (High) the identity read has no failure branch | Fixed, with security R6. The browser clears its storage only on a 401 that carries a signed-out marker; "`lazyboy-app` unavailable" added to §14.5 | §5.1, §6.2, §14.5 |
 | 6 (High) rollbacks name no mechanism | Fixed, with security R1: one recipe, environment changes additive or explained, a boot check that names a missing store variable, each rollback rehearsed in its phase's soak | §13.1, §13.5 |
-| 7 (High) there are no foreign plays | Fixed. §11.2 replaced by the measurement and a re-check on the latest backup before Phase 2; decision 10, the rollout row and the Phase 2 precondition dropped | §11.2, §13.1, §18 |
+| 7 (High) there are no foreign plays | Fixed. §11.2 replaced by the measurement and a re-check on the latest backup before Phase 2; the Oct 14 decision 10, the rollout row and the Phase 2 precondition dropped | §11.2, §13.1, §18 |
 | 8 (High) 122 of Rem's plays exist only in the recorder's file | Fixed. Edit 7 backs up `backstop.db` nightly; a one-off copy now (decision 6); the replay after lane 1904 and before P2 (decision 7) | §10.2, §11.3, §13.1 |
 | 9 (High) one mis-set key strands every user | Fixed. A decrypt failure writes no user state; two or more in a tick, or the admin's, answers the Zenbook caller 503; each key's sentinel blob is decrypted at cold start | §5.3, §7.8 |
 | 10 the daily route is one invocation a day | Fixed. `daily_at` stamp; a tick runs overdue chores under a lease; the Vercel cron at 09:00 UTC; the telemetry deletion retried every tick until it succeeds | §7.11, §10.2 |
@@ -2964,7 +2968,7 @@ rotation after each deletion is no longer recommended (decision 23).
 | L4 two Phase 3 exit checks read data nothing records | Fixed. Each harvest tags its trigger in `api_log.source` | §7.4 |
 | L5 the foreign-play cleanup leaves copies | Retired by migration 7, except the advice to ask the second account's owner to remove the app | §11.2 |
 | L6 Phase 3 changes Rem's app before any friend | Fixed. The 15-second poll and the 2-hour idle backstop wait for the first friend; Liked stays daily through the incremental fetch; the one change left in Phase 3 is decision 15 | §7.4, §7.6, §7.7, decision 15 |
-| L7 decision 8 states no cost | Fixed (decision 12) | §18 |
+| L7 decision 8 states no cost | Fixed: decision 12, the same choice, now states that the first friend arrives ~1.5-2.5 weeks later | §13.3, §18 |
 | §2 R6 binds the cutover only; a restore brings back no token | Fixed | §10.2, §12.4 |
 
 ## 20. What the revision ran
