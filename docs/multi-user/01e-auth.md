@@ -574,7 +574,7 @@ Recommended app-side gate, replacing `isOwnerSignIn`:
 
 Today, single user (from the code): the user removes the app at spotify.com/account/apps. Whether the
 stored access token stops working at once is undocumented; it expires within an hour regardless
-(`expires_in` 3600). A 401 meanwhile surfaces as a `SpotifyError` (`src/lib/spotify/client.ts:205-210`)
+(`expires_in` 3600). A 401 meanwhile surfaces as a `SpotifyError` (`src/lib/spotify/client.ts:206-211`)
 and triggers nothing. The next refresh gets `400 invalid_grant`, which is terminal:
 `clearTokensIfStale` deletes the row; the request path sets `error` and sends the browser to `/login`;
 the cron answers 503 "no token" (`cron/sync/route.ts:103-111`) and the Zenbook's timer logs a failure.
@@ -643,6 +643,86 @@ What N users need:
 
 ## 6. What multi-user needs from STORE_MIGRATION.md
 
+What auth needs from the store once it is on Turso:
+
+- `users`, `user_tokens` and the lock rows on the core client, never the telemetry one. The telemetry
+  client gets one attempt and a 4 s timeout (STORE_MIGRATION §6 item 1), which is wrong for a read
+  every request waits on. The plan already keeps `meta` on core (§5 there).
+- One round trip per request for identity and tokens together (§5.1), at the plan's R1 target of
+  p50 ≤ 15 ms.
+- The refresh lock is a compare-and-set, which is sound on Turso's single primary. If read replicas
+  are ever added, token and lock reads stay on the primary; GOTCHAS already says this for `meta`.
+- Writes from tokens are small: about 54K a month at 25 users (§5.2), against 10M.
+
+Does anything in it need to change before it runs (Oct 15, 8 PM)? Nothing is required for auth. The
+cutover moves `meta` whole, compares both token rows (§8 step 10) and fences the Zenbook so an old
+deployment cannot write a refreshed token there (§6 item 8). Multi-user's tables come later. Four small
+changes I would make, none of them blocking:
+
+1. **Backups and the archive drop the token rows.** Lane 1904 rewrites `backup.py` (§9) and lane 1909
+   archives the Zenbook's old core tables to OneDrive (§9, "The 7-day cleanup"). Both copy `meta` with
+   live 13-scope grants (F2). Deleting `meta` rows `spotify_tokens%` and `lock:%` from the copy before
+   gzip removes that exposure today, long before §5.3 exists. The cost is one sign-in after a restore.
+   The cutover's own snapshot and import must keep the rows (R5: Rem stays signed in).
+2. **Lane 1903 deletes its plaintext copies when it finishes**: the core snapshot copied to the lane's
+   scratch on the Mac (§8 step 5) and the mode-600 copy of `.env.local` (§8 step 15). The first holds
+   live grants, the second every secret in §3.1.
+3. **Give lane 1905 a real user id.** Its IndexedDB copy is keyed by "the signed-in user's id"
+   (STORE_MIGRATION.md:332), and today's session carries none (§1.5). Shipping A7-A9 first (the
+   account id on the JWT, cookies without it refused, `session.user.id` exposed) gives 1905 the id
+   multi-user will use, and it is the lasting fix for F1. It is a small auth change of its own, not
+   something to fold into 1905's scope.
+4. **Preview stays on the production store until a second user exists** (STORE_MIGRATION.md:71, §8
+   step 9). After that, any branch deployment could read every user's data, so Preview needs its own
+   database or none. Not a change for the cutover.
+
+After the cutover, for multi-user: the app's Turso token is "full access, no expiry"
+(STORE_MIGRATION.md:129) and `TURSO_PLATFORM_TOKEN` can mint another. Once §5.3 ships, neither unlocks
+anyone's Spotify account, but both still read every user's history. I would take the platform token
+out of the Vercel runtime when the second user arrives; it serves `/usage` and a dormant guard (§3.2).
+
 ## 7. Decisions that are Rem's
 
+1. **F1, now:** rotate `AUTH_SECRET` in production. Recommend yes, tonight: it costs one sign-in and
+   closes a live cross-account hole.
+2. **What "log out" means:** today it stops capture and signs out every device. Recommend splitting
+   it into sign out, sign out everywhere, and disconnect (§5.6).
+3. **Data after an ambiguous `invalid_grant`:** recommend stopping all processing at once and purging
+   after 30 days without a reconnect, owner exempt (§5.7). The policy's literal reading is an
+   immediate purge; 30 days is my judgment of the balance against destroying history on a signal that
+   can also mean Spotify-side invalidation.
+4. **The recorder:** recommend owner-only (§5.9).
+5. **Token rows out of the backups:** recommend yes (§6 item 1).
+6. **Encryption at rest with a Vercel-held key:** recommend yes, before the second user signs in;
+   no KMS (§5.3).
+7. **Who may sign up:** recommend an app-side invite list next to Spotify's allowlist, capped at what
+   development mode allows (five, §5.4). Whether to seek extended quota for more is 01f's question and
+   Rem's.
+8. **Dev against the production store:** recommend moving dev to a local or separate store once a
+   second user exists (§5.9).
+9. **`TURSO_PLATFORM_TOKEN` in the runtime:** recommend removing it with the second user (§6).
+
 ## 8. Unknowns and what I did not verify
+
+- Whether `AUTH_SECRET` was rotated after the Oct 14 incident, which decides whether F1 is open. A
+  look at its "updated" time in Vercel would answer it; I read nothing from Vercel.
+- Whether `SPOTIFY_OWNER_ID` is set in production (`owner.ts:7` says it is), and whether production
+  uses the same client id as dev.
+- Whether `/v1/me` returns `account_id` to this development-mode app (documented, not observed).
+- Whether this app's refresh tokens can be refreshed without the client secret (§3.2).
+- Whether revoking at spotify.com stops the current access token at once, and whether a password
+  change or other account event also invalidates grants.
+- Whether the six-month lifetime applies to grants issued before Spotify documented it (F3).
+- Whether development mode's five-user cap counts the owner, and how many accounts the allowlist
+  holds today.
+- Who the second account was, and whether its browser still holds the cookie.
+- Whether Vercel builds Preview deployments for pull requests from forks of this public repo with
+  Preview's env (which holds the store token); I did not check the project's setting.
+- Every library-internal claim comes from the `@auth/core` 0.41.2 and `next-auth` 5.0.0-beta.31
+  tarballs; a different installed version could differ.
+
+Read-only measurements in this file, all on 2026-10-14 between 9:12 and 9:25 PM: `ls -la` of three
+Zenbook directories; key names of the recorder's two JSON files; the hash-prefix probe of three
+Zenbook snapshots and `tokens.json` (§2.1); `rclone listremotes` (names only); `sqlite3 -readonly` on
+the Mac's `data/replica.db` and `data/listens.db`; key names of the Mac's `.env.local`; a client-id
+hash-prefix comparison; `gh repo view` for visibility. No query touched the production store.
