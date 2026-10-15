@@ -27,7 +27,10 @@ the dedupe/clean/queue-save algorithms — they are re-specified in `docs/FEATUR
 ## Where things live
 
 ```
-src/app/(auth)/          login page (unauthenticated shell)
+src/app/(auth)/          login page (unauthenticated shell; its consent line links the two below)
+src/app/(legal)/         /privacy and /terms, public, no session or data reads: the privacy policy
+                         and end-user agreement Spotify's Developer Terms §V require. Every line
+                         must stay true of the code; change what the app stores, change /privacy
 src/app/(app)/           authed shell: layout calls auth() + owns the chrome (chrome.tsx,
                          den.css skin, now-playing provider); pages bring their own <main>
                          home/ (greeting, action dock, day strip, song table), playlists/,

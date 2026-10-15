@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { login } from "@/app/(app)/actions";
@@ -40,6 +41,10 @@ export default async function LoginPage({
           <Button type="submit" size="lg" className="w-full font-medium">
             Connect Spotify
           </Button>
+          <p className="mt-3 text-xs text-muted-foreground [&_a]:text-foreground [&_a]:underline [&_a]:underline-offset-4">
+            By connecting your Spotify account you agree to the <Link href="/terms">Terms</Link>{" "}
+            and the <Link href="/privacy">Privacy Policy</Link>.
+          </p>
         </form>
         <p className="text-xs text-muted-foreground">
           We only access your library to manage playlists. Nothing is shared.
