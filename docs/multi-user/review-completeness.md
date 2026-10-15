@@ -5,18 +5,45 @@ Lane 0224_lb_mu_review_completeness, Oct 14, 2026. An adversarial review of `doc
 not reversible, tests that would not catch what they claim to, and decisions it makes that should be
 Rem's. Security, scale and migration have their own reviewers; this file stays out of their lanes
 except where a gap is a product or completeness gap first. Planning only: nothing here changed code,
-data, the Zenbook store, Turso or Vercel. §3 lists everything this lane ran.
+data, the Zenbook store, Turso or Vercel. §4 lists everything this lane ran.
 
 Severity: **High** means a friend's data can be lost or exposed, Rem's capture can stop, or a claimed
 safety property does not hold as specified, with no step in the plan that would catch it in time.
 **Medium** means a real gap the plan should close before the phase that needs it. **Low** means a
 note for the phase's lane.
 
-Status: in progress.
+Status: complete, Oct 15, 2026.
 
 ## 0. Summary
 
-(to be filled)
+Four high findings, seven medium, seven low. The plan works out isolation in detail. What it leaves open
+is what happens around that work when something goes wrong, and what a friend actually gets.
+
+- **H1. The alarms reach nobody.** The owner alarm, the isolation events, the deletion and key-rotation
+  clocks and a friend's dead capture all end on `/usage` or in a failed systemd unit whose `OnFailure=`
+  is empty. STORE_MIGRATION's R6 ("no new alerting") is why, and the plan never lifts it. Fix: an hourly
+  health route behind a cron-job.org job with failure e-mail.
+- **H2. Automatic deletion on `invalid_grant`.** The friend's database is destroyed at day 0 and their
+  `users` row deleted, so on return they are refused as "invite-only" and the plan's stated grace cannot
+  happen; nothing guards against a Spotify-side mass invalidation; on Turso Free it is final; and it
+  assumes each sign-in restarts Spotify's six-month clock, which nobody has observed. Fix: design A's
+  `deleting` state and tombstone, a mass-event guard, and a Phase 0 check of the refresh token's hash.
+- **H3. The versioned open has no rule for a database newer than the code**, so a rollback can refuse
+  every user, and dev, which keeps a `lazyboy` token, applies a branch's schema steps to Rem's production
+  database. Fix: a `min_reader` version, and DDL only from production code and the migrate script.
+- **H4. The first two-user run in production is a real friend's.** Phases 1-3 cannot exercise isolation
+  with one user, and the canary is optional and arrives beside the first friend. Fix: Phase 4 opens with
+  only a canary invited, for a week, with exit checks that can fail.
+- **Medium:** T3 and T1 cannot see parts of what they claim to cover (M1, M2); `SIGNUPS=owner` freezes
+  nobody already signed in, and there is no incident runbook (M3); what a friend gets is unwritten,
+  including that playback needs their own Premium and that the allowlist needs their Spotify e-mail
+  (M4); removed, inactive and unbacked friends fall through the lifecycle (M5); P4's equality check
+  skips its own hard cases (M6); nothing bootstraps an empty install, which the plan's answer for more
+  than five people depends on (M7).
+- **STORE_MIGRATION** needs nothing beyond the plan's six edits before Oct 15, 8 PM (§2).
+- **Decisions this adds for Rem:** lifting R6 for the multi-user phases (H1); decision 14 re-presented
+  with the lock-out and mass-deletion cases (H2); a canary week before the first friend (H4); the Phase 3
+  changes to his own app (L6); and decision 8's cost in weeks to the first friend (L7).
 
 ## 1. Findings, ranked
 
@@ -108,18 +135,19 @@ one day destroys nothing and raises the alarm.
 
 **What the plan says.** On a database's first open, "A current version means nothing more is run. A
 version behind by additive steps only ... applies them ... A version behind by a rebuild refuses that
-user" (§4.5 step 2, PLAN.md:428-434). Every phase's rollback is "redeploy the previous build" (§13.1,
+user" (§4.5 step 2, PLAN.md:428-434). Rollbacks are mostly a redeploy of the previous build (§13.1,
 PLAN.md:1582-1588). Dev holds a `lazyboy` token "so dev reaches Rem's data only" (§5.5, PLAN.md:598;
 layer 7, PLAN.md:712-713).
 
 **What is wrong with it.**
 
-1. A database ahead of the code has no rule, and every rollback after a phase that added a step makes
-   one. Phase 3 creates `sync_state` in the app database (PLAN.md:1586), so rolling Phase 3 back puts
-   Phase 2's build on an app database one step ahead. If the open reads "not current" as an error, the
-   identity read fails for every session, Rem's included; on `lazyboy` it refuses Rem ("updating") and
-   the cron skips his step (PLAN.md:972). §4.5 step 5's "old code tolerates it" (PLAN.md:440) is true of
-   today's `init()`; with a version check it has to be designed back in.
+1. A database ahead of the code has no rule, and the first rollback of a deploy that added a schema step
+   makes one. The plan's own next lever is such a step: history segments materialized in the user
+   database, a new table in every user's database (§8.5, PLAN.md:1119). Rolled back, the previous build
+   opens databases one step ahead. If the open reads "not current" as an error, then on the app database
+   the identity read fails for every session, Rem's included, and on `lazyboy` it refuses Rem
+   ("updating") and the cron skips his step (PLAN.md:972). §4.5 step 5's "old code tolerates it"
+   (PLAN.md:440) is true of today's `init()`; with a version check it has to be designed back in.
 2. Dev runs branch code against Rem's production database. The first dev open of `lazyboy` on a branch
    that declares a new additive step applies it and bumps `schema_version` in production, before review
    and before deploy. The plan takes Preview off the store for exactly this reason (§10.2 edit 2,
@@ -265,7 +293,7 @@ with no plays. Hide or label the features development mode killed.
 
 **Fix.** Seven days in `removed` raises H1's alarm and prompts Rem to run the deletion; the policy names
 a way to request deletion outside the app. Capture pauses after about 60 days without a sign-in
-(`dormant`, resumed at the next sign-in, the gap's plays beyond 50 being the honest cost). Back up every
+(`dormant`, resumed at the next sign-in; the cost is the gap's plays beyond the last 50). Back up every
 user not in `deleting`. An export of the user's own history segments (the JSON bodies §9.1 already
 serves) on the disconnect page and before any automatic deletion. `invite.mjs --revoke`, and a 14-day
 expiry the daily route enforces. Put the grandfathering consequence next to decision 5's dashboard read.
@@ -333,11 +361,10 @@ store or `api_log`. Fix: each harvest logs its trigger in `api_log.source` (`har
 after lane 1904 (PLAN.md:1346-1369). The same rows, and any `contexts` names resolved with the second
 account's token, stay in every nightly backup from Oct 15 until the delete (60 days on OneDrive), in the
 cutover's snapshot and in lane 1909's archive. `client_metrics` may hold `handoff` rows naming that
-account's songs ("artist — title", 01a §2), and its prune has not run since August
-(STORE_MIGRATION §3). The second
-account's grant also stays valid at Spotify until its owner removes the app (01e §1.6). Fix: name these
-copies in §11.2 with when each ages out; delete the window's `handoff` rows; if Rem knows who the second
-account was, ask them to remove Lazy Boy at spotify.com/account/apps.
+account's songs ("artist — title", 01a §2), and its prune has not run since August (STORE_MIGRATION §3).
+The second account's grant also stays valid at Spotify until its owner removes the app (01e §1.6). Fix:
+name these copies in §11.2 with when each ages out; delete the window's `handoff` rows; if Rem knows who
+the second account was, ask them to remove Lazy Boy at spotify.com/account/apps.
 
 **L6. Phase 3 changes Rem's own app weeks before any friend, outside §18.** Phase 3 ships to Rem alone:
 now-playing polls every 15 s mid-track instead of 6 s (PLAN.md:939-943); `refreshHistoryAction` stops
