@@ -390,8 +390,8 @@ WHERE u.uid = :uid
 
 Primary-key probes only, ~4 rows read [estimate]. No `uid`, an unknown one, `disabled` or `deleting`,
 a stale epoch, or a `db` that differs from `u.db_name` returns `null`, which ends the session; this one
-rule closes F1 (01e §1, F1) and asks everyone to sign in once at rollout. `needs_reconnect` keeps a session that can read its stored history
-but makes no Spotify call (01b §2.4's recommendation). The same row carries what Home's chrome and
+rule closes F1 (01e §1, F1) and asks everyone to sign in once at rollout. `needs_reconnect` keeps a
+session that can read its stored history but makes no Spotify call (01b §2.4's recommendation). The same row carries what Home's chrome and
 capture banner need today from three separate reads (`home/page.tsx:78-83`: cooldown, capture health),
 so identity costs no round trip that today's token read does not already pay. The page's user-database
 reads start in parallel, from the `db` in the decoded cookie (encrypted under `AUTH_SECRET`, so only
@@ -510,14 +510,15 @@ cron-job.org on the odd ones (§12). While both run, a tick runs every minute; o
    can get a non-200: when the tick could not run, or when the owner's own capture is failing, since
    the Zenbook timer's failed unit is Rem's only alarm today (01c §5.2). cron-job.org always gets
    200, because it disables a job after a run of consecutive failures (the route's own comment,
-   `src/app/api/cron/sync/route.ts:174-176`), and a store outage or a dead owner token would otherwise switch off the second
-   pinger when it is most needed.
+   `src/app/api/cron/sync/route.ts:174-176`), and a store outage or a dead owner token would
+   otherwise switch off the second pinger when it is most needed.
 
 Each pinger hit is one invocation: 1,440 a day whatever N is (two pingers each running every minute
 would pay 2,880 for the same tick rate). Tick-lock writes: 2 per tick, 2,880 a day [estimate]. Wall
 time: the slowest due user, about 1-3 s at five users through Turso; at 250 users up to ~125 users fall
-due in a minute, ~0.5-1 s each at 16-way concurrency, ~4-8 s per tick [estimate]. The route sets `maxDuration = 60`; nothing under `src/app` sets one today, so the
-project's 300 s default applies (01f §2.1).
+due in a minute, ~0.5-1 s each at 16-way concurrency, ~4-8 s per tick [estimate]. The route sets
+`maxDuration = 60`; nothing under `src/app` sets one today, so the project's 300 s default applies
+(01f §2.1).
 
 ### 7.3 The probe
 
@@ -695,8 +696,8 @@ landing on a day other than the opening day (a late arrival, or the first harves
 out-of-order insert, a time-zone change, a shape change, and any §8.3 event that touches a play in the
 payload's 16 days (a context name resolving, an orphan flip), which marks `home` dirty for the next
 harvest or the daily route. Today the rebuild after every landed play is what heals those two derived
-columns; a patched payload needs the explicit mark, or a stale "From" could sit in it for days. Cost: 1 row read instead of ~7,500, the same
-1 row written.
+columns; a patched payload needs the explicit mark, or a stale "From" could sit in it for days. Cost:
+1 row read instead of ~7,500, the same 1 row written.
 
 ### 8.3 History segments, appended on write
 
@@ -815,7 +816,8 @@ in §6, keyed by uid.
   spends at 4× today (01d §2.3).
 - **The whole-history strip from the segments**: per-day totals from each play's listened seconds,
   replacing the `dailyStatsAction(100000)` prefetch on mount (§3, row 4). The server path stays as the
-  fallback before segments land.
+  fallback before segments land. A day's unique count then counts songs by identity, since segments
+  carry identities, not track ids: the same change as the all-time list below.
 - **The all-time list from the segments**: plays, last play and the latest play's source per song,
   replacing `readAllTimePlays` (~25,000 rows per rebuild, READ_QUOTA "Sibling sweep"). It groups by
   song identity where the server groups by track id, so a song Spotify relinked under two ids shows
@@ -1000,8 +1002,8 @@ can read on the dashboard in a minute; I could not measure it either.
 
 The cheapest store that holds is the one STORE_MIGRATION already moves to: Turso's free plan in
 aws-us-east-1, beside Vercel's iad1. By §10.3 it holds five users at under 5% of its reads, writes and
-storage, and 25 at under 16%; 250 need the Developer plan at $4.99-5.99 a month. The alternatives, from this design's
-angle:
+storage, and 25 at under 16%; 250 need the Developer plan at $4.99-5.99 a month. The alternatives,
+from this design's angle:
 
 - **One shared Turso database with a user column.** The same plan at every size: Turso meters reads
   and writes per organization, so 250 users' writes exceed the free plan either way, and only the
