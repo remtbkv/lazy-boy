@@ -274,8 +274,88 @@ which §2.2 says is usual). At 10 Mbit/s that is ~0.5-0.7 s of transfer; at Ligh
 ## 3. How each grows with a user's library and history
 
 ### 3.1 Bytes per library identity, per played song, per play
-### 3.2 The ceilings: Vercel's 4.5 MB response cap, build time, phone memory and parse
+
+**[measured]** The history body rebuilt from the same copy as it stood at monthly cutoffs (plays with
+`played_at` up to the cutoff, today's tracks and flags):
+
+| cutoff | plays | identities | body | data-cache item |
+|---|---|---|---|---|
+| 2026-07-14 | 12,624 | 9,759 | 1,428,118 B | 69.1% of 2 MiB |
+| 2026-08-14 | 15,176 | 10,369 | 1,546,651 B | 74.8% |
+| 2026-09-14 | 18,172 | 10,899 | 1,661,250 B | 80.3% |
+| 2026-10-14 | 21,559 | 11,358 | 1,791,126 B | 86.6% |
+
+It grows 115-130 KB a month at the owner's ~3,000 plays and ~450-600 new songs a month. The per-unit
+model from §2.1 (19 B per play + 122 B per new played identity) reproduces it: 3,387 × 19 + 459 × 122
+≈ 120 KB for the last month against 130 KB measured. New identities per month are falling as the
+owner's repertoire saturates (first plays: 1,900 in June, 934 July, 780 August, 404 September), so
+the plays term will dominate.
+
+The library body is 125 B per identity and moves only when playlists do. It has gone both ways:
+13,464 identities in August, 6,457 now.
+
+Server rebuild cost grows the same way: ~3 store rows per play for the history and ~2 per membership
+for the library (§2.2). Client parse and build grow linearly in plays and entries (§2.3 at 1×, 2×, 4×
+scale below).
+
+### 3.2 The ceilings
+
+**1. The Data Cache's 2 MB item limit — the owner reaches it in about ten weeks.** Next 16.2.6 stores an
+`unstable_cache` result as a JSON string inside a wrapper and checks
+`JSON.stringify(wrapper).length > 2 * 1024 * 1024` before writing (`next/dist/server/web/
+spec-extension/unstable-cache.js:17-33`, `next/dist/server/lib/incremental-cache/index.js:471-487`,
+read from the published 16.2.6 package). Over the limit, with no custom cache handler (this app has
+none; `next.config.ts` sets no `cacheHandler`), production logs a warning and does not cache; `next
+dev` throws (`E1003`). Vercel documents the same limit: "Item size 2 MB (items larger won't be cached)"
+(https://vercel.com/docs/data-cache, "Limits and usage", fetched 2026-10-14).
+
+The history entry is at 1,815,171 of 2,097,152 (86.6%) and grows ~123,000 a month (the slope over the
+last two months above). **[estimate]** It crosses in ~2.3 months: **late December 2026.** From then on
+every request for the history payload runs the full plays scan, ~850 ms+ through the Funnel today
+(§2.2) and ~65,000 rows read on Turso after the move, on every Home open. Nothing reports it: the
+warning goes to Vercel runtime logs, which age out within about an hour (STORE_MIGRATION §3).
+Removing the catalog rows from this body alone would drop it to 37% (§2.1); monthly segments remove
+the cliff (§5).
+
+**2. Vercel's 4.5 MB response cap.** "The maximum payload size for the request body or the response
+body of a Vercel Function is 4.5 MB ... it will return an error 413: FUNCTION_PAYLOAD_TOO_LARGE"
+(https://vercel.com/docs/functions/limitations, fetched 2026-10-14). That is a 413 and no payload at all,
+so the box degrades to the server fallback. The library body reaches it at ~36,000 identities; the
+history body, by §3.1's model, at roughly 90,000 plays with 20,000 identities (§3.3).
+
+**3. Client main-thread time.** Measured at 4× in §2.3: 264 ms at today's size; **[measured]** 496 ms
+at 2× and 1,013 ms at 4× synthetic scale (identities and plays duplicated under suffixed names, so
+match rates hold; the interned art tables were not duplicated, so parse at 2-4× is a lower bound).
+One-letter keystrokes at 4×: 10.5 ms (14,507 entries), 25.6 ms (29,014), 55.9 ms (58,028). All of it is
+on the main thread today.
+
+**4. Memory.** **[measured, Node]** The merged search set holds ~8 MB of heap at today's size and
+~65 MB at 8× (116,056 entries), on top of the parsed payloads. A browser tab on a low-memory phone is
+the place this would show first; not measured on a device.
+
 ### 3.3 Projections for a light, a typical and a heavy user
+
+**[estimate]** Profiles are assumptions to argue from, not data: plays a day and library size are
+guesses about Rem's friends; the owner sits at ~100 plays a day (93-121 per day in Aug-Oct) and had
+13,464 library identities in August. Played identities after a year are taken as ~25% / 20% / 17% of
+plays for light / typical / heavy, between the owner's 30% at 4.5 months and his falling monthly rate.
+Sizes use §2.1's per-unit model; main-thread time scales §2.3's 4× measurement (~12 ms per 1,000
+plays at the owner's mix); store rows are ~3 per play + ~2 per membership.
+
+| profile | library ids | plays | history body | library body | parse + build at 4× | rows per full rebuild |
+|---|---|---|---|---|---|---|
+| light, 1 yr (20/day) | 2,000 | 7,300 | ~360 KB | ~250 KB | ~100 ms | ~26K |
+| typical, 1 yr (50/day) | 8,000 | 18,250 | ~790 KB | ~1.0 MB | ~230 ms | ~71K |
+| heavy, 1 yr (100/day) | 15,000 | 36,500 | ~1.45 MB | ~1.9 MB | ~450 ms | ~140K |
+| heavy, 3 yr | 15,000 | 109,500 | ~3.7 MB, **over 2 MiB** | ~1.9 MB | ~1.3 s | ~360K |
+| any user + 5-yr history import | – | ~91,000 + | ~4.2 MB, **over 2 MiB, 93% of 4.5 MB** | – | ~1.1 s + | ~270K + |
+| the owner today | 6,457 | 21,559 | 1.79 MB (87% of 2 MiB) | 0.81 MB | 264 ms (measured) | ~80K |
+
+Two things follow. A one-year heavy listener's library alone sits at ~90% of the Data Cache limit,
+and anyone given the owner's tools — the Extended Streaming History import
+(`scripts/import-extended-history.mjs`) or the catalog backfill (`scripts/backfill-scan.mjs`) —
+starts above the limit on day one. And under today's design every visit after listening re-downloads
+the whole history body: ~270 KB gzipped for the typical user after a year, ~500 KB for the heavy one.
 
 ## 4. What multi-user changes for search
 
