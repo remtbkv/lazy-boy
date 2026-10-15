@@ -1142,14 +1142,14 @@ user needs P4. Against R4 at five users (≤ 250M a month): after P3, Rem plus f
 ~258M (52%, at the bar). The strip is the one per-visit term left that grows with history (~3 rows
 per real play per mount), so a year in, at ~42,000 plays each, the second case is ~337M (67%). After
 P4 it is ~64-70M (13-14%) at either size, because nothing left on a per-visit path grows with
-history.
-Friends start with no history and no catalog rows, so a year in is where they arrive, not where they
-begin. §14.4 has the arithmetic.
+history. Friends start with no history and no catalog rows, so a year in is where they arrive, not
+where they begin. §14.4 has the arithmetic.
 
 Writes: ~3,000 core rows a day for Rem (01c §2.7), plus ~72 for tokens, ~900-1,440 for claims and
 releases (two rows per probe, 450-720 probes a day), and ~150 counter increments: ~4,100-4,700 a day,
 inside D3's 5,000 [estimate]. Five users: ~0.63M a month, 6% of the free plan's 10M, inside R4's 10%.
 `api_log`, ~1,000 Spotify calls a user a day after Phase 3, stays on the Zenbook.
+
 ## 9. Search: per-user payloads, caching and the phone budget
 
 Search keeps today's model: the browser holds the user's library and history and filters them on
@@ -1238,6 +1238,7 @@ history entry drops from 86.6% to 37.1% of the limit and the next crossing moves
 starts after lane 1906 merges, never in a parallel branch (C §7.2). Friends' history imports wait for
 segments: a five-year import is a ~4.2 MB history body today, over the item limit on day one and near
 Vercel's 4.5 MB response cap (01d §3.3, §7 decision 2).
+
 ## 10. The store, and STORE_MIGRATION (lanes 1901-1911)
 
 ### 10.1 The store
@@ -1313,6 +1314,7 @@ five users' `api_log` would be ~0.6M rows written a month even after Phase 3's c
 a user a day, ~4 rows written per insert counting index entries, 01c §2.1) [estimate], which with the
 ~0.63M core writes of §8.6 passes R4's 10% write bar. On the Zenbook the cost is `/usage`'s log
 sections during an outage and a dependency on the Funnel certificate that lane 1907 renews.
+
 ## 11. Migrating Rem's data with nothing lost
 
 ### 11.1 What changes in Rem's database
@@ -1406,6 +1408,7 @@ the row and Rem signs in once (C §9.4). After step 7: a script decrypts Rem's b
 `meta.spotify_tokens`, then redeploy. Pause the cron-job.org pinger in any rollback to a build without
 the claim (Phase 3 and later), because the old route has no lease and two pingers would double Rem's
 Spotify calls (C §9.4). Nothing else in Rem's database changed, so nothing else needs undoing.
+
 ## 12. Sign-up gating, privacy, deletion and backups
 
 ### 12.1 Sign-up gating
@@ -1531,6 +1534,7 @@ STORE_MIGRATION phase D's nightly job (lane 1904) with edit 4 of §10.2, extende
   kind of database in lane 1904's restore drill.
 - The cost: a friend's data lost more than four days back cannot be restored from a backup; Turso's
   point-in-time recovery covers the last day (ten on Developer). Rem's backups are unchanged.
+
 ## 13. Rollout in reversible phases
 
 Every phase is its own deploy, and each has an exit check and a rollback measured in minutes. Until
@@ -1610,6 +1614,7 @@ written twice.
 - One branch per phase, rebased on `origin/main` before it pushes; one lane in `db.ts` at a time.
 - Rem's own steps: Phase 0's environment changes and dashboard reads, the foreign-play list, the
   policy text, each friend's dashboard entry, and the decisions in §18.
+
 ## 14. Each target, step by step, with its budget
 
 Store round trips use STORE_MIGRATION R1's target (p50 ≤ 15 ms), which lanes 1902-1903 will measure;
@@ -1891,6 +1896,7 @@ written except this file. On Oct 14, about 11:03 PM to 11:45 PM, on the Mac:
   `sqlite3 -readonly 'file:data/replica.db?immutable=1' < orphan_equal.sql` (1.3 s) and
   `< orphan_plans.sql`, against the Mac's Aug 11 local copy (7,572 plays; nothing written, no WAL
   opened). The output is quoted in §8.2 and matched B §10.1's figures exactly.
+
 ## 18. Decisions that are Rem's
 
 Each with a recommendation and its reason, grouped by what it blocks.
