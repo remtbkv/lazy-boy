@@ -1077,9 +1077,9 @@ Reads, in Turso rows. Rem's column comes from the meter's per-statement log for 
 | landed plays: insert, verdicts, Home payload (~7,700 rows each for Rem, scaling with the 16-day window) | 0.95M | 0.11M | 0.17M | 0.89M |
 | all-time recompute (~2.3 rows per stored play per run; 44 runs for Rem) | 2.24M | 0.25M | 0.84M | 4.3M |
 | rescans and the unique-song count | 0.17M | ~0.05M | ~0.1M | ~0.17M |
-| search payload rebuilds on Home visits (~3 rows per play + ~2 per membership) | ~0.13M (1-2 visits) | 0.19M | 0.5M | 0.8M |
-| **total a day** | **~3.5M** | **~0.6M** | **~1.6M** | **~6.2M** |
-| the same with M24's 60-minute gate | ~1.9M | ~0.4M | ~0.95M | ~3.1M |
+| search payload rebuilds on Home visits (~3 rows per play, plus ~2 per membership on the half of visits where the library moved too) | ~0.13M (1-2 visits) | 0.19M | 0.5M | 1.1M |
+| **total a day** | **~3.5M** | **~0.6M** | **~1.6M** | **~6.5M** |
+| the same with M24's 60-minute gate | ~1.9M | ~0.4M | ~0.95M | ~3.4M |
 
 Rem's total leaves out the unscoped orphan pass, ~5M rows on Turso per run and three runs on Oct
 14 (01c §2.8); lanes 1910-1911 scope it before Phase 2 (§8.3). With it, Rem's month is the 135-170M
@@ -1091,13 +1091,13 @@ Against Turso's free plan, 500M rows a month, with R4's bar at 50%:
 |---|---|---|---|
 | Rem + 4 light | ~180M (36%) | ~105M (21%) | – |
 | Rem + 4 typical | ~300M (60%) | ~170M (34%) | – |
-| Rem + 4 heavy | ~850M (170%) | ~425M (85%) | ~170M (34%) |
+| Rem + 4 heavy | ~890M (178%) | ~465M (93%) | ~190M (38%) |
 
 So the free plan holds Rem and four light or typical friends once the 60-minute gate ships, and
 four heavy friends only with the accumulator and segmented history as well. Friends start at zero
 history, so these are where a year of listening leads, not where Phase 3 starts; Turso reports
 usage per database, and the Phase 3 gate reads it monthly. The Developer plan includes 2.5B
-reads a month, which takes even the worst row to 34% of its allowance with no work at all (01f
+reads a month, which takes even the worst row to 36% of its allowance with no work at all (01f
 §4.2, §15 decision 5).
 
 Writes: ~3,000 core rows a day for Rem (01c §2.7), roughly proportional to plays for friends; plus
