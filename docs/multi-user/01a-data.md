@@ -376,8 +376,8 @@ incorrect even for the user's own data.
 | id | where | assumption | multi-user needs | size |
 |---|---|---|---|---|
 | D20 | token row `db.ts:2504-2531`; refresh lock `auth.ts:212`; logout's clear `actions.ts:67` | one token chain; signing out clears THE row | per-user token rows (encrypted, lane 01e), per-user lock names, logout clears only the caller's row | M |
-| D21 | markers `write_seq`, `library_seq`, `slow_seq_pub` (`db.ts:345-416`, `1550-1596`) | one content version for the whole store | per user. With a global marker every user's play moves every user's cache keys and payload ETags: at 25 users like the owner (~2,900 plays a day) the slow marker would republish every 10 min all day and every user's history payload would rebuild up to 144 times a day | M |
-| D22 | `spotify_cooldown_until` `db.ts:2376-2392`, honoured at `sync/history.ts:34`, `playlists-sync.ts:35`, `home/page.tsx:81` | one ban for everything | stays global for app-wide 429s (Spotify's rolling limit is per app; lane 01f to confirm). An endpoint quota that turns out to be per user (recently-played's daily quota was only ever observed with one user, `db.ts:2653-2664`) would need a per-user key, or one user's ban stops everyone's sync | S |
+| D21 | markers `write_seq`, `library_seq`, `slow_seq_pub` (`db.ts:345-416`, `1550-1596`) | one content version for the whole store | per user. With a global marker (even with the user in every cache key) any user's play moves every user's keys and payload versions, so while anyone listens nobody's day strip, playlist grid or payload is served from cache, and every Home load rebuilds its history payload | M |
+| D22 | `spotify_cooldown_until` `db.ts:2376-2392`, honoured at `sync/history.ts:34`, `playlists-sync.ts:35`, `home/page.tsx:81` | one ban for everything | stays global: Spotify's rate limit is per app and its quotas are per developer account (01f §1.4), so a ban really is everyone's. The data model has nothing to change; sharing one budget fairly across users is lane 01c's | — |
 | D23 | the per-user stamps and payloads of §3 (harvest gate, sync stamps, Liked signals, `home_payload`, `alltime_*`, `unique_song_count`, `plsnap:*`, `contexts_full_check_at`, `user_tz_offset`, `last_sync`) | one user's state | `user_meta` rows | M |
 | D24 | `HOME_TZ = "America/New_York"` `db.ts:1270`; `user_tz_offset` written by every `POST /api/sync` (`api/sync/route.ts:24-27`) before its debounce | one time zone; the last browser to post wins | per-user offset and a per-user home zone; with two users in different zones each post would re-bucket the other's Home payload | S |
 | D25 | negative context cache `db.ts:606-609`, `api/now-playing/route.ts:47-55` | a 403 is a 403 for everyone | per-user `contexts` (D8): one user's 403 (a private playlist, an account outside the allowlist) must not hide the name from the owner for 30 days | S with D8 |
@@ -428,14 +428,14 @@ connection is the scope: a statement can only see the database it was sent to.
 
 | | row-level | database per user |
 |---|---|---|
-| census items it leaves to fix | all of §7 | D1-D3, D20-D22, D24, D26-D38. D4-D19, D23 and D25 need no SQL change: whole-table statements are already per user, and the markers in each user's own `meta` are already per user |
+| census items it leaves to fix | all of §7 except D22, which needs nothing in either model | D1-D3, D20, D24, D26-D38. D4-D19, D21, D23 and D25 need no SQL change: whole-table statements are already per user, and the markers and stamps in each user's own `meta` are already per user |
 | failure if one scope is missed | another user's rows returned, rewritten or deleted (D12-D19) | not possible inside the per-user database; the residual risk moves to choosing the client (one place) and to the cache keys (D26, D27), which both models must fix |
 | the owner's data | rebuild four tables with a user column, re-key `meta`, move the token row (§8.6) | none: the owner's existing database becomes his user database; the token row moves to the app database |
 | per-user query cost | flat in N only with user-led indexes (§9.2 measures it) | each database holds one user's rows; today's indexes and plans apply unchanged |
 | backups, schema changes, clients | one of each | one per database: the nightly backup and every schema change loop over N+1 databases; the cron opens a client per user |
 | account deletion | a DELETE per table, plus telemetry rows | drop the database, plus telemetry rows |
 | deletion from backups | the nightly snapshot holds every user, so a deleted user stays in 60 days of offsite files unless they are rewritten | per-database backup files: deleting the user deletes their files |
-| shared catalog | `tracks` once (saves ~4 MB per Rem-sized library; nothing at five users) | `tracks` per user |
+| shared catalog | `tracks` once; the saving is the overlap between users' catalogs, at most the owner's 4.2 MB per user, negligible at five users | `tracks` per user |
 | cross-user features (ROADMAP's friends) | SQL joins | two reads merged in code |
 | store limits | none new | Turso's database count per plan must allow N+1 (lane 01f §4.2; not checked here). The Zenbook's sqld would need namespaces, but after STORE_MIGRATION it holds only telemetry |
 
@@ -744,7 +744,7 @@ snapshots were deleted at the end: they hold the owner's listening history and b
   investigated; nothing uses `plays.id` as a cursor, so it does not affect the plan.
 - **The meter's log retention** on the Zenbook (§10, item 1): not checked.
 - Spotify's terms on storing Spotify content and derived listening metrics, and the per-developer
-  quota pooling, are lane 01f's (§1.4, §1.5); D22 and §8.8 depend on them.
+  quota pooling, are lane 01f's (§1.4, §1.5); D22 and §8.8 rest on them.
 
 ## 12. Decisions that are Rem's
 
