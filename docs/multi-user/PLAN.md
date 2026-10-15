@@ -1919,7 +1919,8 @@ brake M, each friend after that S.
 ## 17. What I ran
 
 Nothing ran against the production store, the Zenbook, Turso, Vercel or Spotify, and nothing was
-written except this file. On Oct 14, about 11:03 PM to 11:45 PM, on the Mac:
+written except this file (and a one-off formatting script in this lane's scratch, deleted at the end).
+On Oct 14, about 11:03 PM to 11:45 PM, on the Mac:
 
 - Read in full: the six overviews (`01a`-`01f`), the three designs, `docs/STORE_MIGRATION.md`,
   `docs/GOTCHAS.md` and the project's `CLAUDE.md`.
