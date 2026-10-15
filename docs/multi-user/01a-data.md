@@ -402,6 +402,7 @@ connection is the scope: a statement can only see the database it was sent to.
 | per-user query cost | flat in N only with user-led indexes (§9.2 measures it) | each database holds one user's rows; today's indexes and plans apply unchanged |
 | backups, schema changes, clients | one of each | one per database: the nightly backup and every schema change loop over N+1 databases; the cron opens a client per user |
 | account deletion | a DELETE per table, plus telemetry rows | drop the database, plus telemetry rows |
+| deletion from backups | the nightly snapshot holds every user, so a deleted user stays in 60 days of offsite files unless they are rewritten | per-database backup files: deleting the user deletes their files |
 | shared catalog | `tracks` once (saves ~4 MB per Rem-sized library; nothing at five users) | `tracks` per user |
 | cross-user features (ROADMAP's friends) | SQL joins | two reads merged in code |
 | store limits | none new | Turso's database count per plan must allow N+1 (lane 01f §4.2; not checked here). The Zenbook's sqld would need namespaces, but after STORE_MIGRATION it holds only telemetry |
@@ -412,7 +413,8 @@ import scripts) under one rule, "remember the user", and the census
 found the misses would not be cosmetic: one user's library sync deleting everyone's playlists (D12),
 skip verdicts computed from another person's previous play and then stored (D18), plays silently dropped
 on a timestamp collision (D17). A per-user database makes those statements correct without touching
-them, and it migrates Rem's data by not moving it. The costs are loops over at most six databases. Two
+them, it migrates Rem's data by not moving it, and it lets a deletion reach the backups (§8.8). The
+costs are loops over at most six databases. Two
 facts would change this: if Turso's plan caps databases below six (01f), or if Rem wants cross-user
 features soon, where joins in one store are simpler. Rows-read quota is per organization on Turso either
 way, so the choice does not change §9.3's budget.
@@ -502,9 +504,10 @@ database per user, their database plus the same app and telemetry rows. Lane 01f
 five-day deletion requirement and its "do not store Spotify Content indefinitely" term (01f §1.5,
 §1.6); the data model supports a retention window as one indexed range delete on `played_at` per user
 (and `recordPlays`' successor rule must then treat the oldest kept play as having no predecessor, as it
-already does for the first play). Backups: the nightly snapshots keep 60 days offsite (BRIDGE.md), so a
-deletion is complete only when the last snapshot holding the user ages out, or the snapshots are
-rewritten. That interacts with the five-day rule and is Rem's call (§12).
+already does for the first play). Backups: the nightly snapshots keep 60 days offsite (BRIDGE.md), so in
+a single shared store a deletion is complete only when the last snapshot holding the user ages out, or
+every snapshot is rewritten. Per-database backup files avoid that: the deletion removes the user's files
+too. How that squares with the five-day rule is Rem's call (§12).
 
 ## 9. How the data scales with N users
 
