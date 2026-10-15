@@ -235,7 +235,169 @@ The order of work, detailed in §13:
 
 ## 4. Data model
 
-(the app database, the user databases, every table and meta key, the user key, schema versions)
+### 4.1 Three kinds of database
+
+- **A user database** per user, holding today's seven core tables with today's columns, keys and
+  indexes (`tracks`, `plays`, `contexts`, `meta`, `playlists`, `playlist_tracks`, `saved_tracks`;
+  `db.ts:158-209` and the `ALTER`s at `:244-295`), plus one derived column, `plays.listened_ms` (§8.2).
+  Every plan 01a measured with `EXPLAIN QUERY PLAN` (01a §4.2) holds unchanged, and each user gets
+  01a §9.2's "user-led" timings without a new index. Rem's is Turso `lazyboy`; a friend's is
+  `lb-u-<uid>`, in the same group (`default`, `aws-us-east-1`, beside Vercel's iad1).
+- **The app database**, `lazyboy-app`: identity, ciphertext and scheduling, and no listening data at
+  all. A mistake in its functions can mis-schedule or lock out a user; it cannot show one person's
+  history to another (A §3).
+- **The telemetry store**, the Zenbook's sqld after STORE_MIGRATION (its §5): `api_log` and
+  `client_metrics` gain a nullable `user_id`, `api_log` a nullable `reason` for 429s; `usage_ledger`
+  stays global.
+
+Why a database per user rather than one shared store with a `user_id` column: in a shared store, 17
+of 01a's 38 census items are SQL-level, more than fifty statements each need `user_id = ?`, four
+tables are rebuilt over live data, and a single missed filter deletes other users' playlists (D12),
+drops their plays on a timestamp collision (D17) or stores skip verdicts computed from another
+person's previous play (D18) (01a §7.3, §8.1). SQLite has no row-level security, so that rule would
+live in application code with nothing to check a `WHERE` clause. Per-user databases make those
+statements correct without editing them and leave Rem's data where the cutover puts it. The costs at
+five users are loops over six databases (backups, migrations), `tracks` stored once per user (at most
+~4.2 MB each, 01a §8.1), and a future friends feature that merges two reads in code instead of
+joining. Turso's free plan allows 100 databases and counts rows read per organization, so the model
+changes neither the database limit nor the read budget in practice (01f §4.2).
+
+### 4.2 The app database
+
+```sql
+CREATE TABLE users (
+  uid               TEXT PRIMARY KEY,      -- random, 12 base32 chars; never reused
+  account_id        TEXT UNIQUE,           -- Spotify account_id; NULL until an invite is claimed
+  spotify_id        TEXT NOT NULL,         -- Spotify id: what an invite names; refreshed at sign-in
+  db_name           TEXT NOT NULL UNIQUE,  -- 'lazyboy' for Rem, 'lb-u-<uid>' for a friend
+  status            TEXT NOT NULL,         -- provisioning | invited | active | needs_reconnect
+                                           -- | disabled | deleting
+  is_admin          INTEGER NOT NULL DEFAULT 0,
+  session_epoch     INTEGER NOT NULL DEFAULT 0,
+  terms_version     TEXT,                  -- privacy policy and end-user agreement accepted (§12.2)
+  terms_accepted_at INTEGER,
+  invited_at        INTEGER NOT NULL,
+  claimed_at        INTEGER,
+  last_sign_in      INTEGER                -- drives the twelve-month inactivity rule (§12.3)
+);
+-- one open invite per Spotify id, so a claim can never match two rows (A §3.1)
+CREATE UNIQUE INDEX idx_users_open_invite ON users (spotify_id) WHERE status = 'invited';
+
+CREATE TABLE user_tokens (
+  uid        TEXT PRIMARY KEY,
+  blob       TEXT NOT NULL,      -- 'v1.' || base64url(iv ‖ ciphertext ‖ tag), §5.3
+  expires_at INTEGER NOT NULL,   -- plaintext, so the cron sees who needs a refresh
+  granted_at INTEGER NOT NULL    -- last consent: Spotify's six-month refresh-token clock (01e §2.1)
+);
+
+CREATE TABLE sync_state (        -- 01c §5.2's due queue
+  uid             TEXT PRIMARY KEY,
+  state           TEXT NOT NULL, -- active | idle | backoff | needs_reconnect | removed | paused
+  next_probe_at   INTEGER NOT NULL,
+  next_rescan_at  INTEGER,
+  lease_owner     TEXT,
+  lease_until     INTEGER,
+  failures        INTEGER NOT NULL DEFAULT 0,
+  last_error      TEXT,          -- a code, never a message body
+  last_ok_at      INTEGER,       -- capture health for the banner and the owner alarm
+  last_harvest_at INTEGER,
+  quota_day       TEXT,          -- the recently-played quota day rp_calls counts (§7.5)
+  rp_calls        INTEGER NOT NULL DEFAULT 0,
+  lag_p50_s       INTEGER,       -- F2's instrument, rolled up daily (§7.8)
+  lag_p95_s       INTEGER
+);
+CREATE INDEX idx_sync_due ON sync_state (next_probe_at);
+
+CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT);
+-- keys: schema_version; cooldown:<bucket>; played_at_convention; lock:spotify_refresh:<uid>
+```
+
+Choices in it: there is no `env` column on tokens, because dev runs its own app database (§5.6) and
+production's never holds a dev grant (A, C). Invites are `users` rows in status `invited`, with the
+database already provisioned, so one claim statement binds a sign-in to a row (A §10.2). What the
+probe last saw (track, progress, the retry flag) stays in the user's own `meta` beside today's
+`player_last_active` and `rp_last_harvest` (`db.ts:2364-2374`); `sync_state` holds times, counters
+and leases only.
+
+**Every client comes from one factory.** The app client, each user client and the telemetry client
+are built by one function that passes `makeStoreFetch` (`src/lib/store-fetch.ts`): the gzip pin, the
+retry ladder and the Request rebuilt per attempt are what two production incidents bought (GOTCHAS
+"Never let the store compress with brotli", "The store fetch must rebuild its Request per attempt"),
+and a per-user client built with a bare `createClient` would lose all three silently. URLs use the
+`https://` form, since `@libsql/client` maps `libsql://` to WebSockets, where the fetch override does
+not apply (STORE_MIGRATION §3). None of the designs names this; it is cheap to get right once and
+easy to get wrong N times.
+
+### 4.3 Every table and `meta` key
+
+01a §2-3's census, with where each item goes:
+
+| today | where it goes | how it is tied to one user |
+|---|---|---|
+| `tracks`, `plays`, `contexts`, `playlists`, `playlist_tracks`, `saved_tracks` | the user's database | by being in it. Per-user `contexts` also ends the shared negative cache: one user's 403 no longer hides a name from another for 30 days (01a D25) |
+| `meta`: `last_sync`, `write_seq`, `library_seq`, `slow_seq_pub`, `home_payload`, `alltime_stats`, `alltime_at`, `unique_song_count`, `contexts_full_check_at`, `playlists_synced_at`, `library_synced_at`, `library_scan_attempt_at`, `saved_synced_at`, `liked_total`, `liked_top_added_at`, `plsnap:*`, `player_last_active`, `rp_last_harvest`, `clean_backup_pref`, `lock:clean:*` | the user's database, unchanged | by being in it. The version markers become per user without a line of code, which stops one user's plays from invalidating every other user's caches (01a D21) |
+| `meta.me_id` | the user's database | written only by that user's own library sync with that user's own token; used by the owned-playlist filter (`db.ts:2297, 2310`) and the page's `isMine`; never read for sign-in again |
+| `meta.user_tz_offset`, `HOME_TZ` (`db.ts:1270`) | `user_tz` (an IANA zone) in the user's database | written by `/api/sync` only when it changes; the Home payload buckets days in the user's zone, with the DST check against that zone (C §3.3) |
+| `meta.spotify_tokens` | `user_tokens`, encrypted | the uid key and the associated data (§5.3); the plaintext row stays in `lazyboy` for a week, then goes (§11.3) |
+| `meta.spotify_tokens_dev` | dev's own app database | not in production at all |
+| `meta.lock:spotify_refresh` | `app_meta`, `lock:spotify_refresh:<uid>` | the uid in the name |
+| `meta.spotify_cooldown_until` | `app_meta`, `cooldown:<bucket>` | global by meaning: Spotify's rate limit is per app and its quota per developer account (01f §1.4); split by bucket so a recently-played ban does not stop the player probe (01c S4) |
+| `meta.played_at_convention` | `app_meta` | global by meaning; computed from the admin's plays by the daily route |
+| new: `owner_uid`, `schema_version` | the user's database | written once at provisioning or migration, never by the app (§4.5) |
+| new: `probe`, `seg_seq:<YYYY-MM>` | the user's database | the probe's last track and progress (§7.3); each month's segment version (§9.1) |
+| `meta.last_sync_added`, `meta.pltracks_at:*` | dropped by the Phase 2 migration | dead: no reader (01a §3) |
+| `api_log`, `client_metrics` | telemetry, `+ user_id`; `api_log` `+ reason` | the column; deletion deletes by it (§12.3) |
+| `usage_ledger` | telemetry, unchanged | global; per-user store usage comes from Turso's per-database numbers |
+
+### 4.4 The user key
+
+A random opaque uid, 12 base32 characters (60 bits), names the user everywhere the app can see it:
+the session claim, `forUser`, cache keys, payload URLs, ETags, browser storage, telemetry rows and a
+friend's database name. Spotify's `account_id` is only the link used at sign-in (01e §5.1); Spotify's
+mutable `id` is only what an invite matches once (§12.1).
+
+The design question was integer or random (§2.3). The case for random is the failure it removes: if
+the app database is ever restored from a backup, an `AUTOINCREMENT` integer can be issued again to a
+newcomer, who would then match a departed user's cache entries for up to a day and, under C's
+derived names, their database. A random uid cannot collide, so the owner stamps of §6 compare against
+a value that is unique for good. It carries no personal data, so it can sit raw in an ETag, a URL or a
+storage key where page scripts can read it, which removes A's need for an HMAC secret (`HK_SECRET`) to
+make an opaque browser key. 01a §8.4's case for an integer (bytes per play) does not apply: no
+per-play row carries the key in this model.
+
+### 4.5 Schema versions in place of `init()`
+
+Today `init()` runs one `executeMultiple`, four `PRAGMA table_info` reads and three `CREATE INDEX`
+statements on every cold process, eight serial round trips, with no notion of a version
+(`db.ts:153-297`; 28 cold starts on Oct 14, 01c §2.1). Against N databases that would be eight round
+trips per database a process touches. The plan:
+
+1. **Code declares `USER_SCHEMA` and `APP_SCHEMA` versions**, each a list of steps marked additive or
+   rebuild.
+2. **The first open of a database in a process** runs one statement: `SELECT key, value FROM meta
+   WHERE key IN ('owner_uid', 'schema_version')`. A wrong `owner_uid` refuses the database and logs an
+   `isolation` event (§6.2). A current version means nothing more is run. A version behind by
+   additive steps only (a nullable column, an index) applies them as `init()` does today and bumps
+   the version, so the house workflow for the common change is unchanged (C §3.4). A version behind
+   by a rebuild refuses that user ("updating") until the migrate script runs; nobody else notices
+   (A §3.5, B §4.6).
+3. **Provisioning** creates a new user database at the current version in one `executeMultiple`, with
+   `owner_uid` and `schema_version`, at invite time (§12.1), so sign-in never waits on it.
+4. **`scripts/migrate.mjs`**, run from the Mac, applies rebuild steps one database at a time: set that
+   user's `sync_state` to `paused`, take a restore point (Turso point-in-time, plus a dump), apply,
+   verify, bump the version, resume (B §4.6). At six databases this takes minutes.
+5. **Deploy order** stays what it is: an additive step first (old code tolerates it), then the code
+   that needs it, then any destructive step.
+
+Preview cannot run any of this against production, because Preview gets no store variables (§10.2).
+The telemetry store keeps STORE_MIGRATION phase A's own telemetry init (its §6 item 2).
+
+### 4.6 Storage
+
+Rem's core data is 11.87 MB, growing ~35 KB a day (01a §2, §6) [measured]; `listened_ms` adds ~4 bytes
+a play, ~0.1 MB [estimate]. A friend with a library like Rem's starts near 3.3 MB (01a §9.1) and has
+no catalog backfill. Five Rem-like users are under 100 MB against the free plan's 5 GB [estimate];
+storage does not bind (01f §4.4).
 
 ## 5. Identity, sessions and per-user tokens encrypted at rest
 
