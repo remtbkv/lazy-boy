@@ -127,8 +127,8 @@ overview finding it answers.
 | M19 | a second pinger on cron-job.org | config | 2 | §6.5 |
 | M20 | Preview and dev cannot reach friends' databases | config | 2 | §8.2 |
 | M21 | backups loop over databases; friends' and the app database's files kept five days | S | 2 | §10.3 |
-| M22 | a daily recently-played budget brake: batch closed-app harvests past a threshold | S-M | 3 | §6.4 |
-| M23 | library rescans stop calling `/me`; the recorder runs hourly | S + config | 3 | §6.4 |
+| M22 | a daily recently-played budget brake: past a threshold, one harvest per user per 30 min of playback | S-M | 3 | §6.4 |
+| M23 | library rescans stop calling `/me`; the recorder runs hourly | S + config | 2 | §6.4 |
 | M24 | read levers if the projection needs them: the all-time recompute gate 10 → 60 min, then an incremental accumulator | S, then M | 3 | §12.4 |
 | M25 | the now-playing poll 6 → 15 s mid-track, only if per-user call logs show visible tabs crowding Spotify's 30 s window | S | 3, if needed | §6.4 |
 
@@ -590,6 +590,62 @@ gate, `src/lib/sync/library.ts:64-71`). M23 drops the rescan's `/me` call
 (01e §5.5).
 
 ## 7. Search: per-user payloads, caching, and the phone budget
+
+### 7.1 What a database per user does to search
+
+Search matches in the browser against two bodies, the library and the history payload, fetched
+once per visit (01d §1). Under this design:
+
+- **Both builds** (`readLibraryIndex`, `readHistoryIndex`, `db.ts:1625-1730`) read only the
+  caller's database, so each user's build costs what a single user's does today. 01a §9.2
+  measured what a shared store would need to match that: user-led indexes kept the history
+  payload's scan at 32-36 ms from 25 to 100 users, against 130-527 ms without them. Here that
+  property holds with today's indexes.
+- **Keys and tags** carry the uid (§5.2), which closes the two search-specific traps 01d §4.1
+  names: payload entries keyed on small per-user counters, and 304s across accounts on one
+  browser.
+- **The in-memory delta patch** (`refreshHistoryAction` → `searchHistory("", ≤ 50)`,
+  `history-actions.ts:140-161`) and **the server fallback** (`searchPlaysAction`'s `LIKE`,
+  `db.ts:884-904`) read the user's own plays, so neither can patch or show another user's songs,
+  and phase E's IndexedDB copy cannot persist such a patch (01d §4.1).
+- **Phase E** (STORE_MIGRATION §10, lanes 1905-1906) keys its copy by payload shape and the
+  signed-in user's id. That id is the uid from Phase 1 on; until then a constant (§8.3).
+- **Friends start small.** No catalog backfill and no history import, so a friend's history body
+  holds their real plays only: ~360 KB raw after a year of 20 plays a day, ~790 KB at 50 a day
+  (01d §3.3, estimates). Giving friends the Extended Streaming History import would put a
+  five-year history over the Data Cache's 2 MiB item limit on day one (01d §7 decision 2); it
+  waits.
+
+### 7.2 The owner's payload, which is on this target's path either way
+
+The history entry is at 1,815,171 of 2,097,152 bytes, 86.6% of the Data Cache's item limit, and
+grows about 6 points a month. Around late December it stops being cached, silently, and every
+Home open re-runs the full plays scan (01d §3.2, measured on the Oct 14 backup; Vercel documents
+"Item size 2 MB (items larger won't be cached)"). That is a single-user problem with its own
+deadline, and multi-user neither causes nor fixes it. The smallest changes that keep T2 for the
+owner:
+
+| id | change | effect | size |
+|---|---|---|---|
+| S1 | fetch the payloads at mount instead of after `requestIdleCallback` (2 s timeout) or, where that is missing, an 800 ms `setTimeout` (`src/app/(app)/home/den-home.tsx:657-675`) | on Safari, which takes the timeout path per the code's own comment, a first visit loses 800 ms before the first byte is requested | S |
+| S2 | build a day's rows when the day is selected (01d O6): plays arrive newest first, so a day is one contiguous run found by binary search | 199 of the client's 264 ms at 4× CPU go away [measured, 01d §2.3]; `history-days.ts` already has known answers against `getPlaysByDay` | S-M |
+| S3 | the 7,529 catalog rows in a body of their own, versioned only by the backfill script and cached long in the browser (01d O2) | the history entry drops from 86.6% to 37.1% of the limit and the next crossing moves to about 10.7 months out [measured, 01d §5.1]; 58% of what is re-downloaded after each listening session goes away | M |
+
+01d recommends monthly segments (O3) over S3. S3 is smaller and buys ten months; O3 is what
+makes a rebuild proportional to the current month, and is worth doing before anyone's history
+gets large, the owner's included. Either way phase E's store should take `(uid, kind, version)`
+as its key now, so a third body or a segment drops in without migrating browser data (01d §6
+item 3). S1-S3 do not gate any multi-user phase.
+
+### 7.3 The Data Cache with several users
+
+Every rebuild writes a new entry, and superseded entries stay until their 24-hour TTL. The cache
+is shared by every project in the Vercel team and evicts least-recently-used at a size Vercel
+does not publish (01d §4.2, 01f §2.2). At five users that is ten live entries, none near 2 MiB
+except the owner's, plus superseded ones. An eviction costs one rebuild, not correctness. The
+read cost of rebuilds is in §12.4.
+
+The step-by-step phone budget is in §12.2.
 
 ## 8. The store: Turso, a database per user, and STORE_MIGRATION
 
