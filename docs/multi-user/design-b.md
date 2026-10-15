@@ -1013,7 +1013,9 @@ told apart by the incident window and by comparison with the recorder, which cap
 token chain throughout. Rem confirms the window; that is the one step a person has to check.
 
 **The fenced window** (~15 minutes, the discipline of STORE_MIGRATION §8 steps 2-3; Spotify's 50-play
-buffer covers any plays in it):
+buffer covers any plays in it). The rollout (§15) lands step 3 with the single-user phase P1 and step 4
+with P2, so in practice this runs twice, each time with steps 1-2, its own checks from step 5, and its
+own rollback:
 
 1. Pause both pingers; wait for no writes for 5 minutes.
 2. Restore point: Turso's point-in-time restore (1 day on Free) plus a dump by the backup script.
@@ -1048,6 +1050,57 @@ Cost on Turso, once [estimate]: ~100,000 rows read (the chain walk, the builders
 ~25,000 written, under 0.3% of a month on the free plan.
 
 ## 14. Sign-up gating, privacy and account deletion
+
+**Gating.** Two gates, both required: Spotify's allowlist in the dashboard (five accounts at most),
+and the app's `invites` table, which also fails closed on a store error as `owner.ts:8-9` does today
+(01e §5.4).
+
+- Rem invites by running `scripts/invite.mjs <spotify id>` on his Mac, where the Turso platform token
+  lives: it picks a uid, creates `lb-u-<uid>` from the template, writes the invite, and reminds him to
+  add the account to the dashboard's allowlist. Provisioning at invite time keeps database creation off
+  the sign-in path and the platform token out of the Vercel runtime (01e §6).
+- First sign-in by an invited Spotify id: the privacy policy and an end-user agreement shown and
+  accepted before anything is stored (Developer Terms §V, 01f §1.5; `users.terms_accepted_at`), then
+  the users row under `account_id`, the tokens, and a `sync_state` row in `active`. The first library
+  scan runs across the next ticks (§7.6); history starts empty, or from the person's own Extended
+  Streaming History export through the importer, once it takes `--user` (01c S17) and only after
+  segments exist (01d decision 2).
+- Scopes trimmed to what the app uses, dropping `user-read-email` and `user-read-private` (01f §1.5,
+  01e).
+- `users.status` lets Rem cut anyone off without the dashboard; admin is a flag bound to his
+  `account_id`.
+
+**Privacy.**
+
+- Stored per user: their listening history, library, the derived values, encrypted tokens. In
+  telemetry: Spotify call counts and client timings tagged with the uid; no song names (§4.4).
+- Visible to: the user, and Rem as operator, who can read any database; the privacy policy says so.
+  No other user, by construction (§6).
+- Retention: Rem's history unlimited; an invited user's history kept for a window Rem chooses (01a
+  decision 2), enforced daily by one indexed delete per user on `played_at` and by dropping that
+  user's segments past the window. Telemetry 30 days, enforced by the daily route.
+- Policy risk: Spotify's Developer Policy prohibits "creating new or derived listenership metrics"
+  (01f §1.5), which listened time and skip verdicts arguably are. Each user's stats stay visible to
+  that user only. Accepting the risk is Rem's call (01f decision 6).
+
+**Deletion** ("Disconnect", complete within the Developer Terms' five days, 01e §5.7-5.8):
+
+1. In the app, at once: bump `session_epoch`, set `status = 'deleting'`, delete the user's
+   `user_tokens` rows, set `sync_state` to `removed` (the tick stops calling Spotify for them), and
+   drop every table in the user's database with the group token. The data is gone within seconds; an
+   empty database remains.
+2. `revalidateTag('user:<uid>')` purges the three cached reads (§6).
+3. Within five days, a job holding the platform token (the Zenbook's nightly backup job, or the script
+   on Rem's Mac) deletes the database, the user's backup files on the Zenbook and OneDrive (one file
+   per database, §11.2), the telemetry rows carrying the uid, and last the users row, so a crash midway
+   leaves a row the job can find and finish (01e §5.8).
+4. The user is told to remove Lazy Boy at spotify.com/account/apps; the app cannot revoke a grant.
+
+Non-owner backup files are kept five days at most, so a deletion is complete within the window even if
+step 3 is late (01a decision 3, 01e §5.8); the owner's keep today's 60 days. One gap I could not close:
+none of the Turso pages I read says whether deleting a database also deletes its point-in-time history
+(1 day on Free, 10 on Developer). On Developer, ten days would outlast the five-day window; Turso
+should be asked before a friend's data is on that plan.
 
 ## 15. Rollout in reversible phases
 
