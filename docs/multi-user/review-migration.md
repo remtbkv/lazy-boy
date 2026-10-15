@@ -417,7 +417,7 @@ finding 6).
 
 ### 15. (Low) The plan's "heavy day" is the incident day
 
-"A heavy day is Oct 14's activity … with three unscoped orphan passes (as that day had)" (PLAN.md:71-74).
+"A heavy day is Oct 14's activity … with three unscoped orphan passes (as that day had)" (PLAN.md:72-74).
 On UTC Oct 14 the second account's library replaced Rem's and was replaced back (`me_id` flipped and
 returned, 01b E6, and the library tables match the pre-incident snapshot tonight, finding 7). Each swap
 moved the playlist id set, which is what triggers an unscoped pass (01c §2.3), so at least two of the
@@ -439,11 +439,49 @@ the inflated orphan term. For the scale reviewer.
 
 ## 2. STORE_MIGRATION, from this lens
 
-(in progress)
+Nothing in the cutover's logic needs to change, and no lane should wait. On the plan's six edits:
+
+- **Edit 2** (Production-only flip, Preview's `TURSO_*` deleted) holds. After it, run
+  `vercel env ls production` and see both store variables before any redeploy: STORE_MIGRATION §3
+  records them as one Production + Preview pair, and the CLI page does not say what removing one
+  environment from a shared variable does (https://vercel.com/docs/cli/env, updated 2026-08-20). A
+  production build without them fails every query (finding 6).
+- **Edit 4** holds, with the source counts kept (finding 12).
+- **A seventh edit, for lane 1904:** the nightly job also copies `~/lazyboy-recorder/backstop.db`, the
+  only copy of 122 of Rem's plays (finding 8).
+- **§6 item 7** should say whether `/api/cron/sync` keeps its daily Vercel entry (finding 14).
+
+Two things for after the move, not before it: the D1 replay of those 122 plays after lane 1904 and
+before P2 (finding 8), and the second pinger with its 90-second guard after lane 1904 (finding 2).
+Both are Rem's go-ahead.
 
 ## 3. What holds up
 
-(in progress)
+- **Rem's data stays where the cutover puts it.** `lazyboy` becomes his user database with nothing
+  copied, rebuilt or re-keyed (§11.1), and per-user databases remove the cross-user statement classes a
+  shared store's migration would have had to get right (01a D12, D17, D18).
+- **The order around the move.** STORE_MIGRATION runs first with its logic untouched, multi-user schema
+  stays out of a reversible move (§10.2), and Phase 2's token move waits for the cutover's token
+  compare.
+- **The token handover.** The plaintext row is kept a week, the later `expiresAt` wins any compare, and
+  Phase 1 can read Rem's token again because Spotify has not rotated this app's refresh token in two
+  weeks of hourly refreshes (01e §2.1). Finding 6 supplies the rollback mechanics.
+- **The tick's failure isolation.** The claim doubles as the store health check, each user runs under
+  its own deadline in `allSettled`, and one user's failure costs that user's slot (§7.8), apart from
+  findings 3 and 9.
+- **Telemetry off the request path.** One attempt, 4 s, never awaited (§3), so A1 holds by design once
+  STORE_MIGRATION lands; finding 13 keeps it held.
+- **The client factory** through `makeStoreFetch`, with `https://` URLs (§4.2).
+- **The owner stamp on first open** (§4.5) turns a wrong mapping into a refusal, which is what makes
+  finding 1's restore runbook safe to write.
+- **The recorder is a sound reference.** All 96 runs on Oct 14 succeeded, and from Oct 13 on its plays
+  match the store's exactly (finding 7). Owner-only and hourly is enough at Rem's peak of ~20 plays an
+  hour.
+- **Deletion by destroying the database**, with Turso's point-in-time and undelete behaviour quoted
+  correctly (re-read tonight: "PITR restores an existing database — it cannot bring back a database
+  that was deleted").
+- **§14.5's closing line**: Turso, Vercel and Spotify are shared fate at this size, and the plan says
+  so instead of pretending to engineer around them.
 
 ## 4. What I ran
 
