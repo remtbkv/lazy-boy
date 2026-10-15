@@ -190,7 +190,48 @@ safety with less machinery.
 
 ## 3. The plan on one page
 
-(the architecture, the rules it holds itself to, the order of work)
+```
+browser ──► Vercel functions (iad1)
+             ├─ app client ─────────► Turso lazyboy-app   users · user_tokens (AES-256-GCM) ·
+             │                                            sync_state · app_meta (global keys, locks)
+             ├─ forUser(uid) client ► Turso lazyboy       Rem's data: today's schema + plays.listened_ms
+             │                        Turso lb-u-<uid>    one per friend (at most four), same schema
+             └─ telemetry client ───► Zenbook sqld via the Funnel; one attempt, 4 s, never awaited
+                                      api_log (+uid, +reason) · client_metrics (+uid) · usage_ledger
+pingers:  Zenbook timer, even minutes, its own secret ─┐
+          cron-job.org, odd minutes ───────────────────┴► /api/cron/sync: one tick a minute;
+          each due user claimed by lease, probed every 2 min while active, harvested on track changes
+Zenbook:  telemetry · Rem's recorder (hourly) · nightly backups of every database · one of two pingers
+```
+
+The rules the plan holds itself to:
+
+1. **The database a statement is sent to is the user scope.** `forUser(uid)` is the only way to a
+   user's database, and it takes a branded uid that only the request gate, the cron's claim and the
+   script helper can mint. Every database, cached value and token names its owner, and the owner is
+   checked on the way out (§6).
+2. **A user's recurring store cost follows what changed, never what is stored** (B §2). A scan of a
+   whole history survives only in a repair event, a daily chore or the nightly backup (§8).
+3. **Shared budgets are held on the server.** Turso's rows read, Spotify's quota and rate limit and
+   Vercel's CPU are shared by every user; no client call can spend more than the server allows, and
+   one user's share is bounded (§6.6, §7.5).
+4. **Nothing reaches a friend until it has run on Rem alone.** Phases 1-3 change how the app is
+   built, never who can reach it; each soaks on Rem's account before the next, and the first friend
+   arrives only after every isolation test has failed against a planted bug and then passed (§13).
+5. **Rem's data does not move.** `lazyboy` becomes his user database. The only changes to it are a
+   new derived column (`plays.listened_ms`, filled and verified once), two `meta` keys, and the token
+   rows leaving for the app database a week after they are copied (§11).
+
+The order of work, detailed in §13:
+
+| when | what | for whom |
+|---|---|---|
+| now, before Oct 15, 8 PM if Rem approves | **Phase 0**: rotate `AUTH_SECRET`, set `SPOTIFY_OWNER_ID`, gate `logout`; six edits to STORE_MIGRATION; two dashboard reads; a dev sign-in that shows whether Spotify returns `account_id` | today's exposures |
+| Oct 15 on | **STORE_MIGRATION lanes 1901-1911**, as planned; 1910-1911 also ship the identity-first orphan predicate (P1) | Rem |
+| after lane 1911 | **P2**: `listened_ms` and the all-time accumulator. **P3**: monthly history segments, lazy days, fetch at mount; **must ship before mid-December** | Rem, single-user |
+| after P3 | **Phase 1**: identity and isolation structure. **Phase 2**: the app database and encrypted tokens. **Phase 3**: the sync queue, the second pinger | Rem, single-user |
+| after Phase 3 | **Phase 4**: the first friend | Rem + 1 |
+| a week apart each | **P4** (Home payload patch, strip from segments) and the quota brake before the second friend; then **Phase 5**: friends two to four | up to 5 |
 
 ## 4. Data model
 
