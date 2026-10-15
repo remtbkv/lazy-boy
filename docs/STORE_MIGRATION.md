@@ -32,9 +32,9 @@ reads the Spotify token row from `meta` before anything renders.
 | R1 | A store round trip from the production function (`SELECT 1`, n=30, three runs at different hours): p50 ≤ ⅓ of L2's Zenbook baseline p50 and p95 ≤ 100 ms. Target: p50 ≤ 15 ms, p95 ≤ 50 ms | `/api/cron/store-bench` (phase A), L2 baseline vs L3 after |
 | R2 | When the Zenbook is down or frozen, no user-visible request gets slower by more than 50 ms or fails | fault injection in L3: the meter frozen with SIGSTOP (connections hang, as in a host stall), timed on the bench and cron routes as proxies (Home and search need a Spotify session a lane does not have) + unit tests in phase A |
 | R3 | Search is usable within 300 ms of Home's first paint on any repeat visit, and within 2 s on a first visit | `lb:index-idb` / `lb:history-ready` marks on /usage, L8 |
-| R4 | Turso stays inside its free plan with room, projected from a **heavy** day (the ledger's busiest `sync_tick_landed` day), not an average one: ≤ 50% of 500M rows read and ≤ 10% of 10M rows written per month | the daily usage record (phase A item 7) + `turso plan show`, L4 and L8 |
+| R4 | Turso stays inside its free plan with room, projected from a **heavy** day (the ledger's busiest `sync_tick_landed` day), not an average one: ≤ 50% of 500M rows read and ≤ 10% of 10M rows written per month, plus a growth term: reads rise ~12,000 rows a day for every day of history at Oct 14's 44 all-time recomputes (§3; multi-user PLAN §8.1, 01c §5.9). R4 is for one user; the multi-user plan re-checks it at N users | the daily usage record (phase A item 7) + `turso plan show`, L4 and L8 |
 | R5 | No data lost or changed by the move: every core table's row count equal at the snapshot; `verify-derived.mjs` green against Turso; every play the Zenbook's backstop recorder captured during the freeze present in Turso after the first sync; Rem stays signed in (the Spotify token rows on Turso are the newest) | L3 |
-| R6 | No new alerting mechanism, and nothing that bills | all lanes |
+| R6 | No new alerting mechanism, and nothing that bills. Binds lanes 1901-1911, not the multi-user phases, whose alarm is multi-user PLAN §7.10 | all lanes |
 
 If R1 is not met once the data is on Turso, the lane does not tune its way around it: it records the
 numbers in its outcome log and stops the chain before the browser-cache phase, because the plan's
@@ -48,10 +48,14 @@ premise failed.
   total on Oct 12 (~115M/month if it dates from the Aug 8 move). Turso's free plan allows 500M.
 - **Writes are small and mostly logs.** 11,136 rows written on Oct 13 UTC; `INSERT INTO api_log` was
   8,072 of them (72%). ~330K/month against 10M.
-- **One query dominates reads**: the history payload's plays scan (~50,500 rows read per run), rebuilt
-  after every sync that lands a play: 23 runs, 1.16M of the day's 1.94M. It is bounded by the slow
+- **One query dominates reads**: the all-time recompute's plays scan (`orderedRealPlays`, ~50,500 rows
+  read per run; this line first named the history payload, which multi-user PLAN §8.1 and 01c §2.2
+  separate from it by their logged SQL prefixes), rebuilt after every sync that lands a play, app open
+  or not: 23 runs, 1.16M of the day's 1.94M. It is bounded by the slow
   marker (published at most every 10 min), so its ceiling is 144 runs a day, ~7.3M, ~220M a month
-  at today's size; a long listening day with Home open gets near that. With the orphan passes below,
+  at today's size; a long listening day gets near that. It also grows with history: ~12,000 rows a
+  day more for every day of history at Oct 14's 44 runs (01c §5.9), and phase E's browser cache does
+  not touch it. With the orphan passes below,
   a heavy month is ~280M (56%): that is why R4 projects from a heavy day and why lanes 1910-1911 run.
 - The meter cannot attribute statements sent as one `sequence` (the cold-start `executeMultiple` of
   `CREATE TABLE IF NOT EXISTS`); they read a handful of schema rows each and are not in its totals.
@@ -60,7 +64,10 @@ premise failed.
   **5,102,733 rows** at 21,950 plays (its WHERE clause as a `SELECT count(*)` through the meter,
   Oct 13). The read ledger shows about three a week, so ~65M a month, growing with history. With it
   the month projects to ~120M (24% of the free plan); lanes 1910-1911 scope it to the playlists that
-  changed.
+  changed and ship the identity-first orphan predicate with the scoping, pinned by a known-answer test
+  (multi-user PLAN §8.2): with today's predicate a scoped pass still costs plays × members on a busy
+  playlist; the rewrite makes it ~5-10 rows a play. On the Oct 14 backup copy (22,040 plays) both forms
+  give the same verdict on every play, 1,162 orphans each, walking 379.9 rows a play against 2.6.
 - **Turso org `remtbkv`**: plan `starter` (free), overages disabled, quota resets at the start of each
   month (UTC). One database, `lazy-boy`, group `default`, primary `aws-us-east-1` (the same AWS region
   as Vercel's iad1), not blocked, holding the August 8 state. `turso` CLI v1.0.26 at `~/.turso/turso`,
@@ -166,8 +173,10 @@ All in `src/lib/db.ts` unless named. Branch `store-split` in a worktree.
    `Promise.all`; make the telemetry half `Promise.allSettled` with an empty state per section, so a
    frozen Zenbook costs that page its log sections after 4 s, not the whole page.
 7. **The daily chores run again (QUEUE.md C2, spec in `~/.claude/burn/20261003/lazyboy-review.md`
-   § C2).** Give them their own route, `/api/cron/daily`, in `vercel.json` at the existing `0 7 * * *`,
-   `CRON_SECRET`-gated, so no header sniffing is needed, and remove the dead `x-vercel-cron` branch from
+   § C2).** Give them their own route, `/api/cron/daily`, in `vercel.json` at `0 9 * * *`, added beside
+   `/api/cron/sync`'s existing `0 7 * * *` entry, not in place of it (07:00 UTC holds the Zenbook's
+   nightly reboot, which fails the chores' telemetry steps; the sync entry is the last-resort capture
+   when both pingers are down; multi-user PLAN §10.2 edit 8), `CRON_SECRET`-gated, so no header sniffing is needed, and remove the dead `x-vercel-cron` branch from
    `/api/cron/sync`. The daily route also runs the usage-check reconciliation (the logic in
    `src/app/api/cron/usage-check/route.ts`, imported rather than copied) so Turso's real month-to-date
    usage lands in the ledger every day and shows on /usage. It does not notify anyone (R6). The first run
@@ -216,7 +225,7 @@ in `~/.claude/broke/scratch/lazyboy_store/markers/`: `<lane>.done` means its pas
 | 1906 L6 | adversarial review of L5, deploy | xhigh | L5 | --stat-first |
 | 1908 L8 | outcome check after 3 days of real use | medium | L6 | --stat-first --age 1906.done 72 |
 | 1909 L9 | archive and drop the Zenbook's stale core tables | medium | L4 | --stat-first --age 1903.done 168 |
-| 1910 L10 | scope the orphan-flag pass to changed playlists (R4 headroom) | high | L3 | --stat-first |
+| 1910 L10 | scope the orphan-flag pass to changed playlists, with the identity-first predicate (§3) (R4 headroom) | high | L3 | --stat-first |
 | 1911 L11 | adversarial review of L10, deploy | xhigh | L10 | --stat-first |
 
 A LaunchAgent on the Mac, `com.remtbkv.lazyboy-statwatch`, runs `gate.py --mark-idle` every 10
@@ -263,10 +272,18 @@ through the meter. Comparison work uses a small script in the lane's scratch wit
    equal; `scripts/verify-derived.mjs` green with `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` set to Turso
    for that one command. **Never `--demo` against a real store.**
 8. **Tokens for the store**: `turso db tokens create lazyboy` (the app's) and `--read-only` (backups,
-   lane 1904), straight into mode-600 files in scratch.
-9. **Flip** Production and Preview: `TURSO_DATABASE_URL` (the `https://` form), `TURSO_AUTH_TOKEN`; and
-   Production `TURSO_DATABASE_NAME=lazyboy`. `vercel env add <NAME> <environment> --force`, value on
-   stdin (not on the command line, where `ps` shows it). Then `vercel redeploy <url> --target production`
+   lane 1904), straight into mode-600 files in scratch. Note: this full-access, no-expiry token is the
+   credential multi-user Phase 2 invalidates before it mints the group token; dev gets a token of its
+   own after that (multi-user PLAN §11.4).
+9. **Flip** Production only: `TURSO_DATABASE_URL` (the `https://` form), `TURSO_AUTH_TOKEN` and
+   `TURSO_DATABASE_NAME=lazyboy`. `vercel env add <NAME> production --force`, value on
+   stdin (not on the command line, where `ps` shows it). Delete Preview's `TURSO_*` variables
+   (`vercel env ls preview`, then `vercel env rm <NAME> preview`): otherwise a preview's `init()` runs a
+   branch's schema against production and any preview reads every row (multi-user PLAN §10.2 edit 2).
+   §3 records the store variables as one Production + Preview pair, and Vercel does not say what
+   removing one environment from a shared variable does, so `vercel env ls production` must show both
+   store variables before any redeploy; a production build without them falls back to
+   `file:data/listens.db` (`db.ts:127-128`) and fails every query. Then `vercel redeploy <url> --target production`
    with `<url>` from `vercel ls lazy-boy --prod` (not `vercel --prod`, which uploads a working tree).
    Wait for Ready; record the new deployment url.
 10. **Fence and tokens**, at once: `ssh ubuntu touch ~/lazyboy-sqld/FENCE_CORE`. From here every
@@ -279,7 +296,11 @@ through the meter. Comparison work uses a small script in the lane's scratch wit
 11. **Smoke**: three bench runs (R1: numbers, `VERCEL_REGION`, core host = Turso); one `/api/cron/sync`
     with the secret answers ok and Turso's `meta.last_sync` moved; the meter log shows the fence's 503s
     (old deployments, a dev server) and their sources; watch them stop over 30 minutes rather than chase
-    each one (pinned tabs reload to the new build through build-skew).
+    each one (pinned tabs reload to the new build through build-skew). Note (multi-user PLAN §10.2):
+    Skew Protection is a Pro feature, the team is on Hobby, and production shows no pinning today, so
+    after the flip old tabs reach the new deployment and old deployments answer only on protected URLs.
+    Fence hits should come from dev servers and scripts; an old deployment in the meter's log means
+    someone reached a protected deployment URL, which is worth a look rather than a wait.
 12. **Pingers on**: `systemctl --user enable --now lazyboy-cron-sync.timer`; resume anything you paused
     in step 2. Three ticks answer 200 and Turso's `meta.last_sync` moves with each.
 13. **Missed plays** (R5): compare the backstop recorder's plays (`~/lazyboy-recorder/backstop.db`) from
@@ -295,14 +316,17 @@ through the meter. Comparison work uses a small script in the lane's scratch wit
     telemetry rows arrive again.
 15. **Dev**: keep a mode-600 copy of `.env.local` in scratch, then point `.env.local` at the new layout
     (section 5) so dev reads and writes production's data again.
-16. Final token compare (step 10's rule). Record every step's evidence in the outcome log; write the
-    marker.
+16. Final token compare (step 10's rule). Delete the plaintext scratch copies on the Mac: step 5's core
+    snapshot (both token rows) and step 15's mode-600 copy of `.env.local` (every secret) (multi-user
+    PLAN §10.2 edit 5). Record every step's evidence in the outcome log; write the marker.
 
 **Rollback.** Before step 12: remove `FENCE_CORE`, flip the env back, redeploy; the Zenbook's core
 tables are untouched since `T_snap`. After step 12 the Zenbook copy is stale: dump Turso's core tables
 (`turso db shell lazyboy .dump`), `systemctl --user stop lazyboy-sqld`, load the dump into a copy of the
 Zenbook file, swap it in, `systemctl --user start lazyboy-sqld`, remove `FENCE_CORE`, then flip back.
-Write down which way the data went.
+Write down which way the data went. Note: multi-user Phase 0 lands before step 9, so the deployment a
+one-click rollback could reach during the cutover was built after the `AUTH_SECRET` rotation
+(multi-user PLAN §10.2).
 
 ## 9. Phase D: aftercare (L4)
 
@@ -310,9 +334,22 @@ Write down which way the data went.
   read-only token, loaded into SQLite, `integrity_check`, counts equal to Turso's, gzip, rclone as today)
   and the Zenbook file (telemetry). It also deletes the `-wal`/`-shm` files it leaves next to snapshots
   (98 MB of them on Oct 13). Test one restore end to end.
+- **Backup shape** (multi-user PLAN §10.2 edits 4 and 7). Write the Turso side as a list of
+  `(database, retention)` pairs, starting with `("lazyboy", 60 days)`. Run each database's retention
+  prune first and unconditionally, and log it (today's script prunes only at the end of a successful
+  run, so a failed night skips every prune). Keep the source counts, `count(*)` per table on the store,
+  against the loaded dump, and require the CLI's exit status and, for a `.dump`, the closing `COMMIT;`.
+  That costs ≤ ~45,800 rows a night if Turso charges a `count(*)` for every row, a few hundred if it
+  counts pages; one read of Turso's usage before and after settles which. Strip the `spotify_tokens%`
+  and `lock:%` rows from `meta` in every copy before it is compressed; the cutover's own snapshot keeps
+  them (R5). The nightly job also copies `~/lazyboy-recorder/backstop.db` (31 MB, one file, the only
+  copy of 122 of Rem's plays and the loss-repair path for every recorder window), kept 60 days like
+  Rem's store. Note: a backup then carries no token rows, so restoring `lazyboy` from one brings back
+  no token and capture stops until Rem signs in, with the recorder covering him meanwhile; the restore
+  test should expect that sign-in, and a `meta` count short by the stripped rows.
 - **Quota visibility**: `TURSO_DATABASE_NAME=lazyboy` in Production; call `/api/cron/usage-check` once
   and check it reports `lazyboy`'s real usage; confirm the daily route (phase A item 7) wrote today's
-  usage row to the ledger after 07:00 UTC. The cron-job.org job that used to call the guard has not run
+  usage row to the ledger after 09:00 UTC. The cron-job.org job that used to call the guard has not run
   since 2026-08-10 (the last `usage_check` ledger row): if `CRONJOB_API_KEY` pulls, read the account's
   jobs and record whether the usage-check job exists and is enabled. Do not create or re-enable any job
   (R6); if it is dead, add one line for Rem to NEEDS_REM.md.
@@ -320,7 +357,7 @@ Write down which way the data went.
   READ_QUOTA.md (the meter now sees telemetry only; Turso's usage comes from the guard and
   `turso plan show`), GOTCHAS.md, CLAUDE.md.
 - **The 7-day cleanup** is lane 1909, already queued and gated on the L3 marker's age: it archives
-  the Zenbook's stale core tables (snapshot, gz, rclone) and then drops them from sqld so nothing can
+  the Zenbook's stale core tables (snapshot, token rows stripped as above, gz, rclone) and then drops them from sqld so nothing can
   read a week-old copy by mistake.
 
 ## 10. Phase E: search from the browser's copy (L5, reviewed by L6)
@@ -328,12 +365,17 @@ Write down which way the data went.
 Search already matches in the browser once both payloads are in memory (18 ms per query in `lb-perf`);
 the wait is the download on every visit, which the history half repeats after any new play.
 
-- Keep the last good `/api/search/library` and `/api/search/history` bodies in IndexedDB, keyed by the
-  payload shapes (`LIBRARY_INDEX_SHAPE`, `HISTORY_INDEX_SHAPE`) and the signed-in user's id. On Home
+- Keep the last good `/api/search/library` and `/api/search/history` bodies in IndexedDB, keyed by
+  `(userKey, epoch, kind, segment, version, shape)`, with `shape` the payload shape
+  (`LIBRARY_INDEX_SHAPE`, `HISTORY_INDEX_SHAPE`). `userKey` is an opaque user key the `(app)` layout
+  renders, a constant until multi-user Phase 1's uid replaces it: no user id reaches the browser today,
+  and the email, the random `sub` and `me_id` are each wrong for it. Stamp each stored body with it.
+  The epoch and segment dimensions save a second migration of browser data when the multi-user plan's
+  P3 lands (multi-user PLAN §10.2 edit 3, §9.1). On Home
   mount, before the network, read them and build `entries` at once; mark `lb:index-idb`. Then fetch as
   today (the browser revalidates with the ETag) and swap in the fresh pair when it lands; store it.
 - Same validators as the network path (`fetchPayload` checks); a stored body that fails them is deleted.
-  A different user id, or sign-out, clears the store. Storage failures (private mode, quota) fall back to
+  A different user key clears the store, and the browser clears it when the sign-out form submits. Storage failures (private mode, quota) fall back to
   today's behaviour silently.
 - The day list also derives from the history payload: a stored copy may be minutes old until the fresh
   one lands. Today stays the server's (`initialTracks`), so check that a stored payload never replaces a
