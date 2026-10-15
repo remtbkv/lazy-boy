@@ -2566,22 +2566,34 @@ program's pace, §13.3]:
 
 | unknown | where it matters | answered by |
 |---|---|---|
-| whether Spotify's development-mode quota is one pool or one per user | §7.5, F2 | the passive check (§7.9): a ban in Phase 5, or never; the plan is safe under both readings |
-| the team's Vercel Active CPU | Phase 4's gate, §15 | Rem, on the dashboard, in Phase 0 |
+| whether Spotify's development-mode quota is one pool or one per user | §7.5, F2 | the passive check (§7.9): after the first refusal §7.8 lets one other user's harvest through, so the first ban answers it; the plan is safe under both readings |
+| the player bucket's daily limit, and the 30-second rate limit's real number | §7.6, §14.3; every harvest is triggered by a probe in that bucket | a player-endpoint 429 with its `reason` in `api_log`; until one comes, the envelope the app has already run without a 429 (1,336 player calls in a day, 56 calls in 30 s, scale 6-7) gates each Phase 5 addition |
+| the team's Vercel Active CPU | Phase 4a's gate, §15 | Rem, on the dashboard, in Phase 0 |
 | how many accounts the allowlist holds, whether any are grandfathered, whether Rem counts toward five | U | the dashboard's User Management list, in Phase 0 |
-| whether `/v1/me` returns `account_id` to this app, and under which scopes | §5.1, §11.4, §12.1 | Phase 0's dev sign-in; Phase 2 step 2 before anything depends on it |
+| whether `/v1/me` returns `account_id` to this app, and under which scopes | §5.1, §11.4, §12.1 | Phase 0's dev sign-in; Phase 2 stops at its first step if it does not (decision 31) |
+| whether a sign-in mints a new refresh token, so that a re-consent restarts Spotify's six-month clock | §5.4's expiry rule | Phase 0's hash-prefix probe on the Oct 15 backup (01e §8, completeness H2); `granted_at` moves only with a new token, so the rule holds either way |
+| what besides revocation and expiry makes Spotify answer `invalid_grant` (a password change, a client-secret rotation) | §5.4 | undocumented (01e §8); the app-wide rule of §5.4 keeps the plan safe without the answer |
 | R1 on Turso, and the payload build time from iad1 | every latency in §14 | lanes 1902-1903's bench route |
-| whether recently-played lists a play after the player has moved on, and how often | F2's worst case | Phase 3's soak: the retry count |
-| whether `/me/player` alone ever misses playback that currently-playing sees | §7.3 | Phase 3's soak: no play first stored by a backstop while Rem was listening |
-| whether the identity-first predicate is equal on today's data | §8.2 | lane 1910's check on a current copy (verified so far on the Aug 11 copy only) |
-| the player bucket's limit and the rate limit's number | §14.3 | a player-endpoint 429, with its `reason`, in `api_log` |
+| whether `changes()` after an `INSERT OR IGNORE` reports that insert inside a Turso batch | §8.3's accumulator | P2's lane, before relying on it; the fallback is a `through_id` over the rowid range of new plays (migration 3) |
+| whether Turso bills an unfiltered `count(*)` per row or per page | §10.2 edit 4's cost: ≤ ~45,800 rows a night or a few hundred | Turso's usage read before and after one backup |
+| whether a token minted for `lazyboy` is refused by another database in the group | §5.5, what dev can reach | Phase 2 step 4's check against a throwaway `lb-u-test` (security R8) |
+| what removing Preview from a shared Production + Preview variable does | §10.2 edit 2 | `vercel env ls production` after the edit, before any redeploy (migration §2) |
+| whether `/me/player` alone ever misses playback that currently-playing sees | §7.3 | Phase 3's soak: no play first stored by a backstop while Rem was listening, read from the trigger tags (§7.4) |
 | keystroke-to-paint on a real phone | S3 | Phase 0's `lb-perf` read on Rem's phone |
-| how friends listen and how often they open Home | §14.2, §14.4 | Phase 4's week; Turso's per-database usage |
-| whether a destroyed Turso database's point-in-time history goes with it | §12.3 | A and C quote Turso's docs saying it does; B could not find the statement (B §14). Re-read the page before a friend's data is on a paid plan |
-| the incident's exact window | §11.2 | not needed: the recorder diff finds the rows |
-| whether Preview and Production share the Data Cache; whether `cache()` is active in route handlers | §6.2 | not needed: the owner stamp and the keyed boxes make the design correct either way |
+| how friends listen and how often they open Home | §14.2, §14.4 | the canary week, then Phase 4b's; Turso's per-database usage |
+| whether `cache()` is active in route handlers, whether Preview and Production share the Data Cache, and how Fluid compute mixes users in one instance | §6.2 | not needed for correctness: the owner stamps and the keyed boxes hold either way; the canary week is the first production run with two users (completeness H4) |
 | the Data Cache's size and hit rate under the team's other projects | §9.3 | not observable on Hobby; an eviction costs one month's rebuild |
 | what "Turso is joining Supabase" means for plans and prices | §10.1 | Turso's announcements; each user's data stays portable |
+
+Answered since Oct 14, so out of the table: how often Spotify lists a play late (13% miss the first
+harvest after them, scale 5); whether the identity-first predicate matches on current data (all
+22,040 plays of the Oct 14 backup, scale §3); the incident's window, since there are no foreign plays
+to find (migration 7); whether the production secrets are Vercel's write-only type (all `sensitive`,
+security §2); the Zenbook's outage record (about ten days without capture in four weeks of August and
+September, migration 2); the busiest 30-second window without a 429 (56 calls, scale 7); and whether
+point-in-time recovery outlives a destroyed database ("PITR restores an existing database — it cannot
+bring back a database that was deleted", Turso's page, re-read by migration §3; only the paid plans'
+five-day undelete can).
 
 ### 16.2 Risks the plan carries
 
@@ -2590,8 +2602,18 @@ program's pace, §13.3]:
   receives its arguments and touches nothing else, T4 checks that each user's play lands in that
   user's file, and the token-owner assertion and owner stamps catch a mismatch at runtime (C §16.2).
 - **One token reads everything.** The group token reaches every user's data and cannot be revoked
-  alone (B §19). It must be a Secret-type variable (write-only after saving), which nobody has checked
-  for today's `TURSO_AUTH_TOKEN` (C §16.2).
+  alone (B §19). It is a `sensitive` Vercel variable, as every production secret already is
+  (security §2), and Phase 2 invalidates the cutover's `lazyboy` token before minting it (§11.4).
+- **The app database is on every request.** From Phase 2 a blocked, refused or broken `lazyboy-app`
+  stops every user while every user database is healthy. The identity read's "unavailable" outcome
+  keeps people signed in and their browser stores intact, and §12.5 restores it (migration 5, §14.5).
+- **People run the runbooks.** Restores, rollbacks, the incident freeze and Phase 2's token move are
+  steps someone follows, each rehearsed once (§12.5, §13.2, §13.5, §13.6). A step out of order, such as
+  an Instant Rollback across a secret rotation or moving `users.db_name` before the new `store_epoch`
+  is written, is the likeliest way left to hurt data.
+- **A false deletion.** A friend who removed the app by mistake and does not sign in within four days
+  loses their history: on Free nothing is left, and on Developer Turso's undelete keeps it to about
+  day 9 (§12.3, decision 21).
 - **The open app trusts the cron.** While ticks run, an open tab harvests only its catch-ups, even if
   the cron's step for that one user keeps failing; the user's capture health shows the stall, and for a
   quota ban not harvesting is the right behaviour (C §16.2).
@@ -2603,14 +2625,19 @@ program's pace, §13.3]:
   known-answer test, the manifest's play counts catch a missed insert, and moving the shape token
   re-fetches everything (§9.1).
 - **P3's deadline.** If segments slip past mid-December, the catalog split (01d O2) buys ~10 months.
-- **Spotify can lower the budget.** The brake plans to 60% of a limit Spotify says "may change"; the
-  429 `reason` with per-user attribution shows the first sign.
+- **Spotify can change the terms under the plan.** The brake plans to 60% of a limit Spotify says "may
+  change"; the player bucket that triggers every harvest has no known limit; and development mode went
+  to five users from Mar 9, 2026 (01f §1.2). The 429 `reason` with per-user attribution shows the first
+  sign, and the health check reports a player refusal (§7.8).
 - **Rollbacks assume Spotify keeps not rotating this app's refresh tokens** (01e F2); if it starts, a
   rollback costs Rem one sign-in (§11.4).
 - **Cross-site scripting** acts as its victim only (the session cookie is httpOnly and server actions
-  run as the victim), and the text the app renders comes from Spotify, where anyone can name a
-  playlist; React's escaping stays the main defence. A nonce-based CSP stays on `docs/SECURITY.md`'s
-  checklist, not a multi-user blocker (01e §5.10).
+  run as the victim). With every admin mutation moved to scripts on the Mac (security R11), one in
+  Rem's session can read what he can read but cannot destroy a friend's data. The text the app renders
+  comes from Spotify, where anyone can name a playlist, so React's escaping stays the main defence; a
+  nonce-based CSP stays on `docs/SECURITY.md`'s checklist, not a multi-user blocker (01e §5.10).
+- **Publication.** The repo is public, and these documents describe today's exposures in detail; the
+  next push of `main` publishes them (decision 1).
 - **Policy.** Storing friends' history and showing derived listening stats sit against the Developer
   Terms' storage rule and the Policy's "derived listenership metrics" line (01f §1.5). The plan
   narrows the exposure (each user sees only their own stats; retention; deletion inside five days);
