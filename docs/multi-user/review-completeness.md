@@ -355,10 +355,59 @@ weeks) the order moves the first friend back by about one and a half to two and 
 P3 alongside Phase 1 is ruled out by "one lane in `db.ts` at a time" (PLAN.md:1621), so this is a real
 trade between the friend's date and merge risk, and decision 8 should say so.
 
-## 2. What holds up
+## 2. STORE_MIGRATION, from this lens
 
-(to be filled)
+Nothing in lanes 1901-1911 needs to change before Oct 15, 8 PM beyond the plan's six edits (§10.2), and
+nothing in this review is due tonight. Two notes:
 
-## 3. What I ran
+- R6, "No new alerting mechanism" (STORE_MIGRATION.md:37), is right for the cutover, which Rem asked to
+  keep small, and wrong for the multi-user phases (H1). §10.2 should say that R6 binds lanes 1901-1911
+  and not Phases 1-5.
+- Edit 4 strips the token rows from every backup, which is right. Two consequences belong in the plan:
+  T12 has to plant a synthetic token row to keep rehearsing the token step (L1), and from lane 1904 on a
+  restore of `lazyboy` from a nightly backup brings back no token, so capture stops until Rem signs in
+  (the recorder covers him meanwhile; 01e §6 item 1 names the cost). Lane 1904's restore drill should
+  expect that sign-in.
 
-(to be filled)
+## 3. What holds up
+
+- **Rem's data moves nowhere.** `lazyboy` becomes his user database as it stands; the complete list of
+  changes to it is written down (rule 5, §11.1) and each carries a snapshot, a sum check or a recorder
+  diff. H3 is the one way the list can be overrun.
+- **The foreign-play cleanup** waits for Rem's yes on a list built from the recorder diff, with a
+  snapshot first and the reopened verdicts re-ruled after (§11.2).
+- **Owner-only phases, each its own deploy with a rollback**, and the irreversible steps named in one
+  place (§13.1), apart from those H2 and L2 add.
+- **Deletion reaches the backups by per-database retention** instead of file bookkeeping, and §12.3 closes
+  two copies none of the designs did: the telemetry backups and the app database's point-in-time history.
+- **The client factory rule** (§4.2): every client through `makeStoreFetch`, so per-user clients cannot
+  silently lose what two incidents bought.
+- **The predicate was reproduced rather than trusted** (7,572 plays, 0 differ), and the re-check on a
+  current copy is named as a condition of shipping it (§8.2).
+- **§18's decisions** each carry a recommendation and a reason, grouped by what they block, and the move
+  from 25 users to five is quoted from Spotify's own pages.
+
+## 4. What I ran
+
+Nothing ran against the production store, Turso, Vercel or Spotify's API, and nothing was written except
+this file. On Oct 14, about 11:39 PM to midnight, on the Mac:
+
+- Read in full: `docs/multi-user/PLAN.md` (at `0ca7ab5`), `01a`, `01b`, `01c`, `01e`, `01f`,
+  `docs/GOTCHAS.md`, `docs/STORE_MIGRATION.md`. Read in part: `01d` §0, §4.3, §7-8; `design-a.md` §6.5
+  and §12; `docs/ARCHITECTURE.md:180-230`; `README.md:20-60`. A grep of the three designs for Premium,
+  onboarding, export, bootstrap, canary and alerting (none covers the M4-M5 topics).
+- `git diff --stat ac6f7fe HEAD -- src scripts ops tests vercel.json next.config.ts package.json`: empty,
+  so the plan's line numbers hold. `git show -s 044c9b6` for the guard's timestamps.
+- Code read with `sed`/`grep`: `src/lib/spotify/client.ts` (whole), `src/app/api/cron/sync/route.ts:92-186`,
+  `src/app/(app)/home/page.tsx:1-120`, `src/app/(app)/playlists/[id]/page.tsx:22-60, 136-200`,
+  `src/app/(app)/home/den-home.tsx:690-725`, `src/lib/db.ts:158-180` and its `ALTER`s,
+  `src/lib/cronjob.ts:14-20`, `scripts/setup.mjs`, `tests/setup.ts`, `tests/stubs/next-cache.ts`,
+  `vitest.config.ts`, `tests/now-playing-route.test.ts:1-40`, and a grep of every test's imports.
+- On the Zenbook, read-only, about 11:48 PM: `ssh ubuntu 'systemctl --user cat lazyboy-cron-sync.service
+  lazyboy-cron-sync.timer; systemctl --user show lazyboy-cron-sync.service -p OnFailure -p NRestarts'`,
+  output filtered for lines naming a secret or token (there were none). Result: `OnFailure=` empty.
+- Two Spotify pages fetched about 11:50 PM: `https://developer.spotify.com/documentation/web-api/reference/start-a-users-playback`
+  ("This API only works for users who have Spotify Premium.") and
+  `https://developer.spotify.com/documentation/web-api/concepts/quota-modes` ("enter the name and
+  Spotify email address of the user that you want to enable to use your app"; Premium stated only for
+  the owner).
