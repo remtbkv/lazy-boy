@@ -435,7 +435,221 @@ Target I$ holds: one round trip on Home, microseconds elsewhere.
 
 ## 3. Data model: how every table and meta key gets a user
 
+Two rules decide where everything goes. Listening data and everything derived from it lives in the
+user's own database and nowhere else. The app database holds identity, scheduling and ciphertext,
+and no listening data at all, so a mistake in its fifteen functions can mis-schedule or lock out a
+user but cannot show one person's history to another.
+
+### 3.1 The app database, `lazyboy-app`
+
+```sql
+CREATE TABLE users (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT, -- the uid; AUTOINCREMENT: never reused
+  account_id            TEXT UNIQUE,     -- Spotify account_id (immutable); NULL until claimed and after deletion
+  spotify_id            TEXT,            -- Spotify id (mutable): what an invite matches on; refreshed at sign-in
+  db_name               TEXT NOT NULL UNIQUE,  -- 'lazyboy' for uid 1, 'lb-u-<random>' for everyone else
+  db_url                TEXT NOT NULL UNIQUE,  -- https:// on Turso; file: in dev and tests
+  status                TEXT NOT NULL,   -- invited | active | needs_reconnect | disabled | deleting | deleted
+  is_admin              INTEGER NOT NULL DEFAULT 0,
+  session_epoch         INTEGER NOT NULL DEFAULT 0,
+  terms_version         TEXT,
+  terms_accepted_at     INTEGER,
+  invited_at            INTEGER NOT NULL,
+  claimed_at            INTEGER,
+  deletion_requested_at INTEGER,
+  deleted_at            INTEGER
+);
+CREATE TABLE user_tokens (
+  uid        INTEGER PRIMARY KEY,
+  blob       TEXT NOT NULL,      -- 'v1.' || base64url(iv ‖ ciphertext ‖ tag), §4
+  expires_at INTEGER NOT NULL,   -- plaintext, so the cron sees who needs a refresh without decrypting
+  granted_at INTEGER NOT NULL    -- the last authorization: Spotify's six-month clock (01e §5.7)
+);
+CREATE TABLE sync_state (        -- 01c §5.2's due queue, scheduling fields only
+  uid             INTEGER PRIMARY KEY,
+  state           TEXT NOT NULL, -- active | idle | backoff | needs_reauth | removed
+  next_probe_at   INTEGER NOT NULL,
+  next_harvest_at INTEGER,
+  next_rescan_at  INTEGER,
+  failures        INTEGER NOT NULL DEFAULT 0,
+  last_error      TEXT,          -- an error code, never a message body
+  last_ok_at      INTEGER,
+  lease_owner     TEXT,
+  lease_until     INTEGER,
+  quota_day       TEXT,          -- the recently-played quota day rp_calls counts (§6.4)
+  rp_calls        INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_sync_due ON sync_state (next_probe_at);
+CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT);
+```
+
+Choices in it, with the reason for each:
+
+- **An integer uid, with `account_id` as an attribute.** 01a §8.4 measured an integer key at 2% of
+  per-play storage against 57% for a text id, but in this design no per-play row carries a user, so
+  the integer's real advantages are elsewhere: it is short in cache keys and the HMAC input, it is
+  not a Spotify identifier, and `AUTOINCREMENT` means a deleted user's id never comes back, so a
+  stale cookie or cache entry for it cannot match a newcomer.
+- **`account_id`, not Spotify's `id`, is the link to the account**, as Spotify now asks ("Do not use
+  this field for account linking — use account_id instead, which is immutable", quoted in 01f §1.5
+  and 01e §1.1). `spotify_id` stays as an attribute because it is what Rem can see before someone
+  signs in (it is in their profile URL), so invites match on it once (§10).
+- **No `env` column on tokens**, unlike 01e §5.2's sketch. Today one store holds a production and a
+  dev token row (`db.ts:2511-2512`); here dev runs its own app database on a local file (§2.7), so
+  production's app database never holds a dev grant.
+- **`sync_state` holds times and counters, not what was playing.** 01c §5.2's change gate compares
+  the last probe's track and progress; those stay in the user's own `meta`, next to today's
+  `player_last_active` and `rp_last_harvest` (`db.ts:2364-2374`).
+- **Invites are `users` rows in status `invited`**, with the database already provisioned (§10.1).
+  One table, one claim statement, and the owner check has an `owner_uid` to compare from the first
+  sign-in on.
+
+`app_meta` keys: `schema_version`; `cooldown:<bucket>` (today's `spotify_cooldown_until`, split by
+quota bucket as 01c S4 recommends); `played_at_convention` (a fact about Spotify's API, computed
+from the admin's plays); `lock:spotify_refresh:<uid>`.
+
+### 3.2 A user database
+
+Today's seven core tables with today's columns, keys and indexes (`db.ts:158-209`, the `ALTER`s at
+`:244-295`), so every plan 01a measured with `EXPLAIN QUERY PLAN` (01a §4.2) holds unchanged, and
+01a §9.2's "user-led" timings are what each user gets without a single new index. Two `meta` keys
+are new: `owner_uid` (written once, §2.3) and `schema_version` (§3.5). One changes meaning:
+`user_tz` (an IANA zone name sent by the browser) replaces the fixed `HOME_TZ = "America/New_York"`
+(`db.ts:1270`) and the last-browser-wins `user_tz_offset` for that user's write-path payloads (01a
+D24). Size: Rem's core is 11.87 MB (01a §2); a newcomer with a library like Rem's starts near
+3.3 MB (01a §9.1). `tracks` is per user, so two users who play the same songs store them twice; at
+most ~4.2 MB per user, 01a §8.1's ceiling for the overlap.
+
+### 3.3 Every table and `meta` key
+
+The census of 01a §2-3, with where each item goes:
+
+| today | where it goes | how it is tied to one user |
+|---|---|---|
+| `tracks`, `plays`, `contexts`, `playlists`, `playlist_tracks`, `saved_tracks` | the user's database | by being in it. Per-user `contexts` also fixes the shared negative cache (01a D25): one user's 403 no longer hides a name from another for 30 days |
+| `meta`: `last_sync`, `write_seq`, `library_seq`, `slow_seq_pub`, `home_payload`, `alltime_stats`, `alltime_at`, `unique_song_count`, `contexts_full_check_at`, `playlists_synced_at`, `library_synced_at`, `library_scan_attempt_at`, `saved_synced_at`, `liked_total`, `liked_top_added_at`, `plsnap:*`, `player_last_active`, `rp_last_harvest`, `clean_backup_pref`, `lock:clean:*` | the user's database | by being in it. The version markers become per user without a line of code, which is what stops one user's plays from invalidating every other user's caches (01a D21). Two users cleaning one collaborative playlist stop blocking each other (01b §3.5) |
+| `meta.me_id` | the user's database | written only by that user's own library sync with that user's own token, so it is right by construction; still used for the owned-playlist filter (`db.ts:2297`) and the page's `isMine`; **never** again read for sign-in (`src/lib/owner.ts` goes, §10) |
+| `meta.user_tz_offset` and `HOME_TZ` | `user_tz` in the user's database | by being in it |
+| `meta.spotify_tokens` (production) | `user_tokens`, encrypted (§4) | `uid` primary key and the associated data |
+| `meta.spotify_tokens_dev` | dev's own local app database | not in production at all |
+| `meta.lock:spotify_refresh` | `app_meta`, `lock:spotify_refresh:<uid>` | uid in the name |
+| `meta.spotify_cooldown_until` | `app_meta`, `cooldown:<bucket>` | global by meaning: a ban is the app's (01f §1.4) |
+| `meta.played_at_convention` | `app_meta` | global by meaning |
+| `meta.last_sync_added`, `meta.pltracks_at:*` | dropped by the migration | dead: no reader (01a §3) |
+| `api_log`, `client_metrics` | telemetry store, plus nullable `user_id` | the column; deletion deletes by it (§12) |
+| `usage_ledger` | telemetry store, unchanged | global; per-user store usage comes from Turso's per-database numbers instead (§2.1) |
+
+What changes in `db.ts`'s SQL: nothing in the seven tables' statements. The token, lock and
+cooldown functions (`db.ts:2504-2565`, `2376-2392`) move to `app-db.ts`; the scripts gain
+`--user`.
+
+### 3.4 Telemetry
+
+`api_log` gains `user_id INTEGER` (nullable: some calls belong to no user, such as the token
+endpoint before sign-in completes), written from the token's owner (§2.5). That is what lets the
+quota question of 01c §4 be answered at all: when a ban lands, whose harvests spent the bucket.
+`client_metrics` gains `user_id`, set from the session in `/api/metrics` (today the row carries a
+client-chosen tab id only, 01b C7). Neither gets a new index: both are pruned at 30 days once
+STORE_MIGRATION's daily route runs (its §6 item 7; 01a D32), so a deletion's `DELETE … WHERE
+user_id = ?` scans at most a month of rows, once.
+
+### 3.5 Schema versions and migrations, replacing `init()`
+
+`init()` (`db.ts:153-297`) cannot carry a multi-database world: it runs on any cold instance,
+concurrently, with writers live (01a §8.6), and with N databases it would run N times per cold
+process. It is replaced by three pieces:
+
+1. **Declared versions.** The code carries `USER_SCHEMA` and `APP_SCHEMA`. The open check of §2.3
+   compares `meta.schema_version`; a database behind the code is refused for that user only.
+2. **Provisioning** creates a new user database at the current version in one `executeMultiple`
+   (today's `CREATE` block for the seven tables, with every later `ALTER` folded in) plus
+   `owner_uid` and `schema_version` (§10.1).
+3. **`scripts/migrate.mjs --all`**, run by hand from the Mac with the pingers paused for its
+   duration (STORE_MIGRATION §8 step 2's discipline): for the app database and then each user
+   database in turn, it applies the pending steps in one transaction and bumps `schema_version`. At
+   six databases this takes seconds.
+
+Deploy order for a schema change stays what it is today, looped: an additive step first (old code
+tolerates it), then the deploy that needs it, then any destructive step. Mixed versions are expected
+for the minutes a migration runs, and they are per user, never inside one table. Preview cannot run
+any of this against production, because Preview has no store variables (§2.7).
+
 ## 4. Per-user tokens, encrypted at rest
+
+This section follows 01e §5.2-5.3, which designed the scheme; what changes is the key (the uid,
+§3.1) and the owner field of §2.5.
+
+### 4.1 The scheme
+
+- **AES-256-GCM** from Node's built-in `crypto`; a random 12-byte IV per write; stored as
+  `v1.<base64url(iv ‖ ciphertext ‖ tag)>`, where `v1` names the key.
+- **Associated data** `lazyboy:tokens:v1:<uid>`. A ciphertext moved to another user's row fails to
+  authenticate (checked, §17), so someone with write access to the app database but not the key
+  cannot graft a victim's grant onto their own account (01e §5.3).
+- **Plaintext columns**: `uid`, `expires_at`, `granted_at`. Both tokens sit in the one blob.
+- **Keys**: `TOKEN_KEYS="v2:<base64 32 bytes>,v1:<…>"`, the first one writes and reads pick by
+  prefix; a Vercel Secret in Production only. Dev uses its own key and its own local app database,
+  so the production key never sits in `.env.local`. A copy in Rem's password manager is the backup;
+  losing the key costs every user one sign-in and nothing else.
+- **Rotation**: put a new key first and redeploy; active users re-encrypt at their next refresh,
+  about hourly; a one-off script re-encrypts the rest; the old key goes once no blob starts with
+  its prefix.
+- **A blob that fails to decrypt** is no token: the user goes to `needs_reconnect`, and the log
+  line carries the uid, never the blob.
+- **Cost, measured** (§17): 1.67 µs to decrypt and 2.67 µs to encrypt a 450-byte token blob on the
+  Mac, against a store round trip of ~15 ms at R1's target.
+
+### 4.2 The three paths that touch tokens
+
+**Every request.** The jwt callback reads identity and the token in one query:
+
+```sql
+SELECT u.status, u.session_epoch, u.is_admin, u.db_url, t.blob, t.expires_at
+FROM users u LEFT JOIN user_tokens t ON t.uid = u.id
+WHERE u.id = :uid
+```
+
+It returns `null`, so the request is signed out, when the cookie has no `uid` (every cookie minted
+before phase 1, which also ends 01b E1 / 01e F1 for good), when the user is not `active` or
+`needs_reconnect`, or when the cookie's epoch is not `session_epoch`. One round trip, as today's
+token read is. The result goes into the request box keyed by uid (§2.4).
+
+**Sign-in.** The sign-in pass of the jwt callback writes the token row for the uid the sign-in
+resolved (§10.2), sets `token.uid` and `token.ep` from the users row, never from the incoming
+cookie or the profile alone, and stores nothing else in the cookie. The two paths that park Spotify
+tokens inside the cookie when the store write fails (`auth.ts:367-374`, `388-405`) go: a token in a
+cookie is bound to no user row and is invisible to the cron, so a sign-in that cannot write its
+token row fails visibly and is retried (01e A18).
+
+**Refresh.** `coordinatedRefresh`, `waitForFreshToken`, `clearTokensIfStale` and
+`getValidAccessToken` (`auth.ts:170-289`) all take the uid. The cross-instance lock is
+`lock:spotify_refresh:<uid>`; the in-process in-flight map is keyed by uid; every token object
+carries its owner (§2.5). `clearTokensIfStale` keeps its wave-2 rule unchanged within one row.
+The token core moves out of `auth.ts` into a module with no `next-auth` import, so the simulated
+environment can run it (01e §5.2; today's tests cannot load `auth.ts`, 01e §2.7). Write load: about
+24 refreshes per user per day, each a token write plus a lock acquire and release, ~72 writes per
+user per day (01e §5.2's estimate).
+
+### 4.3 What encryption covers, and the other secrets
+
+Encryption at rest protects every copy of the token rows outside the Vercel runtime: the app
+database's backups, Turso's own retention, any dump or scratch copy, a dev machine. Those copies
+matter more than usual for this app, because Spotify does not rotate its refresh tokens (unchanged
+across two weeks of hourly refreshes) and documents a six-month lifetime, so a copied refresh token
+stays a live 13-scope credential for months (01e F2). It does not protect against code running in
+production, which holds the key.
+
+The other secrets, and what this design asks of each:
+
+| secret | today | in this design |
+|---|---|---|
+| `AUTH_SECRET` | Production and Preview, 133 days old (01e §3.1) | rotate now (01e F1, §16). With a uid in every session, a forged cookie can name any user, so it becomes the key to every account's in-app session: Production only, and Preview gets its own |
+| `TOKEN_KEYS` | – | Production only, Secret; dev has its own |
+| `HK_SECRET` | – | Production only; rotation is harmless (§2.6) |
+| Turso group token (runtime) | a single-database token after STORE_MIGRATION (its §5) | one group token, read-write, Production only; Preview gets none (§2.7) |
+| Turso group token, read-only | – | the backup job only (§8) |
+| `TURSO_PLATFORM_TOKEN` | in the runtime for `/usage` and the dormant guard (01e §3.1) | kept in the runtime for two narrow uses, destroying a departed user's database and the daily usage read (§12 argues why); provisioning stays a script on the Mac (§10.1) |
+| `CRON_SECRET` | the cron routes | unchanged; with N users its holder can make the cron fan out on demand, so the per-user lease (§6.2) also caps what a leaked secret can spend |
 
 ## 5. Isolation tests
 
