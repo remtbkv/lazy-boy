@@ -144,9 +144,10 @@ Each design is strongest on its own angle and weakest where the others are stron
 - **A (isolation first)** maps every class of cross-user mistake to a layer that prevents it and a
   layer that detects it (A §2.8), adds cheap runtime checks that turn a missed bug into a logged slow
   path instead of a leak (owner stamps on databases and cached values, tokens that carry their owner),
-  and phases the work so nothing anyone but Rem can reach changes until the first friend. Its store
-  budget is the loosest of the three on the read paths it leaves alone (~0.8M rows a heavy day, A
-  §13.4).
+  and phases the work so nothing anyone but Rem can reach changes until the first friend. On cost it
+  adopts the overviews' levers (an accumulator, the strip updated in place, scoped orphan passes) and
+  stops there (~0.8M rows a heavy day, A §13.4), without counting the whole-history strip Home
+  prefetches on every mount (B §3 row 4).
 - **B (performance first)** has the rule this plan adopts for cost, "a user's recurring cost follows
   what changed, never what is stored" (B §2), and the measured finding with the most leverage: the
   "From" verdict rewritten to start from the song's identity, which reads ~2.7 rows per play where
@@ -158,7 +159,8 @@ Each design is strongest on its own angle and weakest where the others are stron
   and is the most concrete operationally: a client lookup that fails closed, a one-variable kill
   switch, friends' backups that age out inside Spotify's five days with no bookkeeping, the owner
   alarm evaluated where a second pinger cannot hide it, and soak checks with numbers. It leaves each
-  user's read cost as it is today and relies on Turso's paid plan for four heavy friends (C §12.4).
+  user's read cost close to today's (one constant, the all-time gate, moves from 10 to 60 minutes when
+  the usage asks) and relies on Turso's paid plan for four heavy friends (C §12.4).
 
 **The plan takes A's structure** (its targets, its layered enforcement, its phase order), because
 Rem's first words were "keep it all secure" and A's is the only structure that says, for each way a
@@ -260,9 +262,10 @@ The rules the plan holds itself to:
 4. **Nothing reaches a friend until it has run on Rem alone.** Phases 1-3 change how the app is
    built, never who can reach it; each soaks on Rem's account before the next, and the first friend
    arrives only after every isolation test has failed against a planted bug and then passed (§13).
-5. **Rem's data does not move.** `lazyboy` becomes his user database. The only changes to it are a
-   new derived column (`plays.listened_ms`, filled and verified once), two `meta` keys, and the token
-   rows leaving for the app database a week after they are copied (§11).
+5. **Rem's data does not move.** `lazyboy` becomes his user database. Beyond what the app's own code
+   writes, the only changes to it are a new derived column (`plays.listened_ms`, filled and verified
+   once), two `meta` keys, the incident's foreign plays (removed with his yes), and the token rows
+   leaving for the app database a week after they are copied (§11).
 
 The order of work, detailed in §13:
 
@@ -281,7 +284,7 @@ The order of work, detailed in §13:
 
 - **A user database** per user, holding today's seven core tables with today's columns, keys and
   indexes (`tracks`, `plays`, `contexts`, `meta`, `playlists`, `playlist_tracks`, `saved_tracks`;
-  `db.ts:158-209` and the `ALTER`s at `:244-295`), plus one derived column, `plays.listened_ms` (§8.2).
+  `db.ts:158-209` and the `ALTER`s at `:244-295`), plus one derived column, `plays.listened_ms` (§8.3).
   Every plan 01a measured with `EXPLAIN QUERY PLAN` (01a §4.2) holds unchanged, and each user gets
   01a §9.2's "user-led" timings without a new index. Rem's is Turso `lazyboy`; a friend's is
   `lb-u-<uid>`, in the same group (`default`, `aws-us-east-1`, beside Vercel's iad1).
@@ -316,7 +319,7 @@ CREATE TABLE users (
                                            -- | disabled | deleting
   is_admin          INTEGER NOT NULL DEFAULT 0,
   session_epoch     INTEGER NOT NULL DEFAULT 0,
-  terms_version     TEXT,                  -- privacy policy and end-user agreement accepted (§12.2)
+  terms_version     TEXT,                  -- privacy policy and end-user agreement accepted (§12.1)
   terms_accepted_at INTEGER,
   invited_at        INTEGER NOT NULL,
   claimed_at        INTEGER,
@@ -354,7 +357,7 @@ CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT);
 -- keys: schema_version; cooldown:<bucket>; played_at_convention; lock:spotify_refresh:<uid>
 ```
 
-Choices in it: there is no `env` column on tokens, because dev runs its own app database (§5.6) and
+Choices in it: there is no `env` column on tokens, because dev runs its own app database (§5.5) and
 production's never holds a dev grant (A, C). Invites are `users` rows in status `invited`, with the
 database already provisioned, so one claim statement binds a sign-in to a row (A §10.2). What the
 probe last saw (track, progress, the retry flag) stays in the user's own `meta` beside today's
@@ -380,7 +383,7 @@ easy to get wrong N times.
 | `meta`: `last_sync`, `write_seq`, `library_seq`, `slow_seq_pub`, `home_payload`, `alltime_stats`, `alltime_at`, `unique_song_count`, `contexts_full_check_at`, `playlists_synced_at`, `library_synced_at`, `library_scan_attempt_at`, `saved_synced_at`, `liked_total`, `liked_top_added_at`, `plsnap:*`, `player_last_active`, `rp_last_harvest`, `clean_backup_pref`, `lock:clean:*` | the user's database, unchanged | by being in it. The version markers become per user without a line of code, which stops one user's plays from invalidating every other user's caches (01a D21) |
 | `meta.me_id` | the user's database | written only by that user's own library sync with that user's own token; used by the owned-playlist filter (`db.ts:2297, 2310`) and the page's `isMine`; never read for sign-in again |
 | `meta.user_tz_offset`, `HOME_TZ` (`db.ts:1270`) | `user_tz` (an IANA zone) in the user's database | written by `/api/sync` only when it changes; the Home payload buckets days in the user's zone, with the DST check against that zone (C §3.3) |
-| `meta.spotify_tokens` | `user_tokens`, encrypted | the uid key and the associated data (§5.3); the plaintext row stays in `lazyboy` for a week, then goes (§11.3) |
+| `meta.spotify_tokens` | `user_tokens`, encrypted | the uid key and the associated data (§5.3); the plaintext row stays in `lazyboy` for a week, then goes (§11.4) |
 | `meta.spotify_tokens_dev` | dev's own app database | not in production at all |
 | `meta.lock:spotify_refresh` | `app_meta`, `lock:spotify_refresh:<uid>` | the uid in the name |
 | `meta.spotify_cooldown_until` | `app_meta`, `cooldown:<bucket>` | global by meaning: Spotify's rate limit is per app and its quota per developer account (01f §1.4); split by bucket so a recently-played ban does not stop the player probe (01c S4) |
