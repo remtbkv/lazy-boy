@@ -180,8 +180,9 @@ with an id it made up. Three functions mint one, and a static test (§5.3) pins 
 allowed to import the minting helper:
 
 1. **`gate()`**, behind every page, action and route. It calls `auth()`; the jwt callback has
-   already checked, in its one store query, that the session's user exists, is active, has the
-   current `session_epoch`, and has a token (§4.2). `gate()` returns `{ uid, hk, admin, spotify }`
+   already checked, in its one store query, that the session's user exists, is `active` or
+   `needs_reconnect`, carries the current `session_epoch`, and whether a usable token exists
+   (§4.2). `gate()` returns `{ uid, hk, admin, spotify }`
    or `null`. Three thin wrappers give each kind of entry point its refusal: `requireUser()`
    redirects a page to `/login`, `requireUserForRoute()` returns a 401, `requireUserForAction()`
    returns `{ ok: false }`. `spotify` says whether the user's Spotify grant is live; reading one's
@@ -309,12 +310,12 @@ value today is legitimately the same for two users.
   across users fails an assertion on the first mixed call instead of acting on someone else's
   account. Cost: one integer compare per Spotify call.
 - **The ciphertext is bound to its row.** AES-256-GCM with associated data
-  `lazyboy:tokens:v1:<uid>:<env>` (§4). A blob copied into another user's row fails to decrypt,
+  `lazyboy:tokens:v1:<uid>` (§4). A blob copied into another user's row fails to decrypt,
   which I checked with the scheme itself (§17: the swapped associated data is refused). That catches
   a row-level mix-up in SQL or by hand; it cannot catch the wrong plaintext encrypted for the right
   user, which is what the owner field above is for.
-- **Locks and in-flight refreshes per user**: `lock:spotify_refresh:<uid>:<env>` in the app
-  database, and the in-flight map of §2.4 (01e A2, A4).
+- **Locks and in-flight refreshes per user**: `lock:spotify_refresh:<uid>` in the app database,
+  and the in-flight map of §2.4 (01e A2, A4).
 - **The sign-in profile read is never cached.** `spotifyUserinfo` fetches `/v1/me` with no `cache`
   option (`src/lib/spotify/userinfo.ts:29-31`) and relies on Next 16's default of not caching
   `fetch`. It gets `cache: "no-store"` explicitly, because this is the one fetch whose cached answer
@@ -364,17 +365,17 @@ file a reviewer can read in one sitting:
 
 | function | statement shape | takes a uid |
 |---|---|---|
-| `sessionRow(uid, env)` | `users LEFT JOIN user_tokens` on the uid: status, epoch, admin, db location, token blob | yes |
+| `sessionRow(uid)` | `users LEFT JOIN user_tokens` on the uid: status, epoch, admin, db location, token blob | yes |
 | `userByAccount(accountId)` | point read on `users.account_id` (sign-in, returning user) | no: sign-in has no uid yet |
 | `claimInvite(spotifyId, accountId, terms)` | compare-and-set from `invited` to `active` (§10.2) | no: same |
 | `userDbLocation(uid)` | point read of `db_url` (client open) | yes |
-| `writeTokens`, `clearTokensIfStale` | upsert / conditional delete on `(uid, env)` | yes |
+| `writeTokens`, `clearTokensIfStale` | upsert / conditional delete on the uid's row | yes |
 | `acquireLock`, `releaseLock` | today's compare-and-set on `app_meta`, names carrying the uid | yes (in the name) |
 | `claimDueUsers(now, owner, leaseMs)` | one `UPDATE … RETURNING uid` over due rows | no: cross-user by design |
 | `releaseUser(uid, owner, next)` | lease release and next due times | yes |
 | `setStatus(uid, …)`, `bumpEpoch(uid)` | point updates | yes |
 | `listUsers()` | admin page and the backup job | no: admin only |
-| `getGlobal(key)`, `setGlobal(key, v)` | the two global settings (§3.3) | no: global by meaning |
+| `getGlobal(key)`, `setGlobal(key, v)` | `app_meta`'s listed keys: the per-bucket cooldowns, `played_at_convention`, `schema_version` (§3.1) | no: global by meaning |
 
 The six that take no uid are cross-user by design, and each has a test of its own (§5.2, T6).
 
@@ -459,6 +460,8 @@ CREATE TABLE users (
   deletion_requested_at INTEGER,
   deleted_at            INTEGER
 );
+-- one open invite per Spotify id, so a claim can never match two rows
+CREATE UNIQUE INDEX idx_users_open_invite ON users (spotify_id) WHERE status = 'invited';
 CREATE TABLE user_tokens (
   uid        INTEGER PRIMARY KEY,
   blob       TEXT NOT NULL,      -- 'v1.' || base64url(iv ‖ ciphertext ‖ tag), §4
@@ -545,8 +548,8 @@ cooldown functions (`db.ts:2504-2565`, `2376-2392`) move to `app-db.ts`; the scr
 
 ### 3.4 Telemetry
 
-`api_log` gains `user_id INTEGER` (nullable: some calls belong to no user, such as the token
-endpoint before sign-in completes), written from the token's owner (§2.5). That is what lets the
+`api_log` gains `user_id INTEGER` (nullable, since the rows already there have none), written from
+the token's owner on every call through the Spotify client (§2.5). That is what lets the
 quota question of 01c §4 be answered at all: when a ban lands, whose harvests spent the bucket.
 `client_metrics` gains `user_id`, set from the session in `/api/metrics` (today the row carries a
 client-chosen tab id only, 01b C7). Neither gets a new index: both are pruned at 30 days once
@@ -821,8 +824,8 @@ kept out of the harvest deadline. Each state lives in that user's `sync_state` r
   harvests on every call with no debounce (`src/app/(app)/history-actions.ts:133`, 01c S6). The
   browser's own provisional plays already cover the moment a track ends.
 - **Now-playing** polls every 15 s mid-track instead of 6 s, keeping the end-of-track and focus
-  polls (01c §5.5), so five users with a visible tab each stay near the 18-per-30-seconds rate that
-  has passed without a 429.
+  polls (01c §5.5): about 6 Spotify calls a minute per user, so five users with a visible tab each
+  make ~15 calls per 30 s, under the 18 that have passed without a 429.
 - **The library rescan**: one user per tick, resumable across ticks (it already commits per
   playlist), every 30 minutes while active and every 2-3 hours idle; it stops calling `/me`, whose
   answer (the user's Spotify id) is known from sign-in; and it reads all of a user's playlist
@@ -1004,9 +1007,11 @@ recorder captured his real plays throughout on its own grant, every 15 minutes, 
 `~/lazyboy-recorder/backstop.db` (01c §1, §2.6). So, on a local copy of a nightly snapshot taken
 after Rem signed in again:
 
-1. List the plays of Oct 14 (UTC and local) that are in the store and not in `backstop.db`. The
-   recorder holds the last 50 plays every 15 minutes, so a real play of Rem's missing from it would
-   need 50 plays in a quarter hour or the box down; the 3 AM reboot is 6-8 minutes (01f §3.3).
+1. List the plays from the start of Oct 14 to Rem's first sign-in after the incident that are in
+   the store and not in `backstop.db` (01e's 9:32 PM probe found `me_id` back on Rem's account, so
+   the window closes before then). The recorder reads the last 50 plays every 15 minutes, so a real
+   play of Rem's missing from it would need 50 plays in a quarter hour or the recorder down; its
+   timer's log shows the second, and the 3 AM reboot is 6-8 minutes (01f §3.3).
 2. Show Rem the list (time, track, artist, context). Nothing is deleted without his yes.
 3. In one transaction on the store: delete the confirmed rows; set `skipped = NULL` on the play
    after each deleted one, since its listened time and verdict were computed from a foreign
@@ -1060,8 +1065,7 @@ Invites are made by Rem, on the Mac, with `scripts/invite.mjs --spotify-id <id>`
 1. Refuse if active plus invited users already number `MAX_USERS` (5; `--force` to override, for a
    grandfathered allowlist).
 2. Insert the users row in status `provisioning`, which reserves the uid; create
-   `lb-u-<random>` in group `default` with the platform token (which stays on the Mac for this);
-   apply the user schema; write `owner_uid` = that uid and `schema_version`; set the row to `invited`
+   `lb-u-<random>` in group `default` with the Turso CLI on the Mac; apply the user schema; write `owner_uid` = that uid and `schema_version`; set the row to `invited`
    with `spotify_id`, `db_name`, `db_url` and `invited_at`. A crash leaves a `provisioning` row the
    script resumes or removes.
 3. Print the join link. Rem also adds the person to the app's User Management list in Spotify's
@@ -1143,9 +1147,8 @@ agreement (disclaimers, Spotify as third-party beneficiary; 01f §1.5).
 
 Three ways in: the user's "Disconnect and delete" (the mechanism the Developer Policy requires, 01e
 §5.8); an `invalid_grant` that arrives within six months of the grant, which 01e §5.7 recommends
-treating as a disconnect after a five-day grace in which reconnecting cancels it (Rem's call, §16);
-and an admin removal. All three run one idempotent job; each step can be re-run and the job resumes
-from the user's status:
+treating as a disconnect (Rem's call, §16); and an admin removal. All three run one idempotent job;
+each step can be re-run and the job resumes from the user's status:
 
 1. `status = 'deleting'`, `session_epoch + 1`, `deletion_requested_at = now`: every session of the
    user fails on its next request. The `sync_state` row is deleted, so the cron stops.
@@ -1157,8 +1160,12 @@ from the user's status:
    uid 1 and any admin outright.
 6. The nightly backup job removes the user's backup files, on the Zenbook and on OneDrive, when it
    sees status `deleting` or `deleted`.
-7. The row becomes a tombstone: `account_id` and `spotify_id` cleared, `status = 'deleted'`,
-   `deleted_at` set. The uid is never reused (§3.1).
+7. Five days later, when Turso's recovery window has closed, the daily route turns the row into a
+   tombstone: `account_id` and `spotify_id` cleared, `status = 'deleted'`, `deleted_at` set. The
+   uid is never reused (§3.1). Until then a returning sign-in finds the row in `deleting` and is
+   told the account is being deleted; Rem can undo it inside the window with a restore script on
+   the Mac (Turso's restore of the database, the row back to `active`; the person then signs in
+   again for a fresh token).
 
 The response to the request that starts it sends `Clear-Site-Data`, and the page tells the person to
 remove Lazy Boy at spotify.com/account/apps, since the app cannot revoke a grant itself (01e §5.8).
@@ -1167,11 +1174,18 @@ remove Lazy Boy at spotify.com/account/apps, since the app cannot revoke a grant
 the database is what meets it on a paid plan: a destroyed database stays recoverable for "up to five
 days after deletion" and point-in-time recovery cannot bring it back, whereas rows deleted inside a
 living database remain restorable for 10 days on Developer (§2.1). So step 5 runs the same day,
-inside the request's `after()` or the next cron tick, and the five days at Turso then run alongside
-Spotify's five. On the free plan there is no deleted-database recovery and point-in-time recovery
-is 24 hours, so either way finishes within a day. Turning off Turso's "Allow restore" toggle would
-end the recoverable window at once, at the price of Rem's own safety net against a mistaken delete;
-I would leave it on.
+inside the request's `after()` or the next cron tick, and Turso's five days then run alongside
+Spotify's five.
+
+That same window settles the ambiguous case. 01e §5.7 worries that purging on an `invalid_grant`
+is irreversible if the person only revoked by mistake, and that waiting is outside the Terms. On a
+paid plan the job can destroy at once for every trigger: if the person signs in again within five
+days, Rem restores their database from Turso's recovery and nothing is lost; after five days it is
+gone for good, inside the Terms. On the free plan there is no recovery of deleted databases and
+point-in-time recovery holds 24 hours, so an immediate destroy is final; there the ambiguous case
+would need a grace of up to four days before step 5, and the explicit disconnect none. Turning off
+Turso's "Allow restore" toggle would end the recoverable window at once, at the price of this grace
+and of Rem's own safety net against a mistaken delete; I would leave it on.
 
 **Where the platform token lives.** Step 5 needs `TURSO_PLATFORM_TOKEN`, and 01e §6 recommends
 taking it out of the runtime once a second user exists. I recommend keeping it, Production only, for
