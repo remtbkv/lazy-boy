@@ -918,6 +918,82 @@ on Developer). Rem's data and backups are unchanged.
 
 ## 11. Rollout in reversible phases
 
+Each phase leaves a working app if the next one never ships, and each has a rollback that costs
+minutes. Rem's data is written by the app's ordinary SQL in every phase and by nothing else.
+
+| phase | ships | starts when | rollback | rollback costs |
+|---|---|---|---|---|
+| 0 | M0a-M0c | now; before Oct 15, 8 PM keeps it out of the cutover window (01b §7) | re-set the variables, revert the guard | nothing |
+| 1, owner only | M1-M12 | STORE_MIGRATION's cutover and aftercare are done | promote the previous deployment (§9.4) | minutes, at most one sign-in |
+| 2, one friend | M13-M21, M23 | Phase 1 soaked; the gates below | the friend's `status = 'disabled'`, or `SIGNUPS=owner` | an env change and a redeploy; Rem's data untouched |
+| 3, friends 2-4 | one person at a time; M22 before the third user; M24 and M25 if their triggers fire | each addition's gate below | as Phase 2, per friend | the same |
+| search track | S1-S3; phase E as STORE_MIGRATION plans it | independent; S3 (or O3) before mid-December | revert the commit | a re-download of the payloads |
+
+### 11.1 Phase 0: close today's exposures
+
+- **M0a**: a new `AUTH_SECRET` (`openssl rand -base64 32`, type Secret) in Production and
+  Preview, then a redeploy. Every session ends, including the second account's, which otherwise
+  keeps acting as the owner until about Nov 13 (01e F1). Nothing in `src/` reads the secret, so
+  the token row, the cron and the recorder are untouched (01b E1).
+- **M0b**: `SPOTIFY_OWNER_ID` in Production and `.env.local`. The guard then stops depending on
+  `meta.me_id`, which a library sync rewrites from whatever token is stored (01b E2;
+  `tests/owner-signin.test.ts:33-38` pins the precedence).
+- **M0c**: `logout` checks the session before it deletes the token row (`actions.ts:63-69`;
+  01b E3).
+- Done when an old cookie is refused after the redeploy and Rem's fresh sign-in works.
+
+### 11.2 Phase 1: the multi-user structure, with one user
+
+- One branch for M1-M12. The mechanical part of M2 and M3 suits a Sonnet lane at medium effort
+  with `tsc --noEmit` as the oracle; the token core (M5), the gate (M4) and the cron (M8) carry
+  the risk and get an adversarial review of the diff before deploy.
+- Gate: STORE_MIGRATION R1-R5 met (lane 1903) and a backup restore tested (lane 1904); Phase 0
+  done; `npm test` green including §5.4's suite; `npm run build` green; Preview has no store
+  variables (§8.3 edit 1).
+- Deploy and migrate as §9.2. Then a three-day soak, done when: §9.2 step 6 holds every day; Rem's
+  recently-played calls a day are about half of his Oct 1-14 range (139-319, 01c §2.7), which
+  checks the track-change rule on real traffic; every tick answers 200; no `getClient` refusal
+  appears in the logs; Turso's rows read a day are within ~5% of the pre-Phase-1 days.
+- If Phase 2 never ships, Phase 1 is still worth having: sessions bound to an identity, the token
+  encrypted, and capture that one Spotify error cannot stop.
+
+### 11.3 Phase 2: the first friend
+
+Gates, all before the invite:
+
+- Phase 1 soaked, and lanes 1910-1911's scoped orphan pass shipped (§8.3).
+- **Vercel Active CPU** read off the dashboard (team → Usage → Active CPU, 30 days). No API open
+  to Hobby reports it, and overrunning a Hobby allowance stops the feature for up to 30 days for
+  every project in the team (01f §2.2-2.3). Stay on Hobby only if the team uses under ~2 of its 4
+  CPU-hours a month; otherwise move to Pro first.
+- **Spotify's User Management list** read off the dashboard: how many accounts it holds, and
+  whether more than five survived Mar 9 (01f §1.2). It decides whether Rem counts toward five.
+- The Turso plan decided (§15).
+- **The second pinger proven**: stop the Zenbook timer for ten minutes and watch ticks from
+  cron-job.org land plays; restart it and watch the lease turn one of the two into no-ops.
+- **Deletion proven** on a throwaway invite: create the row and its database, run the job, and
+  see the database gone from `turso db list` and the rows gone.
+- Rem's decisions on the privacy page, retention, log-out and `invalid_grant` (§15).
+
+Then: the friend goes on the dashboard allowlist, `invite.mjs` runs, they sign in and agree. A
+week with one friend, done when: each user's scarce-bucket calls (now in `api_log` by user) sit
+near §6.4's table; Turso's per-database usage matches §12.4's profiles; no `QUOTA_EXCEEDED`; the
+friend's capture health is green and they confirm their Home shows only their own plays.
+
+### 11.4 Phase 3: friends two to four
+
+One person at a time, a few days apart. Each addition needs: the last week's combined
+recently-played spend plus the newcomer's expected share under the ~450 line, or M22 shipped (it
+ships before the third user in any case); the read projection under 50% of the plan, or M24's
+levers or a paid plan; Active CPU still inside the plan.
+
+The quota-sharing question is answered here or not at all. With `user_id` and the 429 `reason` in
+`api_log` (01c §6 item 7), a ban tells: every user refused at once means one pool, one user
+refused means per-user quotas. With the brake holding spend near ~600 at most, a ban may never
+come, and the question can stay open: the design is safe under both readings. Driving a test
+account into a ban to find out would risk Rem's own capture for up to ~12 hours (01c §7
+decision 3); asking on Spotify's developer forum costs nothing.
+
 ## 12. Each target, step by step, with its budget
 
 ## 13. Costs
