@@ -201,7 +201,101 @@ reads. None of it depends on the user opening the app.
 
 ## 5. Derived data and caches built on the store
 
+**Stored derived values.** Two per row: `plays.ctx_orphan` (`db.ts:700-751`) and `plays.skipped`
+(`db.ts:762-822`). Three whole-history aggregates in `meta`: `alltime_stats`, `unique_song_count`,
+`home_payload`. Three version counters in `meta`: `write_seq` (bumped by any write a cached read serves,
+`db.ts:312-360`), `library_seq` (library membership only, `db.ts:362-383`), and `slow_seq_pub`
+(`write_seq` republished at most every 10 min, `db.ts:1536-1589`). `scripts/verify-derived.mjs`
+recomputes the aggregates and the orphan flags from source and diffs them; it reads the whole store.
+
+**Next data-cache entries.** Seven `unstable_cache` wrappers in `db.ts`. Vercel's Data Cache is shared by
+every instance and outlives deploys (GOTCHAS "The Data Cache OUTLIVES THE DEPLOY"), so an entry written
+for one request is served to any later request whose key matches.
+
+| entry | key parts | arguments (the rest of the key) | TTL | at |
+|---|---|---|---|---|
+| all-time list | `all-time-plays` | limit, slow seq | 1 h | `db.ts:983-994` |
+| day strip | `daily-stats` | offset, days, write seq | 1 h | `db.ts:1082-1090` |
+| one day, frozen | `plays-by-day-frozen` | day, offset, write seq | 1 day | `db.ts:1176-1180` |
+| one day, live | `plays-by-day-live` | day, offset, write seq | 1 h | `db.ts:1181-1191` |
+| library payload | `library-index`, `v1` | library seq, shape | 1 day | `db.ts:1600-1613` |
+| history payload | `history-index`, `v2` | slow seq, shape | 1 day | `db.ts:1615-1623` |
+| playlist grid | `stored-playlists` | write seq | 1 h | `db.ts:1906-1914` |
+
+None of the seven keys carries a user. Two ways that leaks once there is more than one user: with a
+global counter, every user hits the same entries outright; with per-user counters, two users whose
+counters happen to hold the same value (both start at 1) share an entry, so user B is served user A's
+day, A's playlists, A's whole history payload. The user id has to be an explicit argument of every one
+of these calls, independent of the counter. The test harness cannot catch a missing user key today:
+`tests/stubs/next-cache.ts` makes `unstable_cache` a passthrough, so every "cached" read executes. An
+isolation suite needs a stub that keys on the key parts plus the serialized arguments the way Next does,
+so a forgotten user argument shows up as a cross-user hit (§8.7).
+
+**Browser-facing versions.** The search routes build their ETags from these counters:
+`"lib-v1-<library_seq>-<UTC day>"` and `"hist-v2-<slow seq>-<UTC day>"` (`api/search/library/route.ts:39`,
+`api/search/history/route.ts:26`). No user component, so two accounts used in one browser can collide the
+same way the cache keys do and get a 304 for the other account's body. A user component in the tag fixes
+it; a keyed hash rather than the raw Spotify id, since ETags are visible to anything on the page. STORE
+MIGRATION's phase E IndexedDB copy already keys on the signed-in user's id (STORE_MIGRATION §10).
+
+**Request-scoped and module-scoped state in `db.ts`.** `seqBox` (`db.ts:402`) and `orderedRealPlays`
+(`db.ts:854`) are React `cache()` boxes with no arguments, so they assume one user per request; that holds
+for page renders, and the cron path has no React dispatcher (each call reads directly, `db.ts:396-401`).
+Keying them by user makes them correct by construction rather than by call site. Two module-scope
+values assume one user per instance: `uniqueRecomputeKickedAt` (`db.ts:1960`; one user's kick would
+suppress every other user's recompute for 60 s) and `storeSizeMemo` (`db.ts:2887`; the ledger model's
+plays count).
+
+**Invalidation across users.** The marker rule (`db.ts:326-344`) says a write bumps when it changes a
+table a cached read serves. Per-user markers keep that rule for per-user tables. The shared catalog is the
+exception: `trackUpsertStmt` (`db.ts:444-461`) rewrites a `tracks` row whenever a sync sees different
+fields, and that row feeds every user's cached reads, but only the syncing user's marker moves. Another
+user then sees the old name or art until their own marker moves or the entry's TTL lapses (at most a day).
+`library_seq` already accepts the same one-day bound for in-place re-tags (`db.ts:1520-1523`), so this
+widens an accepted staleness rather than adding a new kind.
+
 ## 6. Volumes: row counts, sizes and growth per day (the owner's data)
+
+Row counts [measured, three snapshots]; per-day rates are (S-Oct14 − S-Sep14) / 30 days.
+
+| table | S-Aug16 | S-Sep14 | S-Oct14 | per day, last 30 days | bytes per row incl. indexes |
+|---|---|---|---|---|---|
+| `plays` | 15,618 | 18,537 | 22,040 | +116.8 | 275 |
+| `tracks` | 15,068 | 15,591 | 15,859 | +8.9 (Aug 16 → Sep 14: +18.0) | 265 |
+| `contexts` | 79 | 97 | 114 | +0.6 | 250 |
+| `meta` | 233 | 243 | 243 | 0 (two rows per owned playlist plus 23) | 270 |
+| `playlists` | 110 | 115 | 114 | ~0 | 320 |
+| `playlist_tracks` | 7,089 | 7,386 | 7,400 | moves with playlist edits | 196 |
+| `saved_tracks` | 33 | 45 | 48 | +0.1 | 170 |
+| `api_log` | 13,528 | 44,524 | 104,942 | +2,014 | 118 |
+| `usage_ledger` | 87 | 278 | 496 | +7.3 | 99 |
+| `client_metrics` | 1,100 | 1,625 | 1,716 | +3.0 | 153 |
+| file (used) | 10.96 MB | 16.29 MB | 24.56 MB | +276 KB | |
+
+**Listening.** Real plays (backfill excluded) per UTC day over the 30 full days Sep 14 – Oct 13: mean
+114.6, median 113, p90 150, min 59, max 172; over 61 days the busiest day was 204 [measured, S-Oct14]. By
+month: June 3,594, July 2,969, August 3,746, September 2,788. The history holds 4,279 distinct track ids
+from real plays, 11,390 distinct (artist, title) identities including backfill, and the library 6,418
+identities across 110 owned playlists (7,404 members) and 48 Liked Songs [measured, S-Oct14].
+
+**Bytes.** The owner's core data grows ~35 KB a day (116.8 plays × 275 B + 8.9 tracks × 265 B) [estimated
+from the measured rows and per-row bytes], about 12.6 MB a year on top of today's 11.87 MB. Telemetry grows
+about seven times faster: `api_log` adds ~2,000 rows (~238 KB) a day and is 86% of the file's 30-day growth. Its
+30-day retention should cap it near 60,000 rows (~7 MB), but S-Oct14 holds rows back to Aug 10: the
+prune runs only from the dead daily block or on every 256th write of one instance (`db.ts:2628`), which a
+short-lived serverless instance rarely reaches.
+
+**Writes.** The meter counted 11,136 rows written on Oct 13 (UTC), 8,072 of them `INSERT INTO api_log`
+(STORE_MIGRATION §3), so the core tables take ~3,100 rows written a day for one active user.
+
+**Reads.** The meter logged 1,430,580 rows read in the 21 hours from 9 PM Oct 12, and the history payload's
+plays scan (~50,500 rows per run, 23 runs) was 1.16M of a day's 1.94M (STORE_MIGRATION §3). The unscoped
+orphan pass reads 5,102,733 rows at 21,950 plays and ran about three times a week (same section).
+
+**Where the owner's numbers stop being typical.** 7,529 of the 22,040 plays are backfill (one row per
+song of the pre-tracking library, `scripts/backfill-scan.mjs`), and they ride in the history payload, the
+all-time list and every full `plays` scan. A new user starts with zero history and no backfill, so for
+their first months every per-user full scan is a fraction of the owner's.
 
 ## 7. Census: every single-user assumption in the data layer
 
