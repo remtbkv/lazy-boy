@@ -693,9 +693,11 @@ What the model needs from Turso, checked against Turso's documentation on Oct 14
 | tests | a temp file | temp files | §5.4 |
 
 A database token created for `lazyboy` alone (STORE_MIGRATION §8 step 8) reaches only Rem's data,
-which is what dev already does today against the Zenbook. Rotating the group token
-(`turso group tokens invalidate`) would also kill that database token, so the two should be
-rotated together.
+which is what dev already does today against the Zenbook. Revocation is group-wide, though:
+invalidating one database's tokens means "All tokens in the group that provided database belongs
+will also be invalidated" (https://docs.turso.tech/cli/db/tokens/invalidate). A leaked dev token
+is therefore rotated together with production's group token and the backups' read-only one: one
+redeploy and two file edits.
 
 ### 8.3 STORE_MIGRATION: what this design needs from it, and four edits before it runs
 
@@ -739,6 +741,80 @@ Rem's call:
    headroom arithmetic stands; which lever comes next changes (M24, §12.4).
 
 ## 9. Migrating Rem's data with nothing lost
+
+### 9.1 What moves
+
+Only the Spotify token. Rem's plays, tracks, playlists, Liked Songs, contexts and every derived
+value (the 7,529 catalog rows, 1,162 orphan flags and 481 skip verdicts on the Oct 14 backup, 01a
+§2) stay in `lazyboy`, which no step below writes with anything but the app's ordinary SQL. There
+is no DDL on Rem's database, no table rebuild and no copy. That is the main reason this design
+takes the database-per-user model (§2.2).
+
+### 9.2 The steps (Phase 1)
+
+Preconditions: STORE_MIGRATION's cutover is done with R1-R5 met (lane 1903) and its backups have
+passed a restore test (lane 1904); Phase 0 is done.
+
+1. **Record the before-state.** From that morning's verified backup of `lazyboy`: the seven core
+   tables' counts and `max(played_at)`. Turso's own 24-hour point-in-time history is the second
+   restore point (§8.1).
+2. **Create** `lazyboy-app` (`turso db create lazyboy-app --group default`), a full-access group
+   token for Production and a read-only one for the backups (§8.1). Tokens go straight into
+   mode-600 files, as STORE_MIGRATION §8 step 8 does.
+3. **Run `scripts/mu-setup.mjs`** (M12), idempotent: create the app tables; insert Rem's row (id 1,
+   `spotify_id = SPOTIFY_OWNER_ID`, `status = 'active'`, `admin = 1`, `account_id` empty); read
+   `meta.spotify_tokens` from `lazyboy` and write it, encrypted, to `user_tokens` for uid 1. It
+   leaves `spotify_tokens` and `spotify_tokens_dev` in `lazyboy` exactly as they are. `granted_at`
+   is set to now, since the true consent time is not stored; Rem's sign-in in step 5 resets it.
+4. **Set Production's environment** (`APP_DATABASE_URL`, `TOKEN_KEYS`, `TURSO_AUTH_TOKEN` → the
+   group token, `USER_DB_URL_TEMPLATE`, `SIGNUPS=owner`) and deploy Phase 1's build.
+5. **Rem signs in once**, because every older cookie lacks a uid (§4.1). The sign-in binds his
+   `account_id` to row 1, which only happens when `profile.id` equals the row's `spotify_id`. If
+   Spotify's `/v1/me` does not return `account_id` to this app (documented, never observed: 01e
+   §5.5), the sign-in is refused; that is a stop: roll back (§9.4) and take decision 9 in §15.
+6. **Verify**: the seven counts at or above step 1's and `max(played_at)` moving; `scripts/
+   verify-derived.mjs` green against `lazyboy`; uid 1's `last_sync` moving with each tick; every
+   play the backstop recorder captured since the deploy present in `lazyboy` (STORE_MIGRATION §8
+   step 13's check, reused).
+7. **Soak three days, then close the rollback window**: delete `spotify_tokens`,
+   `spotify_tokens_dev`, `lock:spotify_refresh` and `spotify_cooldown_until` from `lazyboy.meta`.
+   Nothing in the new code reads them. The recorder keeps its own copy of its grant in
+   `~/lazyboy-recorder/tokens.json` (01e §2.1) and does not read the store.
+
+### 9.3 Why nothing is lost in the gap
+
+Between the deploy and Rem's sign-in the cron runs on the token copied in step 3. If that copy
+fails (Spotify would have to rotate the refresh token between steps 3 and 4, which it has not
+done for this app in two weeks of hourly refreshes, 01e §2.1), uid 1 shows `needs_reconnect`, the
+Zenbook pinger gets its 503 (§6.2), and the recorder keeps capturing on its own grant. Plays
+inside Spotify's last 50 come back at the next tick after the sign-in; anything older comes back
+from the recorder through `scripts/backfill-from-backstop.mjs`, the path STORE_MIGRATION §8
+step 13 already uses.
+
+### 9.4 Rollback
+
+Promote the previous production deployment in Vercel and restore the previous environment
+values. The old code reads `lazyboy.meta.spotify_tokens`, which step 3 left untouched and whose
+refresh token still works unless Spotify rotated it; if it did, the old code's refresh fails with
+`invalid_grant`, `clearTokensIfStale` deletes the row, and Rem signs in once. The old code ignores
+the app database, the `user_id` telemetry columns and the new `meta` keys. Its cache keys cannot
+collide with the new ones (§5.2), and it keys off the same `write_seq` row the new code kept
+bumping, so it cannot be served an entry from before the deploy. Plays recorded meanwhile are in
+the same tables and stay. Cost: a few minutes and at most one sign-in.
+
+### 9.5 The second account's plays from the incident (01b E6)
+
+Commit `044c9b6` records that "the cron recorded its plays into the owner's history" while the
+second account's token sat in the row. Those plays are in `lazyboy` under either data model, and
+under this one they would become uid 1's history for good. They can be told apart: the recorder
+captures with Rem's own grant every 15 minutes (01c §2.6), so a play stored in the incident window
+that is absent from `~/lazyboy-recorder/backstop.db` is not Rem's, provided the recorder ran
+throughout the window (its log says). The cleanup: snapshot; list the candidates for Rem to
+confirm (they will be songs he does not recognize); delete; re-open the skip verdicts on the edges
+of each deleted run, the same rule `scripts/import-tail.mjs` applies to inserted runs; recompute
+the all-time totals and the Home payload; bump `write_seq`. It deletes rows, so it is Rem's call
+(§15); it is independent of multi-user and can run before or after Phase 1. This lane does not
+know the window's bounds: the sign-in times are not in the repo.
 
 ## 10. Sign-up gating, privacy, and account deletion
 
