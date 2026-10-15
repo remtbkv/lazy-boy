@@ -43,7 +43,7 @@ in until a canary account has run beside you for a week.
 | no path shows or caches another user's data (I) | by design: per class of mistake a layer that prevents it and a test or runtime check that detects it, a canary week, an e-mailed alarm |
 | search ready ≤ 300 ms on a repeat visit, ≤ 2 s on a first at 10 Mbit/s, a keystroke ≤ 50 ms, on a phone (S1-S3) | yes for you (~80 ms, ~1.1-1.4 s, ~25-35 ms) and a typical friend; no for a heavy three-year history (~2.2-2.6 s), a five-year import (~3 s) and slow 4G |
 | screens current; closed-app plays stored p50 ~1 min, p95 ~5 min; none lost while a pinger runs (F1-F3) | yes; on a heavy shared day a user past their share waits up to 15 minutes, everyone up to 30 once the day's budget is spent |
-| reads ≤ 1.5M rows a heavy day with nothing per visit growing with history; writes ≤ ~5,000 rows a day (D1-D3) | after P4: you go from ~4.5-19M a day today to ~0.36M; writes ~4,500-5,000 |
+| reads ≤ 1.5M rows a heavy day with nothing per visit growing with history; writes ≤ ~5,000 rows a day (D1-D3) | after P4: you go from ~4.5-19M a day today to ~0.4M; writes ~4,500-5,000 |
 | no request on the Zenbook; capture survives its outages; one user's failure stays theirs (A1-A3) | after STORE_MIGRATION, the interim pinger, and Phase 3 respectively |
 | $0 until the first friend, ≤ $26 a month at five | yes |
 
@@ -199,8 +199,8 @@ safety with less machinery.
 |---|---|---|---|---|---|
 | user key | INTEGER `AUTOINCREMENT`; an HMAC of it (`hk`) for the browser | random 12-char base32 text | INTEGER `AUTOINCREMENT`, raw in the browser | **B's random uid**, everywhere, the browser included | never reused, even if the app database is restored from a backup: a restored `sqlite_sequence` can re-issue an integer, and a stale cache entry (A's owner stamp would match) or C's derived database name would then point a newcomer at a departed user's data. It holds nothing personal, so it can sit raw in an ETag or URL without an HMAC secret |
 | user → database | stored `db_url`, random names | stored `db_name`, also on the cookie | derived from the uid; unmapped throws | stored `db_name` (`lazyboy` for Rem, `lb-u-<uid>` for friends), one URL template, an unknown uid throws, never a fallback URL | one source of truth; C's fail-closed rule; no copy on the cookie |
-| owner stamp | `meta.owner_uid` checked on first open | – | – | **A's** | a wrong mapping (a restore, a provisioning slip) becomes a refused open at one statement per process per database |
-| schema changes | `init()` replaced by declared versions and an explicit migrate script | versions, a template database, per-user pause | `init()` per database, as today | a versioned open: one statement reads `owner_uid` and `schema_version`; pending additive steps apply as `init()` does today; a pending table rebuild refuses that user until the migrate script runs, with that user paused | keeps today's workflow for the additive changes that are nearly all of them (C), one round trip per cold open instead of eight (A), and the unsafe case becomes a refusal (A, B) |
+| owner stamp | `meta.owner_uid` checked on first open | – | – | **A's**, cached per `(uid, db_name)` | a wrong mapping (a restore, a provisioning slip) becomes a refused open at one statement per process per pair, and a second uid pointed at a checked database is checked again (security R15) |
+| schema changes | `init()` replaced by declared versions and an explicit migrate script | versions, a template database, per-user pause | `init()` per database, as today | a versioned open: one statement reads the owner, the version, a reader floor (`min_reader`) and the store epoch; production alone applies pending additive steps as `init()` does today; a database ahead of the code opens while `min_reader` allows; a pending rebuild refuses that user until the migrate script runs, with that user paused | keeps today's workflow for the additive changes that are nearly all of them (C), one round trip per cold open instead of eight (A), and the unsafe case becomes a refusal (A, B) |
 | a new user's database | full schema at invite | seeded from `lb-template` | `init()` on first connection | **A's**: full schema at invite | no template database to keep migrated |
 | `me_id` | stays in the user database | dropped for `users.spotify_id` | stays | stays (A, C) | the owned-playlist SQL is unchanged (`db.ts:2297, 2310`); only that user's own sync can write it now |
 | time zone | `user_tz` in the user database | `users.tz_zone` | `user_tz`, with the DST check against the user's own zone | **C's** | C §3.3 found today's heuristic buckets a Chicago user in New York's days |
@@ -213,22 +213,22 @@ safety with less machinery.
 | identity read | users ⋈ tokens | + `sync_state` and the cooldown in the same row | users ⋈ tokens | **B's wider row** | Home's cooldown and capture-health reads ride the identity read: two sequential reads per render, where today's one wave makes five (`home/page.tsx:78-83`, 01b E5) |
 | Home's first wave | gate, then reads (+1 round trip) | user database opened in parallel from the cookie | gate, then reads | gate first (A, C); B's parallel open held in reserve if R1 misses badly | a parallel open is a second way to mint a user handle; ~15 ms is under 1% of S2 |
 | reaching user data | branded `UserId` minted by three functions, a `forUser(uid)` handle | branded `UserDb` handle | branded `Uid` first parameter, `getClient(uid)` | **A's** `forUser(uid)` over a branded uid | no module-level per-user function survives, and a uid from request input does not compile |
-| cache keys | one `userCache` helper: uid in key parts and arguments, an owner stamp checked on return, a tag | uid argument, a tag | uid argument, no tag | **A's helper with the stamp, no tag** | the stamp turns a key mistake into a slow request in production; a tag adds nothing a ≤ 24 h TTL and a never-reused uid do not (C §5.2) |
+| cache keys | one `userCache` helper: uid in key parts and arguments, an owner stamp checked on return, a tag | uid argument, a tag | uid argument, no tag | **A's helper with the stamp, no tag**, the store epoch in every key | the stamp turns a key mistake into a slow request in production, and the epoch keeps a restore from re-issuing a cached version (migration 1); a tag adds nothing a ≤ 24 h TTL and a never-reused uid do not (C §5.2) |
 | tokens carry their owner | asserted on every Spotify call | – | – | **A's** | 01e A2, the shared in-flight refresh, is the one silent token leak in the census; the assertion catches its whole class |
 | runtime `isolation` events | yes | – | – | **A's** | the first sign of a bug the tests missed |
-| tests | T1-T12, static checks S1-S6, file hashes, a faithful cache stub, Spotify scripted per bearer | ten tests, each proven against a planted bug | similar; structural test via the TS compiler API | **A's suite, B's planted-bug rule** | the most complete, and a test that never failed proves nothing |
+| tests | T1-T12, static checks S1-S6, file hashes, a faithful cache stub, Spotify scripted per bearer | ten tests, each proven against a planted bug | similar; structural test via the TS compiler API | **A's suite, B's planted-bug rule**, the planted bugs kept as a permanent self-test | the most complete, and a test that never failed proves nothing (completeness M2) |
 
 **Sync**
 
 | point | A | B | C | this plan | why |
 |---|---|---|---|---|---|
 | tick | per-user claims (`UPDATE … RETURNING`), one tick a minute | global tick lock plus a per-user harvest lock, one a minute | global 90 s lease, ~2 minutes | **A's per-user claims**, with B's two pingers on alternate minutes | one lease serves the cron and the open tab; an overrunning step holds only its own user |
-| owner alarm | non-200 when the owner's capture stops | only the Zenbook's caller, by its own secret | `?alarm=owner`, checked before the lease | the Zenbook's own secret (B), the verdict read from the owner's sync state (C's reason) | with two pingers, the other one may have done the owner's work this minute |
+| owner alarm | non-200 when the owner's capture stops | only the Zenbook's caller, by its own secret | `?alarm=owner`, checked before the lease | the Zenbook's own secret (B), the verdict read from the owner's sync state (C's reason), and an hourly health check that e-mails Rem (§7.10) | with two pingers, the other one may have done the owner's work this minute; and a failed unit nobody looks at is no alarm (completeness H1) |
 | probe | `/me/player` alone | the same, now-playing too | `/me/player` alone in the cron | cron only (A, C) | now-playing's two-step read is the UI's freshness path (GOTCHAS "Player simulation") |
-| harvest | on a track change; completeness at 40 changes | on a track change; 25 | on a track change, plus one retry after a lagging change | track change, **C's retry, B's 25** | the retry covers a Spotify lag nobody has measured; 25 leaves half the 50-play window spare |
-| quota brake | fair share: at ¾ of 450, users above their share go to 15 minutes; at 450, everyone to 30 | a daily projection picks one interval for all | at 450, everyone to 30 minutes, before the third user | **A's fair share**, C's counter (awaited before the call) and C's timing | light listeners never slow down; simple enough for known-answer tests |
+| harvest | on a track change; completeness at 40 changes | on a track change; 25 | on a track change, plus one retry after a lagging change | track change, **B's 25**, one retry ~5 minutes after a session ends | Spotify's lag is now measured (13% of plays listed late, scale 5); mid-session the next change's harvest catches it, so the retry goes to the session tail; 25 leaves half the 50-play window spare |
+| quota brake | fair share: at ¾ of 450, users above their share go to 15 minutes; at 450, everyone to 30 | a daily projection picks one interval for all | at 450, everyone to 30 minutes, before the third user | **A's fair share with a per-user cap at the share**, C's counter (awaited before the call), on from the first friend | light listeners never slow down, a heavy one cannot spend anyone else's share, and the first week the bucket is shared is covered (scale 1) |
 | open-app harvest | the same step under the same claim | on load or focus, if a track change was seen | only when no tick ran in 5 minutes, or on load after 15 minutes | **all three**: A's step under the claim, B's load trigger, C's fallback | each covers a different case: overlap, catch-up, dead pingers |
-| now-playing poll | 15 s mid-track | 15 s | only if logs show crowding | 15 s, in phase 3 | five visible tabs at 6 s pass the 18 calls per 30 s seen safe, and a rate-limit 429 pauses everyone |
+| now-playing poll | 15 s mid-track | 15 s | only if logs show crowding | 15 s from the first friend, with a per-user server memo | the daily player volume is the reason, not the 30-second window, which has taken 56 calls without a 429 (scale 6, 7); Rem's app does not change before a friend needs it (completeness L6) |
 
 **Store cost and search**
 
@@ -245,13 +245,13 @@ safety with less machinery.
 
 | point | A | B | C | this plan | why |
 |---|---|---|---|---|---|
-| deletion | destroy the database the same day; tombstone after 5 days | drop the tables at once; destroy within 5 days, off the runtime | destroy at the request; refuses uid 1 | destroy at day 0 (A, C); delete the users row at the end | a destroyed database leaves point-in-time recovery; dropped tables stay in it 1-10 days (A §2.1, C §8.1) |
-| backups | one file per database, removed with the account | non-owner copies kept 5 days | friends' kept 4 days, taken only while active | **C's** | deletion reaches the backups with no bookkeeping that could miss a file |
-| platform token | in the runtime, two uses | Mac only | in the runtime | runtime, Production only (A, C) | a same-day destroy cannot wait for a laptop |
-| sign-up | `/join`: terms accepted before OAuth; compare-and-set claim | separate invites table | `invited` users row; `SIGNUPS` flag; consent after sign-in | **A's `/join` and claim, C's flag** | terms before anything is stored; a one-variable way back |
-| dev | local files only | copies of production | uid of Rem → `lazyboy` on its own token; friends local | **C's** | Rem keeps his workflow; dev can never reach a friend |
+| deletion | destroy the database the same day; tombstone after 5 days | drop the tables at once; destroy within 5 days, off the runtime | destroy at the request; refuses uid 1 | destroy at the person's request (A, C); after a confirmed revocation, on day 4 unless they return; a `deleted` row kept five days, then removed | a destroyed database leaves point-in-time recovery, where dropped tables stay 1-10 days (A §2.1, C §8.1); a day-0 destroy on an ambiguous signal turns a false positive into a lost history (security R4, completeness H2) |
+| backups | one file per database, removed with the account | non-owner copies kept 5 days | friends' kept 4 days, taken only while active | **C's**, for every friend not pending deletion, with the prune run first | deletion reaches the backups by retention, and a prune that runs first cannot be skipped by a failed dump (migration 11, completeness M5) |
+| platform token | in the runtime, two uses | Mac only | in the runtime | runtime, Production only (A, C), and the Mac's Keychain for the scripts | a deletion cannot wait for a laptop; `.env.local` holds none (security R8) |
+| sign-up | `/join`: terms accepted before OAuth; compare-and-set claim | separate invites table | `invited` users row; `SIGNUPS` flag; consent after sign-in | **A's `/join` and claim, C's flag**, a canary week first | terms before anything is stored; a one-variable way back; the first two-user run is a test account's (completeness H4) |
+| dev | local files only | copies of production | uid of Rem → `lazyboy` on its own token; friends local | **C's**, with no schema step applied to production from dev | Rem keeps his workflow; dev cannot reach a friend or migrate Rem's database ahead of review (completeness H3) |
 | Rem's migration | the token and three `meta` keys; plaintext kept a week; `account_id` read first | adds columns and payloads in fenced windows | the token only; `account_id` bound at first sign-in | **A's** | learns whether `account_id` exists before deploying code that needs it |
-| phases | 0-5, phases 1-3 single-user | performance first, then multi-user | one large owner-only phase | **A's split, B's performance track first, C's gates and soak checks** | small reversible deploys; the December deadline protected |
+| phases | 0-5, phases 1-3 single-user | performance first, then multi-user | one large owner-only phase | **A's split, B's performance track first, C's gates and soak checks**, a canary week before the first friend | small reversible deploys with one rollback recipe (§13.5); the December deadline protected |
 
 ## 3. The plan on one page
 
@@ -2600,7 +2600,7 @@ brake M, each friend after that S.
   narrows the exposure (each user sees only their own stats; retention; deletion inside five days);
   accepting the rest is Rem's call. This is an engineer's reading, not legal advice.
 
-## 17. What I ran
+## 17. What the first lane ran (Oct 14)
 
 Nothing ran against the production store, the Zenbook, Turso, Vercel or Spotify, and nothing was
 written except this file (and a one-off formatting script in this lane's scratch, deleted at the end).
