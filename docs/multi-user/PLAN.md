@@ -78,28 +78,33 @@ slightly different ways (A §0.1, B §1, C §1); this plan takes the strictest v
 evidence supports and states how it is measured. §14 walks every target step by step with its budget.
 
 "Rem-like" means Rem's measured profile: ~115 real plays a day over 30 days (01a §6), 129 on Oct 14
-(01c §2). A **heavy day** is Oct 14's activity as the store meter measured it (716 ticks, 129 landed
-plays, 44 all-time recomputes, ~30 rescans, 01c §2.1-2.3), with three unscoped orphan passes (as that
-day had) and eight Home visits (an app-heavy user, 01d §4.2's assumption). "A phone" is Chrome with
-the CPU throttled 4×, the stand-in 01d §2.3 measured with; no real phone has been measured.
+(01c §2), 204 on his busiest day in 61 (01a §6). A **heavy day** is Oct 14's activity as the store
+meter measured it (716 ticks, 129 landed plays, 44 all-time recomputes, ~30 rescans, 01c §2.1-2.3),
+with three unscoped orphan passes (as that day had) and eight Home visits (an app-heavy user, 01d
+§4.2's assumption). Oct 14 was the incident day: the second account's library replaced Rem's and was
+replaced back, and each swap moved the playlist id set that triggers an unscoped pass, so at least two
+of the three passes were most likely the incident's; the ordinary rate is about three a week
+(migration 15, STORE_MIGRATION §3). That inflates only the "today" column of §8.6; from P1 on an
+orphan pass is cheap. "A phone" is Chrome with the CPU throttled 4×, the stand-in 01d §2.3 measured
+with; no real phone has been measured.
 
 | id | target | today | measured by |
 |---|---|---|---|
 | **U** | **5 accounts, Rem included**, on the one Spotify app. Past five, each person runs their own copy, which is the one-user case of the same code | 1 (the owner guard, `src/lib/owner.ts:10-14`) | the dashboard's User Management list; `users` rows |
-| **I** | No request, cache entry, browser store, background job or script returns, changes or caches another user's data. Every class of mistake that could do it meets one layer that prevents it and one that detects it (a test in `npm test`, or a runtime check that refuses and logs) | not applicable: one global token row, every read unscoped (01b §1) | the isolation suite (§6.4) on every `npm test`; runtime `isolation` events on `/usage`, expected count 0 |
-| **I$** | Isolation costs at most one extra store round trip on Home (~15 ms at STORE_MIGRATION R1's target) and microseconds elsewhere | – | §14.6 |
+| **I** | No request, cache entry, browser store, background job or script returns, changes or caches another user's data. Every class of mistake that could do it meets one layer that prevents it and one that detects it (a test in `npm test`, or a runtime check that refuses, records the event in `lazyboy-app` and alerts Rem) | not applicable: one global token row, every read unscoped (01b §1) | the isolation suite (§6.4) on every `npm test`; the canary week's exit checks (§13.1); runtime `isolation` events, expected count 0, alarmed by the health check (§7.10) |
+| **I$** | Isolation costs at most one extra store round trip on Home (~15 ms at STORE_MIGRATION R1's target) on a warm process, plus one TLS handshake to the app database on a cold one, and microseconds elsewhere | – | §14.6 |
 | **S1** | Repeat visit: search usable ≤ 300 ms after Home's first paint, on a phone | no browser copy yet (STORE_MIGRATION phase E) | `lb:index-idb` (R3) |
 | **S2** | First visit on a device: search usable ≤ 2 s after first paint, on a phone at 10 Mbit/s, for Rem today and for a typical one-year friend (18,250 plays, 8,000 library songs, 01d §3.3) | real users, mostly August: median 4.0 s, p90 8.7 s between rows painted and search ready [measured, 01d §2.3] | `lb:history-ready`; 01d's throttled-browser harness re-run on the new bodies |
 | **S3** | Keystroke to painted rows ≤ 50 ms on a phone, for search sets up to ~30,000 entries (about twice Rem's) | matching 10.5-13.2 ms at 4× for one-letter queries; keystroke-to-paint 43.8 ms median on a desktop dev build [measured, 01d §2.3] | `lb-perf` `paint=` (GOTCHAS "Measuring a search") |
 | **F1** | Observed freshness: any Home view shows every play that ended more than 2 minutes before it opened, and every play that ends while it is open | met for Rem through the on-load sync and the browser's provisional plays (01c §5.3) | the on-load harvest's outcome; the handoff beacon |
-| **F2** | Stored freshness with the app closed: a finished play is in the store within ~2 minutes (p50 ~1 min). On a quota day the fair-share brake trips (§7.5): within 15 minutes for whoever is above their share, within 30 minutes for everyone once the app's daily budget is spent | ~2 min for Rem (one tick while playing, `src/app/api/cron/sync/route.ts:121-146`) | each harvest records `now − played_at` for the plays it lands; `/usage` shows p50/p95 per user |
+| **F2** | Stored freshness with the app closed: a finished play is in the store at p50 ~1 minute and p95 ~5 minutes. The tail is Spotify's: it lists ~13% of plays only after the first harvest that follows them [measured, scale 5]. On a quota day the brake (§7.5) slows a user who has spent their share to 15-minute batches, and everyone to 30 once the app's daily budget is spent | p50 72 s, p95 300 s for Rem, Oct 12-14 [measured, scale 5] | each harvest records `now − played_at` for the plays it lands; `/usage` shows p50/p95 per user |
 | **F3** | Completeness: no play lost while either pinger runs and no quota ban is in force | one pinger, on the Zenbook (01c §1) | the recorder diff for Rem (STORE_MIGRATION §8 step 13); a harvest before 25 track changes pile up |
-| **D1** | Store reads ≤ 1.5M rows (Turso's terms) per Rem-like user on a heavy day, so five such users stay inside R4 (≤ 250M of the free plan's 500M a month) | ~4.5-5.6M on a typical day, ~19M on a day with three unscoped orphan passes [estimate from the meter, 01c §2.7-2.8, §5.9] | Turso's per-database usage, recorded by the daily route |
-| **D2** | No read on a per-play, per-tick or per-visit path grows with the user's total stored history | the all-time recompute scans every play up to 144 times a day and grows ~12,000 rows a day, every day (01c §5.9) | the §8 table, reviewed per change |
-| **D3** | ≤ 5,000 core rows written and ≤ 50 KB of growth per Rem-like user a day (five users ≤ 10% of the free plan's 10M writes a month) | ~3,000 core rows and ~35 KB a day (01c §2.7, 01a §6) | Turso's per-database usage |
-| **A1** | No user-visible request depends on the Zenbook | every authenticated page does (01f §3.2) | STORE_MIGRATION R2's fault injection, repeated with two users |
-| **A2** | Closed-app capture survives a Zenbook outage of any length | the only frequent pinger is on the Zenbook (01c §1) | stop the Zenbook timer for 10 minutes; plays land from the other pinger |
-| **A3** | One user's failure (a revoked grant, removal from the allowlist, a refused database, a hung Spotify call) costs that user's slot and nothing else | one token's failure stops all capture; one user's 403 fails the tick (01c S2) | the cron fan-out test (§6.4); per-user outcomes in every tick's reply |
+| **D1** | Store reads ≤ 1.5M rows (Turso's terms) per Rem-like user on a heavy day, so five such users stay inside R4 (≤ 250M of the free plan's 500M a month) | ~4.5-5.6M on a typical day, ~19M on the incident day with three unscoped orphan passes [estimate from the meter, 01c §2.7-2.8, §5.9] | Turso's per-database usage, recorded by the daily chores |
+| **D2** | No read on a per-play, per-tick or per-visit path grows with the user's total stored history | the all-time recompute scans every play up to 144 times a day and grows ~12,000 rows a day, every day (01c §5.9); an open Home tab re-reads the strip at any width the client asks (scale 2) | the §8 table, reviewed per change |
+| **D3** | ≤ 5,000 rows written per Rem-like user a day, counting the index entries libSQL bills, and ≤ 50 KB of growth (five users ≤ 10% of the free plan's 10M writes a month) | ~3,000 core rows and ~35 KB a day (01c §2.7, 01a §6) | the meter's per-statement `rw` before the move (scale 8); Turso's per-database usage after |
+| **A1** | No user-visible request depends on the Zenbook | every authenticated page does (01f §3.2) | STORE_MIGRATION R2's fault injection, re-run as an exit check of Phases 1, 3 and 4a |
+| **A2** | Closed-app capture survives a Zenbook outage of any length | the only frequent pinger is on the Zenbook (01c §1), which lost about ten days of capture in late August and September (migration 2) | stop the Zenbook timer for 10 minutes; plays land from the other pinger |
+| **A3** | One user's failure (a revoked grant, removal from the allowlist, a refused database, a hung Spotify call) costs that user's slot and nothing else | one token's failure stops all capture; one user's 403 fails the tick (01c S2) | the cron fan-out test (§6.4); per-user outcomes in every tick's reply to the Zenbook |
 | **$** | $0 a month until the first friend; ≤ $26 a month at five users | $0 | §15 |
 
 What changed from the brief, and why:
@@ -109,20 +114,22 @@ What changed from the brief, and why:
   "only accepts applications from organizations (not individuals)" with "at least 250k MAUs"; several
   Client IDs break the one-Security-Code rule and share one quota anyway (all quoted in 01f §1.2-1.3,
   fetched Oct 14). The 25 on today's pages is Client IDs per developer. All three designs and four
-  overviews reached the same number.
+  overviews reached the same number. §14.7 shows what would bind first at 25 and 250 if the cap moved.
 - **Freshness split into F1-F3**, as B §1 did. Under the documented reading of Spotify's quota (one
   pool per developer account, 01c §4), 2-minute closed-app freshness for five heavy listeners costs
   more recently-played calls a day than the budget August's bans measured (01c §5.1). Nobody sees
   stored freshness while the app is closed, so the plan protects F1 and F3 always and lets F2 degrade
-  on the days the budget runs low.
+  on the days the budget runs low. F2's tail was "~2 minutes" on Oct 14; the review measured Spotify's
+  listing lag, and the target now states it.
 - **D1 is set by need, not ambition.** B set 100,000 rows a day; that is reachable (B §10.2) but asks
   for more write-path machinery than five users need. 1.5M is what keeps five heavy users inside R4 on
   the free plan; D2 is the structural rule that keeps D1 true as histories grow.
 - **I and I$ are added**, from "keep it all secure" (A §0.1, C T0).
 
-Two numbers the targets rest on are not measured, and the rollout gates on both (§13): whether
-Spotify's development-mode quota is one pool or one per user (01c §4, 01f §1.4), and how much of
-Vercel Hobby's 4 Active-CPU-hours a month the team already uses (01f §2.3).
+Three numbers the targets rest on are not measured, and the rollout gates on them (§13): whether
+Spotify's development-mode quota is one pool or one per user (01c §4, 01f §1.4), how much of Vercel
+Hobby's 4 Active-CPU-hours a month the team already uses (01f §2.3), and how many player calls a day
+Spotify allows (the most the app has made is 1,336, on Oct 13, with no 429, scale 6).
 
 ## 2. The three designs compared, and what this plan takes from each
 
@@ -251,14 +258,16 @@ safety with less machinery.
 ```
 browser ──► Vercel functions (iad1)
              ├─ app client ─────────► Turso lazyboy-app   users · user_tokens (AES-256-GCM) ·
-             │                                            sync_state · app_meta (global keys, locks)
+             │                                            sync_state · app_meta · events
              ├─ forUser(uid) client ► Turso lazyboy       Rem's data: today's schema + plays.listened_ms
              │                        Turso lb-u-<uid>    one per friend (at most four), same schema
              └─ telemetry client ───► Zenbook sqld via the Funnel; one attempt, 4 s, never awaited
                                       api_log (+uid, +reason) · client_metrics (+uid) · usage_ledger
 pingers:  Zenbook timer, even minutes, its own secret ─┐
-          cron-job.org, odd minutes ───────────────────┴► /api/cron/sync: one tick a minute;
+          cron-job.org, odd minutes, CRON_SECRET_EXT ──┴► /api/cron/sync: one tick a minute;
           each due user claimed by lease, probed every 2 min while active, harvested on track changes
+          (from lane 1904 to Phase 3: today's route with a 90-second guard, so a tick every 2 minutes)
+alarm:    cron-job.org, hourly ────────────────────────► /api/cron/health: 500 → an e-mail to Rem
 Zenbook:  telemetry · Rem's recorder (hourly) · nightly backups of every database · one of two pingers
 ```
 
@@ -273,24 +282,31 @@ The rules the plan holds itself to:
 3. **Shared budgets are held on the server.** Turso's rows read, Spotify's quota and rate limit and
    Vercel's CPU are shared by every user; no client call can spend more than the server allows, and
    one user's share is bounded (§6.6, §7.5).
-4. **Nothing reaches a friend until it has run on Rem alone.** Phases 1-3 change how the app is
-   built, never who can reach it; each soaks on Rem's account before the next, and the first friend
-   arrives only after every isolation test has failed against a planted bug and then passed (§13).
+4. **Nothing reaches a friend until it has run on Rem alone, and then beside a canary account for a
+   week.** Phases 1-3 change how the app is built, never who can reach it; each soaks on Rem's account
+   before the next; Phase 4a's canary is the first two-user run, with exit checks that can fail, and
+   the first friend arrives only after it and after every isolation test has failed against a planted
+   bug and then passed (§13).
 5. **Rem's data does not move.** `lazyboy` becomes his user database. Beyond what the app's own code
    writes, the only changes to it are a new derived column (`plays.listened_ms`, filled and verified
-   once), two `meta` keys, the incident's foreign plays (removed with his yes), and the token rows
-   leaving for the app database a week after they are copied (§11).
+   once), four `meta` keys (`owner_uid`, `schema_version`, `min_reader`, `store_epoch`), his own 122
+   plays replayed from the recorder (with his yes), and the token rows leaving for the app database a
+   week after they are copied (§11).
+6. **Every alarm reaches Rem.** A condition that needs a person (an isolation event, his capture
+   stopping, a deletion clock, a friend's dead capture) turns the hourly health check red, which
+   e-mails him (§7.10). A page nobody opens is not an alarm.
 
 The order of work, detailed in §13:
 
 | when | what | for whom |
 |---|---|---|
-| now, before Oct 15, 8 PM if Rem approves | **Phase 0**: rotate `AUTH_SECRET`, set `SPOTIFY_OWNER_ID`, gate `logout`; six edits to STORE_MIGRATION; two dashboard reads; a dev sign-in that shows whether Spotify returns `account_id` | today's exposures |
-| Oct 15 on | **STORE_MIGRATION lanes 1901-1911**, as planned; 1910-1911 also ship the identity-first orphan predicate (P1) | Rem |
+| now, today if Rem approves | **Phase 0**: rotate `AUTH_SECRET`, set `SPOTIFY_OWNER_ID`, gate `logout`; the dashboard reads; copy `backstop.db` off the Zenbook; a dev sign-in that shows whether Spotify returns `account_id`; the refresh-token probe | today's exposures |
+| Oct 15, 8 PM on | **STORE_MIGRATION lanes 1901-1911**, with §10.2's edits; 1910-1911 also ship the identity-first orphan predicate (P1) | Rem |
+| after lane 1904 | the **interim second pinger** with a 90-second guard; the **122-play replay** | Rem |
 | after lane 1911 | **P2**: `listened_ms` and the all-time accumulator. **P3**: monthly history segments, lazy days, fetch at mount; **must ship before mid-December** | Rem, single-user |
-| after P3 | **Phase 1**: identity and isolation structure. **Phase 2**: the app database and encrypted tokens. **Phase 3**: the sync queue, the second pinger | Rem, single-user |
-| after Phase 3 | **Phase 4**: the first friend | Rem + 1 |
-| a week apart each | **P4** (Home payload patch, strip from segments) and the quota brake before the second friend; then **Phase 5**: friends two to four | up to 5 |
+| after P3 | **Phase 1**: identity and isolation structure, the health check. **Phase 2**: the app database and encrypted tokens. **Phase 3**: the sync queue, the Liked fix, the full second pinger | Rem, single-user |
+| after Phase 3 | **Phase 4a**: a canary account Rem controls, for a week; **Phase 4b**: the first friend | Rem + canary, then Rem + 1 |
+| a week apart each | **P4** (Home payload patch, the open-tab fix, strip from segments) before the second friend; then **Phase 5**: friends two to four | up to 5 |
 
 ## 4. Data model
 
