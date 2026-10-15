@@ -160,9 +160,10 @@ any endpoint in the last 30 days (`api_log`, Appendix A, query 4).
 
 Store on Rem's day (meter): 13,629 requests, 4,252,260 rows read, 13,480 rows written. The sync
 paths account for ~3.9M of the reads: the all-time recompute 2.24M, the Home payload's two reads
-0.95M, the library rescans' unscoped orphan passes 0.39M, the unique-song counts 0.16M, the harvest
-probes ~0.06M. About 0.25M were other planning lanes' audit counts. Of the rows written, `api_log`
-was 8,472 (63%), `usage_ledger` 618; the core tables took ~3,000.
+0.95M, the library rescans' unscoped orphan passes 0.39M as the meter counts them (but see 2.8: on
+Turso those three passes would have been ~15M), the unique-song counts 0.16M, the harvest probes
+~0.06M. About 0.25M were other planning lanes' audit counts. Of the rows written, `api_log` was
+8,472 (63%), `usage_ledger` 618; the core tables took ~3,000.
 
 ### 2.8 Measurement caveats
 
@@ -180,6 +181,13 @@ was 8,472 (63%), `usage_ledger` 618; the core tables took ~3,000.
 - The meter keeps only the first ~150 characters of each statement, so statements sharing a prefix
   are told apart by rows per call: ~51,000 is `orderedRealPlays` (no `WHERE` window), ~5,300-5,600
   is `readDailyStats`.
+- **The meter undercounts the unscoped orphan `UPDATE`.** It logged 131,607 rows per run on Oct 14.
+  The same `WHERE` as a `SELECT count(*)` read 5,102,733 through the meter on Oct 13
+  (STORE_MIGRATION §3), and Turso billed 2,544,558 for one pass at ~7,300 plays on Aug 7
+  (READ_QUOTA.md, sibling sweep), ~350 rows per play, which at today's size is ~5M. So sqld's
+  per-statement count for an `UPDATE` appears to leave out its correlated subqueries, and Turso's
+  bill does not. The other sync `UPDATE`s touch rows by id or through a partial index and are not
+  affected. Where this document projects Turso cost it uses ~5M per unscoped pass.
 - One full day, cross-checked against Oct 13 (84 plays landed, 28 all-time recomputes reading
   1,418,708 rows, 82 Home payload rebuilds). A heavier listening day scales the landed terms.
 - Wall times are Zenbook-side windows. Vercel's own timings age out of its logs within the hour
@@ -205,7 +213,7 @@ collisions into hourly ones.
 | S8 | `currentSyncId` and the token getter, `src/lib/playlists-sync.ts:22, 50-54, 61-65` | one library task per instance, refreshing the one global token | B's kick returns A's task; B's scan would run on A's token (01e A17) | keyed by user, getter bound to the user |
 | S9 | `storePlaylists` rewrite, `db.ts:1848-1883` | delete-all and purge on the one library | one user's list change deletes every other user's playlists and cached members (01a D12) | per-user rows; purge shared rows only when no user lists them |
 | S10 | gap chains in `recomputeSkipFlags`, the successor reset, `orderedRealPlays`, `readDailyStats` | the predecessor is the previous play in the whole table | another user's play becomes the predecessor: wrong skip verdicts and listened time, no error anywhere (01a D18) | every chain within one user |
-| S11 | `recordPlays` dedupe and UNIQUE `(track_id, played_at)`, `db.ts:174, 484-516` | key without a user | two users in a Spotify Jam can end the same track in the same millisecond; the second user's play is silently ignored (01a D4, D17) | `(user_id, track_id, played_at)` |
+| S11 | `recordPlays` dedupe and UNIQUE `(track_id, played_at)`, `db.ts:174, 484-516` | key without a user | two users ending the same track in the same millisecond is rare, but a Spotify Jam plays one queue on both accounts; when it happens the second user's play is silently ignored (01a D4, D17) | `(user_id, track_id, played_at)` |
 | S12 | negative context cache, `src/lib/sync/history.ts:67-85`, `db.ts:586-638` | a 403 is cached for everyone | B's 403 on A's private playlist hides its name from A's own syncs, because `unseenContexts` then treats it as seen, until the 30-day recheck (01a D8, D25) | positive names shared, negative rows per user |
 | S13 | maybeSyncLibrary inside the tick, `route.ts:171` | the one library rides the harvest tick | a new user's first full scan (hundreds of playlist pages at 150 ms pacing) sits inside a tick other users are waiting on | rescans outside the harvest deadline, one user per tick, resumable (they already commit per playlist) |
 | S14 | the daily block, `route.ts:71-91` (dead today, QUEUE.md C2) | global heal, payload rebuild, convention check | heals one user's totals, rebuilds one payload; `checkPlayedAtConvention` (`db.ts:1044-1065`) chains several users' plays and can report a false inversion | per-user loop in STORE_MIGRATION's `/api/cron/daily` (§6) |
@@ -215,6 +223,59 @@ collisions into hourly ones.
 | S18 | the owner guard, `src/lib/owner.ts:11-14`, `src/lib/auth.ts:344-347` | refuses every account but `SPOTIFY_OWNER_ID` | the one thing keeping S1-S17 harmless today | removed last, after everything above ships |
 
 ## 4. Spotify's limits, which bound N
+
+01f §1 is the full policy read. These are the lines the sync design rests on, fetched with `curl`
+on 2026-10-14 (Appendix A).
+
+**Five users per app.** "Up to 5 authenticated Spotify users can use an app that is in development
+mode" ([quota modes](https://developer.spotify.com/documentation/web-api/concepts/quota-modes)).
+The February 2026 migration guide's table: "Client IDs per developer 1 | Users per app 5", and
+"Existing apps are grandfathered: If you already have multiple Client IDs or more than 5 users, you
+will retain them. These limits only restrict what you can create or add going forward"
+([migration guide](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide)).
+Whether the owner counts toward the five is not stated (01f §1.2). Extended quota mode is out of
+reach: "Spotify only accepts applications from organizations (not individuals)" and requires "at
+least 250k MAUs" (quota modes). So N ≤ 5, Rem included. The 25 and 250 the planning program asks
+about are not reachable on this app.
+
+**A rate limit per app, over 30 seconds.** "Spotify's API rate limit is calculated based on the
+number of calls that your app makes to Spotify in a rolling 30 second window … The limit varies
+depending on whether your app is in development mode or extended quota mode"
+([rate limits](https://developer.spotify.com/documentation/web-api/concepts/rate-limits)). No number
+is published. 01f §1.4 cites an observed safe peak of 18 calls per 30 s (`db.ts:2655-2658`).
+
+**A quota per developer account, in buckets.** "Spotify's Web API has a quota system that limits the
+number of requests made through development mode apps that belong to a single developer account.
+Note that this is different from rate limits. Endpoints are grouped into quota buckets and requests
+to endpoints in the same bucket count toward a shared limit. The specific groupings and limits are
+subject to change", answered with a 429 whose body carries `"reason": "QUOTA_EXCEEDED"` (quota
+modes). Since July 23, 2026: "Previously, the API quota for Development Mode was counted per app.
+Going forward, the quota is counted per developer account. If you have multiple apps in Development
+Mode, the quota for all of those apps is shared under a single budget"
+([Spotify blog](https://developer.spotify.com/blog/2026-07-23-web-api-quota-updates)). The one
+sentence pointing the other way is the July changelog's "When a user's quota has been exceeded, the
+429 Too Many Requests response now contains the following body"
+([July 2026 changelog](https://developer.spotify.com/documentation/web-api/references/changes/july-2026)).
+More Client IDs therefore buy no budget.
+
+**What this app has measured.**
+
+- recently-played has a daily budget: six bans Aug 11-16, each lifting at 10:46-10:51 AM ET
+  (`db.ts:2653-2670`), after 629-700 logged calls plus the recorder's ~96, so ~725-800 calls per
+  quota day for the whole app (01f §1.4, from a store snapshot). The `api_log` duplication in 2.8 does
+  not inflate those counts: harvest rows are not duplicated.
+- Since the harvest gate (Aug 17): at most ~415 recently-played calls a day including the recorder
+  (Oct 8: 319 cron + 96), and no 429 on any endpoint in the last 30 days.
+- The player endpoints sit in a different bucket: the August bans stopped recently-played while the
+  player check kept answering, which is why the cron asks currently-playing first
+  (`route.ts:121-127`). Their limit has never been reached; the cron alone spends ~1,035-1,303 a day.
+
+**The question the design turns on:** is the ~725-800 a day the developer account's, shared by every
+user of the app, or each user's? Every statement of the rule says the account's ("a single
+developer account", "a single budget"), and one changelog sentence says "a user's quota". With one
+user the two readings cannot be told apart, and nothing here has measured a second user. This
+document plans for the shared reading, which is the one the documentation states, and §7 decision 3
+is how to find out without risking Rem's own capture.
 
 ## 5. Running it for N users
 
