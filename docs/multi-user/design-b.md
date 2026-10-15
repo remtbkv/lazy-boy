@@ -161,9 +161,9 @@ cron ticks, 129 plays landed. Home was barely opened that day, so the two terms 
 | 1 | all-time recompute: `orderedRealPlays` full scan + a `tracks` probe per row (`db.ts:854-869`) | after a landed harvest, at most every 10 min (`db.ts:577-583`), app open or not | ~51,000 | 2,244,004 (53%), 44 runs | stored plays: ~2.3 rows per play per run, so +~12,000 rows a day per day (01c §5.9) | accumulator over stored `listened_ms` (§8) |
 | 2 | Home payload rebuild: 16-day strip + the opening day (`db.ts:1315-1343`) | every landed harvest | ~7,500 | 954,265 (22%), 127 runs | plays per 16 days | patched in place from the harvest in hand (§8) |
 | 3 | history payload rebuild (`db.ts:1686-1730`) | a browser fetch after the slow marker moved | ~79,000 | 78,781, 1 run; ceiling 144 × 79,000 ≈ 11M with Home open all day (01c §6) | stored plays; hits the 2 MiB Data Cache limit in late December (01d §3.2) | monthly segments in the store, current month appended on write (§8, §9) |
-| 4 | whole-history day strip, `dailyStatsAction(100000)` prefetched on every Home mount (`den-home.tsx:373-384`), cached on `write_seq`, so the first mount after any landed play re-reads every real play | Home mounts after listening | ~43,500 [estimate: 14,511 real plays × ~3 rows for a `plays JOIN tracks`, READ_QUOTA "Measured reads"] | ~0 (no mounts) | stored plays × visits | built in the browser from segments that carry listened seconds (§9) |
+| 4 | whole-history day strip, `dailyStatsAction(100000)` prefetched on every Home mount (`den-home.tsx:374-384`), cached on `write_seq`, so the first mount after any landed play re-reads every real play | Home mounts after listening | ~43,500 [estimate: 14,511 real plays × ~3 rows for a `plays JOIN tracks`, READ_QUOTA "Measured reads"] | ~0 (no mounts) | stored plays × visits | built in the browser from segments that carry listened seconds (§9) |
 | 5 | unscoped orphan pass (`db.ts:724-751`) | the library's playlist id set moved, ~3 a week | ~5,100,000 as Turso counts it (01c §2.8) | 394,820 as the meter counted 3 runs | plays × members | lanes 1910-1911 scope it; kept scoped (§8) |
-| 6 | unique-song count (`db.ts:1969-1991`) | a library sync that changed anything; the daily Liked refetch always counts as a change (`sync/library.ts:76-80`) | ~39,000 | ~160,000, 4 runs | library members | counted inside the library body's build and patch (§8) |
+| 6 | unique-song count (`db.ts:1969-1991`) | a library sync that changed anything; the daily Liked refetch always counts as a change (`sync/library.ts:81-84`) | ~39,000 | ~160,000, 4 runs | library members | counted inside the library body's build and patch (§8) |
 | 7 | library payload rebuild (`db.ts:1625-1684`) | a fetch after `library_seq` moved, which every list rewrite does | ~15,000 | 0-2 runs a day (ledger, 01d §2.2) | members | patched per changed playlist (§8) |
 | 8 | library rescan's snapshot reads (`sync/library.ts:65-66`) | every rescan, ~30 a day | ~110 serial one-key reads | ~3,500 round trips | owned playlists | one statement over a `snapshot_id` column (§7) |
 | 9 | daily contexts pass, `unresolvedContextUris` (`db.ts:646-667`) | once a day | ~43,000 [estimate: ~2 rows per contexted play, READ_QUOTA "Attribution": 14.1K at 7,194 plays] | one run | stored plays | a scan of the 114-row `contexts` table (§8) |
@@ -177,8 +177,158 @@ recently-played 139-319 plus the recorder's 96, library ~127-175.
 
 ## 4. Data model: how every table and meta key gets a user
 
-(database per user plus an app database; every table and meta key mapped; the user key; schema
-versioning in place of `init()`)
+### 4.1 A database per user, chosen on performance grounds
+
+01a §8.1 recommends a database per user for isolation, migration and deletion. I reach the same
+model from the performance side; per query, the two models cost the same once a shared store has
+user-led indexes (01a §9.2 measured a per-user history scan at 32-36 ms from 25 to 100 users with
+them). What separates them at scale:
+
+- **No statement can become O(all users).** In a shared store, any statement or index that forgets the
+  user degrades silently from one user's rows to everyone's: 01a §9.2 measured the same scan at
+  130-527 ms from 25 to 100 users without user-led indexes, ×4 for ×4 users, and at 250 it would be
+  another ×2.5 [estimate, linear]. In a per-user database that failure mode does not exist; the
+  worst a forgotten scope can do is read the right user's own rows.
+- **Each user's cost is measured, not modeled.** Turso reports rows read, rows written and storage
+  per database (§1, T4). In a shared store the per-user split would come from the ledger and
+  `api_log`, which disagree by ~30% on the same events (01c §2.8).
+- **Every statement and plan carries over unchanged**, so §8's changes are measured against today's
+  plans and the 50-plus unscoped statements need no user predicate (01a §8.1: D4-D19 vanish).
+- **Deletion and backups are per database** (§14).
+
+What it costs: Turso's free plan allows 100 databases, so 98 users plus the app and template
+databases (250 needs the Developer plan, which 250 users' writes need anyway, §10); one more warm
+connection per active user per function instance (an in-region TLS handshake, a few milliseconds
+[estimate]; undici keeps an idle connection ~4 s by default); a schema change is a loop over
+databases (§4.6); cross-user features (the roadmap's friends) merge two reads in code; and `tracks`,
+public catalog rows, is stored once per user (4.2 MB for Rem, ≤ 1 GB at 250 such users, §10).
+
+One group token reaches every database in the group ("a new token that can be used to connect to any
+database in the group", https://docs.turso.tech/cli/group/tokens/create, fetched 2026-10-14), so the
+runtime holds one store secret, as today. A user's database URL is derived from its name, so a request
+can open the user's database from the uid in its session cookie without a lookup, in parallel with
+the app database's identity check (§5).
+
+### 4.2 The app database (`lazyboy-app`)
+
+```sql
+CREATE TABLE users (
+  uid            TEXT PRIMARY KEY,     -- random, 12 base32 chars: cache keys, URLs, ETags, DB names
+  account_id     TEXT NOT NULL UNIQUE, -- Spotify account_id, the immutable link (01e §5.1)
+  spotify_id     TEXT NOT NULL,        -- mutable; playlist ownership (replaces meta.me_id)
+  db_name        TEXT NOT NULL UNIQUE, -- 'lazyboy' for Rem, 'lb-u-<uid>' for everyone else
+  schema_version INTEGER NOT NULL,
+  status         TEXT NOT NULL,        -- active | needs_reconnect | disabled | deleting
+  is_admin       INTEGER NOT NULL DEFAULT 0,
+  session_epoch  INTEGER NOT NULL DEFAULT 0,
+  tz_zone        TEXT,                 -- IANA zone the browser reports; payloads bucket in it
+  created_at     INTEGER NOT NULL
+);
+CREATE TABLE user_tokens (             -- 01e §5.2, encrypted blob (§5)
+  uid TEXT NOT NULL, env TEXT NOT NULL, blob TEXT NOT NULL,
+  expires_at INTEGER NOT NULL, granted_at INTEGER NOT NULL, PRIMARY KEY (uid, env)
+);
+CREATE TABLE invites (                 -- what Rem can see before the person signs in (01e §5.4)
+  spotify_id TEXT PRIMARY KEY, uid TEXT NOT NULL, created_at INTEGER NOT NULL, claimed_at INTEGER
+);
+CREATE TABLE sync_state (              -- the due queue and harvest state (§7)
+  uid TEXT PRIMARY KEY, state TEXT NOT NULL, next_due_at INTEGER NOT NULL,
+  lease_owner TEXT, lease_until INTEGER,
+  last_probe_at INTEGER, last_track TEXT, last_progress_ms INTEGER, last_active_at INTEGER,
+  changes_since_harvest INTEGER NOT NULL DEFAULT 0, last_harvest_at INTEGER,
+  batch_keys TEXT,                     -- the previous harvest's 50 played_at stamps, ~0.6 KB
+  next_rescan_at INTEGER, last_rescan_at INTEGER,
+  failures INTEGER NOT NULL DEFAULT 0, last_error TEXT, last_ok_at INTEGER,
+  lag_p50_s INTEGER, lag_p95_s INTEGER -- T3's instrument, rolled up by the daily route
+);
+CREATE INDEX idx_sync_due ON sync_state (next_due_at);
+CREATE TABLE quota_ledger (            -- Spotify calls per quota day and bucket (§7.4)
+  quota_day TEXT NOT NULL, bucket TEXT NOT NULL, calls INTEGER NOT NULL,
+  PRIMARY KEY (quota_day, bucket)
+);
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);  -- global keys only
+```
+
+### 4.3 Each user's database
+
+Today's seven core tables, with two columns added and one table:
+
+- `plays.listened_ms INTEGER`: the play's listened time, written with its skip verdict (both come
+  from the same `min(gap, duration)`, `src/lib/skip-rule.ts:33-46`). Everything that sums listened
+  time then sums a column instead of walking the gap chain (§8.1).
+- `playlists.snapshot_id TEXT`: replaces the 110 `plsnap:<id>` meta rows, so a rescan compares every
+  snapshot in the list probe it already makes (§7.6).
+- `payloads (kind, key, version, shape, body, dirty, built_at, PRIMARY KEY (kind, key))`: the
+  materialized bodies: `home` (today's `meta.home_payload`), `hist`/`<YYYY-MM>` per UTC month,
+  `hist`/`catalog`, and `lib`. Each read is one row; each write is a compare-and-set on `version`
+  (§8).
+
+### 4.4 Every table and meta key, mapped
+
+| today | goes to | change |
+|---|---|---|
+| `tracks` | user DB | none; public catalog rows, copied per user |
+| `plays` | user DB | `+ listened_ms` |
+| `contexts` | user DB | none; per user, so one account's 403 never hides a name from another (01a D25) |
+| `playlists` | user DB | `+ snapshot_id` |
+| `playlist_tracks`, `saved_tracks` | user DB | none |
+| `api_log` | telemetry (Zenbook) | `+ uid` (nullable), `+ reason` (the 429 body's `QUOTA_EXCEEDED` or not, 01c S4) |
+| `client_metrics` | telemetry | `+ uid`; `handoff` beacons stop carrying song names (01a §10) |
+| `usage_ledger` | telemetry | unchanged; per-user truth now comes from Turso's per-database usage |
+| new: `users`, `user_tokens`, `invites`, `sync_state`, `quota_ledger` | app DB | §4.2 |
+| new: `payloads` | user DB | §4.3 |
+
+| `meta` key today (01a §3) | goes to |
+|---|---|
+| `spotify_tokens`, `spotify_tokens_dev` | app `user_tokens (uid, env)`, encrypted (§5) |
+| `lock:spotify_refresh` | app `meta`, `lock:spotify_refresh:<uid>:<env>` |
+| `lock:clean:<playlist>` | user `meta`, unchanged |
+| `me_id` | dropped; `users.spotify_id` |
+| `last_sync`, `player_last_active`, `rp_last_harvest` | app `sync_state` |
+| `playlists_synced_at`, `library_synced_at`, `library_scan_attempt_at` | app `sync_state` (`last_rescan_at`, `next_rescan_at`) |
+| `write_seq`, `library_seq` | user `meta`, unchanged (they still version the remaining cached reads and the library body) |
+| `slow_seq_pub` | dropped: nothing rebuilds a whole payload on a visit any more |
+| `home_payload` | user `payloads` (`home`) |
+| `alltime_stats` | user `meta` `alltime`, now an accumulator (§8.1) |
+| `alltime_at` | dropped (no throttled recompute) |
+| `unique_song_count` | user `meta`, written by the library body's build and patch (§8.4) |
+| `contexts_full_check_at` | user `meta` `contexts_checked_at` (a scan of `contexts`, §8.5) |
+| `saved_synced_at`, `liked_total`, `liked_top_added_at`, `clean_backup_pref` | user `meta`, unchanged |
+| `plsnap:<id>` (110 rows) | `playlists.snapshot_id` |
+| `pltracks_at:<id>` (110 rows), `last_sync_added` | dropped (never read, 01a §3) |
+| `user_tz_offset` | `users.tz_zone`; the offset is computed from the zone at build time (`zoneOffsetMinutes`, `db.ts:1286-1302`) |
+| `spotify_cooldown_until` | app `meta`, split per bucket: `cooldown:<bucket>` (§7.5) |
+| `played_at_convention` | app `meta` (a fact about Spotify, checked on the owner's plays) |
+
+### 4.5 The user key
+
+A random opaque `uid` (12 base32 characters, 60 bits) names the user everywhere the app can see it:
+cache keys, payload URLs, ETags, IndexedDB keys, telemetry rows, database names. Spotify's
+`account_id` is only the link, used at sign-in (01e §5.1). Two reasons: the uid carries no personal
+data, so it can sit raw in an ETag or a URL that page scripts can read (01a D27 asked for a keyed hash
+of the Spotify id for the same job); and Turso's dashboards, logs and database names never show an
+account id. 01a §8.4's case for an INTEGER key (bytes per play) does not apply here, because no
+per-user table carries the key.
+
+### 4.6 Schema versions in place of `init()`
+
+`init()` runs `CREATE TABLE IF NOT EXISTS`, four `PRAGMA table_info` reads and three `CREATE INDEX`
+statements on every cold instance (`db.ts:153-297`); against N databases that is ~10 statements per
+database per cold instance, on the request path. Instead:
+
+- Every database carries `meta.schema_version`, mirrored in `users.schema_version`. Code declares the
+  version it needs and never runs DDL on a request; a user whose database is behind gets a short
+  "updating" state, and nobody else notices.
+- A new user's database is created from a template, `lb-template`, which holds the current schema and
+  no rows: Turso's create-database call takes `seed: {type: "database", name}` (names: "lowercase
+  letters, numbers, dashes. No longer than 64 characters",
+  https://docs.turso.tech/api-reference/databases/create, fetched 2026-10-14). The provisioning
+  script runs when Rem creates an invite (§14), so sign-in never waits on it and the platform token
+  stays out of the Vercel runtime (01e §6).
+- A migration is `scripts/migrate-dbs.mjs`: per user, pause that user's sync through its lease, apply,
+  verify, bump the version, resume. Additive changes only on live databases; anything that rebuilds a
+  table runs on one user at a time behind a snapshot (Turso's point-in-time restore: 1 day on Free, 10
+  on Developer, pricing page fetched 2026-10-14).
 
 ## 5. Tokens: per user, encrypted at rest
 
