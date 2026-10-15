@@ -345,15 +345,17 @@ CREATE TABLE users (
   account_id        TEXT UNIQUE,           -- Spotify account_id; NULL until an invite is claimed
   spotify_id        TEXT NOT NULL,         -- Spotify id: what an invite names; refreshed at sign-in
   db_name           TEXT NOT NULL UNIQUE,  -- 'lazyboy' for Rem, 'lb-u-<uid>' for a friend
-  status            TEXT NOT NULL,         -- provisioning | invited | active | needs_reconnect
-                                           -- | disabled | deleting
+  status            TEXT NOT NULL,         -- the lifecycle, kept here and nowhere else (§12.3):
+                                           -- provisioning | invited | active | needs_reconnect
+                                           -- | removed | dormant | revoked | disabled | deleting | deleted
+  status_at         INTEGER NOT NULL,      -- when status last changed: the 4-, 7- and 14-day clocks
   is_admin          INTEGER NOT NULL DEFAULT 0,
   session_epoch     INTEGER NOT NULL DEFAULT 0,
   terms_version     TEXT,                  -- privacy policy and end-user agreement accepted (§12.1)
   terms_accepted_at INTEGER,
   invited_at        INTEGER NOT NULL,
   claimed_at        INTEGER,
-  last_sign_in      INTEGER                -- drives the twelve-month inactivity rule (§12.3)
+  last_sign_in      INTEGER                -- drives the 60-day dormant and twelve-month rules (§12.3)
 );
 -- one open invite per Spotify id, so a claim can never match two rows (A §3.1)
 CREATE UNIQUE INDEX idx_users_open_invite ON users (spotify_id) WHERE status = 'invited';
@@ -362,38 +364,51 @@ CREATE TABLE user_tokens (
   uid        TEXT PRIMARY KEY,
   blob       TEXT NOT NULL,      -- 'v1.' || base64url(iv ‖ ciphertext ‖ tag), §5.3
   expires_at INTEGER NOT NULL,   -- plaintext, so the cron sees who needs a refresh
-  granted_at INTEGER NOT NULL    -- last consent: Spotify's six-month refresh-token clock (01e §2.1)
+  granted_at INTEGER NOT NULL    -- when the stored refresh token first appeared: Spotify's six-month
+                                 -- clock (01e §2.1); moves only when a write carries a new one (§5.2)
 );
 
-CREATE TABLE sync_state (        -- 01c §5.2's due queue
+CREATE TABLE sync_state (        -- 01c §5.2's due queue: scheduling only
   uid             TEXT PRIMARY KEY,
-  state           TEXT NOT NULL, -- active | idle | backoff | needs_reconnect | removed | paused
-  next_probe_at   INTEGER NOT NULL,
+  state           TEXT NOT NULL, -- active | idle | backoff | paused
+  next_probe_at   INTEGER NOT NULL,  -- unindexed at N ≤ 5: scanning five rows costs less than the
+                                     -- index entry every release would write (scale 8)
   next_rescan_at  INTEGER,
   lease_owner     TEXT,
   lease_until     INTEGER,
   failures        INTEGER NOT NULL DEFAULT 0,
   last_error      TEXT,          -- a code, never a message body
-  last_ok_at      INTEGER,       -- capture health for the banner and the owner alarm
+  last_ok_at      INTEGER,       -- capture health for the banner and the health check, from Phase 3
   last_harvest_at INTEGER,
   quota_day       TEXT,          -- the recently-played quota day rp_calls counts (§7.5)
   rp_calls        INTEGER NOT NULL DEFAULT 0,
   lag_p50_s       INTEGER,       -- F2's instrument, rolled up daily (§7.8)
   lag_p95_s       INTEGER
 );
-CREATE INDEX idx_sync_due ON sync_state (next_probe_at);
+
+CREATE TABLE events (            -- what the server detected and a person must see (§6.5, §7.10)
+  id    INTEGER PRIMARY KEY,
+  at    INTEGER NOT NULL,
+  uid   TEXT,                    -- the user the request or step ran as, if any
+  code  TEXT NOT NULL,           -- owner-mismatch | cache-stamp | token-owner | decrypt | drift | ...
+  alarmed INTEGER NOT NULL DEFAULT 0  -- set by the health check once it has turned red for it
+);
 
 CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT);
--- keys: schema_version; cooldown:<bucket>; played_at_convention; lock:spotify_refresh:<uid>;
---       last_tick_at (stamped by every tick, read by the open app's fallback, §7.6)
+-- keys: schema_version, min_reader; cooldown:<bucket>; played_at_convention;
+--       lock:spotify_refresh:<uid>; tick_at (the tick's compare-and-set stamp, §7.2);
+--       daily_at and lock:daily (the daily chores, §7.11)
 ```
 
 Choices in it: there is no `env` column on tokens, because dev runs its own app database (§5.5) and
 production's never holds a dev grant (A, C). Invites are `users` rows in status `invited`, with the
-database already provisioned, so one claim statement binds a sign-in to a row (A §10.2). What the
-probe last saw (track, progress, the retry flag) stays in the user's own `meta` beside today's
-`player_last_active` and `rp_last_harvest` (`db.ts:2364-2374`); `sync_state` holds times, counters
-and leases only.
+database already provisioned, so one claim statement binds a sign-in to a row (A §10.2). A user's
+lifecycle lives in `users.status` alone, written by one function with `status_at`, and the cron's claim
+joins `users` and leases only `active` users, so disabling, removing or deleting someone stops their
+sync at the next tick (security R2). What the probe last saw (track, progress, when playback stopped)
+stays in the user's own `meta` beside today's `player_last_active` and `rp_last_harvest`
+(`db.ts:2364-2374`); `sync_state` holds times, counters and leases only. `events` is expected to stay
+empty; a row is a bug report the health check e-mails (§7.10).
 
 **Every client comes from one factory.** The app client, each user client and the telemetry client
 are built by one function that passes `makeStoreFetch` (`src/lib/store-fetch.ts`): the gzip pin, the
@@ -403,6 +418,13 @@ and a per-user client built with a bare `createClient` would lose all three sile
 `https://` form, since `@libsql/client` maps `libsql://` to WebSockets, where the fetch override does
 not apply (STORE_MIGRATION §3). None of the designs names this; it is cheap to get right once and
 easy to get wrong N times.
+
+**Names and roles come from `users`, every time** (migration 1). The per-process map of user clients
+is keyed by `db_name`, and every identity read (§5.1) and every claim (§7.2) already returns the
+user's current `db_name`; an entry under a different name is rebuilt before use, so a restore that
+moves a user to a new database reaches warm instances at their next request, at no extra round trip.
+Nothing keys a role on the string `lazyboy`: the backup's retention, the deletion job's refusal and the
+usage read follow `is_admin` and `db_name` on the row.
 
 ### 4.3 Every table and `meta` key
 
@@ -414,12 +436,12 @@ easy to get wrong N times.
 | `meta`: `last_sync`, `write_seq`, `library_seq`, `slow_seq_pub`, `home_payload`, `alltime_stats`, `alltime_at`, `unique_song_count`, `contexts_full_check_at`, `playlists_synced_at`, `library_synced_at`, `library_scan_attempt_at`, `saved_synced_at`, `liked_total`, `liked_top_added_at`, `plsnap:*`, `player_last_active`, `rp_last_harvest`, `clean_backup_pref`, `lock:clean:*` | the user's database, unchanged | by being in it. The version markers become per user without a line of code, which stops one user's plays from invalidating every other user's caches (01a D21) |
 | `meta.me_id` | the user's database | written only by that user's own library sync with that user's own token; used by the owned-playlist filter (`db.ts:2297, 2310`) and the page's `isMine`; never read for sign-in again |
 | `meta.user_tz_offset`, `HOME_TZ` (`db.ts:1270`) | `user_tz` (an IANA zone) in the user's database | written by `/api/sync` only when it changes; the Home payload buckets days in the user's zone, with the DST check against that zone (C §3.3) |
-| `meta.spotify_tokens` | `user_tokens`, encrypted | the uid key and the associated data (§5.3); the plaintext row stays in `lazyboy` for a week, then goes (§11.4) |
+| `meta.spotify_tokens` | `user_tokens`, encrypted | the uid key and the associated data (§5.3); Phase 2's runtime copies it on its first tick, so the key never leaves Vercel; the plaintext row stays in `lazyboy` for a week, then goes (§11.4) |
 | `meta.spotify_tokens_dev` | dev's own app database | not in production at all |
 | `meta.lock:spotify_refresh` | `app_meta`, `lock:spotify_refresh:<uid>` | the uid in the name |
 | `meta.spotify_cooldown_until` | `app_meta`, `cooldown:<bucket>` | global by meaning: Spotify's rate limit is per app and its quota per developer account (01f §1.4); split by bucket so a recently-played ban does not stop the player probe (01c S4) |
 | `meta.played_at_convention` | `app_meta` | global by meaning; computed from the admin's plays by the daily route |
-| new: `owner_uid`, `schema_version` | the user's database | written once at provisioning or migration, never by the app (§4.5) |
+| new: `owner_uid`, `schema_version`, `min_reader`, `store_epoch` | the user's database | written at provisioning, by the migrate script and by a restore, never by request code except production's additive steps (§4.5, §12.5) |
 | new: `probe`, `seg_seq:<YYYY-MM>` | the user's database | the probe's last track and progress (§7.3); each month's segment version (§9.1) |
 | `meta.last_sync_added`, `meta.pltracks_at:*` | dropped by the Phase 2 migration | dead: no reader (01a §3) |
 | `api_log`, `client_metrics` | telemetry, `+ user_id`; `api_log` `+ reason` | the column; deletion deletes by it (§12.3) |
@@ -428,17 +450,18 @@ easy to get wrong N times.
 ### 4.4 The user key
 
 A random opaque uid, 12 base32 characters (60 bits), names the user everywhere the app can see it:
-the session claim, `forUser`, cache keys, payload URLs, ETags, browser storage, telemetry rows and a
-friend's database name. Spotify's `account_id` is only the link used at sign-in (01e §5.1); Spotify's
+the session claim, `forUser`, cache keys, ETags, browser storage, telemetry rows and a friend's
+database name. It stays out of URL paths: the server takes the user from the session (§9.1). Spotify's `account_id` is only the link used at sign-in (01e §5.1); Spotify's
 mutable `id` is only what an invite matches once (§12.1).
 
 The design question was integer or random (§2.3). The case for random is the failure it removes: if
 the app database is ever restored from a backup, an `AUTOINCREMENT` integer can be issued again to a
 newcomer, who would then match a departed user's cache entries for up to a day and, under C's
 derived names, their database. A random uid cannot collide, so the owner stamps of §6 compare against
-a value that is unique for good. It carries no personal data, so it can sit raw in an ETag, a URL or a
-storage key where page scripts can read it, which removes A's need for an HMAC secret (`HK_SECRET`) to
-make an opaque browser key. 01a §8.4's case for an integer (bytes per play) does not apply: no
+a value that is unique for good. It carries no personal data, so it can sit raw in an ETag, on the
+session or in a storage key where page scripts can read it, which removes A's need for an HMAC secret
+(`HK_SECRET`) to make an opaque browser key. Version counters inside a database are not unique for
+good, since a restore winds them back; `store_epoch` (§4.5) covers them. 01a §8.4's case for an integer (bytes per play) does not apply: no
 per-play row carries the key in this model.
 
 ### 4.5 Schema versions in place of `init()`
@@ -448,22 +471,38 @@ statements on every cold process, eight serial round trips, with no notion of a 
 (`db.ts:153-297`; 28 cold starts on Oct 14, 01c §2.1). Against N databases that would be eight round
 trips per database a process touches. The plan:
 
-1. **Code declares `USER_SCHEMA` and `APP_SCHEMA` versions**, each a list of steps marked additive or
-   rebuild.
-2. **The first open of a database in a process** runs one statement: `SELECT key, value FROM meta
-   WHERE key IN ('owner_uid', 'schema_version')`. A wrong `owner_uid` refuses the database and logs an
-   `isolation` event (§6.2). A current version means nothing more is run. A version behind by
-   additive steps only (a nullable column, an index) applies them as `init()` does today and bumps
-   the version, so the house workflow for the common change is unchanged (C §3.4). A version behind
-   by a rebuild refuses that user ("updating") until the migrate script runs; nobody else notices
-   (A §3.5, B §4.6).
-3. **Provisioning** creates a new user database at the current version in one `executeMultiple`, with
-   `owner_uid` and `schema_version`, at invite time (§12.1), so sign-in never waits on it.
-4. **`scripts/migrate.mjs`**, run from the Mac, applies rebuild steps one database at a time: set that
+1. **Code declares `USER_SCHEMA` and `APP_SCHEMA`**, each a list of steps marked additive or
+   rebuild, and its own version.
+2. **Every database's `meta` holds four keys**: `owner_uid`; `schema_version`; `min_reader`, the
+   oldest code version that can read it (an additive step leaves it, a rebuild raises it,
+   completeness H3); and `store_epoch`, a random value written at provisioning and by every restore,
+   which goes into every version token so a restored database cannot re-issue a cached version
+   (§9.1, §12.5).
+3. **The first open of a database for a uid in a process** reads those four keys in one statement,
+   sent in the same batch as the request's first read, whose result is used only if the owner matches
+   (scale 10). The verdict is cached per `(uid, db_name)`, so a second uid mapped to an already-checked
+   database is checked again (security R15). Then:
+   - a wrong `owner_uid` refuses the database and records an `isolation` event (§6.5);
+   - code older than `min_reader` refuses that user ("updating"); a database ahead of the code by
+     additive steps opens, so a rolled-back build keeps working;
+   - a database behind by additive steps only (a nullable column, an index) is brought up to date the
+     way `init()` does today, **by production code alone** (`VERCEL_ENV === "production"`) and by
+     `scripts/migrate.mjs`. A dev server, a test pointed at a remote URL or any other script refuses
+     and says the database is waiting for the production deploy, so a branch's schema never reaches
+     Rem's database before review (completeness H3; dev's own databases are local files it may
+     migrate);
+   - a database behind by a rebuild refuses that user until the migrate script runs; nobody else
+     notices (A §3.5, B §4.6).
+4. **Provisioning** creates a new user database at the current version in one `executeMultiple`, with
+   the four keys, at invite time (§12.1), so sign-in never waits on it.
+5. **`scripts/migrate.mjs`**, run from the Mac, applies rebuild steps one database at a time: set that
    user's `sync_state` to `paused`, take a restore point (Turso point-in-time, plus a dump), apply,
-   verify, bump the version, resume (B §4.6). At six databases this takes minutes.
-5. **Deploy order** stays what it is: an additive step first (old code tolerates it), then the code
-   that needs it, then any destructive step.
+   verify, bump `schema_version` and `min_reader`, resume (B §4.6). At six databases this takes
+   minutes.
+6. **Deploy order** stays what it is: an additive step first (older code opens the database because
+   `min_reader` did not move), then the code that needs it, then any destructive step. A rebuild
+   raises `min_reader`, so the previous build refuses that database instead of misreading it, and the
+   phase's rollback cell says so (§13.1).
 
 Preview cannot run any of this against production, because Preview gets no store variables (§10.2).
 The telemetry store keeps STORE_MIGRATION phase A's own telemetry init (its §6 item 2).
@@ -489,12 +528,14 @@ request reads one global token row, and the owner guard runs only at sign-in (`s
   the one fetch whose cached answer would bind one person's sign-in to another's account). Then, in
   order: a 403 "not registered" goes to `/login?error=SpotifyNotRegistered` as today; a profile with
   no `account_id` is refused and logged, never keyed on `id` instead (01e §5.5); a `users` row with
-  that `account_id` signs in if `active` or `needs_reconnect` (refreshing `spotify_id` if it
-  changed) and is refused if `disabled` or `deleting`; otherwise the sign-in must claim an invite,
-  which needs the terms cookie of §12.1:
+  that `account_id` signs in if `active`, `needs_reconnect`, `dormant` or `revoked` (the last three
+  return to `active`: a fresh consent is what they were waiting for), refreshing `spotify_id` if it
+  changed; `disabled` is refused with "ask Rem"; `deleting` and `deleted` are refused with the date
+  the account was deleted and "ask Rem for a new invite" (completeness H2). Otherwise the sign-in must
+  claim an invite, which needs the terms cookie of §12.1:
   ```sql
-  UPDATE users SET account_id = :aid, status = 'active', claimed_at = :now, last_sign_in = :now,
-         terms_version = :tv, terms_accepted_at = :now
+  UPDATE users SET account_id = :aid, status = 'active', status_at = :now, claimed_at = :now,
+         last_sign_in = :now, terms_version = :tv, terms_accepted_at = :now
   WHERE status = 'invited' AND spotify_id = :sid AND account_id IS NULL
   RETURNING uid
   ```
@@ -503,12 +544,13 @@ request reads one global token row, and the owner guard runs only at sign-in (`s
   and it is Phase 4's one-variable way back (C §4.1). `userinfo.ts` today maps every non-2xx from
   `/v1/me` to "not registered" (`src/lib/spotify/userinfo.ts:33-36`), so a passing 429 would tell an
   invited friend they are not allowed; it narrows to a 403 (C §10.1).
-- **The jwt callback's sign-in branch** writes the encrypted token row for that uid with
-  `granted_at = now`, and puts `uid` and `ep` (the session epoch) on the cookie from the `users` row,
-  never from the incoming cookie or the profile alone, which is what keeps session fixation out
-  (01e §5.6). The two paths that park Spotify tokens inside the cookie when the store write fails
-  (`auth.ts:367-374`, `388-405`) go: a token in a cookie is bound to no user row and invisible to the
-  cron, so a sign-in that cannot write its row fails visibly and is retried (01e A18).
+- **The jwt callback's sign-in branch** writes the encrypted token row for that uid (§5.2) and puts
+  `uid`, `ep` (the session epoch) and `auth_time` (now) on the cookie from the `users` row, never from
+  the incoming cookie or the profile alone, which is what keeps session fixation out (01e §5.6).
+  `auth_time` is written here and nowhere else (security R5). The two paths that park Spotify tokens
+  inside the cookie when the store write fails (`auth.ts:367-374`, `388-405`) go: a token in a cookie is
+  bound to no user row and invisible to the cron, so a sign-in that cannot write its row fails visibly
+  and is retried (01e A18).
 - **Every later request** reads identity, token, capture health and the cooldown in one app-database
   statement, through a React `cache()` box keyed by uid (it replaces `tokenBox`, `auth.ts:73-83`):
   ```sql
@@ -520,22 +562,39 @@ request reads one global token row, and the owner guard runs only at sign-in (`s
   LEFT JOIN sync_state  s ON s.uid = u.uid
   WHERE u.uid = :uid
   ```
-  Primary-key probes only, ~4 rows read [estimate]. The callback returns `null`, which signs the
-  request out, when the cookie has no `uid` (every cookie minted before Phase 1, which closes 01e F1
-  for good), the uid is unknown, the status is not `active` or `needs_reconnect`, or `ep` is not
-  `session_epoch`. One round trip, as today's token read is (01e §5.1), and it also carries what
-  Home's chrome reads separately today (B §5).
+  Primary-key probes only, ~4 rows read [estimate]. It has three outcomes (security R6, migration 5):
+  - **allowed**: the session gets its uid;
+  - **refused**: the callback returns `null`, which signs the request out, when the cookie has no
+    `uid` (every cookie minted before Phase 1, which closes 01e F1 for good), the uid is unknown, the
+    status is not `active` or `needs_reconnect`, `ep` is not `session_epoch`, `auth_time` is more than
+    30 days old, or `SIGNUPS=owner` is set and the row is not the admin's (from Phase 2, so one
+    variable and a redeploy freeze every friend already signed in, completeness M3);
+  - **unavailable**: the statement threw or timed out. The callback returns the cookie unchanged, as
+    today's does on purpose (`auth.ts:379-387`: "a Turso hiccup must NOT crash the request into a
+    Configuration error / forced logout"), but no uid is set on the session. `requireUser()` then
+    answers a retryable error (503 for a route, an error page with a retry for a page, `{ ok: false,
+    retry: true }` for an action), never a redirect to `/login` and never a 401, so the browser keeps
+    its stores (§6.2 layer 6). A cookie that an epoch bump revoked therefore stays refused while the
+    app database is down, because nothing reads user data without a uid.
+
+  One round trip, as today's token read is (01e §5.1), and it also carries what Home's chrome reads
+  separately today (B §5). Until Phase 3 writes `sync_state`, the banner keeps reading capture health
+  from `lazyboy.meta` as it does today (migration 16).
 - **`requireUser()`** (server-only) wraps `auth()` and returns the branded uid with `{ admin,
   canCallSpotify }`, or refuses: a redirect for a page, a 401 for a route, `{ ok: false }` for an
-  action (01b S2). It is the only source of a uid for an entry point, and it merges the three gate
-  strengths 01b §2.4 found into one rule.
-- **The browser** gets the uid rendered into the page by the `(app)` layout, for its storage keys
-  (§6.2 layer 6). Nothing new goes on the `Session` type, whose fields Auth.js serves at
-  `GET /api/auth/session` (docs/SECURITY.md "Tokens never reach the browser").
+  action (01b S2), or the retryable answer above. It is the only source of a uid for an entry point,
+  and it merges the three gate strengths 01b §2.4 found into one rule.
+- **The uid goes on the session** (security R15). `auth()` returns what the session callback returns
+  (`next-auth` beta.31 `lib/index.js:22-31`), and handing the uid over through a `cache()` box may be a
+  pass-through in route handlers (01b §3.3, unverified), which would refuse every route. The uid is not
+  a credential, the `(app)` layout renders it into the page for the browser's storage keys anyway (§6.2
+  layer 6), and `GET /api/auth/session` serves it only to its own holder. Tokens stay off the session,
+  as docs/SECURITY.md "Tokens never reach the browser" requires.
 - **Home's gate runs before its reads**: the payload read needs the uid, so Home pays one sequential
-  round trip it does not pay today (~15 ms at R1's target, I$). Decoding the cookie separately to
-  start the read in parallel (B §5, 01b S2) is held in reserve for a badly missed R1; it is a second
-  way to mint a user handle, and 15 ms is under 1% of S2's budget.
+  round trip it does not pay today (~15 ms at R1's target, I$), plus, in a cold process, a TLS
+  handshake to the app database's host; the owner check rides the payload read's batch (§4.5).
+  Decoding the cookie separately to start the read in parallel (B §5, 01b S2) is held in reserve for a
+  badly missed R1; it is a second way to mint a user handle.
 
 ### 5.2 Tokens per user
 
@@ -548,16 +607,21 @@ so the simulated environment can run it; today no test can load `auth.ts` (01e �
 | `inflightRefresh`, one promise per instance (`auth.ts:188-196`) | `Map<Uid, Promise<Tokens>>` | shared, user B's concurrent refresh joins user A's and receives A's tokens: the one change in the census that leaks silently (01e A2) |
 | `acquireLock("spotify_refresh")` (`auth.ts:212`) | `lock:spotify_refresh:<uid>` in `app_meta` | a shared lease makes B wait up to ~32 s for a token nobody is refreshing (01e A4) |
 | `get/set/clearSpotifyTokens()` on `meta` (`db.ts:2514-2531`) | `getTokens(uid)`, `setTokens(uid, t)`, `clearTokens(uid)` on `user_tokens` | 01e A1, A5 |
+| a sign-in's write takes no lock and any write is unconditional (`auth.ts:352-362`) | a sign-in writes `INSERT … SELECT … WHERE EXISTS (SELECT 1 FROM users WHERE uid = :uid AND status IN ('active', 'needs_reconnect', 'dormant', 'revoked'))`; a refresh writes `UPDATE … WHERE uid = :uid AND blob = :blob_it_read` and, on zero rows, re-reads | a write landing after the deletion job's first step stores nothing (security R3); a refresh that read the old grant before a sign-in cannot overwrite the new one (security R4) |
+| – | `granted_at` moves only when the refresh token being written differs from the stored one | Spotify's six-month clock runs from the refresh token's grant (01e §2.1), so the expiry test of §5.4 needs the token's age, not the last sign-in's; it holds whether or not a re-consent mints a new refresh token (Phase 0 probes which, §13.1) |
 | `getValidAccessToken()`, `refreshingToken()`, the library task's getter (`auth.ts:278-289`, `actions.ts:46-57`, `playlists-sync.ts:61-65`) | each takes the uid; a background task binds it at creation | 01e A16 |
 | `clearTokensIfStale` (`auth.ts:170-181`) | the same rule within one user's row | the fresh-token veto carries over unchanged (01e §2.5) |
 | a decrypted token is a bare object | `{ uid, accessToken, refreshToken, expiresAt }`; `setTokens` asserts `t.uid === uid`; the Spotify client asserts the token's uid is the caller's and tags every call with it in `api_log` | a future refactor that shares a promise or cache across users fails an assertion on the first mixed call instead of acting on someone else's account (A §2.5); one compare per call |
 
-Six known answers come first (01e §5.2): two users refreshing concurrently in one process each end
-with their own token, one token-endpoint call each; A holding the lock does not delay B;
-`invalid_grant` for A clears A's row only; A's ciphertext in B's row fails to decrypt; a cookie with
-no uid, an unknown uid, a disabled user or a stale epoch yields no session; no row means no Spotify
-call. Write load: about 24 refreshes per active user a day, each a lock acquire, a row write and a
-release, ~72 rows per user a day [estimate, 01e §5.2].
+Known answers come first (01e §5.2, plus the reviews): two users refreshing concurrently in one
+process each end with their own token, one token-endpoint call each; A holding the lock does not
+delay B; `invalid_grant` for A touches A's row only; A's ciphertext in B's row fails to decrypt; a
+cookie with no uid, an unknown uid, a disabled user, a stale epoch or a 31-day-old `auth_time` yields
+no session; the identity read throwing yields no uid, no redirect and the cookie unchanged; no row
+means no Spotify call; a refresh finishing after a sign-in leaves the sign-in's grant; a refresh
+finishing after the deletion job's first step stores nothing. Write load: about 24 refreshes per
+active user a day, each a lock acquire, a row write and a release, ~72 rows per user a day [estimate,
+01e §5.2].
 
 ### 5.3 Encryption at rest
 
@@ -570,13 +634,29 @@ release, ~72 rows per user a day [estimate, 01e §5.2].
   onto the attacker's account. A checked this with the scheme itself (A §17).
 - Plaintext columns: `uid`, `expires_at`, `granted_at`.
 - Keys in `TOKEN_KEYS="v2:<base64 32 bytes>,v1:<…>"`, a Vercel Secret ("write-only after saving"),
-  Production only; the first key writes, reads pick by prefix. Dev has its own key and its own app
-  database, so the production key never sits in `.env.local`. Rotation: put a new key first and
-  redeploy; active rows re-encrypt at their next refresh, about hourly; a one-off script does the
-  rest; drop the old key when no blob carries its prefix. A copy in Rem's password manager is the
-  backup; losing the key costs every user one sign-in and nothing else.
-- A blob that fails to decrypt is no token: the user goes to `needs_reconnect`, and the log line
-  carries the uid, never the blob.
+  Production only; the first key writes, reads pick by prefix. A new key is generated in a pipe
+  straight into `vercel env add`, never written to a file, and a copy goes to Rem's password manager
+  as the backup. Dev has its own key and its own app database, so the production key never sits in
+  `.env.local`.
+- **Everything that needs the production key runs in the runtime** (security R9). Phase 2's first
+  tick encrypts Rem's plaintext row into `user_tokens` (§11.4); the daily chores re-encrypt any blob
+  not under the first key; a rollback flag has the runtime write the plaintext row back. No script on
+  the Mac ever holds the key.
+- **Rotation only on a suspected compromise** (decision 23): put a new key first and redeploy; the
+  daily chore re-encrypts every row; take an app-database backup right after, so no backup needs the
+  old key (completeness L2); then drop the old key from Vercel and from the password manager, and
+  delete the production deployments built with it (security R1, R9).
+- **A blob that fails to decrypt is the deployment's fault, not the user's** (migration 9). It is
+  logged as a `decrypt` event with the uid, never the blob; that user's step is skipped or that request
+  fails with the retryable answer of §5.1; no user state is written, so the user stays `active`. Two or
+  more users, or the admin, failing to decrypt in one tick answers the Zenbook caller 503 and touches
+  no rows. At cold start the runtime decrypts one sentinel blob per configured key (kept in `app_meta`)
+  and refuses to serve if any fails, so a wrong, truncated or missing key breaks the deploy loudly
+  instead of stranding users. Known answer: a deploy with a wrong key leaves every user `active`, and
+  capture resumes on the next correct deploy with no sign-in.
+- **Losing the key** costs every user one sign-in, and closed-app capture stops for everyone until
+  they sign in; for a friend who does not open the app that day, that is every play past their last
+  50 (completeness L2).
 - Cost: 1.67 µs to decrypt and 2.67 µs to encrypt a 450-byte blob [measured by A on the Mac, A §17.1],
   against a ~15 ms round trip.
 
@@ -591,39 +671,70 @@ token. Vercel KMS only signs; AWS KMS brings the AWS dependency Rem ruled out (0
 ### 5.4 Sign-out, revocation and expiry
 
 - **Three actions instead of today's one** (01e §5.6; Rem's call, §18): *sign out* clears this
-  browser's cookie and its stores, and capture continues; *sign out everywhere* bumps
-  `session_epoch`; *disconnect and delete* runs the deletion job (§12.3) and tells the user to remove
-  Lazy Boy at spotify.com/account/apps, since the app cannot revoke a grant. Today's `logout` deletes
-  the only token row, which stops capture and signs out every device (`actions.ts:63-69`).
-- **Sessions stay a fixed 30 days**, never renewed (01e §1.4). Every sign-in passes Spotify's consent
-  screen (`show_dialog`, `auth.ts:322`), which restarts the six-month refresh-token clock, so an
-  active user never reaches it. The epoch is the server-side kill switch; `AUTH_SECRET` rotation is
-  the everyone-out switch.
-- **`invalid_grant`** clears that user's token row and sets `needs_reconnect`; the cron stops calling
-  Spotify for them and nobody else is touched (01e §5.7). `granted_at` tells the two causes apart:
-  under six months it was most likely revoked, and the plan treats it as a disconnect (§12.3,
-  decision in §18); at six months it expired, and the data stays. The owner is exempt from any
-  automatic deletion.
+  browser's stores and cookie, and capture continues; *sign out everywhere* bumps `session_epoch`;
+  *disconnect and delete* offers a download of the user's history first (the segments the browser
+  already holds, §12.3), asks for the account name typed out and a sign-in within the last 10 minutes
+  by `auth_time` (otherwise a fresh Spotify sign-in first, security R11), runs the deletion job
+  (§12.3), and tells the user to remove Lazy Boy at spotify.com/account/apps, since the app cannot
+  revoke a grant. Today's `logout` deletes the only token row, which stops capture and signs out every
+  device (`actions.ts:63-69`).
+- **A session lasts 30 days from its sign-in, enforced by `auth_time`** (security R5). The cookie's
+  own expiry is no bound: Auth.js re-encodes the JWT with a fresh expiry on every session read
+  (`@auth/core` 0.41.2 `lib/actions/session.js:33-50`, `jwt.js:58`), and `GET /api/auth/session`
+  delivers that cookie through this app's route (`src/app/api/auth/[...nextauth]/route.ts:16-18`).
+  The app never calls that route (01e §1.4), so an ordinary user signs in about monthly either way;
+  `auth_time` stops anyone holding a copied cookie from renewing it for good. Every sign-in passes
+  Spotify's consent screen (`show_dialog`, `auth.ts:322`). The epoch is the server-side kill switch for
+  one user; `AUTH_SECRET` rotation is the everyone-out switch, used in Phase 0 and again in Phase 1's
+  deploy, each followed a day later by deleting the production deployments built before it, so no
+  rollback can bring the old secret back (security R1, §13.5).
+- **`invalid_grant`** for a friend (security R4, completeness H2; decision 21). Spotify answers it for
+  refresh tokens that are "expired, revoked, or otherwise invalid" (01e §5.7), and what else
+  invalidates a grant is undocumented (01e §8), so the app treats it as a question, not a verdict:
+  1. Stop at once: no Spotify call for that user, status `needs_reconnect`, data and blob kept.
+  2. Confirm: one more refresh at least 10 minutes later. If it succeeds, back to `active`.
+  3. If two or more users, or the admin, got `invalid_grant` within 24 hours, it is an app-wide
+     event: everyone stays `needs_reconnect` with their data, nothing is scheduled for deletion, and
+     the health check reports it (§7.10).
+  4. Otherwise, a refresh token at least ~170 days old (`granted_at`) has expired: the user stays
+     `needs_reconnect`, the data stays, and their next visit asks them to reconnect.
+  5. A younger one most likely means the person removed the app at Spotify, which the Developer Terms
+     treat as a disconnect with five days to delete (01e §5.7, 01f §1.5). Status `revoked`: no calls,
+     no backups (§12.4), an alarm to Rem, and the deletion job destroys the database on day 4 after
+     the first failure unless the person signs in first, which re-consents and returns them to
+     `active` with nothing lost but the gap.
+  The admin is never `revoked` or deleted automatically: his `invalid_grant` is `needs_reconnect` and
+  an alarm. Why day 4 and not day 0, as the Oct 14 plan had: a false positive on day 0 destroys a
+  friend's history, which Turso's Free plan cannot undelete, while day 4 still deletes inside the five
+  days. The cost: under the strictest reading of "in your possession or control", Turso's paid-plan
+  undelete keeps a destroyed database restorable for five more days (§12.3).
 - A 401 on a token the store believes fresh zeroes that user's `expires_at`, so the next call
   refreshes and finds a revocation within seconds rather than within the hour (01e §5.7).
 - **A dead grant and the pages**: a `needs_reconnect` session keeps today's behaviour, the page gates
   send it to `/login` (`auth.ts:406-409`), and the six history actions and two search routes that
   check only for a session today move onto `requireUser()`, which applies the same rule (C §15
-  decision 20). 01b §2.4 recommends a read-only mode instead; with §12.3 deleting a friend's data on a
-  revocation, the read-only state would mostly show data that is being deleted. Rem's call (§18).
+  decision 20). 01b §2.4 recommends a read-only mode instead; one sign-in restores both reading and
+  capture, so the plan keeps the redirect. Rem's call (§18).
 
 ### 5.5 Secrets, by environment
 
 | secret | Production | Preview | dev (`.env.local`) | what it unlocks once friends exist |
 |---|---|---|---|---|
-| `AUTH_SECRET` | rotated in Phase 0 | its own value (C M0a) | its own | minting a cookie that names any uid |
-| `TOKEN_KEYS` | Secret | none | a dev key | decrypting every grant |
-| Turso group token, read-write | Secret | none | none | every user's data (group tokens "cannot be revoked individually", B §19) |
-| Turso group token, read-only | – | – | – (Zenbook backup job) | reading every user's data |
-| `lazyboy` database token | – | – | yes, so dev reaches Rem's data only (C §8.2) | Rem's data; invalidation is group-wide, so a leak rotates all three Turso tokens |
-| `TURSO_PLATFORM_TOKEN` | runtime, used by two functions only: the deletion job's destroy and the daily usage read (§12.3) | none | yes, for the invite and migrate scripts | creating and destroying databases |
-| `CRON_SECRET` (Zenbook) and `CRON_SECRET_EXT` (cron-job.org) | both | none | the Zenbook's | running ticks; each rotates alone, and the route knows which caller may get a non-200 (§7.2) |
+| `AUTH_SECRET` | rotated in Phase 0 and again in Phase 1; production deployments built before each rotation deleted a day later | its own value (C M0a) | its own | minting a cookie that names any uid |
+| `TOKEN_KEYS` | Secret, generated in a pipe straight into Vercel; a backup copy in Rem's password manager | none | a dev key | decrypting every grant |
+| Turso group token, read-write | Secret, minted in Phase 2 after the old `lazyboy` token is invalidated | none | none | every user's data (group tokens "cannot be revoked individually", B §19) |
+| Turso group token, read-only | – | – | – (the Zenbook's backup job, under an account the Funnel-facing services cannot read, §13.2) | reading every user's data |
+| `lazyboy` database token | the cutover's (STORE_MIGRATION §8 step 8), invalidated in Phase 2 | – | a fresh one minted after that, checked once to get a 401 from a throwaway database in the same group (security R8) | Rem's data. Invalidation is group-wide (C §8.2), so any rotation retires every Turso token at once and they are re-minted together |
+| `TURSO_PLATFORM_TOKEN` | runtime, used by two functions only: the deletion job's destroy and the daily usage read (§12.3) | none | none: it lives in the macOS Keychain, read by `invite.mjs`, `user.mjs`, `migrate.mjs` and `setup` only (security R8) | creating and destroying databases, minting tokens |
+| `CRON_SECRET` (Zenbook) and `CRON_SECRET_EXT` (cron-job.org) | both | none | the Zenbook's | `CRON_SECRET` opens every cron route; `CRON_SECRET_EXT` opens `/api/cron/sync` and `/api/cron/health` only, never the daily route that runs deletions, and its replies carry no per-user data (security R14) |
 | `SPOTIFY_CLIENT_SECRET` | unchanged | unchanged | unchanged | refreshing any refresh token it finds |
+
+Every Production secret is already Vercel's `sensitive` type, so `vercel env pull` returns none of
+them (read by security §2 on Oct 15; that answers the open check on `TURSO_AUTH_TOKEN`). Deployment
+Protection covers every deployment URL today (`all_except_custom_domains`) and stays at Standard or
+stricter; on Pro, Skew Protection would route requests to older deployments for a day or more after
+each deploy (Vercel's skew-protection page, quoted in security R1), so it stays off or gets a
+threshold at every phase deploy and rotation.
 
 ## 6. Isolation: enforcement in one place, and the tests that prove it
 
