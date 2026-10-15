@@ -160,7 +160,7 @@ way the dev file does. Uid 1's database is Turso `lazyboy`; uid N's is `lazyboy-
 
 ```sql
 CREATE TABLE users (
-  id             INTEGER PRIMARY KEY,   -- uid; 1 = Rem
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,  -- uid; 1 = Rem; never reused
   account_id     TEXT UNIQUE,           -- Spotify account_id; NULL until an invitee first signs in
   spotify_id     TEXT NOT NULL UNIQUE,  -- what an invite names; refreshed at every sign-in
   status         TEXT NOT NULL,         -- invited | active | needs_reconnect | disabled | deleting
@@ -181,9 +181,11 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);   -- app-wide keys only, �
 ```
 
 This is 01e §5.2's sketch with three differences. The key is an integer uid with `account_id` as
-a unique column, so Spotify ids stay out of cache keys, ETags and browser storage (01a §8.4). There
-is no `env` column: dev gets an app database of its own (§8.2), so production's never holds a dev
-row. And the user's database is derived from the uid, so the row carries no URL.
+a unique column, so Spotify ids stay out of cache keys, ETags and browser storage (01a §8.4).
+`AUTOINCREMENT` matters: plain `INTEGER PRIMARY KEY` hands a deleted maximum id to the next row,
+and a reused uid would inherit the dead user's database name and any cache entry still keyed by
+it. There is no `env` column: dev gets an app database of its own (§8.2), so production's never
+holds a dev row. And the user's database is derived from the uid, so the row carries no URL.
 
 **The telemetry store**, the Zenbook's sqld after STORE_MIGRATION (§5 there): `api_log` and
 `client_metrics` each gain a nullable `user_id` (M10, an additive column `init()` can add);
@@ -357,6 +359,84 @@ now (§8.3, 01e §6 item 1).
   `docs/SECURITY.md`.
 
 ## 5. Isolation: the enforcement points and the tests that prove them
+
+### 5.1 Where a user could reach another user's data, and what closes each
+
+| path | closed by | overview finding |
+|---|---|---|
+| a store read or write for the wrong user | the database: a statement only sees the database `getClient(uid)` returned; the uid is a required parameter, so a forgotten one fails `tsc`; an unmapped uid throws | 01a D2-D19, 01b B1-B7, C1-C6 |
+| a uid taken from the request | the only sources are `requireUser()` (the session), the cron's user list, and a background task's binding at creation; no route or action reads a uid from params, body or query | 01b S2 |
+| a playlist id, day or task id from the client | ids are looked up in the caller's own database, so another user's private playlist id finds nothing and falls to a live fetch with the caller's own token, which Spotify answers 403 in dev mode; tasks carry an owner (§5.3) | 01a D14, 01b B4, B9 |
+| a Spotify call with the wrong account | every client is built from the uid's own token getter; the in-flight refresh map and the lock are keyed by uid (§4.2) | 01b A1-A6, 01e A2-A6 |
+| a cached entry or a 304 for the wrong user | the uid is an argument of every cached read and part of both ETags (§5.2) | 01a D26-D27, 01b §3.1-3.2, 01d §4.1 |
+| module-level state shared across users | deleted, or keyed by uid (§5.3) | 01b §3.4, 01c S3, S7-S8 |
+| the next person on a shared browser | browser stores carry the uid and are cleared on sign-out (§5.3) | 01b B10, 01d §4.1 |
+| the operator's telemetry | `/usage` admin-only; telemetry rows carry the uid so deletion reaches them (§10.2) | 01b B8, 01a D30 |
+| a Preview build or a dev server | neither holds a credential for friends' databases (§8.2) | 01b E4, 01e §5.9 |
+
+### 5.2 Cache keys and ETags (M6)
+
+- **The seven `unstable_cache` wrappers** (`db.ts:983-994`, `1082-1090`, `1176-1191`,
+  `1600-1623`, `1906-1914`) take the uid as their first argument. Next 16.2.6 builds a key from
+  the callback's source text, the key parts and `JSON.stringify(args)` (01b §3.1, from the
+  published `unstable-cache.js:55, 82`), so an argument separates users and a closure would not.
+  The argument also changes every wrapper's source text and argument list, so the deploy moves
+  every key at once and no single-user entry can be served to the new code (01b §3.1). Per-user
+  counters alone would not be enough: two users at the same small `write_seq` would share an
+  entry (01a §5, 01d §4.1).
+- **Both search ETags** gain the uid: `"lib-v1-u<uid>-<library_seq>-<UTC day>"` and
+  `"hist-v2-u<uid>-<slow seq>-<UTC day>"` (`src/app/api/search/library/route.ts:39`,
+  `src/app/api/search/history/route.ts:26`). User B revalidating with user A's tag gets a 200 and
+  B's body. A uid in the tag reveals nothing about anyone's Spotify account.
+- **React `cache()` boxes**: the token box, `seqBox` (`db.ts:402`) and `orderedRealPlays`
+  (`db.ts:854`) take the uid as an argument, so one request that touches two users (only the
+  cron could) cannot mix them (01e A3, 01b §3.3).
+- **A deleted user's entries** age out of the Data Cache within the longest TTL, 24 hours
+  (`FROZEN_TTL_S`, `db.ts:958`), and no session can name a deleted uid, so nothing can be served
+  from them in the meantime. Per-user cache tags would purge them at once; that is more machinery
+  than a one-day expiry, inside Spotify's five-day deletion window, justifies.
+
+### 5.3 Module state and the browser (M7, M18)
+
+- `playlistsCache` (`src/lib/spotify/resources.ts:74-104`) is deleted. Its callers are the library
+  sync (`myPlaylistsAll`, `src/lib/sync/library.ts:40`) and the live library union
+  (`src/lib/spotify/service.ts:115-118`); the grid reads the store (GOTCHAS, "Persistent playlist
+  library"), so the 60 s entry now saves a few `/me/playlists` pages at most, and unkeyed it would
+  store user A's playlist list as user B's library whenever the cron rescans them back to back
+  (01b A6, 01c S7).
+- `currentSyncId` (`src/lib/playlists-sync.ts:22`), `uniqueRecomputeKickedAt` (`db.ts:1960`) and
+  `storeSizeMemo` (`db.ts:2887`) become per-uid maps.
+- Tasks record the uid that started them; `/api/tasks/[id]` answers 404 to anyone else
+  (`src/lib/tasks/registry.ts:9-18`, `src/app/api/tasks/[id]/route.ts:13-15`; 01b S7).
+- `cooldownUntil` (`src/lib/spotify/client.ts:48`) stays app-wide on purpose (§3.2).
+- The `(app)` layout renders the uid into the page; `lb-days`, `lb-nowplaying`, `clean:active`
+  and phase E's IndexedDB copy are namespaced by it, and the sign-out form clears all four in the
+  browser before it submits (01b §3.6 and §7 item 1, 01d §4.1).
+
+### 5.4 The tests (M11)
+
+All in `tests/`, the simulated environment: real lib code against throwaway SQLite files and a
+scripted fetch. Two harness changes come first. `tests/setup.ts` points the app database and each
+user database at their own temp files (`app.db`, `u1.db`, `u2.db`). `tests/stubs/next-cache.ts`
+stops being a pass-through (`tests/stubs/next-cache.ts:4-10`) and memoizes on callback source +
+key parts + `JSON.stringify(args)`, as Next does, so a read that forgets the uid returns the other
+user's entry in a test instead of passing silently (01a D29, 01b S5).
+
+| test | what it proves |
+|---|---|
+| `isolation/store.test.ts` | Seeds users 1 and 2 with deliberately colliding data: the same track at the same `played_at` (D17), interleaved timelines (D18), the same playlist id in both libraries (D12-D14), one context URI resolved for 1 and negative-cached for 2 (D25). Runs every exported per-user function as user 1. User 2's database file has the same sha256 before and after, and nothing user 1 reads contains a user-2 marker string. |
+| `isolation/cache.test.ts` | Users 1 and 2 with equal `write_seq`, `library_seq` and slow seq. Every cached read for 1, then for 2: 2 gets 2's rows. User 2's request carrying user 1's ETag answers 200 with 2's body. |
+| `isolation/routes.test.ts` | Mocks `@/lib/auth` to return user 2's session (the pattern `tests/now-playing-route.test.ts:13-16` uses), calls every route handler and server action, and finds no user-1 marker in any response and every write in user 2's file. |
+| `isolation/structural.test.ts` | Parses `db.ts` with the TypeScript compiler API (a dev dependency already): every export outside a named allowlist (telemetry, ledger) takes `uid` first. Calls every `"use server"` export and route handler with no session and asserts a refusal before `getClient` is called (01b S2's structural test). |
+| `get-client.test.ts` | An unmapped uid throws; uid 2 never resolves to uid 1's URL; dev's file fallback is one file per uid. |
+| `tokens.test.ts` | 01e §5.2's six known answers: two users refresh concurrently in one process and each ends with their own token, one token-endpoint call each; user 1 holding the lock does not delay user 2; `invalid_grant` for 1 clears only 1's row; 1's ciphertext pasted into 2's row fails to decrypt; a cookie with no uid, an unknown uid, a disabled user or a stale epoch yields `null`; no row means `null` and no Spotify call. |
+| `cron-fanout.test.ts` | Three users: 1 playing, 2 answering `invalid_grant`, 3 answering 403 "not registered". One tick stores 1's play, marks 2 `needs_reconnect` and 3 `disabled`, answers 200 with three outcomes; a second tick inside 90 s does nothing. |
+| `deletion.test.ts` | Deleting user 2 removes their database (Platform API mocked), their app rows and their telemetry rows; user 1's file hash is unchanged. |
+| browser check (manual, one real session) | Sign in, load Home, sign out: IndexedDB, `lb-days` and `lb-nowplaying` are empty and the next payload request carries no `If-None-Match` (01d §4.3 test 5). |
+
+The colliding seeds matter more than the count. D17's same-millisecond play and D18's interleaved
+timelines are the two cases 01a §8.7 names as most likely to pass review unnoticed; under this
+model they cannot occur, and the store test is what shows it.
 
 ## 6. Background sync for N users inside Spotify's limits
 
