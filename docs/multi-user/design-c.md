@@ -32,11 +32,11 @@ Status: complete.
 - **Sync (§6).** One cron tick serves every user, each under its own deadline, behind a 90 s lease;
   it harvests on a track change, which should take Rem's harvests from 280 on Oct 14 to ~160 with
   no loss of freshness, and probes with one Spotify call instead of two. Open tabs stop
-  harvesting while the cron runs: as written, a visible tab harvests every 2 minutes, playing or
-  not. A second pinger on cron-job.org takes the Zenbook off the capture path. Rem plus one
-  friend fits Spotify's scarce recently-played budget with room; five heavy listeners do not if
-  the quota is one pool, so a brake ships before the third friend and on the days it trips plays
-  reach the store up to 30 minutes late.
+  harvesting while the cron runs; today a visible tab harvests every 2 minutes whether or not
+  anything plays, which five users' budget cannot carry. A second pinger on cron-job.org takes
+  the Zenbook off the capture path. Rem plus one friend fits Spotify's scarce recently-played
+  budget with room; five heavy listeners do not if the quota is one pool, so a brake ships before
+  the third friend and on the days it trips plays reach the store up to 30 minutes late.
 - **Search (§7, §12.2).** A database per user leaves each user's payload cost as it is today. On a
   mid-tier phone at 10 Mbit/s a first visit is usable in ~1.45 s for Rem and ~1.1 s for a typical
   friend, once two small single-user changes ship (fetch at mount, build days lazily); that rests
@@ -238,8 +238,8 @@ it. There is no `env` column: dev gets an app database of its own (§8.2), so pr
 holds a dev row. And the user's database is derived from the uid, so the row carries no URL.
 
 **The telemetry store**, the Zenbook's sqld after STORE_MIGRATION (§5 there): `api_log` and
-`client_metrics` each gain a nullable `user_id` (M10, an additive column `init()` can add);
-`usage_ledger` stays global.
+`client_metrics` each gain a nullable `user_id`, and `api_log` a nullable `reason` for 429s (M10,
+additive columns `init()` can add); `usage_ledger` stays global.
 
 ### 3.2 Every `meta` key
 
@@ -257,8 +257,8 @@ holds a dev row. And the user's database is derived from the uid, so the row car
 | `pltracks_at:<id>` | written, never read (01a §3) | unchanged; deleting it is unrelated cleanup |
 | `last_sync_added` | dead since `1d43bc7` | left alone |
 | `user_tz` (new) | – | the user's database: the browser's IANA zone (§3.3) |
-| `probe` (new) | – | the user's database: last probed track id, progress and time, for harvesting on a track change (§6.2) |
-| `lock:tick` (new) | – | app `meta`: the cron's 90 s lease (§6.2) |
+| `probe` (new) | – | the user's database: last probed track id, progress and time, and the one-tick retry flag after a lagging change, for harvesting on a track change (§6.2) |
+| `lock:tick` (new) | – | app `meta`: the cron's 90 s lease, which also tells the open app whether the cron is running (§6.2, §6.3) |
 | `rp_spend:<quota day>` (new, Phase 3) | – | app `meta`: the budget brake's counter (§6.4) |
 
 ### 3.3 The time zone
