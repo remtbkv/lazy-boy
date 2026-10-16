@@ -152,6 +152,9 @@ function releaseFor(u: ClaimedUser, o: StepOutcome, now: number): Release {
     case "ok":
     case "quota":
     case "rate-limited":
+    // No token row costs one app-database read and no Spotify call; staying on the 2-minute
+    // cadence means capture resumes within two minutes of the next sign-in.
+    case "no-token":
       return {
         state: syncStateFor(o.probe, now),
         nextProbeAt: keepsDue ? u.nextProbeAt : nextDue(u.uid, u.nextProbeAt, now),
