@@ -4,7 +4,7 @@
 // each way the plan names leaves B's outcome `ok`; and the reply arrives within 20 s even when one
 // user's Spotify hangs.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getAppMeta } from "@/lib/app-db";
+import { countRpCall as appQueueCount, getAppMeta } from "@/lib/app-db";
 import { mintUid, type Uid } from "@/lib/identity";
 import { runOpenApp, runTick } from "@/lib/sync/tick";
 import { RefreshError } from "@/lib/token-core";
@@ -327,6 +327,51 @@ describe("T4: two users, one tick", () => {
     expect(afters.length).toBeGreaterThanOrEqual(1);
     await Promise.all(afters);
     expect(await row(A)).toMatchObject({ last_error: "timeout", lease_owner: null });
+  });
+});
+
+describe("T4: the lease and the brake's counter, through the tick", () => {
+  it("a step that outlived its lease writes nothing to the queue, and the user is claimable once the lease runs out", async () => {
+    install({ [`at-${A}`]: healthy(A), [`at-${B}`]: healthy(B) });
+    // B is not due; A's store takes longer than the 50-s lease to record its harvest, so A's step
+    // finishes ok but its release comes after the lease ran out.
+    await q("INSERT INTO sync_state (uid, state, next_probe_at) VALUES (:u, 'idle', :t)", { u: B, t: NOW + 3_600_000 });
+    const record = stores[A].store.recordHarvest;
+    let slow = true;
+    stores[A].store.recordHarvest = async (plays, sp) => {
+      if (slow) {
+        slow = false;
+        const real = Date.now.bind(Date);
+        vi.spyOn(Date, "now").mockImplementation(() => real() + 60_000);
+      }
+      return record(plays, sp);
+    };
+    const r = await runTick(tickDeps({ now: () => NOW, stores }).deps, ZEN);
+    vi.mocked(Date.now).mockRestore();
+    expect((r.body.steps as { uid: string; outcome: string }[]).find((s) => s.uid === A)?.outcome).toBe("ok");
+    expect(await row(A)).toMatchObject({ lease_owner: expect.any(String), next_probe_at: NOW, last_ok_at: null, last_harvest_at: null });
+    // After lease_until (NOW + 50 s) the user is due again and the next tick's release lands.
+    await runTick(tickDeps({ now: () => NOW + 51_000, stores }).deps, ZEN);
+    expect(await row(A)).toMatchObject({ lease_owner: null, last_ok_at: NOW + 51_000 });
+  });
+
+  it("the brake counts a harvest before it is made, and counts one Spotify refuses (§7.5 item 1)", async () => {
+    const spotify = install({ [`at-${A}`]: { player: playing(`${A}-now`), recent: 502 }, [`at-${B}`]: healthy(B) });
+    const harvestsBefore: number[] = [];
+    const { deps } = tickDeps({ now: () => NOW, stores });
+    deps.queue = {
+      ...deps.queue,
+      countRpCall: async (uid, day) => {
+        harvestsBefore.push(spotify.calls.filter((c) => c.bearer === `at-${uid}` && c.path.endsWith("/recently-played")).length);
+        return appQueueCount(uid, day);
+      },
+    };
+    await runTick(deps, ZEN);
+    expect(harvestsBefore).toEqual([0, 0]);
+    expect((await q("SELECT uid, rp_calls FROM sync_state ORDER BY uid")).map((x) => [x.uid, x.rp_calls])).toEqual([
+      [A, 1],
+      [B, 1],
+    ]);
   });
 });
 
