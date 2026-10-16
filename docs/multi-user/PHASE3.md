@@ -420,6 +420,22 @@ db.ts's `storeSavedTracks` no longer calls `diffKeyed`; Phase 2's wiring (lane 1
 route (its `events` read beside `readCapture`), in Log out's `user_tokens` clear (which stops the tick for that
 user), and in `getCaptureHealth`'s removal (lane 15's item 1 rewrote it; `readCapture` replaces it).
 
+Read from lane 15's `mu/phase2-turn` at `1343eeb` (Oct 16, ~7:30 AM), the stitch's concrete meeting points:
+- **`forUser(uid)` resolves the db_name the last identity read or claim named** (lane 15's db.ts), and
+  `adminStore()` (identity-read.ts) is the admin's store for the session-less paths. This branch still calls
+  `forUser(phase1Owner())` in three places that must become `adminStore()`: the tick's `dailyChores` in
+  `src/app/api/cron/sync/route.ts`, `src/app/api/cron/daily/route.ts`, and `src/app/api/cron/health/route.ts`
+  (where it only reads the health marks). The tick's own stores are already `forUserAt(uid, the claim's
+  db_name)`, which names them for `forUser`; `/api/sync`'s `forUser(user.uid)` is named by the request's
+  identity read. This branch's tests open the owner at `forUserAt(OWNER, "lazyboy")`, which reads on both.
+- **The health marks**: lane 15 drops `isolation_seen` (events carry `alarmed`), this branch drops `daily_at`
+  (now `app_meta`'s): together `HealthMark` is `quota_pace` alone, and the health route reads `daily_at` with
+  `getAppMeta`, owner capture with `readCapture`, events with lane 15's `unreportedEvents`.
+- **`getCaptureHealth`**: lane 15 points it at `readTokenRow`; this branch deletes it for `readCapture`. Take
+  the deletion; lane 15's `tests/capture-health.test.ts` hunks give way to this branch's rewrite.
+- **The cron route**: lane 15's version (one admin via `adminStore()`, `readTokenRow` for the no-token alarm)
+  is superseded whole by `runTick`, whose owner alarm already reads the admin's `user_tokens` row.
+
 ## 11. Deploy steps for lane 23
 
 After Phase 2's V3 (DISPATCH §4), from the stitched and reviewed `mu/f-p3`. No new environment variables:
