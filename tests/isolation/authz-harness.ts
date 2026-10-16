@@ -42,6 +42,11 @@ delete process.env.CRONJOB_API_KEY;
 
 export const OWNER_UID = process.env.OWNER_UID;
 
+// Phase 2: the identity read and the token row live in the app database (dev and tests: app.db
+// beside the store's file, app-db.ts), the token encrypted under TOKEN_KEYS (a fixed test key).
+process.env.TOKEN_KEYS = `v1:${Buffer.alloc(32, 7).toString("base64")}`;
+delete process.env.APP_DATABASE_URL;
+
 // ── Principals ───────────────────────────────────────────────────────────────────────────
 export const PRINCIPALS = [
   "anon",
@@ -118,12 +123,13 @@ export async function become(p: Principal): Promise<void> {
       ctx.cookies.set(COOKIE, await sessionCookie("rem", SECRETS.authForged));
       return;
     case "staleLogout": {
-      // A copy of Rem's cookie taken before he pressed Log out. Today's logout clears the
-      // global token row (actions.ts logout) and deletes the browser's cookie, but the JWE
-      // itself stays valid for its 30 days.
+      // A copy of Rem's cookie taken before he pressed Log out. Log out clears his token row
+      // (Phase 2: his `user_tokens` row, PHASE2.md §4 item 1; the plaintext `meta` row with it)
+      // and deletes the browser's cookie, but the JWE itself stays valid for its 30 days.
       ctx.cookies.set(COOKIE, await sessionCookie("rem"));
       const c = await raw();
       await c.execute({ sql: "DELETE FROM meta WHERE key = ?", args: [TOKENS_KEY] });
+      await (await appRaw()).execute({ sql: "DELETE FROM user_tokens WHERE uid = ?", args: [OWNER_UID as string] });
       return;
     }
     case "vercelCron":
@@ -316,6 +322,33 @@ async function raw(): Promise<Client> {
 // The four keys the open checks say whose database the file is; a reseed keeps them.
 const OPEN_KEYS = "'owner_uid', 'schema_version', 'min_reader', 'store_epoch'";
 
+// The app database (Phase 2), opened once through app-db.ts so its schema is the code's.
+let appClient: Client | null = null;
+async function appRaw(): Promise<Client> {
+  const app = await import("@/lib/app-db");
+  await app.readTokenRow(OWNER_UID as string); // the first open creates the schema
+  appClient ??= createClient({ url: app.appDatabaseUrl(), intMode: "number" });
+  return appClient;
+}
+
+/** The app database as Phase 2 leaves it for Rem (PLAN §11.4): the admin row step 1 writes,
+ *  bound to his account_id by his first sign-in, and his token encrypted in `user_tokens` with
+ *  the runtime's copy marked done. The key's sentinel and the schema keys survive a reseed. */
+async function seedApp(tokens: { accessToken: string; refreshToken: string; expiresAt: number }): Promise<void> {
+  const a = await appRaw();
+  for (const t of ["user_tokens", "sync_state", "events", "users"]) await a.execute(`DELETE FROM ${t}`);
+  await a.execute("DELETE FROM app_meta WHERE key NOT IN ('schema_version', 'min_reader') AND key NOT LIKE 'sentinel:%'");
+  await a.execute({
+    sql: `INSERT INTO users (uid, account_id, spotify_id, db_name, status, status_at, is_admin, session_epoch, invited_at)
+          VALUES (?, 'rem-account', 'rem-spotify', 'lazyboy', 'active', 0, 1, 0, 0)`,
+    args: [OWNER_UID as string],
+  });
+  const { appTokenStore } = await import("@/lib/token-store-app");
+  const { mintUid } = await import("@/lib/identity");
+  await appTokenStore().set(mintUid(OWNER_UID as string), tokens);
+  await a.execute({ sql: "INSERT INTO app_meta (key, value) VALUES (?, ?)", args: [`token_copy:${OWNER_UID}`, `copied:${Date.now()}`] });
+}
+
 async function tables(): Promise<string[]> {
   const c = await raw();
   const r = await c.execute(
@@ -331,11 +364,9 @@ export async function seedRem(opts: { tokenExpiresAt?: number } = {}): Promise<v
   }
   const db = await import("@/lib/db");
   const rem = await remStore();
-  await rem.setSpotifyTokens({
-    accessToken: "at-REM",
-    refreshToken: "rt-REM",
-    expiresAt: opts.tokenExpiresAt ?? FAR,
-  });
+  const tokens = { accessToken: "at-REM", refreshToken: "rt-REM", expiresAt: opts.tokenExpiresAt ?? FAR };
+  await rem.setSpotifyTokens(tokens); // the plaintext row Phase 2 keeps for a week (§11.4 step 6)
+  await seedApp(tokens);
   await c.execute({ sql: "INSERT OR REPLACE INTO meta (key, value) VALUES ('me_id', ?)", args: ["rem-spotify"] });
   const at = (minAgo: number) => new Date(Date.now() - minAgo * 60_000).toISOString();
   const playOf = (n: number, minAgo: number) => ({
@@ -385,10 +416,13 @@ export async function dump(): Promise<string> {
   return JSON.stringify(out);
 }
 
+/** Rem's token rows, the encrypted one (Phase 2's token of record) and the plaintext one. */
 export async function tokenRow(): Promise<string | null> {
   const c = await raw();
   const r = await c.execute({ sql: "SELECT value FROM meta WHERE key = ?", args: [TOKENS_KEY] });
-  return r.rows[0] ? String(r.rows[0].value) : null;
+  const a = await (await appRaw()).execute({ sql: "SELECT * FROM user_tokens WHERE uid = ?", args: [OWNER_UID as string] });
+  if (!r.rows[0] && !a.rows[0]) return null;
+  return JSON.stringify({ meta: r.rows[0] ? String(r.rows[0].value) : null, app: a.rows[0] ?? null });
 }
 
 // ── Invoking an entry point and reading what it did ──────────────────────────────────────
