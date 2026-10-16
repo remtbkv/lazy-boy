@@ -9,6 +9,9 @@ Status: complete for this lane. §2 is what landed, §3 what proves it, §4 what
 each waits, §5 the runbooks lanes 24, 28 and 29 need, §6 the choices made where PLAN or the rulings left one open,
 §7 what I am unsure of, §8 how to review.
 
+**Turn status (lane 19, Oct 16): wired on `mu/phase4a-turn`, replayed onto `mu/p3-base`; §10 is the account.**
+Not pushed or deployed. The scopes stay as they are: the reduced-scope probe file does not exist (§10).
+
 ## 1. What this branch is
 
 The brief limits this lane to new files and the files `mu/phase1`-`mu/phase3` changed. The branch edits, of
@@ -304,3 +307,92 @@ For the turn and the deploy (not defects of this branch):
   says the address is used "to tell you about your account", stands in for it.
 - The stated limit of §6 holds: an allowlisted account with no row carrying X's cookie or link claims X's invite and
   locks X out (lane 09 ran it). It exposes no one's data; Rem sees it at `--list`.
+
+## 10. Phase 4a's turn (lane 1945_lb_mu_19_p4a_turn, Oct 16)
+
+Branch `mu/phase4a-turn`: `mu/phase4a` (4e8fccb) replayed with `git rebase --onto mu/p3-base f754f72`, then lane 10's
+`mu/ops-zenbook` doc commit (336dd38 → 75f74f0), then the wiring below. Not pushed, merged or deployed; nothing on the
+Zenbook changed (the backup script was read and copied, not installed). Lane 34 lays this on lanes 15 and 17's turns.
+
+**The replay.** The two cherry-picks of `/privacy` and `/terms` (6cb5003, e1726d6) were dropped: `mu/p3-base` already had
+the same content through `main`. Conflicts, each read on both sides: `actions.ts` (Phase 1's `requireActionUser` and
+`forUser` beside 4a's Log out and Disconnect), the two playlists pages (Phase 1's turn removed `canCallSpotify`, so the
+dead-grant redirect moved into the gate, below), the health route (Phase 1's owner marks and telemetry isolation read
+kept beside 4a's `readHealth` and the red record: `daily_at` is the newer of the two stamps, isolation is either
+source), the now-playing and tracks routes (memo and bound on Phase 1's `forUser`), `auth.ts`'s imports, the census
+registry, `CLAUDE.md`. Five of lane 06's tests met Phase 1's `forUser` and were adapted (0b69413).
+
+**What was wired, by the brief's item:**
+
+1. `/usage` (admin-only since Phase 1's turn) lists none of a friend's opens or error messages and counts them only in
+   the per-page numbers, keyed by page template (00ea363). The bounds: `dailyStatsAction` answers only the width Home
+   sends (`DAILY_STATS_DAYS`), `searchPlaysAction` ten a minute per user, `/api/playlists/[id]/tracks` as lane 06 built
+   it; the player actions share a per-user window of thirty a minute; a 403 from any player action now reads "needs
+   Spotify Premium" (the three that said "no active device" go through `playbackError`) (d537bc9). `owner.ts` removed
+   with its import and test (9e0b397). `SIGNUPS=invite` needs no code past that: sign-in, the identity read, the claim
+   and the cron's claim already obey it; `.env.example` documents it. The brake is on and the backstop at 2 hours
+   (8cbfe3f); now-playing polls every 15 s mid-track, the error backoff keeping its 12/24/48/60 s ladder (bc0edb8).
+   Also: a dead grant goes to `/reconnect` from every page and from `getSpotify()` (the gate marks the refusal
+   `deadGrant`), `/login` names every refusal and `SpotifyUnavailable` (0aae63d); the account menu links Disconnect
+   (5882e3e).
+2. **The scopes stay.** `~/.claude/broke/scratch/lazyboy_mu/probe/me_keys_reduced.json` does not exist (the probe
+   directory is empty), so `DROP_PROFILE_SCOPES` stays `false` and `user-read-email` and `user-read-private` are still
+   asked for. Flip it when a dev sign-in writes that file with `has_account_id: true` (PLAN §12.1).
+3. **Backups** (`ops/zenbook-backup/`, e7c29ac the deployed bytes, 4eab059 the change): the prune of every `lb-u-*` copy
+   runs first, before any store is read; friends' databases are never dumped; the admin's database is named by his
+   users row and checked by `owner_uid`; `lazyboy-app` keeps his rows only (an unknown table fails the copy); telemetry
+   keeps his uid and NULL (and fails without `user_id`); the check reads that no file names a friend's database.
+   `test_backup.py` (11 cases, in `npm test`). Lane 24 installs it with two new env variables (`README.md` there),
+   before `SIGNUPS=invite`.
+4. **The daily chores**: `src/lib/daily-chores.ts runDailyChores(store)`, the signature lane 17 gave it, runs the owner's
+   chores and then 4a's; `/api/cron/daily` stamps `daily_at` in Rem's database and the app database; the tick passes
+   `runDailyChores` and stamps the app database itself (lane 17's `tick-deps.ts`). A deletion the chores start waits
+   the 50-s lease window once and finishes in the same run, so it never sits `deleting` past the health check's
+   one-day alarm (6261b0c, 6a4612f, beb686d).
+5. T3's census and the authz map cover every 4a entry point (ten new registry entries, all twelve principals); the
+   staleLogout principal runs the real Log out, so `GET /api/auth/session` refuses a copied cookie (F3) and the P4a
+   pins are rewritten to their targets (21d62d6). T11 and T14 through the real entry points:
+   `tests/isolation/phase4a-routes.test.ts` (the daily route finishing and starting deletions, the real jwt callback on
+   Rem's `invalid_grant`), `claim-signin.test.ts` (the claim through the real callback), `dead-grant-pages.test.ts`.
+   T15: the server half is lane 06's `health-4a`, the client half `tests/metrics-route.test.ts` (reserved names
+   dropped). The planted-bug self-test gains a `/usage` plant (21afc5e).
+6. `/privacy` says the backups hold none of a friend's data (logs included), `/usage` shows them only in totals, and
+   Vercel's cached copies (8103c1d). `/terms` needed nothing.
+7. This section; `SECURITY.md`'s invite and deletion runbooks, `README.md`'s inviting a friend, `CLAUDE.md`'s map
+   (c99d74f).
+
+**Evidence.** At the head: `tsc --noEmit` 0, lint 0, `npm run build` 0 with no store variables, `npm test` 0 (vitest,
+the node suites, the backup unittest). `AUTHZ_TARGET=1 npx vitest run tests/isolation/authz-` fails only the two L07
+cells (lane 07's interim pinger), no P1 or P4a cell or check. Every new or rewritten check was shown failing first,
+against the old code or a one-line mutant (lane 19's `mutants.log`: M1-M12 and B1b-B8b caught; B8, the prune moved
+after the dumps, survived the first suite and got the case that catches it).
+
+**Choices where one was open.** Thirty player commands a minute per user (none given; a person queueing an album stays
+under it, a stuck tab reaches it in seconds). Log out also deletes the admin's plaintext token row, which Phase 2 keeps
+a week and the cron's "no token" alarm still reads. Backup retention 60 days for every copy: PLAN's four days were for
+copies holding friends' rows, and none does. The backup prune keys on the `lb-u-` name, never on "not the current
+admin name", so a restore that renames Rem's database cannot cost him his copies. `/usage` hides a friend's opens and
+error text and keeps their counts.
+
+**Shared files touched (RULES 8):** `auth.ts` (owner guard out, a comment), `session-gate.ts`, `require-user.ts`,
+`session.ts`, `account.ts`, `actions.ts`, `history-actions.ts`, `db.ts` (`getClientLoadSpeed`), `brake.ts`,
+`sync/tick.ts` (two constants), `now-playing-poll.ts`, the daily and health routes, `daily-4a.ts`, `login-error.ts`, the
+login and privacy pages, `chrome.tsx`, `package.json` (the backup unittest in `npm test`), `.env.example`,
+`tests/isolation/{authz-harness,authz-cells,authz-registry,authz-redteam,harness,planted-bugs,static,entry-points}`,
+`tests/cron-routes.test.ts`, `CLAUDE.md`, `docs/{SECURITY,GOTCHAS,NOW_PLAYING_LATENCY}.md`, `AUTHZ.md`, `README.md`.
+
+**Left for later lanes, and why:**
+
+- **Vercel's Data Cache keeps a friend's cached payloads** under their uid after a deletion (lane 09's note): `/privacy`
+  now says so. Closing it takes a uid tag on `userCache`'s entries and `revalidateTag("u:" + uid, { expire: 0 })` in the
+  deletion job's first step; Next 16's purge semantics on Vercel's cache are unverified here, so it is not built.
+- **A positive control for friend cells** in the authz harness (lane 1947's note): Phase 1's `forUser` maps only
+  `OWNER_UID` on this base, so a friend's own read cannot run until lane 15's directory (`forUserAt` by `db_name`) is
+  under it; the stitch (lane 34) or lane 28's rehearsal adds it. `claim-signin.test.ts` already proves a friend's
+  sign-in gets their own uid, row and token.
+- **The health check reads `revoked` over a day as red**, so a friend waiting out days 1-4 after removing the app keeps
+  the check red for three days (lane 06's condition, PLAN §7.10's wording). Lane 20 may want it to read `revoked` past
+  day 4 instead.
+- **Deploy (lane 24):** `TURSO_PLATFORM_TOKEN` (Production only), `TURSO_ORG` if not `remtbkv`, `CRONJOB_API_KEY` and
+  `CRONJOB_JOB_IDS`, `SIGNUPS=invite` last; the backup install and its two env variables before that; check
+  `api_log` and `client_metrics` carry `user_id` in production (the backup refuses a telemetry copy without it).
