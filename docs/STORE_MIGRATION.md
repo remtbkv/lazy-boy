@@ -1,8 +1,8 @@
 # Store migration: the app's data to Turso, the logs stay on the Zenbook
 
-Status: **planned 2026-10-13, not started; nothing runs before 2026-10-15 8:00 PM** (Rem, Oct 13
-8:16 PM: "do it in 2 days, don't do it tonight"; lanes 1901 and 1907 carry `not_before=2026-10-15T20:00`
-and every other lane waits on them). Rem asked for it on 2026-10-12/13 after a 20-second Home load and
+Status: **cut over 2026-10-16 07:52 UTC; production runs on Turso `lazyboy`** (lane 1903); aftercare
+done the same morning (lane 1904); lanes 1905-1906 and 1908-1911 still to run (section 12). Planned
+2026-10-13; Rem held it to 2026-10-15 8:00 PM ("do it in 2 days, don't do it tonight"). Rem asked for it on 2026-10-12/13 after a 20-second Home load and
 a search that sat on "Searching…" for 49 seconds. The work runs as headless lanes on the enterprise
 seats, after STAT 139 work (section 7). This file is the contract every lane works from;
 a lane that finds a premise here wrong stops and says so (its outcome log, section 12) rather than
@@ -401,9 +401,97 @@ now", whatever the outcome, so the cutover never runs while the Funnel is being 
 
 ## 12. Outcomes and open items
 
-(Lanes log to `~/.claude/broke/scratch/lazyboy_store/OUTCOMES.md` as they finish; lanes 1904 and
-1908 fold that log in here: what ran, the numbers against R1-R6, anything held and why.)
+Folded in from `~/.claude/broke/scratch/lazyboy_store/OUTCOMES.md` by lane 1904 on 2026-10-16
+(entries 2013, 1901, 1902, 1907, 1903, 1910, 1904); lane 1908 folds the rest. Each lane's
+step-by-step evidence is in its scratch `NOTES.md` (`~/.claude/broke/scratch/lb_<lane>/`).
+
+**Where it stands (2026-10-16).** Production runs on Turso `lazyboy` since 07:52 UTC; the three log
+tables stay on the Zenbook; the meter's core fence is on; both stores are backed up nightly and a
+restore was tested. R1, R2 and R5's move checks are met; R3 waits on lanes 1905-1906 and 1908; R4
+on 1908's heavy-day projection; R6 holds (nothing alerts, nothing bills).
+
+| R | result |
+|---|---|
+| R1 | met: core `SELECT 1` p50 3.3-4.3 ms, p95 9.6-29.1 ms over five runs (3:50-5:03 AM ET Oct 16) against the Zenbook's 25.9-29.2 / 37.3-90.5 (three runs, 10 PM Oct 15); bar p50 ≤ 8.7 ms, p95 ≤ 100 ms. All runs fell in two nights, not "three different hours"; 1908's daytime use is the check |
+| R2 | met: meter SIGSTOPped 2 min; core bench p50 3.7/3.4 ms, syncs 368/503/451 ms all ok (spread 364-482), telemetry bench 10/10 failures at the 4 s timeout, queued telemetry landed after CONT |
+| R3 | open (lanes 1905-1906, 1908) |
+| R4 | open (1908). Guard reads `lazyboy` (below) |
+| R5 | met for the move (counts, max(played_at), 20+20 rows column by column, meta key set, tokens newest on Turso, no missed plays). `verify-derived.mjs` is red identically on Turso, the snapshot and the live Zenbook: the store was already out of step (skip re-rule `scripts/migrate-skip-rule.mjs --apply` not run; the daily heal never ran before Oct 16) |
+| R6 | held |
+
+**2013, contract edits (Oct 15).** Multi-user PLAN §10.2's eight edits and its lane notes went into
+sections 3, 6, 8, 9 and 10 and the lane briefs (`d3ac1f7`). Left over then and done by 1904 below:
+GOTCHAS "Deployment skew" Hobby note.
+
+**1901, phase A build (Oct 15, 9:24-9:41 PM).** Branch `store-split`, nine commits; gates green
+(vitest 594/594, store-diff, build-skew, ledger, meter fence). §6.3 proof by a per-function census of
+`db.ts`. R2's unit tests: with the telemetry fetch hanging or rejecting, a sync plus the Home payload
+read finish under 1.5 s; awaiting one `ledgerAdd` fails it at 4,007 ms. Held: `/api/cron/daily` does
+not re-enable the cron-job.org job (it holds the pre-Aug-10 secret; re-enabling buys a daily
+"disabled" e-mail, R6) and `src/lib/cronjob.ts` is deleted; the Vercel `CRONJOB_*` variables are
+untouched (burn review Z2 stays Rem's).
+
+**1902, review and deploy (Oct 15, 9:44-11:00 PM).** `origin/main` = `7aeb438`, telemetry env set
+for Production and Preview, meter with the fence deployed (fence off), R1 baseline above. Review:
+independent census, every user-path telemetry call `void`/`.catch`, same-store fallback identical,
+/usage with telemetry hanging renders core sections in 4 s; fence classifier checked on all 112
+`db.ts` statements and on nine request shapes against the live meter. Two surviving mutants got tests
+(`cronAuthorized` failing open, the 15 s default). Defect fixed: `tests/setup.ts` did not clear
+`TELEMETRY_*`, so `npm test` from a shell with `.env.local` would have written log rows to the real
+Zenbook (bb66329). The rebase is blocked by the destructive-git guard, so lanes merge `origin/main`.
+
+**1907, Funnel certificate (Oct 16, 1:16-1:23 AM).** Tailscale 1.102.2 → 1.104.1 still got ACME 409
+`alreadyReplaced`; the cached cert moved aside and `tailscale cert` ordered a fresh one (dns-01):
+`notAfter` Jan 14 2027 04:21 UTC. Store queries through the Funnel stayed 200 throughout. Root cause of
+the 409 (an orphaned replacement order for the old serial) not diagnosed; check
+`journalctl -u tailscaled | grep cert` around the December renewal.
+
+**1903, cutover (Oct 16, 3:34-5:04 AM).** `T_snap` 07:45:50Z; freeze 13 min 52 s. Snapshot: plays
+22,249 · tracks 15,872 · playlists 115 · playlist_tracks 7,482 · contexts 118 · meta 245 ·
+saved_tracks 49. `turso db create --from-file` refused a DELETE-journal file; switched to WAL and
+imported. Production `TURSO_*` flipped (`--force` split the shared Production+Preview variable;
+Preview's `TURSO_*` then removed); new deployment `lazy-9y66pvoa2` (redeploy of 7aeb438). Fence on
+07:50:03Z; 30 min later zero 503s and zero core statements at the meter. The 2-min timer needed one
+manual start to re-arm. `.env.local` points core at Turso, telemetry at the Zenbook. Findings:
+cron-tick telemetry mostly stopped landing after the flip (below); `meta.last_sync` moves only at the
+hourly harvest when nothing plays (idle ticks return first).
+
+**1910, orphan-pass scoping (Oct 16, 5:04-5:07 AM): blocked.** The premise that only plays naming an
+added or removed playlist can flip is false: the rewrite's purge also deletes cached rows of a
+playlist absent from both lists (reachable via `/playlists/[id]` by URL, Resume's cold fetch, or a
+resync racing a library sync), so a pass scoped to added ∪ removed leaves a stale orphan flag
+(`lb_1910/counterexample.sql`). Proposed re-brief: scope to the ids the purge deleted
+(`DELETE … RETURNING playlist_id`). The identity-first predicate half does not depend on this.
+
+**1904, aftercare (Oct 16, 5:04-5:30 AM).** Backups: `~/lazyboy-backup/backup.py` rewritten in §9's
+shape (quota-forensic/BRIDGE.md, "The nightly snapshot"): `TURSO_DBS = [("lazyboy", 60)]` via
+`/dump` (served to a read-only database token: HTTP 200, 7.3 MB, ends `COMMIT;`), the Zenbook file,
+and `backstop.db`, each pruned first, token and lock rows stripped and `VACUUM`ed before gzip; 132
+leftover `-wal`/`-shm` files removed. Run by hand 09:07 UTC, all three ok and uploaded. Restore drill
+from OneDrive: integrity ok, seven tables equal to Turso's live counts, `meta` 243 vs 245 (the two
+token rows), no `refreshToken` in the file. Quota: `TURSO_DATABASE_NAME` is in Production; a manual
+`/api/cron/usage-check` (09:08 UTC) returned 200 with rows_read 5,209,457 (1.0%) and 24 written,
+exactly `lazyboy`'s own usage endpoint figures. `/api/cron/daily` ran at 09:19:57 UTC (200) and wrote today's `usage_check` ledger row (calls 2 with the manual call) and a second `_platform_error` for Oct 15. `CRONJOB_API_KEY` is sensitive and
+does not pull, so the cron-job.org job's state is unknown. Docs: BRIDGE, READ_QUOTA, GOTCHAS,
+CLAUDE.md, QUEUE ticks. The STAT watcher LaunchAgent is retired.
+
+Open items found on the way (both in `.claude/QUEUE.md`, self-startable):
+- The usage-check reconciliation never reads a number: `fetchPlatformDayUsage` expects
+  `database.total` or a map in `database.instances`, the endpoint returns top-level `total`,
+  `database.usage` and an array of `{uuid, usage}`, so every day records `_platform_error`
+  (READ_QUOTA.md, "The reconciliation").
+- Cron-tick telemetry is lost on the separate client: `void logSpotifyRequest`/`ledgerAdd` are
+  dropped when the function returns first (`api_log` cron rows 12-17 per 10 min before the flip, 0
+  after). Wrap them in `after()` (GOTCHAS, "Two clients").
+- Whether Turso charges a `count(*)` per row or per page (§9's backup cost question) is not settled:
+  the usage endpoint lags (rows_read sat at 5,209,457 from 09:06 to 09:12 UTC, then read 5,356,811
+  at 09:21), and the +147,354 step covers four `/dump` reads (~45,900 rows each if charged per
+  row), the count queries, the daily heal and production's own traffic, so it cannot be separated.
+  The next days' figures, with one backup a night, can.
 
 Open for Rem, not for a lane:
 - Delete the old Turso database `lazy-boy` (August state, 0 B counted)? Nothing reads it after the move.
 - The Vercel log capture on the Zenbook has been dead since Aug 9 (invalid token): renew or retire.
+- Run `scripts/migrate-skip-rule.mjs --apply` on production (now Turso) so `verify-derived.mjs` can
+  go green (R5).
+- The cron-job.org usage-check job (burn review Z2): delete or re-key; its key does not pull from Vercel.
