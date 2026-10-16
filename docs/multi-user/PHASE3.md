@@ -319,3 +319,33 @@ Mutants: 22 one-line or few-line changes to the real source (the five the brief 
 map in two forms, a token getter bound to the first user, each of this review's fixes reverted, and the brake,
 policy, caller and deadline rules), each run against the Phase 3 test files and restored; all caught at the
 reviewed head. Tests: vitest 837 (lane 04's 830 and 7 from this review).
+
+## 9. Replayed onto Phase 2's base: `mu/p3-base` (lane 1945_lb_mu_31_stack, Oct 16, 2026)
+
+Lane 31 replayed this branch's 15 commits once onto `mu/p2-base` (Phase 2's commits on Phase 1's turn; PHASE2.md
+§6), so lanes 17 and 19 start from the same commits (DISPATCH §3). `git range-diff a90104d..f754f72
+mu/p2-base..mu/p3-base` shows all 15; two patches changed:
+
+- `6fd8bb7` (`auth.ts`): Phase 1's turn deleted the owner shim this commit's export sat beside and made
+  `getValidAccessTokenFor` return an `OwnedToken`; `tokenForTick` is added after it unchanged. `AUTHZ.md`
+  regenerated in the same commit, since the gates it cites in `auth.ts` moved down six lines.
+- `6c7abe9` (`sync/step.ts`, `sync/tick.ts`): Phase 1's turn made the Spotify client a user's
+  (`spotifyClient(owner, token, …)`), refusing a token that names anyone else (`TokenOwnerError`, a `token-owner`
+  event). The step's and the rescan's clients are made for the step's uid, and the tick's bound token getter
+  hands them `{ uid, accessToken }` in place of the bare string; its own owner check stays. Red before: `tsc`,
+  three TS2345 at the three `spotifyClient` calls. `planted-bugs.test.ts`'s imports keep both phases' helpers.
+
+No resolution needed new behaviour. What this base changes in §4's list, for lane 17:
+
+- **Item 1**: the store for a claimed user is `forUserAt(u.uid, u.dbName)` on this base (Phase 1's turn's db.ts;
+  `forUser(uid)` takes no db_name), and S2 pins who may import it. `/api/cron/daily` exists here (the store split),
+  so `runDailyChores` has its route. The cron route on this base runs Phase 1's single-owner tick
+  (`phase1Owner()` through `forUser`, `cronAuthorized()`/`cronCaller()` both in `cron-auth.ts`); lane 07's
+  interim pinger is not on it and meets this at the stitch (lane 34).
+- **Item 5**: `api_log` already carries the uid (Phase 1's turn: the client tags each row with its owner);
+  the `harvest:<trigger>` and `cron-probe` sources ride it.
+- **Item 8**: Phase 1's turn's health check (`/api/cron/health`, `lib/health.ts`) is what the owner-capture rule
+  replaces; it reads isolation events from telemetry, and PHASE2.md §6 says what Phase 2's wiring changes there.
+- PHASE2.md §6's logout finding carries into this base: today's cron route (`getValidAccessTokenFor`) and the
+  tick's `tokenForTick` both read `user_tokens`, which Log out leaves in place, so a user who logs out keeps being
+  harvested until lane 15 wires Log out onto that row.
