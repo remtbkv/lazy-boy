@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 import { redirect, unstable_rethrow } from "next/navigation";
-import { disconnect, DISCONNECT_WORD, logOutEverywhere } from "@/lib/account";
+import { disconnect, DISCONNECT_WORD, logOutFrom } from "@/lib/account";
 import { auth, signIn, signOut, getValidAccessTokenFor, spotifyAccessTokenFor } from "@/lib/auth";
 import type { Uid } from "@/lib/identity";
 import { requireActionUser } from "@/lib/require-user";
@@ -59,10 +59,10 @@ export async function reauthForDisconnect() {
 
 // Log out (RULINGS Oct 15 1:33 PM): every browser signed out and the listening history no longer
 // recorded (account.ts), awaited, so capture has stopped by the time the page after it says so.
-// A session whose identity check could not run still signs this browser out.
+// A session whose identity check could not run is refused with an error and stays signed in, since
+// nothing could be ended and the page after it says otherwise (account.ts logOutFrom).
 export async function logout() {
-  const g = gateFromSession(await auth());
-  if (g.kind === "allowed") await logOutEverywhere(g.gate);
+  await logOutFrom(gateFromSession(await auth()));
   await signOut({ redirectTo: "/signed-out" });
 }
 

@@ -6,7 +6,7 @@ import { randomBytes } from "node:crypto";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { disconnect, disconnectRefusal, logOutEverywhere } from "@/lib/account";
+import { disconnect, disconnectRefusal, logOutEverywhere, logOutFrom } from "@/lib/account";
 import { mintUid } from "@/lib/identity";
 import { readIdentity } from "@/lib/identity-read";
 import type { Gate } from "@/lib/session-gate";
@@ -66,6 +66,20 @@ describe("Log out", () => {
     expect((await readIdentity({ uid: A, ep: 1, auth_time: NOW_S })).kind).toBe("allowed");
     await appTokenStore().set(A as never, { accessToken: "at2", refreshToken: "rt2", expiresAt: 4_000_000_000 });
     expect((await q("SELECT count(*) AS n FROM user_tokens WHERE uid = :u", { u: A }))[0].n).toBe(1);
+  });
+
+  it("ends nothing and throws when the identity check could not run, so no page claims it did", async () => {
+    // Lane 09's review: Log out used to sign this browser out and land on /signed-out ("every
+    // browser", "stopped recording") even when the check behind it could not run, leaving the other
+    // browsers signed in and the tick recording.
+    await expect(logOutFrom({ kind: "unavailable" })).rejects.toThrow();
+    expect((await q("SELECT session_epoch FROM users WHERE uid = :u", { u: B }))[0].session_epoch).toBe(0);
+    expect((await q("SELECT count(*) AS n FROM user_tokens WHERE uid = :u", { u: B }))[0].n).toBe(1);
+    await logOutFrom({ kind: "refused" });
+    expect((await q("SELECT count(*) AS n FROM user_tokens"))[0].n).toBe(2);
+    await logOutFrom({ kind: "allowed", gate: gate(B) });
+    expect((await q("SELECT session_epoch FROM users WHERE uid = :u", { u: B }))[0].session_epoch).toBe(1);
+    expect((await q("SELECT count(*) AS n FROM user_tokens WHERE uid = :u", { u: B }))[0].n).toBe(0);
   });
 
   it("the page after it says recording stopped and how to resume", async () => {

@@ -10,13 +10,22 @@ import "server-only";
 import { endSessionsAndCapture } from "@/lib/app-db";
 import type { DeletionOutcome } from "@/lib/deletion";
 import { deleteAccount } from "@/lib/deletion-runtime";
-import type { Gate } from "@/lib/session-gate";
+import type { Gate, GateResult } from "@/lib/session-gate";
 
 export const DISCONNECT_WORD = "disconnect";
 export const FRESH_SIGN_IN_S = 10 * 60;
 
 export async function logOutEverywhere(gate: Gate): Promise<void> {
   await endSessionsAndCapture(gate.uid);
+}
+
+/** Log out for whatever the session gate answered. Unavailable (the identity check could not run)
+ *  throws: nothing could be ended, and the page after Log out would say every browser was signed
+ *  out and recording stopped. Refused has nothing left to end: its epoch already moved, or its
+ *  status keeps it from being synced. */
+export async function logOutFrom(g: GateResult): Promise<void> {
+  if (g.kind === "unavailable") throw new Error("log out: the identity check could not run, so nothing was ended; try again");
+  if (g.kind === "allowed") await logOutEverywhere(g.gate);
 }
 
 export type DisconnectRefusal = "admin" | "word" | "stale";
