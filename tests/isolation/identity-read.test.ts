@@ -132,6 +132,13 @@ describe("T9: sign-in by account_id", () => {
     expect((await resolveSignIn({ id: "rem", account_id: "acct-rem" })).kind).toBe("allowed");
   });
 
+  it("a sign-in SIGNUPS=owner refuses writes nothing: a revoked friend stays revoked", async () => {
+    await q("UPDATE users SET status = 'revoked', status_at = 1 WHERE uid = :u", { u: B });
+    const before = await q("SELECT * FROM users WHERE uid = :u", { u: B });
+    expect(await resolveSignIn({ id: "friend-new", account_id: "acct-b" }, 9_000)).toEqual({ kind: "refused", code: "AccessDenied" });
+    expect(await q("SELECT * FROM users WHERE uid = :u", { u: B })).toEqual(before);
+  });
+
   it("the admin's first Phase 2 sign-in binds his account_id once; nobody else can bind", async () => {
     await q("UPDATE users SET account_id = NULL WHERE uid = :u", { u: A });
     expect(await resolveSignIn({ id: "friend-x", account_id: "acct-x" })).toEqual({ kind: "refused", code: "AccessDenied" });

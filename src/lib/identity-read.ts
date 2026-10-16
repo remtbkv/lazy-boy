@@ -42,19 +42,26 @@ export async function resolveSignIn(profile: SignInProfile, now = Date.now()): P
     return { kind: "refused", code: "NoAccountId" };
   }
   let user = (await findUserByAccountId(aid)) ?? (await bindAdminAccount(aid, sid, now));
-  // A fresh consent is what needs_reconnect and revoked were waiting for. If someone else moved
-  // the row first (the deletion job), decide again on what it says now.
-  for (let tries = 0; user && (user.status === "needs_reconnect" || user.status === "revoked") && tries < 2; tries++) {
-    if (await moveStatus(user.uid, user.status, "active", now)) user = { ...user, status: "active", statusAt: now };
-    else user = await findUserByAccountId(aid);
+  // Every refusal comes before any write. A fresh consent is what needs_reconnect and revoked
+  // were waiting for; if someone else moved the row first (the deletion job), decide again on
+  // what it says now.
+  for (let tries = 0; ; tries++) {
+    if (!user) return { kind: "refused", code: "AccessDenied" };
+    if (user.status === "disabled") return { kind: "refused", code: "AccountDisabled" };
+    if (user.status === "deleting" || user.status === "deleted") {
+      return { kind: "refused", code: "AccountDeleted", deletedOn: new Date(user.statusAt).toISOString().slice(0, 10) };
+    }
+    if (signupsMode() === "owner" && !user.isAdmin) return { kind: "refused", code: "AccessDenied" };
+    if (user.status === "active") break;
+    if ((user.status !== "needs_reconnect" && user.status !== "revoked") || tries >= 2) {
+      return { kind: "refused", code: "AccessDenied" };
+    }
+    if (await moveStatus(user.uid, user.status, "active", now)) {
+      user = { ...user, status: "active", statusAt: now };
+      break;
+    }
+    user = await findUserByAccountId(aid);
   }
-  if (!user) return { kind: "refused", code: "AccessDenied" };
-  if (user.status === "disabled") return { kind: "refused", code: "AccountDisabled" };
-  if (user.status === "deleting" || user.status === "deleted") {
-    return { kind: "refused", code: "AccountDeleted", deletedOn: new Date(user.statusAt).toISOString().slice(0, 10) };
-  }
-  if (user.status !== "active") return { kind: "refused", code: "AccessDenied" };
-  if (signupsMode() === "owner" && !user.isAdmin) return { kind: "refused", code: "AccessDenied" };
   await recordSignIn(user.uid, sid, now);
   return { kind: "allowed", user: { ...user, spotifyId: sid } };
 }
