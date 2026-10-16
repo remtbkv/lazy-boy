@@ -95,7 +95,8 @@ vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
 });
 
 const { freshAppDb } = await import("./harness");
-const { dumpDb, useUserFiles } = await import("./user-dbs");
+// Renamed: the hooks lint reads any use* call outside a component as a React hook.
+const { dumpDb, useUserFiles: freshUserFiles } = await import("./user-dbs");
 const { getAppMeta, setAppMeta } = await import("@/lib/app-db");
 const { appTokenStore } = await import("@/lib/token-store-app");
 const { forUserAt } = await import("@/lib/db");
@@ -117,7 +118,7 @@ const q = async (sql: string, args: Record<string, string | number | null> = {})
 async function seed(o: { expired?: boolean } = {}): Promise<void> {
   run++;
   app = freshAppDb();
-  useUserFiles();
+  freshUserFiles();
   await getAppMeta("schema_version"); // the first open creates app.db at the code's version
   for (const uid of [A, B]) {
     await q(
