@@ -9,6 +9,10 @@ Status: Phase 1's turn complete, Oct 16, 2026, about 3 AM, except the two pieces
 1945_lb_mu_33_p1_stitch (§4, §7). Review it as one diff (§5): lane 13 reviews after lane 33's stitch,
 lane 14 deploys (§4's deploy steps).
 
+Stitched, Oct 16, 2026, about 2:15 PM: lane 33 put this branch on production's code as `mu/s-p1`
+(`origin/main` `1eac835`, after lanes 1906, 1911 and 11 deployed) and finished §4's two pieces (§8).
+Lane 13 reviews `origin/main..mu/s-p1`.
+
 ## 1. What this branch is
 
 PLAN.md §13.1 puts Phase 1 after P3; §13.4 lets a lane build a phase early on its own branch, but
@@ -151,7 +155,7 @@ Lane 0226's list (Rem's decisions, and the work in files queued lanes edited) is
 (§6), apart from:
 
 **Left for lane 1945_lb_mu_33_p1_stitch**, which rebases this branch onto `main` once lanes 1905-1906
-and 1910-1911 have merged (§7 lists every place this branch meets their files):
+and 1910-1911 have merged (§7 lists every place this branch meets their files; both done, §8):
 
 - lane 1905's IndexedDB store (STORE_MIGRATION §10) keyed by the uid: its user key is the uid the
   `(app)` layout renders (`useUid()`), its database and store names come from `userStorageName`, its
@@ -311,4 +315,53 @@ Choices where PLAN or the brief left one open, and why:
 - `src/app/api/cron/sync/route.ts` and `src/lib/cron-auth.ts` meet lane 07 (`mu/pinger`), not 1905 or
   1910: this branch runs the tick for `phase1Owner()` through `forUser` and keeps both
   `cronAuthorized()` and `cronCaller()`; lane 07's guard and `CRON_SECRET_EXT` go on top.
+
+## 8. The stitch (lane 1945_lb_mu_33_p1_stitch, Oct 16, 2026)
+
+`mu/s-p1` is `mu/phase1-turn` (`46538cd`) replayed onto `origin/main` `1eac835`, then four commits.
+`git range-diff 7aeb438..46538cd origin/main..mu/s-p1` shows every replayed commit; the five whose
+patch changed are below, and each says so in its message.
+
+- **Dropped:** `58f71bf`, lane 1947's authorization map cherry-picked by lane 12: the same patch is
+  on `main` as `0233916`, with lanes 08 and 1906's later edits on top.
+- **`886a947` the health check route:** no longer touches `cron-auth.ts`. Lane 07 had put the same
+  `cronCaller` on `main` (`1165010`), and the hunk applied without a conflict as a second copy of
+  `cronCaller`, `CronCaller` and `safeEqual`. The replay was split around this commit to fix it there.
+- **`3f1d889` forUser:** lane 1910's `recomputeOrphanFlags` (the `playlistIds` and `identities`
+  scopes, chunked) and `storePlaylists`' RETURNING-scoped purge pass take the user's database first,
+  `u.client()`, and `u` on every per-user call; their bodies are 1910's. `/api/cron/sync` keeps lanes
+  07 and 08's pinger as `main` has it (`cronCaller`, the bare `{"ok":true}` with the tick in
+  `after()`, the owner alarm before the stamp, the 90-second stamp); the tick resolves
+  `phase1Owner()` and `forUser(uid)` first, after cron-job.org's reply, and the alarm and the stamp go
+  through that store.
+- **`fd72cf4` the uid in the browser:** the `(app)` layout renders `<UserProvider uid>` beside lane
+  1905's `data-user-key` (still the constant until the next commit below), the sign-out form runs
+  both clears, and Home's `fetchPayload` takes both the uid and 1905's `keep`: clear on the
+  signed-out 401, drop a body for another user, check the shape, then keep the text.
+- **`5c8dcfe` the authorization map:** the registry and red-team files merged over lane 08's L07
+  flips; `AUTHZ.md` regenerated, not merged by hand.
+- **`5d853f1` docs:** CLAUDE.md's `db.ts` entry keeps both sides' facts.
+
+Then, each shown failing first (the commit messages say how):
+
+- **The IndexedDB copy on the uid** (`0292c32`): the user key is `useUid()`; the database is
+  `userStorageName(uid, "lb-search")`; `readStored` drops a body whose `u` is not the page's;
+  `"lb-search"` is in `USER_DATA_NAMES`, and `clearThisBrowser` (the sign-out form and the signed-out
+  401) deletes every user's database, per-user ones through `indexedDB.databases()` and the bare
+  pre-Phase-1 one by name. S6 has no pending name; S4 reviews 1906's `ended`.
+- **The orphan pass's suite through forUser** (`fa89d59`): `tests/orphan-scope.test.ts` runs as the
+  owner, plus a two-user test over per-user files (B's library change re-rules only B's plays,
+  scoped equals full on B's file, A's file unchanged). The purge pass's ledger line was priced with
+  the calibration's playlist count (180) for every user; it now uses the user's own (the list before
+  the rewrite, at least the purged count).
+- **S3** (`44fda6a`) reads `export { … }` declarations, which it skipped: lane 1905's re-export of the
+  shape tokens was invisible to it, and so would a re-exported per-user function have been.
+  `ORPHAN_PREDICATE` (1910) is in its snapshot.
+- **The pinger's suite through forUser** (`4fbdf8e`), and a test that pins the owner lookup after
+  cron-job.org's reply: with `OWNER_UID` unset the Zenbook hears 503 "no owner" and cron-job.org
+  still a bare `{"ok":true}`.
+
+`cron-auth.ts` is `main`'s unchanged: `cronAuthorized()` (CRON_SECRET only: the daily, store-bench
+and usage-check routes) on top of `cronCaller()` (both secrets: `/api/cron/sync` and
+`/api/cron/health`), one constant-time compare. With `AUTHZ_TARGET=1` only P4a's three pins fail.
 
