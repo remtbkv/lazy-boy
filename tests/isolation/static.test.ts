@@ -127,6 +127,7 @@ describe("S3: db.ts exports no per-user function", () => {
     "HISTORY_INDEX_SHAPE",
     "HOME_PAYLOAD_SHAPE",
     "LIBRARY_INDEX_SHAPE",
+    "ORPHAN_PREDICATE",
     "SUMMARY_EVENTS",
     "StoreRefusedError",
     "USER_SCHEMA_VERSION",
@@ -156,6 +157,14 @@ describe("S3: db.ts exports no per-user function", () => {
     const db = FILES.find((f) => f.rel === "src/lib/db.ts")!;
     const names: string[] = [];
     for (const st of db.sf.statements) {
+      // `export { a, b }` and `export … from` carry no export modifier: read their names, or a
+      // re-exported per-user function would pass unseen (the shape tokens moved to one in 1905).
+      if (ts.isExportDeclaration(st)) {
+        const clause = st.exportClause;
+        if (clause && ts.isNamedExports(clause)) names.push(...clause.elements.map((e) => e.name.text));
+        else names.push(st.getText(db.sf));
+        continue;
+      }
       const exported = (ts.canHaveModifiers(st) ? (ts.getModifiers(st) ?? []) : []).some(
         (m) => m.kind === ts.SyntaxKind.ExportKeyword,
       );
@@ -164,7 +173,6 @@ describe("S3: db.ts exports no per-user function", () => {
       if (ts.isVariableStatement(st)) {
         for (const d of st.declarationList.declarations) if (ts.isIdentifier(d.name)) names.push(d.name.text);
       }
-      if (ts.isExportDeclaration(st)) names.push(st.getText(db.sf));
     }
     expect(names.sort()).toEqual([...EXPORTS].sort());
   });
