@@ -85,6 +85,17 @@ describe("T9: the claim", () => {
     expect((await q("SELECT status, account_id FROM users WHERE uid = :u", { u: X }))[0]).toMatchObject({ status: "provisioning", account_id: null });
   });
 
+  it("an invite whose request does not read approved is not claimed, whatever the users row says", async () => {
+    // Lane 09's review (mutant M9 survived the suite): `--approve` links the request while it is
+    // still pending, then moves both rows in one batch, so an `invited` row under a pending request
+    // only comes from a restore or a hand edit; the claim's own request check is what refuses it.
+    const rid = await request("x@example.com");
+    await seedApprovedInvite(db.raw(), { rid, uid: X, invitedAt: NOW - DAY });
+    await q("UPDATE requests SET status = 'pending' WHERE id = :r", { r: rid });
+    expect(await resolveSignIn(profile("x"), NOW, rid)).toEqual({ kind: "refused", code: "AccessDenied" });
+    expect((await q("SELECT status, account_id FROM users WHERE uid = :u", { u: X }))[0]).toMatchObject({ status: "invited", account_id: null });
+  });
+
   it("Y cannot claim X's: Y's own cookie claims Y's invite, no cookie claims nothing, and an existing user never claims", async () => {
     const rx = await request("x@example.com");
     const ry = await request("y@example.com");
