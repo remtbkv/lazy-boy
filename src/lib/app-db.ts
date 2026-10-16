@@ -383,6 +383,12 @@ export async function readHealth(now: number): Promise<{ app: AppHealth; dailyAt
   };
 }
 
+/** How many events of one code name this uid: the planted probe's reply (one more after it ran). */
+export async function countEvents(uid: string, code: string): Promise<number> {
+  const r = await one({ sql: "SELECT count(*) AS n FROM events WHERE uid = :uid AND code = :code", args: { uid, code } });
+  return Number(r.rows[0].n);
+}
+
 /** The record of a red verdict the health check answered (time and reasons): what lanes 28 and 29
  *  read to prove the planted probe's alarm went out. Pruned after 30 days by the daily sweeps. */
 export async function recordHealthRed(now: number, reasons: string[]): Promise<void> {

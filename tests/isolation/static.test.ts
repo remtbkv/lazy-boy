@@ -63,7 +63,9 @@ describe("S2: a Uid is minted in one place", () => {
   // The gate mints from the session; auth.ts mints Rem's uid in the sign-in branch and in the
   // two owner-bound Phase 1 shims. Phase 3 adds the cron's claim (app-db.ts, from the rows it
   // just leased); the scripts' --user helper comes with forUser.
-  const MINTERS = new Set(["src/lib/session-gate.ts", "src/lib/auth.ts", "src/lib/app-db.ts"]);
+  // user-cache.ts: the planted probe names a cache key from the Zenbook's request, behind
+  // CRON_SECRET, and reads nothing with it (planted-probe.test.ts).
+  const MINTERS = new Set(["src/lib/session-gate.ts", "src/lib/auth.ts", "src/lib/app-db.ts", "src/lib/user-cache.ts"]);
 
   it("no `as Uid` outside identity.ts", () => {
     const casts: string[] = [];
@@ -261,6 +263,8 @@ describe("S3: app-db.ts's exports match the reviewed snapshot", () => {
     // The health check (§7.10): counts by code and state, and its red-verdict record (health-4a.test.ts).
     "readHealth (function)",
     "recordHealthRed (function)",
+    // The planted probe's reply: one uid's count of one code (planted-probe.test.ts).
+    "countEvents (function)",
   ];
 
   it("lists every export", () => {

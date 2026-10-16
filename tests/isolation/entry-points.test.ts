@@ -67,6 +67,8 @@ const REGISTRY: Record<string, Status> = {
   "src/app/api/cron/daily/route.ts": { exempt: "cron secret" },
   "src/app/api/cron/store-bench/route.ts": { exempt: "cron secret" },
   "src/app/api/cron/usage-check/route.ts": { exempt: "cron secret" },
+  "src/app/api/cron/probe/route.ts": { exempt: "the planted probe: CRON_SECRET only, never CRON_SECRET_EXT (planted-probe.test.ts)" },
+
 };
 
 const GATE_CALL = /\brequire(Page|Route|Action)?User\(/;
