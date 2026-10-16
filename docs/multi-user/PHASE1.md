@@ -365,3 +365,27 @@ Then, each shown failing first (the commit messages say how):
 and usage-check routes) on top of `cronCaller()` (both secrets: `/api/cron/sync` and
 `/api/cron/health`), one constant-time compare. With `AUTHZ_TARGET=1` only P4a's three pins fail.
 
+
+## 9. The review (lane 1945_lb_mu_13_p1_review, Oct 16, 2026)
+
+`mu/rv-p1` is `mu/s-p1` (`c4a9f02`) and the review's commits. Each finding was shown failing first
+(the commit messages say how); every gate is green on the branch.
+
+- **A tab rendered for one user kept acting for the next** (M7). After a sign-in in another tab
+  hands the browser's cookie to another user, that tab's soft navigations, server actions and
+  now-playing poll answer for the new user, so it showed their data under the old user's chrome,
+  cached and relayed their player under the old user's names, and kept their day rows in its
+  sessionStorage. `/api/now-playing` now names its user (`u`); a reply naming someone else clears
+  this browser's user storage and reloads the page (`user-storage.ts` `leaveForAnotherUser`).
+  Until the next poll the stale tab can still show the new user's answers to the person using it.
+- **The IndexedDB clear** deletes the page user's own database by name, so a browser without
+  `indexedDB.databases()` loses it on the signed-out 401 too.
+- **The shared telemetry init** (no `TELEMETRY_DATABASE_URL`: the log tables in Rem's database)
+  applies its DDL only where `mayApplySchema` allows. Production sets the variable.
+- **Tests added for gaps the mutants found:** Phase 1's directory and the no-default-URL rule
+  (`tests/isolation/directory.test.ts`), and a census of the planted-bug self-test's plants
+  (`static.test.ts`).
+
+For lane 14: production has no `SPOTIFY_OWNER_ID` (`vercel env ls`, names only), so the sign-in's
+owner guard (`src/lib/owner.ts`) rests on the stored `me_id`, and on an empty store it lets the
+first sign-in through. Setting `SPOTIFY_OWNER_ID` beside `OWNER_UID` in step 1 removes that.
