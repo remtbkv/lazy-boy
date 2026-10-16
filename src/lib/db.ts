@@ -25,6 +25,7 @@ import {
 } from "@/lib/skip-rule";
 import { captureHealth, type CaptureHealth } from "@/lib/capture-health";
 import { makeStoreFetch } from "@/lib/store-fetch";
+import { HISTORY_INDEX_SHAPE, LIBRARY_INDEX_SHAPE } from "@/lib/search-shape";
 import {
   CALIBRATION,
   STEADY_SYNC_TICK_ROWS,
@@ -1563,10 +1564,9 @@ export type HistoryIndex = {
  *  served the OLD shape — which the new route destructured into undefineds and shipped a body
  *  with no tracks at all. Every client that fetched it lost its index and fell back to the
  *  server for every keystroke. The ETags carry the token too, for the same reason one layer up
- *  (a browser holding the old body). */
-export const LIBRARY_INDEX_SHAPE = "v1";
-// v2 added the per-song durationMs slot (Home derives its day lists from this payload).
-export const HISTORY_INDEX_SHAPE = "v2";
+ *  (a browser holding the old body), and so does the browser's IndexedDB copy (search-cache.ts).
+ *  Defined in search-shape.ts, which the browser can import. */
+export { LIBRARY_INDEX_SHAPE, HISTORY_INDEX_SHAPE };
 
 /** The library payload's version: `meta.library_seq`, bumped by the writes that change which
  *  tracks are in the library and by nothing else (see the marker's note). NOT write_seq —
