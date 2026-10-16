@@ -1,7 +1,8 @@
 // requireUser(): the one source of a uid for an entry point (docs/multi-user/PLAN.md §5.1,
 // §6.2 layer 2). It wraps auth() and answers in the shape each kind of entry point needs:
 //   - allowed: the branded uid, whether the user is the admin, whether Spotify can be called;
-//   - refused (no session, or a session without a uid): a page redirects to /login, a route
+//   - refused (no session, or a session without a uid): a page redirects to /login (to
+//     /reconnect when the Spotify grant is what died, decision 20), a route
 //     answers 401 with the signed-out marker (the browser clears its stores on it, §6.2 layer
 //     6), an action answers { ok: false };
 //   - unavailable (the identity check could not run): never a redirect and never a 401, so
@@ -35,7 +36,8 @@ export async function requirePageUser(): Promise<Gate> {
   const r = await requireUser();
   if (r.kind === "allowed") return r.gate;
   if (r.kind === "unavailable") throw new RetryableAuthError();
-  redirect("/login");
+  // A dead grant is explained before the sign-in (decision 20 as ruled), never a silent redirect.
+  redirect(r.deadGrant ? "/reconnect" : "/login");
 }
 
 export async function requireRouteUser(): Promise<Gate | Response> {

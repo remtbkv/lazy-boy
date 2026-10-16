@@ -48,11 +48,21 @@ describe("spotifyUserinfo", () => {
 });
 
 describe("loginErrorMessage", () => {
-  it("names the dev-mode allowlist, the single-user rule, and falls back with the code", () => {
+  it("names the dev-mode allowlist, the invite rule, and falls back with the code", () => {
     expect(loginErrorMessage(undefined)).toBeNull();
     expect(loginErrorMessage("SpotifyNotRegistered")).toMatch(/development mode/);
-    expect(loginErrorMessage("AccessDenied")).toMatch(/single-user/);
+    // Phase 4a: no single-user rule any more; an account with no invite is pointed at the form.
+    expect(loginErrorMessage("AccessDenied")).toMatch(/\/join/);
+    expect(loginErrorMessage("AccessDenied")).not.toMatch(/single-user/);
     expect(loginErrorMessage("Configuration")).toBe("Sign-in didn't complete (Configuration). Try again.");
+  });
+
+  it("says Spotify didn't answer for SpotifyUnavailable, and names each refusal the sign-in makes", () => {
+    expect(loginErrorMessage("SpotifyUnavailable")).toMatch(/Spotify didn't answer.*try again/i);
+    expect(loginErrorMessage("NoAccountId")).toMatch(/which account/);
+    expect(loginErrorMessage("AccountDisabled")).toMatch(/paused\. Ask Rem/);
+    expect(loginErrorMessage("AccountDeleted", "2026-10-20")).toMatch(/deleted on 2026-10-20/);
+    expect(loginErrorMessage("AccountDeleted", "<script>")).not.toMatch(/script/);
   });
 });
 

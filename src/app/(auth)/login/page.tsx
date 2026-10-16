@@ -8,12 +8,13 @@ import { loginErrorMessage } from "@/lib/login-error";
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string | string[] }>;
+  searchParams: Promise<{ error?: string | string[]; on?: string | string[] }>;
 }) {
   const session = await auth();
   if (session && !session.error) redirect("/home");
-  const { error } = await searchParams;
-  const failed = loginErrorMessage(Array.isArray(error) ? error[0] : error);
+  const { error, on } = await searchParams;
+  const first = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v);
+  const failed = loginErrorMessage(first(error), first(on));
 
   return (
     <main className="flex flex-1 items-center justify-center p-6">
@@ -47,7 +48,7 @@ export default async function LoginPage({
           </p>
         </form>
         <p className="text-xs text-muted-foreground">
-          We only access your library to manage playlists. Nothing is shared.
+          Lazy Boy reads your library and records what you play, for you alone. Nothing is shared.
         </p>
       </div>
     </main>

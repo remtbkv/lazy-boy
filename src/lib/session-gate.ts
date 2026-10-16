@@ -38,16 +38,18 @@ export function sessionFields(
 export type Gate = { uid: Uid; admin: boolean };
 export type GateResult =
   | { kind: "allowed"; gate: Gate }
-  | { kind: "refused" }
+  | { kind: "refused"; deadGrant?: true }
   | { kind: "unavailable" };
 
 /** requireUser()'s rule over what auth() returned. A uid is minted here and only here on the
  *  request path. A session whose Spotify grant is gone (`error`: no token row, or a dead
- *  refresh) is refused everywhere, the rule the pages always applied (PLAN.md §5.4): one
- *  sign-in restores both reading and capture. */
+ *  refresh) is refused everywhere, the rule the pages always applied (PLAN.md §5.4), and says so
+ *  for a page to explain it at /reconnect (decision 20 as ruled). One sign-in restores both
+ *  reading and capture. */
 export function gateFromSession(session: Session | null): GateResult {
   if (!session) return { kind: "refused" };
   if (session.idUnavailable) return { kind: "unavailable" };
-  if (!isUidShape(session.uid) || session.error) return { kind: "refused" };
+  if (!isUidShape(session.uid)) return { kind: "refused" };
+  if (session.error) return { kind: "refused", deadGrant: true };
   return { kind: "allowed", gate: { uid: mintUid(session.uid), admin: session.admin === true } };
 }

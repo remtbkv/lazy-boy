@@ -144,9 +144,10 @@ describe("session gate (the jwt and session callbacks' decisions)", () => {
     });
     // A session whose Spotify grant is gone (Log out, invalid_grant) is refused on every entry
     // point, as the pages already refused it (PLAN §5.4; AUTHZ.md F2): it used to keep reading
-    // search, history and tasks, a copied cookie included.
+    // search, history and tasks, a copied cookie included. It says why, so a page can explain
+    // the dead grant at /reconnect instead of a silent sign-in page (decision 20 as ruled).
     expect(
       gateFromSession({ user: {}, expires: "", uid: A, admin: false, error: "RefreshAccessTokenError" }),
-    ).toEqual({ kind: "refused" });
+    ).toEqual({ kind: "refused", deadGrant: true });
   });
 });
