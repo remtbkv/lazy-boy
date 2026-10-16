@@ -681,7 +681,7 @@ ARCHITECTURE.md "The budget" has the design. What bites:
 Once the app's data lives on Turso, the Zenbook's sqld keeps the telemetry tables and a frozen
 copy of the old core tables. Anything still pointing core statements at it — a tab pinned to an
 old deployment, a dev server on an old `.env.local`, a script — would write plays or a rotated
-Spotify token where nobody reads them, silently. While `~/lazyboy-sqld/FENCE_CORE` exists the
+Spotify token where nobody reads them, silently. While `/srv/lazyboy-sqld/FENCE_CORE` exists (`~/lazyboy-sqld/FENCE_CORE` is a link to it; `rm` the real file) the
 meter answers **503** to any request carrying a statement that names a core table after
 `FROM`, `JOIN`, `INTO`, `UPDATE`, `TABLE`, `ON` or `table_info(` (stored SQL resolved, comments
 stripped; an unresolvable `sql_id` is fenced too) and logs it as `fenced` in the query log.

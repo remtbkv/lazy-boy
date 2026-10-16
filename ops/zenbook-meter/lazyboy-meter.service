@@ -1,16 +1,36 @@
 [Unit]
-Description=lazyboy store meter (pass-through proxy in front of sqld; logs sqld's exact per-statement rows_read/rows_written to ~/lazyboy-sqld/querylog)
+Description=lazyboy store meter as lbsvc (pass-through proxy in front of sqld; logs sqld's exact per-statement rows_read/rows_written to /srv/lazyboy-sqld/querylog)
 After=lazyboy-sqld.service
 Wants=lazyboy-sqld.service
 
 [Service]
 Type=simple
-WorkingDirectory=%h/lazyboy-sqld
+WorkingDirectory=/srv/lazyboy-sqld
 Environment=LISTEN=127.0.0.1:8090
 Environment=UPSTREAM=127.0.0.1:8092
-ExecStart=/usr/bin/node %h/lazyboy-sqld/meter-proxy.mjs
+Environment=LOG_DIR=/srv/lazyboy-sqld/querylog
+Environment=FENCE_FILE=/srv/lazyboy-sqld/FENCE_CORE
+ExecStart=/usr/bin/node /opt/lazyboy-store/meter-proxy.mjs
 Restart=always
 RestartSec=2
+# Decision 27 / security R10: its own account, no read access to remtbkv's home.
+User=lbsvc
+Group=lbsvc
+UMask=0007
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/srv/lazyboy-sqld
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+# WSL: /mnt/c is 0777 to every account and /run/WSL's interop sockets run Windows programs as Rem's
+# Windows user, so the service sees neither, cannot reach vsock, and cannot exec what it writes.
+InaccessiblePaths=-/mnt -/run/WSL -/init
+NoExecPaths=/srv/lazyboy-sqld
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target

@@ -1,0 +1,31 @@
+[Unit]
+Description=lazyboy store (sqld / libSQL server) as lbsvc: telemetry + the frozen pre-cutover core copy, behind the meter
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/lazyboy-sqld
+ExecStart=/opt/lazyboy-store/bin/sqld --db-path /srv/lazyboy-sqld/data --http-listen-addr 127.0.0.1:8092 --auth-jwt-key-file /opt/lazyboy-store/jwt-public.pem
+Restart=always
+RestartSec=5
+# Decision 27 / security R10: its own account, no read access to remtbkv's home.
+User=lbsvc
+Group=lbsvc
+UMask=0007
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/srv/lazyboy-sqld
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+# WSL: /mnt/c is 0777 to every account and /run/WSL's interop sockets run Windows programs as Rem's
+# Windows user, so the service sees neither, cannot reach vsock, and cannot exec what it writes.
+InaccessiblePaths=-/mnt -/run/WSL -/init
+NoExecPaths=/srv/lazyboy-sqld
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

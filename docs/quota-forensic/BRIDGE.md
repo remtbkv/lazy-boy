@@ -42,8 +42,12 @@ Vercel (lazy-boy, production)
                                                                        │
                                                                   127.0.0.1:8092
                                                                   sqld 0.24.32
-                                                                  ~/lazyboy-sqld/data
+                                                                  /srv/lazyboy-sqld/data
 ```
+
+Since 2026-10-16 both run as system units under their own account, `lbsvc`, sandboxed, with
+the data in `/srv/lazyboy-sqld` (symlinked from `~/lazyboy-sqld`); `ops/zenbook-meter/README.md`
+has the layout, the modes and the rollback. The user-unit commands below predate that.
 
 Since 2026-10-12 a pass-through meter (`~/lazyboy-sqld/meter-proxy.mjs`,
 `lazyboy-meter.service`) owns 8090 and `sqld` listens on 8092. It forwards bytes untouched and
@@ -56,9 +60,11 @@ it still points at 8090.
 The meter also carries the **core fence** (docs/STORE_MIGRATION.md §6.8, GOTCHAS.md "The
 meter's core fence"): while `~/lazyboy-sqld/FENCE_CORE` exists it answers 503 to any request
 naming a core table and logs it as `fenced`; telemetry passes. `touch` on, `rm` off, no
-restart. The source is `ops/zenbook-meter/meter-proxy.mjs` in the repo, with its test beside it
-(`node --test ops/zenbook-meter/meter-proxy.test.mjs`, part of `npm test`); deploy by copying
-it over `~/lazyboy-sqld/meter-proxy.mjs` and restarting `lazyboy-meter`.
+restart (`rm` the real file, `/srv/lazyboy-sqld/FENCE_CORE`, not the link). The source is
+`ops/zenbook-meter/meter-proxy.mjs` in the repo, with its test beside it
+(`node --test ops/zenbook-meter/meter-proxy.test.mjs`, part of `npm test`); deploy by installing
+it as `/opt/lazyboy-store/meter-proxy.mjs` and `sudo systemctl restart lazyboy-meter`
+(ops/zenbook-meter/README.md).
 
 - The app is unchanged. `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` are just pointed somewhere
   else; `@libsql/client` speaks the same Hrana-over-HTTP protocol to `sqld` that it speaks to

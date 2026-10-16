@@ -327,8 +327,9 @@ through the meter. Comparison work uses a small script in the lane's scratch wit
 
 **Rollback.** Before step 12: remove `FENCE_CORE`, flip the env back, redeploy; the Zenbook's core
 tables are untouched since `T_snap`. After step 12 the Zenbook copy is stale: dump Turso's core tables
-(`turso db shell lazyboy .dump`), `systemctl --user stop lazyboy-sqld`, load the dump into a copy of the
-Zenbook file, swap it in, `systemctl --user start lazyboy-sqld`, remove `FENCE_CORE`, then flip back.
+(`turso db shell lazyboy .dump`), `sudo systemctl stop lazyboy-sqld`, load the dump into a copy of the
+Zenbook file, swap it in, `sudo systemctl start lazyboy-sqld`, remove `/srv/lazyboy-sqld/FENCE_CORE`, then flip back
+(since 2026-10-16 sqld runs as `lbsvc`: ops/zenbook-meter/README.md).
 Write down which way the data went. Note: multi-user Phase 0 lands before step 9, so the deployment a
 one-click rollback could reach during the cutover was built after the `AUTH_SECRET` rotation
 (multi-user PLAN §10.2).

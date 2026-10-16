@@ -150,7 +150,8 @@ docs/                    ARCHITECTURE, FEATURES, ROADMAP, CONVENTIONS, GOTCHAS, 
 ops/zenbook-meter/       the store meter deployed on the Zenbook (proxy on 8090 in front of
                          sqld on 8092; exact per-statement rows read/written; telemetry only
                          since the move) + the core fence (503 for core statements while
-                         ~/lazyboy-sqld/FENCE_CORE exists; on since 2026-10-16).
+                         /srv/lazyboy-sqld/FENCE_CORE exists; on since 2026-10-16). Runs as
+                         its own account, lbsvc, sandboxed: ops/zenbook-meter/README.md.
                          READ_QUOTA.md, GOTCHAS.md. Nightly backups of both stores:
                          ~/lazyboy-backup/backup.py on the Zenbook, quota-forensic/BRIDGE.md
 scripts/backfill-from-backstop.mjs  replay the Zenbook backstop recorder's captured plays
