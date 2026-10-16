@@ -253,7 +253,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 - File: `src/app/api/cron/health/route.ts`. Gate today: `src/app/api/cron/health/route.ts:16`.
 - Does, when allowed: the hourly health check: the owner's capture health, the daily stamp, the pace verdict, isolation events; replies ok/reasons/unchecked and nothing about anyone's listening.
-- Calls (from the source): store `forUser`, `isolationEventsAfter`; via `cronCaller`, `healthVerdict`, `phase1Owner`.
+- Calls (from the source): store `forUser`, `getBudgetMode`, `isolationEventsAfter`, `readMeter`; via `cronCaller`, `healthVerdict`, `phase1Owner`.
 - `anon`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; no header → 401
 - `rem`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; Rem's cookie → 401
 - `friendA`, `friendB`, `revoked`, `staleSecret`, `staleLogout`, `forged`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; a cookie → 401
@@ -658,7 +658,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### page /usage
 
-- File: `src/app/(app)/usage/page.tsx`. Gate today: `src/app/(app)/usage/page.tsx:250`.
+- File: `src/app/(app)/usage/page.tsx`. Gate today: `src/app/(app)/usage/page.tsx:251`.
 - Does, when allowed: renders the admin's page: per-page timings, the rows-read ledger, the Spotify call breakdown, capture health.
 - Calls (from the source): store `forUser`; via `captureHealthMessage`, `requirePageUser`, `tzOffsetMinutes`.
 - `anon`: D — requirePageUser: no session → redirect('/login') before any read

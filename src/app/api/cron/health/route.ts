@@ -1,7 +1,7 @@
 // The hourly health check (docs/multi-user/PLAN.md §7.10): a cron-job.org job with failure
 // e-mail calls this; a 500 is the e-mail. The reply carries reasons and the names of checks
 // not yet measurable, never anything about anyone's listening (cron-job.org keeps bodies).
-import { forUser, isolationEventsAfter } from "@/lib/db";
+import { forUser, getBudgetMode, isolationEventsAfter, readMeter } from "@/lib/db";
 import { cronCaller } from "@/lib/cron-auth";
 import { DAILY_STALE_MS, healthVerdict } from "@/lib/health";
 import { phase1Owner } from "@/lib/identity";
@@ -49,11 +49,19 @@ export async function GET(req: Request) {
     /* unreadable: unchecked */
   }
 
+  // The budget (lib/budget/): the stored mode, uncached; the meter's last write, any day.
+  const [budgetMode, meter] = await Promise.all([
+    getBudgetMode(0).catch(() => null),
+    readMeter(new Date().toISOString().slice(0, 10)).catch(() => null),
+  ]);
+
   const v = healthVerdict({
     isolationEvents: events ? events.count : null,
     ownerCapture,
     dailyAgeMs: dailyAt ? Date.now() - dailyAt : null,
     quotaAhead,
+    budgetMode,
+    meterAgeMs: meter ? (meter.lastAt === null ? Number.POSITIVE_INFINITY : Date.now() - meter.lastAt) : null,
   });
   return Response.json(v, { status: v.ok ? 200 : 500 });
 }

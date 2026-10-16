@@ -2,7 +2,9 @@ import {
   getClientLoadSpeed,
   getRecentlyPlayedQuotaWindows,
   getSpotifyCallBreakdown,
+  readBudgetDay,
   readLedger,
+  type BudgetDayRow,
   type ClientLoadSpeed,
   type LedgerRow,
   type QuotaWindow,
@@ -18,26 +20,30 @@ export type UsageTelemetry = {
   client: ClientLoadSpeed;
   spotifyCalls: SpotifyCallSource[];
   quotaWindows: QuotaWindow[];
-  down: { ledger: boolean; client: boolean; spotifyCalls: boolean; quotaWindows: boolean };
+  budget: BudgetDayRow[];
+  down: { ledger: boolean; client: boolean; spotifyCalls: boolean; quotaWindows: boolean; budget: boolean };
 };
 
 export async function loadUsageTelemetry(days: number): Promise<UsageTelemetry> {
-  const [ledger, client, spotifyCalls, quotaWindows] = await Promise.allSettled([
+  const [ledger, client, spotifyCalls, quotaWindows, budget] = await Promise.allSettled([
     readLedger(days),
     getClientLoadSpeed(),
     getSpotifyCallBreakdown(24),
     getRecentlyPlayedQuotaWindows(),
+    readBudgetDay(),
   ]);
   return {
     ledger: ledger.status === "fulfilled" ? ledger.value : [],
     client: client.status === "fulfilled" ? client.value : { pages: [], opens: [], errors: [] },
     spotifyCalls: spotifyCalls.status === "fulfilled" ? spotifyCalls.value : [],
     quotaWindows: quotaWindows.status === "fulfilled" ? quotaWindows.value : [],
+    budget: budget.status === "fulfilled" ? budget.value : [],
     down: {
       ledger: ledger.status === "rejected",
       client: client.status === "rejected",
       spotifyCalls: spotifyCalls.status === "rejected",
       quotaWindows: quotaWindows.status === "rejected",
+      budget: budget.status === "rejected",
     },
   };
 }

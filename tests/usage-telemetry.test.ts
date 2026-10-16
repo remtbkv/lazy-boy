@@ -13,6 +13,7 @@ vi.mock("@/lib/db", () => ({
   getClientLoadSpeed: dead("client", { pages: [{ page: "/home" }], opens: [], errors: [] }),
   getSpotifyCallBreakdown: dead("spotifyCalls", [{ source: "cron", calls: 3 }]),
   getRecentlyPlayedQuotaWindows: dead("quotaWindows", [{ windowStart: 1, calls: 2 }]),
+  readBudgetDay: dead("budget", [{ day: "2026-10-15", dimension: "vercel_cpu_ms", mode: "normal" }]),
 }));
 
 const { loadUsageTelemetry } = await import("@/app/(app)/usage/telemetry");
@@ -26,17 +27,19 @@ describe("loadUsageTelemetry", () => {
     expect(t.client.pages).toHaveLength(1);
     expect(t.spotifyCalls).toHaveLength(1);
     expect(t.quotaWindows).toHaveLength(1);
-    expect(t.down).toEqual({ ledger: false, client: false, spotifyCalls: false, quotaWindows: false });
+    expect(t.budget).toHaveLength(1);
+    expect(t.down).toEqual({ ledger: false, client: false, spotifyCalls: false, quotaWindows: false, budget: false });
   });
 
   it("all down: empty sections, all flagged, no throw", async () => {
-    for (const s of ["ledger", "client", "spotifyCalls", "quotaWindows"]) fail.add(s);
+    for (const s of ["ledger", "client", "spotifyCalls", "quotaWindows", "budget"]) fail.add(s);
     const t = await loadUsageTelemetry(14);
     expect(t.ledger).toEqual([]);
     expect(t.client).toEqual({ pages: [], opens: [], errors: [] });
     expect(t.spotifyCalls).toEqual([]);
     expect(t.quotaWindows).toEqual([]);
-    expect(t.down).toEqual({ ledger: true, client: true, spotifyCalls: true, quotaWindows: true });
+    expect(t.budget).toEqual([]);
+    expect(t.down).toEqual({ ledger: true, client: true, spotifyCalls: true, quotaWindows: true, budget: true });
   });
 
   it("one down: only that section is empty", async () => {

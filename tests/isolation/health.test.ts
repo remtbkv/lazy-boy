@@ -1,8 +1,9 @@
 // The hourly health check (PLAN.md §7.10; T13's cron-secret half for this route). Known answers
 // for each condition, and the route against the simulated store.
 import { beforeEach, describe, expect, it } from "vitest";
-import { healthVerdict, DAILY_STALE_MS } from "@/lib/health";
+import { healthVerdict, DAILY_STALE_MS, METER_QUIET_MS } from "@/lib/health";
 import { GET } from "@/app/api/cron/health/route";
+import { meterFlush, setBudgetMode } from "@/lib/db";
 import { rawClient, resetStore } from "../adversarial/helpers";
 import { reportIsolation } from "@/lib/isolation";
 import { ownerStore, ownerUid } from "../owner-store";
@@ -12,15 +13,31 @@ const healthy = { ok: true, staleForMs: 60_000, reason: null } as const;
 
 describe("healthVerdict", () => {
   it("green when every measurable condition holds, listing what it could not measure", () => {
-    expect(healthVerdict({ isolationEvents: null, ownerCapture: healthy, dailyAgeMs: null, quotaAhead: null })).toEqual({
+    expect(
+      healthVerdict({
+        isolationEvents: null,
+        ownerCapture: healthy,
+        dailyAgeMs: null,
+        quotaAhead: null,
+        budgetMode: null,
+        meterAgeMs: null,
+      }),
+    ).toEqual({
       ok: true,
       reasons: [],
-      unchecked: ["isolation", "daily", "quota-pace"],
+      unchecked: ["isolation", "daily", "quota-pace", "budget", "meter"],
     });
   });
 
   it("each condition turns it red on its own", () => {
-    const base = { isolationEvents: 0, ownerCapture: healthy, dailyAgeMs: 0, quotaAhead: false };
+    const base = {
+      isolationEvents: 0,
+      ownerCapture: healthy,
+      dailyAgeMs: 0,
+      quotaAhead: false,
+      budgetMode: "normal" as const,
+      meterAgeMs: 0,
+    };
     expect(healthVerdict(base)).toEqual({ ok: true, reasons: [], unchecked: [] });
     expect(healthVerdict({ ...base, isolationEvents: 1 }).reasons).toEqual(["isolation"]);
     expect(
@@ -29,6 +46,13 @@ describe("healthVerdict", () => {
     expect(healthVerdict({ ...base, dailyAgeMs: DAILY_STALE_MS + 1 }).reasons).toEqual(["daily"]);
     expect(healthVerdict({ ...base, dailyAgeMs: DAILY_STALE_MS }).ok).toBe(true);
     expect(healthVerdict({ ...base, quotaAhead: true }).reasons).toEqual(["quota-pace"]);
+    // The budget (CAPACITY §6): any dimension in economy or freeze; the meter quiet six hours.
+    expect(healthVerdict({ ...base, budgetMode: "economy" }).reasons).toEqual(["budget"]);
+    expect(healthVerdict({ ...base, budgetMode: "freeze" }).reasons).toEqual(["budget"]);
+    expect(healthVerdict({ ...base, meterAgeMs: METER_QUIET_MS }).ok).toBe(true);
+    expect(healthVerdict({ ...base, meterAgeMs: METER_QUIET_MS + 1 }).reasons).toEqual(["meter"]);
+    expect(healthVerdict({ ...base, meterAgeMs: Number.POSITIVE_INFINITY }).reasons).toEqual(["meter"]);
+    expect(METER_QUIET_MS).toBe(6 * 3_600_000);
   });
 });
 
@@ -56,6 +80,8 @@ describe("/api/cron/health", () => {
   });
 
   it("red when the owner has no token row; green with a token and a recent harvest; no listening data", async () => {
+    // The meter writes on every metered request in production; a meter that never wrote is red.
+    await meterFlush([{ day: new Date().toISOString().slice(0, 10), route: "/api/x", uid: "-", invocations: 1, cpuUs: 1, wallMs: 1, bytes: 0 }]);
     const red = await call("Bearer ext-secret");
     expect(red.status).toBe(500);
     expect((await red.json()).reasons).toEqual(["owner-capture"]);
@@ -76,6 +102,8 @@ describe("/api/cron/health", () => {
     await c.execute({ sql: "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_sync', ?)", args: [new Date().toISOString()] });
     await ownerStore().setHealthMark("daily_at", String(Date.now() - 3_600_000));
     await ownerStore().setHealthMark("quota_pace", JSON.stringify({ at: Date.now() - 3_600_000, ahead: false }));
+    await setBudgetMode("normal");
+    await meterFlush([{ day: new Date().toISOString().slice(0, 10), route: "/api/cron/sync", uid: "-", invocations: 1, cpuUs: 1, wallMs: 1, bytes: 0 }]);
   }
 
   it("with every input measurable it checks them all: green, nothing unchecked", async () => {
@@ -112,5 +140,34 @@ describe("/api/cron/health", () => {
     const old = await (await call("Bearer ext-secret")).json();
     expect(old.reasons).toEqual([]);
     expect(old.unchecked).toEqual(["quota-pace"]);
+  });
+
+  it("red while the budget is in economy or freeze, green again at normal", async () => {
+    await healthy();
+    await setBudgetMode("economy");
+    const red = await call("Bearer ext-secret");
+    expect(red.status).toBe(500);
+    expect((await red.json()).reasons).toEqual(["budget"]);
+    await setBudgetMode("freeze");
+    expect((await (await call("Bearer ext-secret")).json()).reasons).toEqual(["budget"]);
+    await setBudgetMode("normal");
+    expect((await call("Bearer ext-secret")).status).toBe(200);
+    // Never recorded: not measurable yet.
+    const c = await rawClient();
+    await c.execute("DELETE FROM meta WHERE key = 'budget_mode'");
+    expect((await (await call("Bearer ext-secret")).json()).unchecked).toEqual(["budget"]);
+  });
+
+  it("red when the meter has written nothing for six hours, or ever", async () => {
+    await healthy();
+    const c = await rawClient();
+    await c.execute({ sql: "UPDATE cpu_meter SET updated_at = ?", args: [Date.now() - METER_QUIET_MS + 60_000] });
+    expect((await call("Bearer ext-secret")).status).toBe(200);
+    await c.execute({ sql: "UPDATE cpu_meter SET updated_at = ?", args: [Date.now() - METER_QUIET_MS - 60_000] });
+    const quiet = await call("Bearer ext-secret");
+    expect(quiet.status).toBe(500);
+    expect((await quiet.json()).reasons).toEqual(["meter"]);
+    await c.execute("DELETE FROM cpu_meter");
+    expect((await (await call("Bearer ext-secret")).json()).reasons).toEqual(["meter"]);
   });
 });

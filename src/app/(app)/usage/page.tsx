@@ -3,6 +3,7 @@ import { captureHealthMessage } from "@/lib/capture-health";
 import { forUser, type ClientMetricsPage, type MetricStat, type PageOpen } from "@/lib/db";
 import { requirePageUser } from "@/lib/require-user";
 import { tzOffsetMinutes } from "@/lib/tz";
+import { BudgetSection } from "./budget-section";
 import { LedgerDays } from "./ledger-days";
 import { loadUsageTelemetry } from "./telemetry";
 
@@ -257,7 +258,7 @@ export default async function UsagePage() {
     tzOffsetMinutes(store),
     store.getCaptureHealth().catch(() => null),
   ]);
-  const { ledger, client, spotifyCalls, quotaWindows, down } = telemetry;
+  const { ledger, client, spotifyCalls, quotaWindows, budget, down } = telemetry;
   const summaryByPage = new Map(client.pages.map((p) => [p.page, p]));
 
   return (
@@ -276,6 +277,8 @@ export default async function UsagePage() {
           <p className="mt-1 text-sm text-amber-400/90">{captureHealthMessage(capture)}</p>
         </div>
       )}
+
+      <BudgetSection rows={budget} down={down.budget} />
 
       {/* ── How fast each visible part arrived ──────────────────────────────────────────── */}
       <section className="mt-8">
