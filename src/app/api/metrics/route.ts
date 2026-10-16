@@ -1,3 +1,4 @@
+import { after } from "next/server";
 import { auth } from "@/lib/auth";
 import { recordClientMetrics, type ClientMetricInput } from "@/lib/db";
 
@@ -9,7 +10,9 @@ import { recordClientMetrics, type ClientMetricInput } from "@/lib/db";
 // THIS ENDPOINT MUST NEVER BREAK THE APP IT MEASURES: everything past the auth check is
 // wrapped, and a failed insert answers 204 like a successful one. The beacon has nowhere to
 // report an error to anyway, and a dropped timing is a hole in a diagnostic — the same
-// contract logSpotifyRequest and the read-cost ledger hold to.
+// contract logSpotifyRequest and the read-cost ledger hold to. The insert itself runs in
+// after(), once the 204 is sent: it goes to the telemetry store (the Zenbook, behind the
+// Funnel), and the beacon must not wait on that host (docs/STORE_MIGRATION.md §6.4).
 const MAX_EVENTS = 50;
 const MAX_BODY_BYTES = 16 * 1024;
 
@@ -43,7 +46,13 @@ export async function POST(req: Request) {
         at: typeof at === "number" && Number.isFinite(at) ? at : null,
       });
     }
-    await recordClientMetrics(rows);
+    if (rows.length > 0) {
+      after(() =>
+        recordClientMetrics(rows).catch(() => {
+          /* same contract as above: a lost timing never becomes an error */
+        }),
+      );
+    }
   } catch {
     /* a metric that can't be stored is not worth an error in the client path */
   }
