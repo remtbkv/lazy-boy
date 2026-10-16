@@ -1,7 +1,7 @@
 // Phase E (docs/STORE_MIGRATION.md §10): the browser's copy of the two search payloads. The cache
 // module runs here against an in-memory map standing in for IndexedDB; the IndexedDB adapter is
 // the only part these tests do not reach.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   clearStored,
   historyOk,
@@ -155,15 +155,37 @@ describe("readStored / writeStored", () => {
   });
 
   it("a storage that throws (private mode, quota) reads as a miss and never throws", async () => {
-    expect(await readStored(failingKV, lib(), libraryOk)).toBeNull();
-    await expect(writeStored(failingKV, lib(), "41", JSON.stringify(LIB))).resolves.toBeUndefined();
-    await expect(clearStored(failingKV)).resolves.toBeUndefined();
+    const m = await freshModule();
+    expect(await m.readStored(failingKV, lib(), libraryOk)).toBeNull();
+    await expect(m.writeStored(failingKV, lib(), "41", JSON.stringify(LIB))).resolves.toBeUndefined();
+    await expect(m.clearStored(failingKV)).resolves.toBeUndefined();
+  });
+});
+
+// clearStored is the sign-out form's: it ends storing for the page, so each of these gets its own
+// module instance.
+const freshModule = async () => {
+  vi.resetModules();
+  return import("@/lib/search-cache");
+};
+
+describe("clearStored (the sign-out form)", () => {
+  it("empties the store", async () => {
+    const m = await freshModule();
+    const kv = memoryKV();
+    await m.writeStored(kv, lib(), "41", JSON.stringify(LIB));
+    expect(kv.map.size).toBe(1);
+    await m.clearStored(kv);
+    expect(kv.map.size).toBe(0);
   });
 
-  it("clearStored empties it", async () => {
+  it("a body that lands after the sign-out submit is not stored", async () => {
+    // Home's history fetch is still in flight when the form submits; its body arrives after the
+    // clear and must not put the signed-out user's copy back.
+    const m = await freshModule();
     const kv = memoryKV();
-    await writeStored(kv, lib(), "41", JSON.stringify(LIB));
-    await clearStored(kv);
+    await m.clearStored(kv);
+    await m.writeStored(kv, hist(), "907", JSON.stringify(HIST));
     expect(kv.map.size).toBe(0);
   });
 });

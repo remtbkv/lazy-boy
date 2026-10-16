@@ -118,8 +118,14 @@ export async function readStored<T>(kv: SearchKV, slot: Slot, ok: (d: unknown) =
   }
 }
 
+/** Set by clearStored, the sign-out form's: a body Home was still fetching when the form
+ *  submitted lands after the clear, and must not put the copy back. For the rest of this page
+ *  load; signing in again is a full navigation (the OAuth round trip). */
+let ended = false;
+
 /** Store a validated body as the slot's last good copy, replacing any other version of it. */
 export async function writeStored(kv: SearchKV, slot: Slot, version: string | null, text: string): Promise<void> {
+  if (ended) return;
   try {
     const key = encode(slot, version);
     await kv.put(key, { u: slot.userKey, text } satisfies Stored);
@@ -134,6 +140,7 @@ export async function writeStored(kv: SearchKV, slot: Slot, version: string | nu
 }
 
 export async function clearStored(kv: SearchKV): Promise<void> {
+  ended = true;
   try {
     await kv.clear();
   } catch {
