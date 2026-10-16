@@ -542,7 +542,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action dockDataAction
 
-- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:18`.
+- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:16`.
 - Does, when allowed: reads every stored playlist, me_id, the clean-backup preference and the sync stamp.
 - Calls (from the source): store `forUser`; via `requireActionUser`.
 - `anon`: D — gated(): requireActionUser refused → an empty answer before any read
@@ -555,7 +555,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action dayTracksAction
 
-- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:18`.
+- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:16`.
 - Does, when allowed: reads one day's plays.
 - Calls (from the source): store `forUser`; via `requireActionUser`, `tzOffsetMinutes`.
 - `anon`: D — gated(): requireActionUser refused → an empty answer before any read
@@ -568,7 +568,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action dailyStatsAction
 
-- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:18`.
+- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:16`.
 - Does, when allowed: reads per-day play counts for up to 100,000 days.
 - Calls (from the source): store `forUser`; via `requireActionUser`, `tzOffsetMinutes`.
 - `anon`: D — gated(): requireActionUser refused → an empty answer before any read
@@ -581,7 +581,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action allTimePlaysAction
 
-- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:18`.
+- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:16`.
 - Does, when allowed: reads the 300 most-played tracks.
 - Calls (from the source): store `forUser`; via `requireActionUser`.
 - `anon`: D — gated(): requireActionUser refused → an empty answer before any read
@@ -594,7 +594,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action searchPlaysAction
 
-- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:18`.
+- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:16`.
 - Does, when allowed: LIKE-searches every play by name or artist.
 - Calls (from the source): store `forUser`; via `requireActionUser`.
 - `anon`: D — gated(): requireActionUser refused → an empty answer before any read
@@ -607,9 +607,9 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action refreshHistoryAction
 
-- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:18`.
-- Does, when allowed: harvests recently-played with Rem's grant, then re-reads the strip, all-time totals and the visible day.
-- Calls (from the source): store `forUser`; via `requireActionUser`, `getSpotify`, `syncRecentPlays`, `tzOffsetMinutes`.
+- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:16`.
+- Does, when allowed: re-reads the strip, the all-time totals, the visible day and the plays the client's index is missing from Rem's store; no Spotify call (decision 15).
+- Calls (from the source): store `forUser`, `ledgerAdd (w)`; via `requireActionUser`, `tzOffsetMinutes`.
 - `anon`: D — gated(): requireActionUser refused → NO_REFRESH before any read
 - `rem`: A — the owner's session: the identity check allows OWNER_UID, Phase 1's one user (src/lib/identity.ts)
 - `friendA`, `friendB`: I — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
