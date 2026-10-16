@@ -471,7 +471,7 @@ the ones quoted in the commit history.
 
 Home keeps the last good body of `/api/search/library` and `/api/search/history` in IndexedDB
 (`lb-search`, `src/lib/search-cache.ts`) and builds the search set from it on mount, then swaps in
-the network pair (`lb:index-idb` on /usage when the stored copy got there first). Four rules that
+the network pair (`lb:index-idb` on /usage when the stored copy got there first). Five rules that
 are easy to break:
 - **It feeds search, never the day list.** The stored history can be hours old; a day derived from
   it could replace a fresher day the page holds. `setHistory` takes network bodies only.
@@ -480,7 +480,12 @@ are easy to break:
   token, never reuse it. A stored body also passes the network path's validators or is deleted.
 - **It is per user.** Records are keyed and stamped with the opaque key the `(app)` layout renders
   on `#den-root` (a constant today; multi-user's uid later); another key clears the store, and the
-  sign-out form clears it as it submits (the server action's response can't).
+  sign-out form clears it as it submits (the server action's response can't). That clear also ends
+  storing for the page load: a payload still in flight lands after it and would put the copy back.
+- **Every network-built set sets `fresh`.** The mount read can resolve seconds late (a slow or busy
+  IndexedDB), and it yields only to `fresh`. The refresh's patch path once set `entries` without it
+  (the pair's handler bails when the history ref is replaced), so a late read replaced the patched
+  set with the stored one (L6 review, 2026-10-16).
 - **Storage failures are silent misses** (private mode, quota, no IndexedDB): the page then behaves
   exactly as before the copy existed. Sizes and main-thread cost are in the module header.
 
