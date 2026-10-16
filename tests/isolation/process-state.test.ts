@@ -97,6 +97,6 @@ describe("requireRouteUser", () => {
     expect((down as Response).headers.get("x-lb-signed-out")).toBeNull();
 
     state.session = asUser(B);
-    expect(await requireRouteUser()).toEqual({ uid: B, admin: false, canCallSpotify: true });
+    expect(await requireRouteUser()).toEqual({ uid: B, admin: false });
   });
 });

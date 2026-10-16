@@ -73,8 +73,8 @@ function chunk<T>(arr: T[], size: number): T[][] {
 
 export class Resources {
   readonly http: HttpClient;
-  constructor(token: TokenSource, patient = false, source = "untagged") {
-    this.http = new HttpClient(token, patient, source);
+  constructor(token: TokenSource, patient = false, source = "untagged", owner: string | null = null) {
+    this.http = new HttpClient(token, patient, source, owner);
   }
 
   /** Whole library in native order. It used to sit in a 60-second process-wide cache, the one

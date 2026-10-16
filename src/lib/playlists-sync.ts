@@ -9,7 +9,7 @@
 // so newly-cached data appears as it lands.
 import "server-only";
 import { getValidAccessTokenFor, spotifyAccessTokenFor } from "@/lib/auth";
-import { getLibrarySyncedAt, getSpotifyCooldownUntil } from "@/lib/db";
+import { forUser, getSpotifyCooldownUntil } from "@/lib/db";
 import { spotifyClient } from "@/lib/spotify";
 import { syncLibrary } from "@/lib/sync/library";
 import type { Uid } from "@/lib/identity";
@@ -29,7 +29,8 @@ export async function startLibrarySync(user: Gate): Promise<
   { taskId: string; skipped?: undefined } | { skipped: string; taskId?: undefined }
 > {
   const { uid } = user;
-  if (!user.canCallSpotify || !(await spotifyAccessTokenFor(uid))) throw new Error("unauthorized");
+  if (!(await spotifyAccessTokenFor(uid))) throw new Error("unauthorized");
+  const store = forUser(uid);
 
   // A live Spotify penalty makes a scan pointless: its first call 429s, and because the
   // library then STAYS stale, every navigation re-kicks another doomed probe (api_log,
@@ -46,7 +47,7 @@ export async function startLibrarySync(user: Gate): Promise<
   // state (wave-2 audit, C7). A store synced within the client's own 2h staleness window
   // has nothing to scan for. Skips are ordinary answers, not errors — a 500 here reads as
   // breakage in every console.
-  const syncedAt = await getLibrarySyncedAt();
+  const syncedAt = await store.getLibrarySyncedAt();
   if (syncedAt && Date.now() - Date.parse(syncedAt) < 2 * 60 * 60 * 1000) {
     return { skipped: "fresh" };
   }
@@ -63,14 +64,14 @@ export async function startLibrarySync(user: Gate): Promise<
   // finish, not fail fast like an interactive call. Combined with pacing, it stays gentle.
   // Token getter, not the session's fixed token — a cold full-library scan can outlive
   // the ~1h access token (GOTCHAS: background tasks get a getter, or they 401 mid-run).
-  const sp = spotifyClient(async () => {
+  const sp = spotifyClient(uid, async () => {
     const t = await getValidAccessTokenFor(uid);
     if (!t) throw new Error("Spotify session expired — log out and back in.");
     return t;
   }, true, "library-scan-bg");
   const task: Task = runTask(
     "library-sync",
-    (onProgress) => syncLibrary(sp, onProgress, { paceMs: SYNC_PACE_MS }),
+    (onProgress) => syncLibrary(sp, store, onProgress, { paceMs: SYNC_PACE_MS }),
     uid,
   );
   currentSync.set(uid, task.id);

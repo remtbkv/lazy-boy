@@ -1,17 +1,8 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
-import {
-  getAllTimeStats,
-  getCaptureHealth,
-  getDailyStats,
-  getHomePayload,
-  getPlaysByDay,
-  getSpotifyCooldownUntil,
-  rebuildHomePayload,
-  type HomePayload,
-} from "@/lib/db";
+import { forUser, getSpotifyCooldownUntil, type HomePayload, type UserStore } from "@/lib/db";
+import { requirePageUser } from "@/lib/require-user";
 import { tzOffsetMinutes } from "@/lib/tz";
 import { DenHome } from "./den-home";
 import { RateLimitNotice } from "./rate-limit-notice";
@@ -53,14 +44,14 @@ type HomeData = Pick<HomePayload, "daily" | "allTime" | "initialDay" | "initialT
  *  — the shape the payload exists to remove — so it also kicks off a rebuild, and the next
  *  load is a single read again. The rebuild is not awaited: this request already has its
  *  answer, and making the first visitor after a deploy wait on a write helps nobody. */
-async function readHomeInline(): Promise<HomeData> {
-  const tz = await tzOffsetMinutes();
-  const [daily, allTime] = await Promise.all([getDailyStats(tz, 14), getAllTimeStats()]);
+async function readHomeInline(store: UserStore): Promise<HomeData> {
+  const tz = await tzOffsetMinutes(store);
+  const [daily, allTime] = await Promise.all([store.getDailyStats(tz, 14), store.getAllTimeStats()]);
   const todayLocal = new Date(Date.now() + tz * 60_000).toISOString().slice(0, 10);
   // Serial by necessity: which day to open depends on which days have plays.
   const initialDay = daily[0]?.day ?? todayLocal;
-  const initialTracks = await getPlaysByDay(initialDay, tz);
-  void rebuildHomePayload().catch((e) => {
+  const initialTracks = await store.getPlaysByDay(initialDay, tz);
+  void store.rebuildHomePayload().catch((e) => {
     console.error("[home-payload] rebuild from render failed", e);
   });
   return { daily, allTime, initialDay, initialTracks };
@@ -72,20 +63,26 @@ export default async function HomePage() {
   // "The Home payload"). The page used to run those as two or three sequential query waves,
   // each paying a full round trip to the funnel-reached primary before any work started, to
   // recompute an answer that only moves when a sync writes.
+  // The gate runs FIRST and alone: the reads need its uid, so nothing is read for a caller it
+  // refuses (multi-user PLAN §5.1; AUTHZ.md F8: the reads used to share a Promise.all with
+  // auth(), so an anonymous request paid three store reads before its redirect). Gate here,
+  // not just in the layout: Next renders layout and page in parallel, so the layout's
+  // redirect alone still flushes this page's data into the 307 body (SECURITY.md).
+  const user = await requirePageUser();
+  const store = forUser(user.uid);
   // The payload read gets a catch: a transient store hiccup (cold funnel, sqld restart)
   // should fall through to the inline path — which retries the connection — rather than
   // crash the render into the error boundary (Rem's stale-tab morning refresh, 2026-08-15).
+  // auth() again costs no store read: the identity check and the token read are per-request
+  // boxes the gate's call already filled; it is here for the greeting's name.
   const [session, payload, cooldownUntil, captureHealth] = await Promise.all([
     auth(),
-    getHomePayload().catch(() => null),
+    store.getHomePayload().catch(() => null),
     getSpotifyCooldownUntil().catch(() => 0),
-    getCaptureHealth().catch(() => null),
+    store.getCaptureHealth().catch(() => null),
   ]);
-  // Gate here, not just in the layout: Next renders layout and page in parallel, so the
-  // layout's redirect alone still flushes this page's data into the 307 body (SECURITY.md).
-  if (!session || session.error) redirect("/login");
   const name = session?.user?.name ?? "You";
-  const { daily, allTime, initialDay, initialTracks } = payload ?? (await readHomeInline());
+  const { daily, allTime, initialDay, initialTracks } = payload ?? (await readHomeInline(store));
   const first = name.split(" ")[0] || name;
 
   const greetings = loadGreetings();

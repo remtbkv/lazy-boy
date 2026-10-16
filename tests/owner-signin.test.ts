@@ -6,8 +6,11 @@
 // next/server, which the simulated environment can't load.
 import { beforeEach, describe, expect, it } from "vitest";
 import { isOwnerSignIn } from "@/lib/owner";
-import { getSpotifyTokens, setSpotifyTokens } from "@/lib/db";
 import { rawClient, resetStore } from "./adversarial/helpers";
+import { ownerStore } from "./owner-store";
+
+const getSpotifyTokens = () => ownerStore().getSpotifyTokens();
+const setSpotifyTokens = (t: typeof OWNER_TOKENS) => ownerStore().setSpotifyTokens(t);
 
 async function setMeId(id: string): Promise<void> {
   const c = await rawClient();

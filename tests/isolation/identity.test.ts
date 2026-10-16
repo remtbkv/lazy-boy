@@ -140,17 +140,20 @@ describe("session gate (the jwt and session callbacks' decisions)", () => {
     expect(sessionFields({ kind: "refused", reason: "unknown" })).toEqual({});
   });
 
-  it("gateFromSession: allowed only with a uid; unavailable keeps its retry; no session refuses", () => {
+  it("gateFromSession: allowed only with a uid and a live grant; unavailable keeps its retry; no session refuses", () => {
     expect(gateFromSession(null)).toEqual({ kind: "refused" });
     expect(gateFromSession({ user: {}, expires: "" })).toEqual({ kind: "refused" });
     expect(gateFromSession({ user: {}, expires: "", idUnavailable: true })).toEqual({ kind: "unavailable" });
     expect(gateFromSession({ user: {}, expires: "", uid: "not-a-uid" })).toEqual({ kind: "refused" });
     expect(gateFromSession({ user: {}, expires: "", uid: A, admin: true })).toEqual({
       kind: "allowed",
-      gate: { uid: A, admin: true, canCallSpotify: true },
+      gate: { uid: A, admin: true },
     });
+    // A session whose Spotify grant is gone (Log out, invalid_grant) is refused on every entry
+    // point, as the pages already refused it (PLAN §5.4; AUTHZ.md F2): it used to keep reading
+    // search, history and tasks, a copied cookie included.
     expect(
       gateFromSession({ user: {}, expires: "", uid: A, admin: false, error: "RefreshAccessTokenError" }),
-    ).toEqual({ kind: "allowed", gate: { uid: A, admin: false, canCallSpotify: false } });
+    ).toEqual({ kind: "refused" });
   });
 });

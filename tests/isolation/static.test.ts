@@ -5,8 +5,6 @@
 // and the check fails if a PENDING entry disappears without its line being deleted, so the
 // lists only shrink on purpose.
 //
-// S3 (no per-user function exported from db.ts) and S7 (no await on the telemetry client) wait
-// for forUser and STORE_MIGRATION's telemetry client; see docs/multi-user/PHASE1.md §4.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import ts from "typescript";
@@ -51,8 +49,7 @@ function calls(match: (callee: string) => boolean): string[] {
 
 describe("S1: unstable_cache only inside userCache", () => {
   const ALLOWED = new Set(["src/lib/user-cache.ts"]);
-  // PENDING: db.ts's seven cached reads move onto userCache in Phase 1's turn.
-  const PENDING = new Set(["src/lib/db.ts"]);
+  const PENDING = new Set<string>([]);
 
   it("no other file calls it", () => {
     const files = new Set(calls((c) => c === "unstable_cache").map((s) => s.split(":")[0]));
@@ -81,17 +78,95 @@ describe("S2: a Uid is minted in one place", () => {
   });
 
   it("mintUid is imported only by the minters", () => {
-    const importers: string[] = [];
-    for (const { rel, sf } of FILES) {
-      for (const st of sf.statements) {
-        if (!ts.isImportDeclaration(st)) continue;
-        const named = st.importClause?.namedBindings;
-        if (named && ts.isNamedImports(named) && named.elements.some((e) => (e.propertyName ?? e.name).text === "mintUid")) {
-          importers.push(rel);
-        }
+    expect(importersOf("mintUid").filter((f) => !MINTERS.has(f))).toEqual([]);
+  });
+
+  // phase1Owner() mints Rem's uid from OWNER_UID for the paths that act for him with no
+  // session: the cron and the daily chores until Phase 3's claim, the health check, the
+  // sign-in's owner guard, and db.ts's app-wide rows (the cooldown) until Phase 2's app database.
+  const OWNER_PATHS = new Set([
+    "src/lib/db.ts",
+    "src/lib/owner.ts",
+    "src/app/api/cron/sync/route.ts",
+    "src/app/api/cron/daily/route.ts",
+    "src/app/api/cron/health/route.ts",
+    "src/app/api/cron/store-bench/route.ts",
+  ]);
+  it("phase1Owner is imported only by the paths that act for the owner without a session", () => {
+    expect(importersOf("phase1Owner").filter((f) => !OWNER_PATHS.has(f))).toEqual([]);
+  });
+
+  // forUserAt names the database as well as the user: only Phase 2's identity read (with the
+  // db_name it returns) may call it. Nothing in src does in Phase 1; the tests do.
+  it("forUserAt is imported by nothing in src", () => {
+    expect(importersOf("forUserAt")).toEqual([]);
+  });
+});
+
+function importersOf(name: string): string[] {
+  const out: string[] = [];
+  for (const { rel, sf } of FILES) {
+    for (const st of sf.statements) {
+      if (!ts.isImportDeclaration(st)) continue;
+      const named = st.importClause?.namedBindings;
+      if (named && ts.isNamedImports(named) && named.elements.some((e) => (e.propertyName ?? e.name).text === name)) {
+        out.push(rel);
       }
     }
-    expect(importers.filter((f) => !MINTERS.has(f))).toEqual([]);
+  }
+  return out;
+}
+
+describe("S3: db.ts exports no per-user function", () => {
+  // Every value db.ts exports, as a snapshot a reviewer sees change: forUser and forUserAt (the
+  // only way to a user's data), the telemetry store's functions (no user's database), the
+  // app-wide cooldown (the admin's database until Phase 2's app_meta), and pure helpers and
+  // constants. A per-user function exported here could run against a database without naming
+  // its user (PLAN.md §6.2 layer 3).
+  const EXPORTS = [
+    "HISTORY_INDEX_SHAPE",
+    "HOME_PAYLOAD_SHAPE",
+    "LIBRARY_INDEX_SHAPE",
+    "SUMMARY_EVENTS",
+    "StoreRefusedError",
+    "USER_SCHEMA_VERSION",
+    "forUser",
+    "forUserAt",
+    "getApiLogSummary",
+    "getClientLoadSpeed",
+    "getRecentlyPlayedQuotaWindows",
+    "getSpotifyCallBreakdown",
+    "getSpotifyCooldownUntil",
+    "isolationEventsAfter",
+    "ledgerAdd",
+    "ledgerDayModeledTotal",
+    "ledgerSet",
+    "logSpotifyRequest",
+    "mayApplySchema",
+    "openVerdict",
+    "payloadTzOffset",
+    "pruneApiLog",
+    "pruneClientMetrics",
+    "readLedger",
+    "recordClientMetrics",
+    "setSpotifyCooldownUntil",
+  ];
+
+  it("its value exports match the snapshot", () => {
+    const db = FILES.find((f) => f.rel === "src/lib/db.ts")!;
+    const names: string[] = [];
+    for (const st of db.sf.statements) {
+      const exported = (ts.canHaveModifiers(st) ? (ts.getModifiers(st) ?? []) : []).some(
+        (m) => m.kind === ts.SyntaxKind.ExportKeyword,
+      );
+      if (!exported) continue;
+      if ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name) names.push(st.name.text);
+      if (ts.isVariableStatement(st)) {
+        for (const d of st.declarationList.declarations) if (ts.isIdentifier(d.name)) names.push(d.name.text);
+      }
+      if (ts.isExportDeclaration(st)) names.push(st.getText(db.sf));
+    }
+    expect(names.sort()).toEqual([...EXPORTS].sort());
   });
 });
 
@@ -127,14 +202,14 @@ describe("S4: module-scope state is on a reviewed list", () => {
     "src/lib/metrics-client.ts: visibleMs": BROWSER,
     "src/lib/metrics-client.ts: visibleSince": BROWSER,
     "src/lib/search-perf.ts: enabled": BROWSER,
+    "src/lib/db.ts: g": "clients by db_name, owner verdicts and schema runs by (uid, db_name), the telemetry client",
+    "src/lib/db.ts: storeSizeMemo": "Map keyed by (uid, db_name)",
+    "src/lib/db.ts: uniqueRecomputeKickedAt": "Map keyed by (uid, db_name)",
+    "src/lib/db.ts: apiLogWrites": "the telemetry store's prune counter: one log for the app, no user data",
+    "src/app/api/cron/store-bench/route.ts: warm": "whether this instance served a request yet; no user data",
   };
-  // PENDING: db.ts state that becomes per uid in Phase 1's turn (PLAN.md §6.2 layer 4).
-  const PENDING: Record<string, string> = {
-    "src/lib/db.ts: apiLogWrites": "telemetry prune counter; moves to the telemetry client (lane 1901)",
-    "src/lib/db.ts: g": "the one store client; becomes forUser's client map",
-    "src/lib/db.ts: storeSizeMemo": "per uid",
-    "src/lib/db.ts: uniqueRecomputeKickedAt": "per uid",
-  };
+  // PENDING: none left; an entry here is single-user state still waiting for its key.
+  const PENDING: Record<string, string> = {};
 
   const MUTATORS = new Set(["set", "add", "delete", "clear", "push", "pop", "splice", "shift", "unshift", "sort", "reverse", "fill"]);
 
@@ -147,7 +222,15 @@ describe("S4: module-scope state is on a reviewed list", () => {
         const root = ts.isPropertyAccessExpression(left) || ts.isElementAccessExpression(left) ? left.expression : left;
         if (ts.isIdentifier(root) && root.text === name && (isLet || root !== left)) hit = true;
       }
-      if ((ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) && ts.isIdentifier(n.operand) && n.operand.text === name) hit = true;
+      // ++ and -- only: `!x` and `-x` read a binding, they do not change it.
+      if (
+        (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
+        (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken) &&
+        ts.isIdentifier(n.operand) &&
+        n.operand.text === name
+      ) {
+        hit = true;
+      }
       if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)) {
         const obj = n.expression.expression;
         if (ts.isIdentifier(obj) && obj.text === name && MUTATORS.has(n.expression.name.text)) hit = true;
@@ -252,6 +335,52 @@ describe("S6: browser storage names", () => {
     const bad = all.filter((s) => !/\(userStorageName\(/.test(s) && !DEVICE.has(s) && !PENDING.has(s));
     expect(bad).toEqual([]);
     for (const p of PENDING) expect(all, `${p} is gone: drop it from PENDING`).toContain(p);
+  });
+});
+
+describe("S7: no user path awaits the telemetry store", () => {
+  // The telemetry store is the Zenbook (STORE_MIGRATION §5): a user path that awaits it waits
+  // on it. Its calls are fired with `void` or in after(); these files await on purpose.
+  const TELEMETRY = new Set([
+    "logSpotifyRequest",
+    "getSpotifyCallBreakdown",
+    "getRecentlyPlayedQuotaWindows",
+    "pruneApiLog",
+    "pruneClientMetrics",
+    "getApiLogSummary",
+    "ledgerAdd",
+    "ledgerSet",
+    "readLedger",
+    "ledgerDayModeledTotal",
+    "recordClientMetrics",
+    "getClientLoadSpeed",
+    "isolationEventsAfter",
+  ]);
+  const ALLOWED: Record<string, string> = {
+    "src/app/api/cron/daily/route.ts": "the daily chores",
+    "src/lib/usage-check.ts": "run by the daily chores and the usage-check cron route",
+    "src/app/(app)/usage/telemetry.ts": "/usage, settled one section at a time",
+    "src/app/api/cron/health/route.ts": "the health check reads isolation events where Phase 1 records them",
+    "src/lib/isolation.ts": "an isolation event's only record in Phase 1; a rare path, 4 s cap",
+    "src/instrumentation.ts": "server errors only, after the response (STORE_MIGRATION §6 item 4)",
+  };
+
+  it("awaits a telemetry function only in the allowed files", () => {
+    const bad: string[] = [];
+    for (const { rel, sf } of FILES) {
+      if (rel === "src/lib/db.ts" || rel in ALLOWED) continue;
+      visit(sf, (n) => {
+        if (!ts.isAwaitExpression(n)) return;
+        let e: ts.Expression = n.expression;
+        while (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && /^(catch|then|finally)$/.test(e.expression.name.text)) {
+          e = e.expression.expression;
+        }
+        if (ts.isCallExpression(e) && ts.isIdentifier(e.expression) && TELEMETRY.has(e.expression.text)) {
+          bad.push(`${rel}: await ${e.expression.text}`);
+        }
+      });
+    }
+    expect(bad).toEqual([]);
   });
 });
 

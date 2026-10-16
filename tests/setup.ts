@@ -11,3 +11,9 @@ delete process.env.TURSO_AUTH_TOKEN;
 // its own; an inherited TELEMETRY_* would point the log rows at the real Zenbook.
 delete process.env.TELEMETRY_DATABASE_URL;
 delete process.env.TELEMETRY_AUTH_TOKEN;
+// The owner (multi-user Phase 1): forUser() maps this uid to Rem's database, which is the file
+// above. A test about an unset or different owner sets its own; the per-user template is
+// unset unless a test provisions its own files (tests/isolation/).
+process.env.OWNER_UID = "ownerownerow";
+delete process.env.STORE_URL_TEMPLATE;
+delete process.env.VERCEL_ENV;

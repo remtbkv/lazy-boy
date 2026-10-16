@@ -41,8 +41,10 @@ vi.mock("@/lib/spotify", () => ({
   }),
 }));
 vi.mock("@/lib/db", () => ({
-  getContextName: (uri: string) => state.getContextName(uri),
-  recordContexts: async () => {},
+  forUser: () => ({
+    getContextName: (uri: string) => state.getContextName(uri),
+    recordContexts: async () => {},
+  }),
 }));
 
 const { GET } = await import("@/app/api/now-playing/route");

@@ -1,16 +1,10 @@
 import { Suspense } from "react";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
-import { notFound, redirect } from "next/navigation";
+import { notFound } from "next/navigation";
 import { requirePageUser } from "@/lib/require-user";
 import { getSpotify } from "@/lib/session";
-import {
-  getMeId,
-  getPlaylistSnapshot,
-  getPlaylistTracks,
-  getStoredPlaylist,
-  storePlaylistTracks,
-} from "@/lib/db";
+import { forUser, type UserStore } from "@/lib/db";
 import { duplicatePositions } from "@/lib/spotify/domain";
 import { formatListenTime } from "@/lib/format";
 import { SpotifyError, type Track, type Playlist } from "@/lib/spotify";
@@ -32,8 +26,7 @@ export default async function PlaylistDetailPage({
   // never calls getSpotify(), so without this there is no session check on it at all.
   // requirePageUser: refused → /login; identity check down → a retryable error, never a read.
   // A dead Spotify grant still goes to /login (multi-user PLAN.md §5.4, decision 20).
-  const { canCallSpotify } = await requirePageUser();
-  if (!canCallSpotify) redirect("/login");
+  const store = forUser((await requirePageUser()).uid);
 
   // Render entirely from the local store — no Spotify call on the critical path. A live
   // call here (even the single "get header" one) blocks the whole page for the full
@@ -41,10 +34,10 @@ export default async function PlaylistDetailPage({
   // take 10+ seconds. Freshness is checked in the background instead (PlaylistTracksSync),
   // which only re-paginates when the snapshot_id actually changed.
   const [meId, cachedTracks, cachedSnapshot, stored] = await Promise.all([
-    getMeId(),
-    getPlaylistTracks(id),
-    getPlaylistSnapshot(id),
-    getStoredPlaylist(id),
+    store.getMeId(),
+    store.getPlaylistTracks(id),
+    store.getPlaylistSnapshot(id),
+    store.getStoredPlaylist(id),
   ]);
   let cached = stored;
   // If the cold path below fetches the live header, hand it to <Tracks> so it doesn't
@@ -54,7 +47,7 @@ export default async function PlaylistDetailPage({
   // Only when we have nothing cached at all (unknown id — e.g. a stale link to a deleted
   // playlist) do we have to ask Spotify, both for the header and to surface a real 404.
   if (!cached && cachedTracks.length === 0) {
-    const sp = await getSpotify("playlist-detail");
+    const sp = await getSpotify(store.uid, "playlist-detail");
     try {
       const live = await sp.playlist(id);
       coldLive = live;
@@ -94,7 +87,7 @@ export default async function PlaylistDetailPage({
   const isMine = !!meId && ownerId === meId;
   const totalMs = cachedTracks.reduce((sum, t) => sum + (t.durationMs ?? 0), 0);
   // Cold cache: start the live fetch here, behind the gate; <Tracks> only awaits it.
-  const coldLoad = cachedTracks.length === 0 ? loadColdTracks(id, coldLive) : null;
+  const coldLoad = cachedTracks.length === 0 ? loadColdTracks(store, id, coldLive) : null;
 
   // The (app) layout no longer wraps children in a <main> — each page owns its own, because
   // Home needs a viewport lock and the others don't. This is the standard page container.
@@ -157,10 +150,11 @@ export default async function PlaylistDetailPage({
 // component reads user data or calls Spotify on its own (multi-user PLAN.md T3, static check
 // S8), so the page's gate covers it.
 async function loadColdTracks(
+  store: UserStore,
   id: string,
   live: Playlist | undefined,
 ): Promise<{ tracks: Track[] | null; status: number }> {
-  const sp = await getSpotify("playlist-detail");
+  const sp = await getSpotify(store.uid, "playlist-detail");
   let tracks: Track[] | null = null;
   let snapshot: string | undefined;
   let status = 0;
@@ -182,7 +176,7 @@ async function loadColdTracks(
     status = e instanceof SpotifyError ? e.status : 0;
     tracks = null;
   }
-  if (tracks) await storePlaylistTracks(id, tracks, snapshot);
+  if (tracks) await store.storePlaylistTracks(id, tracks, snapshot);
   return { tracks, status };
 }
 

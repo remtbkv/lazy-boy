@@ -43,6 +43,15 @@ export function ownerUid(): string | null {
   return isUidShape(v) ? v : null;
 }
 
+/** Rem's uid as a Uid, for the paths that act for him with no session in Phase 1: the cron and
+ *  the daily chores (Phase 3's claim replaces this, §7.2), the sign-in (Phase 2's users row),
+ *  and the app-wide rows that live in his database until Phase 2. Null when OWNER_UID is unset
+ *  or malformed. Who may import it is pinned by tests/isolation/static.test.ts (S2). */
+export function phase1Owner(): Uid | null {
+  const o = ownerUid();
+  return o ? mintUid(o) : null;
+}
+
 /** A session lasts 30 days from its sign-in, enforced by `auth_time` (§5.4): Auth.js re-issues
  *  the cookie's own expiry on every session read, so that expiry bounds nothing. */
 export const SESSION_MAX_AGE_S = 30 * 24 * 60 * 60;

@@ -1,33 +1,22 @@
 "use server";
 
 import { unstable_rethrow } from "next/navigation";
-import { auth } from "@/lib/auth";
+import { requireActionUser } from "@/lib/require-user";
 import { getSpotify } from "@/lib/session";
 import { syncRecentPlays } from "@/lib/sync/history";
-import {
-  getAllTimePlays,
-  getAllTimeStats,
-  getCleanBackupPref,
-  getDailyStats,
-  getMeId,
-  getPlaylistsSyncedAt,
-  getPlaysByDay,
-  getStoredPlaylists,
-  ledgerSyncCall,
-  searchHistory,
-  type DayStats,
-  type StoredPlaylist,
-  type TrackStats,
-} from "@/lib/db";
+import { forUser, type DayStats, type StoredPlaylist, type TrackStats, type UserStore } from "@/lib/db";
 import { HISTORY_REFRESH_EXTRA_ROWS } from "@/lib/read-costs";
 import { tzOffsetMinutes } from "@/lib/tz";
 
 // Listen-history data actions for Home — DB reads only, except refreshHistoryAction (below),
 // which is the one that talks to Spotify. Every one of them returns personal data, so each
-// gates on a session: the layout already redirects anyone without one, but an action is a
-// public endpoint and has to check for itself.
-async function allowed(): Promise<boolean> {
-  return !!(await auth());
+// gates first: the layout already redirects anyone without a session, but an action is a
+// public endpoint and has to check for itself. The gate is requireActionUser's (PLAN §5.1,
+// §5.4): a session whose grant is gone is refused here as on the pages, and the store it
+// hands back is the gated user's.
+async function gated(): Promise<UserStore | null> {
+  const user = await requireActionUser();
+  return "uid" in user ? forUser(user.uid) : null;
 }
 
 export type DockData = {
@@ -42,12 +31,13 @@ export type DockData = {
  *  open one), so blocking the first byte on it was pure waste. Fetched in the background
  *  right after mount instead. */
 export async function dockDataAction(): Promise<DockData> {
-  if (!(await allowed())) return { playlists: [], backupPref: false, syncedAt: null };
+  const store = await gated();
+  if (!store) return { playlists: [], backupPref: false, syncedAt: null };
   const [playlists, meId, backupPref, syncedAt] = await Promise.all([
-    getStoredPlaylists(),
-    getMeId(),
-    getCleanBackupPref(),
-    getPlaylistsSyncedAt(),
+    store.getStoredPlaylists(),
+    store.getMeId(),
+    store.getCleanBackupPref(),
+    store.getPlaylistsSyncedAt(),
   ]);
   return {
     playlists: playlists.map((p) => ({ ...p, mine: !!meId && p.ownerId === meId })),
@@ -58,23 +48,26 @@ export async function dockDataAction(): Promise<DockData> {
 
 /** Tracks for one local day — the client caches per day, so each day costs one call. */
 export async function dayTracksAction(day: string): Promise<TrackStats[]> {
-  if (!(await allowed())) return [];
+  const store = await gated();
+  if (!store) return [];
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return [];
-  const tz = await tzOffsetMinutes();
-  return getPlaysByDay(day, tz);
+  const tz = await tzOffsetMinutes(store);
+  return store.getPlaysByDay(day, tz);
 }
 
 /** Older day stats — the strip starts with the recent window and extends on demand. */
 export async function dailyStatsAction(days: number): Promise<DayStats[]> {
-  if (!(await allowed())) return [];
-  const tz = await tzOffsetMinutes();
-  return getDailyStats(tz, Math.min(days, 100000));
+  const store = await gated();
+  if (!store) return [];
+  const tz = await tzOffsetMinutes(store);
+  return store.getDailyStats(tz, Math.min(days, 100000));
 }
 
 /** Most-played all-time — fetched on demand when the All time view is opened. */
 export async function allTimePlaysAction(): Promise<TrackStats[]> {
-  if (!(await allowed())) return [];
-  return getAllTimePlays(300);
+  const store = await gated();
+  if (!store) return [];
+  return store.getAllTimePlays(300);
 }
 
 export type HistoryRefresh = {
@@ -125,35 +118,36 @@ export async function refreshHistoryAction(
   // as one we insert here, and `added` alone would skip it.
   sinceMinute: number | null = null,
 ): Promise<HistoryRefresh> {
-  // getSpotify() throws a login REDIRECT when there's no session. Returning empty instead
+  // getSpotify() throws a login REDIRECT when there's no token. Returning empty instead
   // keeps a signed-out caller from being bounced mid-render — no session, nothing to sync.
-  if (!(await allowed())) return NO_REFRESH;
+  const store = await gated();
+  if (!store) return NO_REFRESH;
   try {
-    const sp = await getSpotify("home-sync");
-    const { added } = await syncRecentPlays(sp);
+    const sp = await getSpotify(store.uid, "home-sync");
+    const { added } = await syncRecentPlays(sp, store);
     // This fires every 120 s from an open tab, twice per track change and on visibility, so
     // it is the term an open tab contributes. Only the sync plus this action's own bounded
     // head/delta check are charged here — the strip, the day and the all-time list below are
     // ledgered under their own readers, and counting them twice would hide a real residual.
-    void ledgerSyncCall("history_refresh", added, HISTORY_REFRESH_EXTRA_ROWS);
-    const tz = await tzOffsetMinutes();
+    void store.ledgerSyncCall("history_refresh", added, HISTORY_REFRESH_EXTRA_ROWS);
+    const tz = await tzOffsetMinutes(store);
     const [daily, allTime, newPlays] = await Promise.all([
-      getDailyStats(tz, Math.max(14, Math.min(days, 100000))),
-      getAllTimeStats(),
+      store.getDailyStats(tz, Math.max(14, Math.min(days, 100000))),
+      store.getAllTimeStats(),
       // The plays the client's index is missing, for its instant search patch.
       // searchHistory with an empty query is "newest N plays, one row each" via
       // idx_plays_played_at, so the steady-state cost is a 1-row head check and a delta
       // fetch only runs when there is one — bounded by the delta, never a scan.
       (async (): Promise<TrackStats[] | null> => {
-        if (sinceMinute == null) return added > 0 ? searchHistory("", Math.min(added, 50)) : null;
-        const head = await searchHistory("", 1);
+        if (sinceMinute == null) return added > 0 ? store.searchHistory("", Math.min(added, 50)) : null;
+        const head = await store.searchHistory("", 1);
         const newest = head[0] ? Math.floor(Date.parse(head[0].lastPlayed) / 60000) : null;
         // `>=` on the boundary minute, not `>`: a second play landing in the SAME minute
         // the client already holds was strictly-greater-filtered out of every delta and
         // stayed missing until the next cold payload (audit 2026-08-19, T2.5). The client
         // patch dedupes on (identity, minute), so re-delivering the boundary is free.
         if (newest == null || newest < sinceMinute) return null;
-        const rows = await searchHistory("", 50);
+        const rows = await store.searchHistory("", 50);
         const fresh = rows.filter(
           (r) => Math.floor(Date.parse(r.lastPlayed) / 60000) >= sinceMinute,
         );
@@ -168,9 +162,9 @@ export async function refreshHistoryAction(
           : null;
     const tracks =
       day === "all"
-        ? await getAllTimePlays(300)
+        ? await store.getAllTimePlays(300)
         : day
-          ? await getPlaysByDay(day, tz)
+          ? await store.getPlaysByDay(day, tz)
           : null;
     return { ok: true, added, daily, allTime, day, tracks, newPlays };
   } catch (e) {
@@ -188,8 +182,9 @@ export async function refreshHistoryAction(
  *  /api/search/{library,history}. It still runs while those are in flight (or if both failed
  *  to load), so the box is never dead — narrower, though, since it only knows the history. */
 export async function searchPlaysAction(query: string): Promise<TrackStats[]> {
-  if (!(await allowed())) return [];
+  const store = await gated();
+  if (!store) return [];
   const q = query.trim();
   if (!q) return [];
-  return searchHistory(q, 500);
+  return store.searchHistory(q, 500);
 }

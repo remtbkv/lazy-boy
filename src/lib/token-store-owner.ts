@@ -6,13 +6,7 @@
 // `lock:spotify_refresh:<uid>`: during a deploy the previous build is still refreshing with the
 // old name, and two names would let both refresh the one grant at once.
 import "server-only";
-import {
-  acquireLock,
-  clearSpotifyTokens,
-  getSpotifyTokens,
-  releaseLock,
-  setSpotifyTokens,
-} from "@/lib/db";
+import { forUser } from "@/lib/db";
 import type { Uid } from "@/lib/identity";
 import type { TokenStore } from "@/lib/token-core";
 
@@ -26,23 +20,23 @@ export function ownerTokenStore(owner: () => string | null): TokenStore {
   };
   return {
     async get(uid) {
-      return isOwner(uid) ? getSpotifyTokens() : null;
+      return isOwner(uid) ? forUser(uid).getSpotifyTokens() : null;
     },
     async set(uid, t) {
       if (!isOwner(uid)) refuse(uid);
-      await setSpotifyTokens({ accessToken: t.accessToken, refreshToken: t.refreshToken, expiresAt: t.expiresAt });
+      await forUser(uid).setSpotifyTokens({ accessToken: t.accessToken, refreshToken: t.refreshToken, expiresAt: t.expiresAt });
     },
     async clear(uid) {
       if (!isOwner(uid)) refuse(uid);
-      await clearSpotifyTokens();
+      await forUser(uid).clearSpotifyTokens();
     },
     async lock(uid, ttlMs) {
       if (!isOwner(uid)) refuse(uid);
-      return acquireLock("spotify_refresh", ttlMs);
+      return forUser(uid).acquireLock("spotify_refresh", ttlMs);
     },
     async unlock(uid, lockOwner) {
       if (!isOwner(uid)) refuse(uid);
-      await releaseLock("spotify_refresh", lockOwner);
+      await forUser(uid).releaseLock("spotify_refresh", lockOwner);
     },
   };
 }

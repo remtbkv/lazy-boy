@@ -1,10 +1,10 @@
 // The hourly health check (PLAN.md §7.10; T13's cron-secret half for this route). Known answers
 // for each condition, and the route against the simulated store.
 import { beforeEach, describe, expect, it } from "vitest";
-import { setSpotifyTokens } from "@/lib/db";
 import { healthVerdict, DAILY_STALE_MS } from "@/lib/health";
 import { GET } from "@/app/api/cron/health/route";
 import { rawClient, resetStore } from "../adversarial/helpers";
+import { ownerStore } from "../owner-store";
 import { FAR } from "./harness";
 
 const healthy = { ok: true, staleForMs: 60_000, reason: null } as const;
@@ -59,7 +59,7 @@ describe("/api/cron/health", () => {
     expect(red.status).toBe(500);
     expect((await red.json()).reasons).toEqual(["owner-capture"]);
 
-    await setSpotifyTokens({ accessToken: "a", refreshToken: "r", expiresAt: FAR });
+    await ownerStore().setSpotifyTokens({ accessToken: "a", refreshToken: "r", expiresAt: FAR });
     const c = await rawClient();
     await c.execute({ sql: "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_sync', ?)", args: [new Date().toISOString()] });
     const green = await call("Bearer ext-secret");

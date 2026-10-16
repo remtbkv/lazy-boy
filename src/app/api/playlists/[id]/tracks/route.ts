@@ -1,7 +1,7 @@
 import { spotifyAccessTokenFor } from "@/lib/auth";
 import { requireRouteUser } from "@/lib/require-user";
 import { spotifyClient, SpotifyError } from "@/lib/spotify";
-import { storePlaylistTracks } from "@/lib/db";
+import { forUser } from "@/lib/db";
 
 // Background freshness check for one playlist's cached track list. The detail page renders
 // from the DB cache instantly and fires this; here we make ONE cheap call to read the
@@ -11,8 +11,7 @@ import { storePlaylistTracks } from "@/lib/db";
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const user = await requireRouteUser();
   if (user instanceof Response) return user;
-  // Short-circuited so a dead grant costs no tokens read.
-  const accessToken = user.canCallSpotify ? await spotifyAccessTokenFor(user.uid) : undefined;
+  const accessToken = await spotifyAccessTokenFor(user.uid);
   if (!accessToken) {
     return Response.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
@@ -20,7 +19,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const { id } = await params;
     const body = (await req.json().catch(() => ({}))) as { snapshot?: unknown };
     const cachedSnapshot = typeof body.snapshot === "string" ? body.snapshot : undefined;
-    const sp = spotifyClient(accessToken, false, "playlist-resync");
+    const sp = spotifyClient(user.uid, accessToken, false, "playlist-resync");
 
     const playlist = await sp.playlist(id);
     if (cachedSnapshot && playlist.snapshot && playlist.snapshot === cachedSnapshot) {
@@ -28,7 +27,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     }
 
     const tracks = await sp.playlistTracks(id);
-    await storePlaylistTracks(id, tracks, playlist.snapshot);
+    await forUser(user.uid).storePlaylistTracks(id, tracks, playlist.snapshot);
     return Response.json({ ok: true, changed: true, count: tracks.length });
   } catch (e) {
     // A rate-limited Spotify is not a server error — report it as what it is so the

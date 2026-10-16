@@ -14,7 +14,9 @@ const state = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("@/lib/auth", () => ({ auth: async () => (state.signedIn ? { user: {} } : null) }));
+vi.mock("@/lib/auth", () => ({
+  auth: async () => (state.signedIn ? { user: {}, uid: "aaaaaaaaaaaa", admin: true } : null),
+}));
 vi.mock("@/lib/db", () => ({ recordClientMetrics: (rows: unknown[]) => state.record(rows) }));
 vi.mock("next/server", () => ({
   after: (task: () => unknown) => {

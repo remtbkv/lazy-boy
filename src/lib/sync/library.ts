@@ -1,16 +1,6 @@
 import "server-only";
 import { spotifyClient } from "@/lib/spotify";
-import {
-  getLikedSignals,
-  getPlaylistSnapshot,
-  getSavedSyncedAt,
-  maybeRecomputeAllTimeStats,
-  recomputeUniqueSongCount,
-  setLibrarySyncedAt,
-  storePlaylists,
-  storePlaylistTracks,
-  storeSavedTracks,
-} from "@/lib/db";
+import { type UserStore } from "@/lib/db";
 
 type Spotify = ReturnType<typeof spotifyClient>;
 
@@ -28,6 +18,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export async function syncLibrary(
   sp: Spotify,
+  store: UserStore,
   // Reports songs looked through so far / total songs across the owned library + Liked.
   onProgress?: (processed: number, total: number) => void,
   // `paceMs`: pause this long after each *actual* playlist-track fetch. Background syncs
@@ -38,7 +29,7 @@ export async function syncLibrary(
 ): Promise<void> {
   const paceMs = opts.paceMs ?? 0;
   const [me, playlists] = await Promise.all([sp.me(), sp.myPlaylistsAll()]);
-  await storePlaylists(
+  await store.storePlaylists(
     playlists.map((p) => ({
       id: p.id,
       name: p.name,
@@ -63,10 +54,10 @@ export async function syncLibrary(
   // derived-index rebuilds below only fire when needed (not every hourly steady-state sync).
   let changed = false;
   for (const p of owned) {
-    const cachedSnapshot = await getPlaylistSnapshot(p.id);
+    const cachedSnapshot = await store.getPlaylistSnapshot(p.id);
     if (!p.snapshot || cachedSnapshot !== p.snapshot) {
       const tracks = await sp.playlistTracks(p.id);
-      await storePlaylistTracks(p.id, tracks, p.snapshot);
+      await store.storePlaylistTracks(p.id, tracks, p.snapshot);
       changed = true;
       if (paceMs) await sleep(paceMs);
     }
@@ -76,11 +67,11 @@ export async function syncLibrary(
 
   // Liked Songs: skip the full page-through when the cheap probe matches, unless the
   // last full sync is over a day old.
-  const sig = await getLikedSignals();
-  const savedAt = await getSavedSyncedAt();
+  const sig = await store.getLikedSignals();
+  const savedAt = await store.getSavedSyncedAt();
   const stale = !savedAt || Date.now() - Date.parse(savedAt) > LIKED_FULL_MAX_AGE_MS;
   if (stale || sig.total !== head.total || sig.topAddedAt !== head.topAddedAt) {
-    await storeSavedTracks(await sp.savedTracks());
+    await store.storeSavedTracks(await sp.savedTracks());
     changed = true;
   }
   processed += head.total;
@@ -90,15 +81,15 @@ export async function syncLibrary(
   // derived-index rebuilds on every steady-state hourly sync burned Turso row writes for
   // no benefit.
   if (changed) {
-    await recomputeUniqueSongCount();
+    await store.recomputeUniqueSongCount();
     // A library sync rewrites tracks' duration_ms, an input of the all-time hours — the
     // old triggers (plays landing, the daily heal) missed it, so a played track whose
     // duration arrived late kept its 10-min fallback in the totals (audit 2026-08-19,
     // T2.2). THROTTLED variant: `changed` fires on any snapshot move (a reorder counts),
     // and the unthrottled recompute made every 30-min cron scan pay a full plays scan on
     // top (wave-2 adversarial review, finding L).
-    await maybeRecomputeAllTimeStats();
+    await store.maybeRecomputeAllTimeStats();
   }
 
-  await setLibrarySyncedAt();
+  await store.setLibrarySyncedAt();
 }

@@ -1,6 +1,5 @@
-import { redirect } from "next/navigation";
 import { requirePageUser } from "@/lib/require-user";
-import { getStoredPlaylists, getMeId, getPlaylistsSyncedAt, getUniqueSongCount } from "@/lib/db";
+import { forUser } from "@/lib/db";
 import { PlaylistsSync } from "@/components/playlists-sync";
 import { PlaylistsGrid } from "./playlists-grid";
 
@@ -19,14 +18,13 @@ export default async function DraftPlaylistsPage() {
   // fetches them anyway).
   // requirePageUser: refused → /login; identity check down → a retryable error, never a read.
   // A dead Spotify grant still goes to /login (multi-user PLAN.md §5.4, decision 20).
-  const { canCallSpotify } = await requirePageUser();
-  if (!canCallSpotify) redirect("/login");
+  const store = forUser((await requirePageUser()).uid);
 
   const [playlists, meId, uniqueSongs, syncedAt] = await Promise.all([
-    getStoredPlaylists(),
-    getMeId(),
-    getUniqueSongCount(),
-    getPlaylistsSyncedAt(),
+    store.getStoredPlaylists(),
+    store.getMeId(),
+    store.getUniqueSongCount(),
+    store.getPlaylistsSyncedAt(),
   ]);
   const owned = meId ? playlists.filter((p) => p.ownerId === meId).length : 0;
 

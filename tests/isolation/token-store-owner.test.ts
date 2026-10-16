@@ -1,10 +1,15 @@
 // Phase 1's token store over the real (simulated) `meta` row: the owner's uid reaches today's
 // plaintext row; any other uid has none, so it reads null and cannot write, clear or lock it.
 import { beforeEach, describe, expect, it } from "vitest";
-import { getSpotifyTokens, setSpotifyTokens } from "@/lib/db";
 import { ownerTokenStore } from "@/lib/token-store-owner";
 import { resetStore } from "../adversarial/helpers";
-import { A, B, FAR } from "./harness";
+import { ownerStore, ownerUid } from "../owner-store";
+import { B, FAR } from "./harness";
+
+// The owner is OWNER_UID (tests/setup.ts), the one uid forUser maps to Rem's database.
+const A = ownerUid();
+const getSpotifyTokens = () => ownerStore().getSpotifyTokens();
+const setSpotifyTokens = (t: typeof OWNER_ROW) => ownerStore().setSpotifyTokens(t);
 
 const OWNER_ROW = { accessToken: "owner-at", refreshToken: "owner-rt", expiresAt: FAR };
 

@@ -15,6 +15,7 @@ import {
 } from "@/lib/identity";
 import { isOwnerSignIn } from "@/lib/owner";
 import { gateJwt, sessionFields, signInClaims } from "@/lib/session-gate";
+import type { OwnedToken } from "@/lib/spotify";
 import { SPOTIFY_NOT_REGISTERED, spotifyUserinfo } from "@/lib/spotify/userinfo";
 import { createTokenCore, isFresh, RefreshError, type UserTokens } from "@/lib/token-core";
 import { ownerTokenStore } from "@/lib/token-store-owner";
@@ -101,14 +102,6 @@ const identityFor = cache(
     }),
 );
 
-// Phase 1's owner-bound entry points. Every caller today is single-user and passes no uid; the
-// mechanical edit of Phase 1's turn threads requireUser()'s uid into them and deletes these
-// two shims in favour of the `…For(uid)` forms below.
-function phase1Owner(): Uid | null {
-  const o = ownerUid();
-  return o ? mintUid(o) : null;
-}
-
 /** The Spotify access token for THIS request — server-only, and deliberately NOT a field on
  *  the session.
  *
@@ -125,28 +118,18 @@ function phase1Owner(): Uid | null {
  *
  *  Free: it reads the box the jwt callback already populated — the same read the session
  *  callback used to make to fill the field in. */
-export async function spotifyAccessTokenFor(uid: Uid): Promise<string | undefined> {
-  return (await readTokensShared(uid).catch(() => null))?.accessToken;
-}
-
-/** Phase 1 shim: spotifyAccessTokenFor(the owner). */
-export async function spotifyAccessToken(): Promise<string | undefined> {
-  const o = phase1Owner();
-  return o ? spotifyAccessTokenFor(o) : undefined;
+export async function spotifyAccessTokenFor(uid: Uid): Promise<OwnedToken | undefined> {
+  const t = await readTokensShared(uid).catch(() => null);
+  return t ? { uid: t.uid, accessToken: t.accessToken } : undefined;
 }
 
 // Server-side, session-less access token for background jobs (e.g. the cron sync) that run
 // without a request. Reuses the same stored tokens and shared refresh lock as the request
 // path, so background and request refreshes coordinate (no PKCE rotation races). Returns
 // null when the user has no row or the refresh is dead.
-export async function getValidAccessTokenFor(uid: Uid): Promise<string | null> {
-  return (await core.getValidAccessToken(uid))?.accessToken ?? null;
-}
-
-/** Phase 1 shim: getValidAccessTokenFor(the owner). */
-export async function getValidAccessToken(): Promise<string | null> {
-  const o = phase1Owner();
-  return o ? getValidAccessTokenFor(o) : null;
+export async function getValidAccessTokenFor(uid: Uid): Promise<OwnedToken | null> {
+  const t = await core.getValidAccessToken(uid);
+  return t ? { uid: t.uid, accessToken: t.accessToken } : null;
 }
 
 export const { handlers, signIn, signOut, auth } = NextAuth({
