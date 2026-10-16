@@ -453,6 +453,8 @@ export type ClaimedUser = {
   nextProbeAt: number;
   nextRescanAt: number | null;
   failures: number;
+  /** The last step's error code (`sync_state.last_error`); null after a success. */
+  lastError: string | null;
   lastHarvestAt: number | null;
   quotaDay: string | null;
   rpCalls: number;
@@ -470,14 +472,15 @@ export type Claim = {
   cooldowns: Record<string, number>;
   /** At most one `needs_reconnect` user whose invalid_grant is due its confirming refresh (§5.4). */
   confirmUid: Uid | null;
-  /** Users whose last step succeeded within 10 minutes: a 403 "not registered" removes a friend
-   *  only while someone else's calls still work (§7.8), whichever tick served them. */
-  okRecent: Uid[];
+  /** Users whose last success is within 10 minutes, and when it was: a 403 "not registered"
+   *  removes a friend only when someone else's calls worked after that friend's previous refusal
+   *  (§7.8), whichever tick served them. */
+  okRecent: { uid: Uid; at: number }[];
 };
 
 const ACTIVE_LEASABLE = `u.status = 'active' AND (:signups = 'invite' OR u.is_admin = 1)`;
 const CLAIMED_COLS = `s.uid, u.db_name, u.is_admin, t.blob, t.expires_at, s.state, s.next_probe_at, s.next_rescan_at,
-                      s.failures, s.last_harvest_at, s.quota_day, s.rp_calls`;
+                      s.failures, s.last_error, s.last_harvest_at, s.quota_day, s.rp_calls`;
 const toClaimed = (r: Record<string, unknown>): ClaimedUser => ({
   uid: mintUid(String(r.uid)),
   dbName: String(r.db_name),
@@ -488,6 +491,7 @@ const toClaimed = (r: Record<string, unknown>): ClaimedUser => ({
   nextProbeAt: Number(r.next_probe_at),
   nextRescanAt: numOrNull(r.next_rescan_at),
   failures: Number(r.failures),
+  lastError: r.last_error == null ? null : String(r.last_error),
   lastHarvestAt: numOrNull(r.last_harvest_at),
   quotaDay: r.quota_day == null ? null : String(r.quota_day),
   rpCalls: Number(r.rp_calls),
@@ -518,7 +522,7 @@ const viewStatements = (args: ClaimArgs): InStatement[] => [
     args,
   },
   "SELECT key, value FROM app_meta WHERE key LIKE 'cooldown:%'",
-  { sql: "SELECT uid FROM sync_state WHERE last_ok_at >= :recent", args },
+  { sql: "SELECT uid, last_ok_at FROM sync_state WHERE last_ok_at >= :recent", args },
 ];
 
 function toClaim(leased: ResultSet, [view, cooldowns, ok]: ResultSet[]): Claim {
@@ -530,7 +534,7 @@ function toClaim(leased: ResultSet, [view, cooldowns, ok]: ResultSet[]): Claim {
     dailyAt: numOrNull(v.daily_at),
     cooldowns: Object.fromEntries(cooldowns.rows.map((r) => [String(r.key).slice("cooldown:".length), Number(r.value)])),
     confirmUid: v.confirm_uid == null ? null : mintUid(String(v.confirm_uid)),
-    okRecent: ok.rows.map((r) => mintUid(String(r.uid))),
+    okRecent: ok.rows.map((r) => ({ uid: mintUid(String(r.uid)), at: Number(r.last_ok_at) })),
   };
 }
 

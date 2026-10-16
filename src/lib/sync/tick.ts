@@ -16,7 +16,7 @@
 //   5. The reply within 20 s; whatever has not finished goes to after().
 //   6. The daily chores in after() when `daily_at` is over 26 hours old, under `lock:daily`.
 // Then the bookkeeping only the tick can do: a 403 "not registered" marks a friend `removed` only
-// while someone else's calls still work; invalid_grant's confirmation (§5.4 step 2) for at most one
+// when it is theirs alone (refused twice, someone else's calls working in between); invalid_grant's confirmation (§5.4 step 2) for at most one
 // user, one token-endpoint call; two or more users, or the admin, hit within 24 h is an app-wide
 // event (step 3).
 import { randomUUID } from "node:crypto";
@@ -249,15 +249,23 @@ async function serve(
     }),
   );
 
-  // §7.8: a 403 "not registered" removes a friend only while someone else's calls still work, in
-  // this tick or within 10 minutes; when every user fails that way (the owner's Premium lapsing
-  // looks like this) everyone backs off. Never the admin.
+  // §7.8: a 403 "not registered" removes a friend only when the refusal is theirs alone, and
+  // never the admin. When every user fails that way (the owner's Premium lapsing looks like this)
+  // everyone backs off. A success from before the refusals began proves nothing, and users on
+  // different minutes meet the onset on different ticks, so the evidence must come after it: the
+  // friend was refused at their previous step too, and someone else's calls worked since that
+  // refusal (in this tick, or a success the claim saw stamped later). That previous refusal's
+  // release set next_probe_at to its tick plus backoffMs(failures), which dates it.
   const notRegistered = served.filter((s) => s.outcome?.code === "not-registered");
   if (notRegistered.length > 0) {
-    const working = new Set<string>([...claim.okRecent, ...served.filter((s) => s.outcome?.code === "ok").map((s) => s.user.uid)]);
+    const okNow = served.filter((s) => s.outcome?.code === "ok").map((s) => s.user.uid);
     for (const s of notRegistered) {
-      const someoneElse = [...working].some((uid) => uid !== s.user.uid);
-      if (someoneElse && !s.user.isAdmin && (await queue.moveStatus(s.user.uid, "active", "removed", now).catch(() => false))) {
+      const u = s.user;
+      const refusedAt = u.nextProbeAt - backoffMs(u.failures);
+      const alone =
+        u.lastError === "not-registered" &&
+        (okNow.some((uid) => uid !== u.uid) || claim.okRecent.some((o) => o.uid !== u.uid && o.at > refusedAt));
+      if (alone && !u.isAdmin && (await queue.moveStatus(u.uid, "active", "removed", now).catch(() => false))) {
         await queue.releaseLease(s.user.uid, tick, clock(), { ...releaseFor(s.user, s.outcome!, now), state: "idle" }).catch(() => {});
       } else {
         await settle(s, s.outcome!).catch(() => {});

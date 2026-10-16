@@ -210,14 +210,14 @@ describe("one user's claim, for the open app (§7.6)", () => {
 });
 
 describe("who succeeded lately (§7.8's not-registered rule)", () => {
-  it("lists the users whose last step succeeded within 10 minutes", async () => {
+  it("lists the users whose last success is within 10 minutes, with its time", async () => {
     await seedUser(db.raw(), { uid: A, status: "active" });
     await seedUser(db.raw(), { uid: B, status: "active" });
     await sync(A, { next_probe_at: NOW + 999_999 });
     await sync(B, { next_probe_at: NOW + 999_999 });
     await q("UPDATE sync_state SET last_ok_at = :t WHERE uid = :u", { t: NOW - 9 * 60_000, u: A });
     await q("UPDATE sync_state SET last_ok_at = :t WHERE uid = :u", { t: NOW - 11 * 60_000, u: B });
-    expect((await app.claimDueUsers({ tick: "t", now: NOW, signups: "invite" })).okRecent).toEqual([A]);
+    expect((await app.claimDueUsers({ tick: "t", now: NOW, signups: "invite" })).okRecent).toEqual([{ uid: A, at: NOW - 9 * 60_000 }]);
   });
 });
 describe("the brake's counter (§7.5 item 1)", () => {
