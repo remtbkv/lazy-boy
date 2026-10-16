@@ -7,7 +7,7 @@
 // AUTH_SECRET for this purpose alone, so a cookie cannot be made, re-pointed at another request or
 // extended without the deployment's secret. It is a bearer of one request for two days; the claim
 // it enables is single-use (app-db.ts claimInvite's compare-and-set).
-import { createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
 
 export const REQUEST_COOKIE = "lb-request";
 export const REQUEST_COOKIE_TTL_S = 2 * 86_400;
@@ -36,4 +36,24 @@ export function verifyRequestCookie(value: string | undefined | null, nowMs: num
   if (want.length !== got.length || !timingSafeEqual(want, got)) return null;
   if (Number(parts[2]) * 1000 < nowMs) return null;
   return parts[1];
+}
+
+/** The join link's token is a random capability `invite.mjs --approve` prints once; the app
+ *  database keeps only this hash of it (requests.join_hash), so a copy of the database cannot
+ *  open an invite. */
+export function joinTokenHash(token: string): string {
+  return createHash("sha256").update(`lazyboy:join:v1:${token}`).digest("hex");
+}
+
+/** The Set-Cookie value for a request id. Secure on https deployments; HttpOnly, so no page
+ *  script reads it; Lax, so the top-level navigation back from Spotify's consent carries it. */
+export function requestCookieHeader(requestId: string, nowMs: number, secure: boolean): string {
+  return [
+    `${REQUEST_COOKIE}=${signRequestCookie(requestId, nowMs)}`,
+    "Path=/",
+    `Max-Age=${REQUEST_COOKIE_TTL_S}`,
+    "HttpOnly",
+    "SameSite=Lax",
+    ...(secure ? ["Secure"] : []),
+  ].join("; ");
 }
