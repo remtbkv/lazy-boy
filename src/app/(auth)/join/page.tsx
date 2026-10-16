@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
 import { requestState, type RequestState } from "@/lib/app-db";
+import { signupsMode } from "@/lib/identity";
 import { REQUEST_COOKIE, verifyRequestCookie } from "@/lib/request-cookie";
 import { JoinView } from "./join-view";
 
@@ -16,5 +17,6 @@ async function cookieRequestState(): Promise<RequestState> {
 export default async function JoinPage({ searchParams }: { searchParams: Promise<{ error?: string | string[] }> }) {
   const { error } = await searchParams;
   const state = await cookieRequestState();
-  return <JoinView state={state} error={Array.isArray(error) ? error[0] : error} />;
+  // SIGNUPS=owner: the door is shut, so the form is not offered at all (the POST refuses too).
+  return <JoinView state={state} closed={signupsMode() !== "invite"} error={Array.isArray(error) ? error[0] : error} />;
 }

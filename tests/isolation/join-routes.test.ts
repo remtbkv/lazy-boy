@@ -122,4 +122,10 @@ describe("/join", () => {
     expect(await view("claimed")).toContain("Sign in");
     expect(await view(null, "full")).toContain("five people");
   });
+  it("under SIGNUPS=owner it offers no form, only the closed notice", async () => {
+    const { JoinView } = await import("@/app/(auth)/join/join-view");
+    const html = renderToStaticMarkup(createElement(JoinView, { state: null, closed: true }));
+    expect(html).toContain("isn&#x27;t taking requests");
+    expect(html).not.toContain('action="/api/join"');
+  });
 });

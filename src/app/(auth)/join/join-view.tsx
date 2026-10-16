@@ -57,8 +57,8 @@ function WhatYouGet() {
   );
 }
 
-export function JoinView({ state, error }: { state: RequestState; error?: string }) {
-  const failed = error ? (ERRORS[error] ?? null) : null;
+export function JoinView({ state, error, closed = false }: { state: RequestState; error?: string; closed?: boolean }) {
+  const failed = closed && state === null ? ERRORS.closed : error ? (ERRORS[error] ?? null) : null;
   return (
     <main className="flex flex-1 items-center justify-center p-6">
       <div className="w-full max-w-md space-y-6 text-center">
@@ -88,7 +88,7 @@ export function JoinView({ state, error }: { state: RequestState; error?: string
             Your account is connected. <Link href="/login">Sign in</Link>.
           </p>
         )}
-        {state === null && (
+        {state === null && !closed && (
           <>
             <WhatYouGet />
             <form method="post" action="/api/join" className="space-y-3 text-left">
