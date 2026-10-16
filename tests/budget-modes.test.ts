@@ -205,12 +205,17 @@ describe("the cron tick's library rescan follows the mode", () => {
     process.env.CRON_SECRET = "s";
     spy.librarySyncs = 0;
     await resetStore();
+    // The owner's token row: the tick reads it for the owner alarm before any harvest or rescan
+    // (the Zenbook's caller; lane 07's pinger as stitched into Phase 1), and without it every
+    // call ends in 503 "no token" before reaching the rescan.
+    await ownerStore().setSpotifyTokens({ accessToken: "at", refreshToken: "rt", expiresAt: Date.now() + 3_600_000 });
   });
 
   async function libraryAgeMinutes(m: number) {
     const c = await rawClient();
-    // Each tick harvests (the gate's first-tick rule), so it reaches the library step.
-    await c.execute("DELETE FROM meta WHERE key IN ('rp_last_harvest', 'player_last_active')");
+    // Each tick harvests (the gate's first-tick rule), so it reaches the library step; and the
+    // pinger's 90-second stamp is cleared, so a second call in one test is a tick, not "recent".
+    await c.execute("DELETE FROM meta WHERE key IN ('rp_last_harvest', 'player_last_active', 'lock:tick')");
     await c.execute({
       sql: "INSERT OR REPLACE INTO meta (key, value) VALUES ('library_synced_at', ?)",
       args: [new Date(Date.now() - m * MIN).toISOString()],
