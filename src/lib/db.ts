@@ -3729,12 +3729,14 @@ function percentile(values: number[], p: number): number {
 /** The last 7 days of what the browser measured, in the two shapes the usage page draws (see
  *  the section note): `pages` = per-page percentiles, busiest first; `opens` = the most recent
  *  OPENS_PER_PAGE opens of each page, newest first, each with the ms of every part that
- *  reported. One scan of the window serves both. */
-export async function getClientLoadSpeed(): Promise<ClientLoadSpeed> {
+ *  reported. One scan of the window serves both. A friend's rows (a uid that is not
+ *  `adminUid`) count only in `pages`, which is keyed by page template: none of their opens or
+ *  error messages is listed (multi-user PLAN §6.2 layer 7, §12.2). */
+export async function getClientLoadSpeed(adminUid: string): Promise<ClientLoadSpeed> {
   const client = await getTelemetryClient();
   const cutoff = new Date(Date.now() - CLIENT_METRICS_WINDOW_MS).toISOString();
   const res = await client.execute({
-    sql: `SELECT id, ts, session, page, event, value, meta FROM client_metrics
+    sql: `SELECT id, ts, session, page, event, value, meta, user_id FROM client_metrics
           WHERE ts >= :cutoff ORDER BY id`,
     args: { cutoff },
   });
@@ -3751,8 +3753,10 @@ export async function getClientLoadSpeed(): Promise<ClientLoadSpeed> {
   for (const row of res.rows) {
     const page = String(row.page ?? "");
     const event = String(row.event ?? "");
-    const { pv, meta } = splitMeta(row.meta === null ? null : String(row.meta));
-    if ((event === "js-error" || event === "server-error") && meta) {
+    const friend = row.user_id != null && String(row.user_id) !== adminUid;
+    const { pv: rowPv, meta } = splitMeta(row.meta === null ? null : String(row.meta));
+    const pv = friend ? null : rowPv;
+    if (!friend && (event === "js-error" || event === "server-error") && meta) {
       // server-error rows (instrumentation.ts) were written and surfaced NOWHERE — the
       // digest-decoding they exist for never reached /usage (audit 2026-08-19, T2.16).
       errors.push({ at: String(row.ts ?? ""), page, message: meta });

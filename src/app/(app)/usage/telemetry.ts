@@ -24,10 +24,10 @@ export type UsageTelemetry = {
   down: { ledger: boolean; client: boolean; spotifyCalls: boolean; quotaWindows: boolean; budget: boolean };
 };
 
-export async function loadUsageTelemetry(days: number): Promise<UsageTelemetry> {
+export async function loadUsageTelemetry(days: number, adminUid: string): Promise<UsageTelemetry> {
   const [ledger, client, spotifyCalls, quotaWindows, budget] = await Promise.allSettled([
     readLedger(days),
-    getClientLoadSpeed(),
+    getClientLoadSpeed(adminUid),
     getSpotifyCallBreakdown(24),
     getRecentlyPlayedQuotaWindows(),
     readBudgetDay(),

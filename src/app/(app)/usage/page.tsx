@@ -254,7 +254,7 @@ export default async function UsagePage() {
   // The log sections read the telemetry store and never reject (telemetry.ts): a dead one
   // empties its own section, not the page.
   const [telemetry, counters, tz, capture] = await Promise.all([
-    loadUsageTelemetry(DAYS),
+    loadUsageTelemetry(DAYS, user.uid),
     liveCounters(),
     tzOffsetMinutes(store),
     readCapture(user.uid).then((c) => c.health, () => null),

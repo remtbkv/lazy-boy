@@ -82,7 +82,7 @@ describe("two stores: core and telemetry", () => {
     // And the reads come back from the same place.
     expect((await getApiLogSummary()).windows.find((w) => w.seconds === 60)!.calls).toBe(1);
     expect((await readLedger(30)).some((r) => r.reader === "_platform_total")).toBe(true);
-    expect((await getClientLoadSpeed()).pages.find((p) => p.page === "/home")?.views).toBe(1);
+    expect((await getClientLoadSpeed("ownerownerow")).pages.find((p) => p.page === "/home")?.views).toBe(1);
     expect((await store.getHomePayload())?.allTime).toBeTruthy();
   });
 

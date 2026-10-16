@@ -22,7 +22,7 @@ describe("loadUsageTelemetry", () => {
   beforeEach(() => fail.clear());
 
   it("all up: every section has its data and none is flagged", async () => {
-    const t = await loadUsageTelemetry(14);
+    const t = await loadUsageTelemetry(14, "ownerownerow");
     expect(t.ledger).toHaveLength(1);
     expect(t.client.pages).toHaveLength(1);
     expect(t.spotifyCalls).toHaveLength(1);
@@ -33,7 +33,7 @@ describe("loadUsageTelemetry", () => {
 
   it("all down: empty sections, all flagged, no throw", async () => {
     for (const s of ["ledger", "client", "spotifyCalls", "quotaWindows", "budget"]) fail.add(s);
-    const t = await loadUsageTelemetry(14);
+    const t = await loadUsageTelemetry(14, "ownerownerow");
     expect(t.ledger).toEqual([]);
     expect(t.client).toEqual({ pages: [], opens: [], errors: [] });
     expect(t.spotifyCalls).toEqual([]);
@@ -44,7 +44,7 @@ describe("loadUsageTelemetry", () => {
 
   it("one down: only that section is empty", async () => {
     fail.add("spotifyCalls");
-    const t = await loadUsageTelemetry(14);
+    const t = await loadUsageTelemetry(14, "ownerownerow");
     expect(t.spotifyCalls).toEqual([]);
     expect(t.down.spotifyCalls).toBe(true);
     expect(t.ledger).toHaveLength(1);
