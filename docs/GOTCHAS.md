@@ -30,7 +30,8 @@ instead of re-investigating. (Pairs with `CLAUDE.md`, `AGENTS.md`, and the other
   "doesn't work" even though the code is fine. Fix: stop dev, build (or not), then
   restart dev clean. To just typecheck without disturbing dev, prefer `npx tsc --noEmit`.
 - **Session is a 30-day persistent JWT** (`src/lib/auth.ts`); the cookie just marks
-  who's logged in. **Spotify tokens live in the DB** (`meta.spotify_tokens`), which
+  who's logged in. **Spotify tokens live in the DB** (`user_tokens` in the app database,
+  encrypted, since multi-user Phase 2), which
   is the source of truth, NOT the cookie. This exists because Spotify's PKCE refresh
   token **rotates on every use**: with tokens in the cookie, a page refresh fires
   several concurrent requests that each refresh with the same (soon-invalidated)

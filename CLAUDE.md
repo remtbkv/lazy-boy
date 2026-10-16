@@ -65,8 +65,9 @@ src/app/api/cron/usage-check/  Turso quota guard (logic in lib/usage-check.ts): 
 src/app/api/cron/store-bench/  store round-trip timings from a production function (?store=
                          core|telemetry; STORE_MIGRATION R1). All cron routes: lib/cron-auth.ts
 src/app/api/cron/health/ the hourly health check (cron-job.org, failure e-mail): the owner's
-                         capture, isolation events, the daily stamp, Turso's pace, the budget
-                         mode, a quiet CPU meter (lib/health.ts)
+                         capture, isolation events (lazyboy-app's `events`, each reported once),
+                         the daily stamp, Turso's pace, the budget mode, a quiet CPU meter
+                         (lib/health.ts)
 src/lib/auth.ts          Auth.js config; the session names a uid (multi-user Phases 1-2)
 src/lib/token-core.ts    Spotify token refresh (centralized), keyed by uid, writes conditional on
                          the row read; token-store-app.ts is its store (user_tokens, encrypted by
@@ -77,7 +78,9 @@ src/lib/app-db.ts        every statement on the app database `lazyboy-app` (user
                          sync_state, events, app_meta); its schema is app-schema.ts
 src/lib/identity.ts      the uid, the branded Uid, the identity check, phase1Owner() (the owner
                          for the session-less paths); identity-read.ts reads it (and sign-in's
-                         account_id link) from the app database; session-gate.ts and
+                         account_id link) from the app database, naming the user's database
+                         for forUser, and adminStore() reads the admin's row for the paths
+                         with no session (the cron routes, owner.ts); session-gate.ts and
                          require-user.ts turn it into each entry point's answer. EVERY entry
                          point gates with require*User() before its first read
 src/lib/user-cache.ts    the only caller of unstable_cache (uid + owner stamp); isolation.ts
@@ -86,13 +89,16 @@ src/lib/session.ts       getSpotify(uid): server-only Spotify client for the gat
 src/lib/user-storage.ts  per-user browser storage names, sign-out clearing, the signed-out 401
 src/lib/spotify/         client.ts (fetch+pagination+429/403), resources.ts, domain.ts, types.ts
 src/lib/tasks/           in-memory task registry (clean-playlist progress); swappable iface
-src/lib/db.ts            libSQL store (listen-history + tokens); async; file: fallback in dev.
-                         A DATABASE PER USER: forUser(uid) is the only way to a user's data
-                         (Phase 1: OWNER_UID -> `lazyboy`, on Turso since 2026-10-16); its
-                         first open checks the database's owner_uid and schema version.
-                         getTelemetryClient() holds api_log, client_metrics and usage_ledger
-                         (sqld on the Zenbook over the Funnel), never awaited on a user path.
-                         Unset TELEMETRY_DATABASE_URL = the log tables in Rem's database.
+src/lib/db.ts            libSQL store (listen history + library); async; file: fallback in dev.
+                         A DATABASE PER USER: forUser(uid) is the only way to a user's data,
+                         at the db_name the identity read or the claim last read from the
+                         user's `users` row (forUserAt records it; a changed name is rebuilt;
+                         Rem's `lazyboy` is on Turso since 2026-10-16); its first open checks
+                         the database's owner_uid and schema version. The plaintext token row
+                         is token-move.ts's alone (the rollback copy). getTelemetryClient()
+                         holds api_log, client_metrics and usage_ledger (sqld on the Zenbook
+                         over the Funnel), never awaited on a user path. Unset
+                         TELEMETRY_DATABASE_URL = the log tables in Rem's database.
                          docs/multi-user/PHASE1.md, STORE_MIGRATION.md, GOTCHAS.md
 src/lib/store-fetch.ts   the fetch every store query rides: pins accept-encoding to gzip
                          (brotli on the Zenbook's CPU cost the history payload 26s) and owns

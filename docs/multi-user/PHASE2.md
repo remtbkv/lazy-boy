@@ -7,6 +7,9 @@ Keychain: the script ran only against a scripted Platform API and local database
 Status: complete for this lane, Oct 15, 2026, about 10:30 PM. §2 is what landed, §3 what proves it, §4 what
 is left and why, §5 how to review.
 
+Status of the turn (Oct 16, 2026): wired on `mu/phase2-turn` by lane 1945_lb_mu_15_p2_turn and rehearsed on
+Rem's real backup (T12 green); not merged, pushed or deployed. §7 says what the turn did and what is still left.
+
 ## 1. What this branch is
 
 PLAN.md §13.4 lets a lane build a phase early, in new files and in files no queued lane edits; this lane's
@@ -313,3 +316,82 @@ No resolution needed new behaviour. What this base changes in §4's list, for la
   so Rem's sign-in there is refused (`NoAccountId`) while the callback's `rem` cell still reads allow (its oracle
   counts the code exchange and the `/me` call made with his bearer). The sign-in itself is decision 31's question
   and identity-read.test.ts's T9; the cell proves less than its rule says until the profile carries the field.
+
+## 7. Phase 2's turn: `mu/phase2-turn` (lane 1945_lb_mu_15_p2_turn, Oct 16, 2026)
+
+Cut from `mu/p2-base` (`4505d5d`), no rebase. Three code commits, one per unit, each shown red first (the
+commit messages say against what), then this docs commit. Nothing pushed or deployed.
+
+**What is wired** (§4's list, by item):
+
+- **Item 2, `forUser` from the users row** (`261cf70`). db.ts keeps a per-process uid → db_name directory.
+  `forUserAt(uid, dbName)` records the name it is given; when a uid's name changed (a restore, PLAN §12.5) it
+  drops the old client and the old (uid, name) open verdict, so the next statement opens the new database and
+  checks its owner. `forUser(uid)` resolves through the directory and throws for a uid nothing has named; the
+  Phase 1 constant is gone. What names a database: an allowed identity read (`readIdentity`, from the row it
+  read), Phase 3's claim (`forUserAt` with the claimed row's `db_name`), and `adminStore()` (identity-read.ts),
+  which reads `OWNER_UID`'s users row for the paths that act for the admin with no session until the claim: the
+  sync, daily, health and store-bench cron routes and `owner.ts`. S2: `phase1Owner` is imported by db.ts (the
+  cooldown) and identity-read.ts only; `forUserAt` by identity-read.ts only (lane 17's tick adds itself).
+- **Item 1, tokens of record in `user_tokens`** (`d5c033d`). Log out calls `signOutTokens(uid)` (auth.ts):
+  `TokenStore.remove` deletes the user's row whatever it holds, and token-move.ts's wrapper also clears the
+  admin's plaintext copy, so a revert inside the rollback week does not resume a capture he stopped. The cron's
+  "no token" (503) and `getCaptureHealth` read the user's `user_tokens` row. db.ts's plaintext token functions now
+  have one caller, token-move.ts. The plaintext rows stay in `lazyboy` for a week (§11.4 step 6 is lane 22's
+  follow-up).
+- **Item 8, the health check reads `events`** (`592c1e3`). `/api/cron/health` counts the rows no check has
+  reported and marks them `alarmed`, so each turns it red once; the app database not answering leaves isolation
+  unchecked. `isolationEventsAfter` and the `isolation_seen` mark went with their only caller.
+- **The harness** (with `261cf70`): `app.db` beside the users' files in `useUserFiles()`, made by app-db.ts's
+  production open. T1 runs every `UserStore` method through the identity read over the three files and holds
+  `app.db` byte for byte too; T8 is B's users row naming A's old database after a restore moved A, the event read
+  from `app.db`; T15 (`t15-events.test.ts`) is an owner mismatch with telemetry down, seen by the health check.
+  The authz harness seeds friends A and B (own rows, own token rows) and the revoked friend `rrrrrrrrrrrr`
+  (disabled, epoch 1), so that column is refused by its row, not as an unknown uid (lane 1947's note), and a
+  red-team test drives Phase 2's unavailable identity read through each `require*User()` form (§6's last item 13).
+- **Items 5-6 and 14, docs**: `.env.example` (`APP_DATABASE_URL`, a dev `TOKEN_KEYS`, `SIGNUPS`,
+  `LB_TOKEN_ROLLBACK`, the group token), README.md's local start (the dev admin row in `data/app.db`, run as
+  written) and deploy steps, docs/SECURITY.md (key rotation, restores, Phase 2's rollback cell), ARCHITECTURE.md
+  and GOTCHAS.md's token lines, CLAUDE.md's file map.
+
+**Gates at the docs commit**: `tsc --noEmit`, lint, `npm test` (vitest and the node suites) and `npm run build`
+green. `AUTHZ_TARGET=1 npx vitest run tests/isolation/authz-` fails 5, all pinned for later phases: P4a (3) and
+L07 (2), the same set as `mu/phase1-turn` and `mu/p2-base`; no P1 or P2 cell or check.
+
+**T12 on Rem's backup** (PLAN §11.4 steps 1, 3 and 5, local files, a dev key). Source: the Zenbook's
+`~/lazyboy-backup/turso/lazyboy/lazyboy-20261016-0944.db.gz` (lane 1904's layout, Turso's `lazyboy`), which
+held no `spotify_tokens%` row and no Phase 1 keys (T12 planted both, as lanes 14 and 22 would). Every check
+passed: `lazyboy-app` in `default`, the schema at version 1, one admin row (`db_name` lazyboy, active, epoch 0,
+`account_id` NULL), the runtime's sentinel, the copy into `user_tokens` with its log line that the blob decrypts
+to the planted row, one refresh stored encrypted, no events, the seven tables' counts unchanged (tracks 15,872,
+plays 22,249, contexts 118, playlists 115, playlist_tracks 7,482, saved_tracks 49, meta 138 without `plsnap:`
+and `lock:`), no meta key removed, Rem's Phase 1 cookie allowed through the identity read, the rollback flag
+writing the plaintext row back; `max(played_at)` cannot move on a copy, as designed. One check needed a step
+outside Phase 2: `verify-derived.mjs` is red on the raw copy in `skipped` (781 of 14,720 plays), identically on
+the pre-cutover snapshot (`snapshots/lazyboy-20261016-0840.db.gz`, which also shows the all-time drift since
+healed). It is lane 1903's R5 finding: `scripts/migrate-skip-rule.mjs --apply` (QUEUE.md, Rem's step after
+afb21d1) has not run on production. With that migration applied to the local copy only (781 verdicts written,
+re-read disagreements 0), T12 passes 7/7 and `verify-derived.mjs` is green. The copies were deleted.
+
+**The refresh-token probe** (PLAN §13.1, Phase 0's row; first 8 hex of the SHA-256 of `meta.spotify_tokens`'s
+`refreshToken` against the pre-incident `d30e33fe`): changed, in the Zenbook's
+`~/lazyboy-backup/snapshots/lazyboy-20261016-0840.db.gz`.
+
+**Still left after the turn** (§4's numbers): 3 (seed the request's token box from the identity row: one round
+trip), 4 (the sentinel check in `instrumentation.ts`), 7 (/login's wording for the new refusal codes through
+`signInRefusalMessage`, with the `on=` date), 9 (re-encrypt blobs not under the first key, a daily chore), 10-11
+(Phase 3 and 4a), 12 (a decrypt failure on the request path answering as "unavailable"). Also: db.ts's
+`adminDb()` still finds the admin's database by the constant for the Spotify cooldown, which Phase 3 moves to
+`app_meta` `cooldown:<bucket>`; and dev sign-in needs the admin row README's local start writes until `npm run
+setup` does (T18, Phase 4a).
+
+**For the stitch (lane 34) and lanes 17 and 19**: `forUser(uid)` keeps its signature but throws until an
+identity read or a claim names the uid in the process, so any test that calls a route with a mocked session
+names the database first (`ownerStore()` in tests/owner-store.ts does it for the owner; `seedOwnerApp()` writes
+his users row and token row for the session-less paths). Phase 3's tick names its users with `forUserAt(u.uid,
+u.dbName)`, which records them; its file joins S2's `forUserAt` list. The cron routes' owner lookup is
+`adminStore()`; lane 07's interim pinger route meets it in `/api/cron/sync`. Shared files this turn touched:
+db.ts, auth.ts, actions.ts, owner.ts, identity-read.ts, app-db.ts, token-core.ts, token-move.ts,
+token-store-app.ts, health.ts, the four cron routes, the isolation harness (harness.ts, user-dbs.ts,
+authz-harness.ts), static.test.ts, AUTHZ.md, CLAUDE.md, README.md, .env.example, SECURITY.md, ARCHITECTURE.md,
+GOTCHAS.md.
