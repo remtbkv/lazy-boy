@@ -87,3 +87,22 @@ approves, as recommended to him on Oct 15:
   wait for a closer reading of that clause before anyone builds them.
 - **Backups keep only Rem's rows** (.claude/QUEUE.md, after store phase D), because /privacy promises a departed
   friend's data is gone within 5 days, backups included.
+
+## Oct 15, 2026, 9:27 PM
+
+- **Decision 16, revised: no canary account and no 48-hour canary.** Rem: "I don't really want to add a free
+  account to test ... I think we can just be sure of it regardless just by like API logic and like our code logic
+  itself. So ... take that 48 hours off this." In its place, two checks that need no account of his:
+  - a two-user rehearsal on a production build, with two synthetic users through the scripted Spotify stand-in
+    (tests/), covering FASTPATH.md section 2.4's list: `cache()` in route handlers, the Data Cache across
+    environments, one instance serving two users, two token refreshes in one tick, the shared-device case, the
+    probe's e-mail, and deletion reaching backups;
+  - the first friend's first hour run as the exit checks, with `SIGNUPS=owner` ready as the one-redeploy freeze
+    (PLAN section 13.6).
+  Phase 3's 24-hour soak on Rem's own account stays. The first friend can connect Monday Oct 19 in the evening.
+- **The UI overhaul waits.** "the UI stuff is like should be for later. It's not our important thing now." The
+  design comparison lane is held (~/.claude/broke/scratch/lazyboy_design/held/).
+- **What matters now, in his words:** "get all this migration properly done. as well as like any of the
+  functionality and security on the backend, as well as performance with our database and make sure it's bounded
+  for [V]ercel so we can have up to like five accounts, you know, at maximum ... realistic usage, make sure that
+  still doesn't flip over and we have [a] way enough room to spare."
