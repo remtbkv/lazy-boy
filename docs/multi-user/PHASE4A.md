@@ -396,3 +396,37 @@ login and privacy pages, `chrome.tsx`, `package.json` (the backup unittest in `n
 - **Deploy (lane 24):** `TURSO_PLATFORM_TOKEN` (Production only), `TURSO_ORG` if not `remtbkv`, `CRONJOB_API_KEY` and
   `CRONJOB_JOB_IDS`, `SIGNUPS=invite` last; the backup install and its two env variables before that; check
   `api_log` and `client_metrics` carry `user_id` in production (the backup refuses a telemetry copy without it).
+
+## 11. Stitched onto Phase 3's turn: `mu/s-p4a` (lane 1945_lb_mu_34_stitch, Oct 16, 2026)
+
+`mu/s-p4a` is this phase's slice, `2a5e950..6fde631` (lane 06's build, lane 09's review, lane 10's Zenbook commit
+and lane 19's turn), replayed with `git rebase --onto mu/s-p3`, where it meets lanes 15 and 17's turns and the
+meter. `git range-diff 2a5e950..6fde631 mu/s-p3..mu/s-p4a` (`--creation-factor=100`), this section's commit
+aside: 31 patches unchanged, 16 changed, 1 dropped, 2 new. Lane 10's doc commit is in the slice (`75f74f0`), with the same hunks as `336dd38`.
+Each changed commit's message ends with a "Stitched onto mu/s-p3" paragraph.
+
+- `3a67b77`: identity-read.ts imports both sides' names. `be8a8ae`: Log out is `logOutEverywhere` (epoch and
+  `user_tokens` row in one batch, then the admin's plaintext copy), over lane 15's `signOutTokens`, which had no
+  other caller and goes with `token-core`'s `removeTokens`.
+- `eb9cb4e`: the health route reads the admin through `adminStore()`, his capture through `readCapture`, and the
+  events through `readHealth` (by code, marked in one batch), so lane 15's `unreportedEvents`/`markEventsAlarmed`
+  go; isolation is the app database's codes alone (lane 15 removed the telemetry read); `daily_at` is the app
+  database's; the meter's two inputs stay, and health.ts's verdict takes both phases' inputs and reasons.
+- `c64fc1d`: the per-user memo with the meter's floor on the replies after the Spotify call (and, from a stitch
+  commit below, on the memo's reply). `1181107`: /privacy's logs line names the meter's counts and the random ID.
+- `1318632`, `c99d74f`: CLAUDE.md and SECURITY.md keep Phases 2 and 3's lines with this phase's.
+- `d537bc9`: history-actions.ts keeps Phase 3's store-only refresh. `00ea363`: `loadUsageTelemetry` takes the
+  admin uid and still settles the budget record. `9e0b397`: owner.ts goes; S2's owner path is identity-read.ts.
+- `6261b0c`, `beb686d`: `daily-chores.ts` was lane 17's; it keeps `runDailyChores(store)`, the meter's chore and
+  the caller's stamp (`app_meta.daily_at` alone), and adds `runPhase4aChores` after the list. `8935194` (AUTHZ.md
+  for the daily route's owner lookup) is dropped: empty once the stitched route's lookup was already in the doc.
+
+New commits: `stitch: Phase 4a's health, probe and claim tests on the stitched admin, capture and meter` (OWNER_UID
+set to the admin each suite seeds, `readCapture` mocked healthy, the meter's inputs normal; friend A's harness rows
+removed before A is invited) and `stitch: a memoized now-playing reply carries the budget's floor` (red with
+`minPollMs` 0 on the memo's reply).
+
+§10's left items stand. The friend positive control in the authz harness is still to add (lane 28's rehearsal or
+lane 21): lane 15's naming is now under the harness, and `claim-signin.test.ts` proves a friend's sign-in reaches
+their own row and token through the real callback. Gates at the slice head: `tsc`, lint, `npm test`, build green;
+`AUTHZ_TARGET=1 … authz-` passes in full. Lane 34's NOTES and OUTCOMES entry have the full range-diff.
