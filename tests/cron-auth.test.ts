@@ -2,8 +2,16 @@
 // cronAuthorized for every /api/cron/* route but sync, cronCaller for sync. An unset secret must
 // reject every caller, including one that sends the literal header an unset secret would
 // template to.
-import { afterEach, describe, expect, it } from "vitest";
+import { timingSafeEqual } from "node:crypto";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { cronAuthorized, cronCaller } from "@/lib/cron-auth";
+
+// The real compare, watched: a `===` on the header answers the same as timingSafeEqual and
+// passes every behavioural test above, so only the call itself can show the compare is constant-time.
+vi.mock("node:crypto", async (orig) => {
+  const real = await orig<typeof import("node:crypto")>();
+  return { ...real, timingSafeEqual: vi.fn(real.timingSafeEqual) };
+});
 
 const req = (authorization?: string) =>
   new Request("https://lazy-boy.example/api/cron/daily", {
@@ -79,5 +87,22 @@ describe("cronCaller", () => {
     delete process.env.CRON_SECRET;
     process.env.CRON_SECRET_EXT = "ext-s3cret";
     expect(cronCaller("Bearer ext-s3cret")).toBe("ext");
+  });
+
+  it("compares in constant time: each secret's right header and a same-length wrong one go through timingSafeEqual (security R14)", () => {
+    process.env.CRON_SECRET = "s3cret";
+    process.env.CRON_SECRET_EXT = "ext-s3cret";
+    const spy = vi.mocked(timingSafeEqual);
+    for (const h of ["Bearer s3cret", "Bearer s3creX", "Bearer ext-s3cret", "Bearer ext-s3creX"]) {
+      spy.mockClear();
+      cronCaller(h);
+      const compared = spy.mock.calls.map(([a]) => Buffer.from(a as Uint8Array).toString());
+      expect(compared, h).toContain(h);
+    }
+    // The verdict is timingSafeEqual's: told the bytes differ, the right header is refused.
+    spy.mockReturnValueOnce(false);
+    expect(cronCaller("Bearer s3cret")).toBe(null);
+    spy.mockReturnValueOnce(false);
+    expect(cronCaller("Bearer ext-s3cret")).toBe(null);
   });
 });
