@@ -1,6 +1,6 @@
 # Multi-user Lazy Boy: the capacity bound at five accounts
 
-Lane 1946_lb_capacity wrote this on Oct 15, 2026, 9:55-10:45 PM, for Rem's 9:27 PM ruling: "make sure it's
+Lane 1946_lb_capacity wrote this on Oct 15, 2026, 9:55-10:10 PM, for Rem's 9:27 PM ruling: "make sure it's
 bounded for [V]ercel so we can have up to like five accounts, you know, at maximum ... realistic usage, make sure
 that still doesn't flip over and we have [a] way enough room to spare." Five accounts is the ceiling Spotify's
 development mode allows (PLAN §1, target U). Every number is **[measured]** with its source or **[estimate]** with
@@ -294,7 +294,7 @@ Lane 05 reads them from the marker file alongside the three already listed there
 
 ## 8. What this lane ran
 
-All read-only, Oct 15, 9:55-10:45 PM.
+All read-only, Oct 15, 9:55-10:10 PM.
 
 - Vercel REST with the CLI's token: `GET /v2/teams/<team>`, `GET /v9/projects/<lazy-boy>`, `GET /v6/deployments`,
   and `GET /v2/usage` for each allowed type, Sep 15-Oct 16; `vercel usage` once. Scripts in the lane's scratch.
