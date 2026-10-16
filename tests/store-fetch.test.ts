@@ -110,4 +110,44 @@ describe("makeStoreFetch", () => {
     expect(seen!.body).toBeUndefined();
     expect(seen!.method).toBe("GET");
   });
+
+  it("options: one attempt surfaces the first failure, rejected or gateway", async () => {
+    let calls = 0;
+    const once = makeStoreFetch(
+      async () => {
+        calls++;
+        throw new TypeError("fetch failed");
+      },
+      { attempts: 1 },
+    );
+    await expect(once(hranaRequest())).rejects.toThrow("fetch failed");
+    expect(calls).toBe(1);
+
+    let gw = 0;
+    const onceGateway = makeStoreFetch(
+      async () => {
+        gw++;
+        return new Response("", { status: 503 });
+      },
+      { attempts: 1 },
+    );
+    expect((await onceGateway(hranaRequest())).status).toBe(503);
+    expect(gw).toBe(1);
+  });
+
+  it("options: attemptTimeoutMs bounds a fetch that never answers", async () => {
+    // A frozen host: the connection is accepted and nothing comes back. Only the signal ends it.
+    const hang = makeStoreFetch(
+      (_u, init) =>
+        new Promise<Response>((_res, rej) => {
+          init?.signal?.addEventListener("abort", () => rej(init.signal!.reason));
+        }),
+      { attempts: 1, attemptTimeoutMs: 50 },
+    );
+    const t0 = Date.now();
+    await expect(hang(hranaRequest())).rejects.toThrow();
+    const took = Date.now() - t0;
+    expect(took).toBeGreaterThanOrEqual(40);
+    expect(took).toBeLessThan(1_000);
+  });
 });
