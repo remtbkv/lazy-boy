@@ -97,7 +97,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/now-playing
 
-- File: `src/app/api/now-playing/route.ts`. Gate today: `src/app/api/now-playing/route.ts:20`.
+- File: `src/app/api/now-playing/route.ts`. Gate today: `src/app/api/now-playing/route.ts:24`.
 - Does, when allowed: reads Spotify's currently-playing with Rem's grant; reads and writes the context-name cache (contexts).
 - Calls (from the source): store `forUser`; Spotify `currentlyPlaying`, `contextName`; via `spotifyAccessTokenFor`, `requireUser`, `spotifyClient`, `spotifyCooldownMs`.
 - `anon`: D — requireUser refused → 200 {playing:null} with no store read (deliberately not 401: polled every 6 s)
