@@ -232,6 +232,9 @@ export const INVITE_TTL_MS = 14 * 86_400_000;
 const NAME_MAX = 80;
 const NAME_FILLER = "A friend";
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Control and format characters (C0, DEL, C1, bidi overrides, line separators): both fields reach
+// Rem's terminal through `invite.mjs --list`, so a stranger's escape sequence is never stored.
+const UNPRINTABLE = /[\p{Cc}\p{Cf}\u2028\u2029]/gu;
 
 export type JoinRefusal = "closed" | "terms" | "email" | "name" | "duplicate" | "busy" | "full";
 export type JoinResult = { ok: true; id: string } | { ok: false; reason: JoinRefusal };
@@ -240,8 +243,8 @@ export async function createJoinRequest(o: { email: string; name: string; agreed
   if (signupsMode() !== "invite") return { ok: false, reason: "closed" };
   if (!o.agreed) return { ok: false, reason: "terms" };
   const email = o.email.trim().toLowerCase();
-  if (email.length > 254 || !EMAIL_RE.test(email)) return { ok: false, reason: "email" };
-  const name = o.name.replace(/[\u0000-\u001f\u007f]/g, "").trim();
+  if (email.length > 254 || !EMAIL_RE.test(email) || email.search(UNPRINTABLE) >= 0) return { ok: false, reason: "email" };
+  const name = o.name.replace(UNPRINTABLE, "").trim();
   if (name.length > NAME_MAX) return { ok: false, reason: "name" };
   const args = {
     id: newUid(),

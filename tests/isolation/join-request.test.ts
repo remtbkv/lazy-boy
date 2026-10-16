@@ -61,6 +61,16 @@ describe("the request form's storage", () => {
     expect(await q("SELECT count(*) AS n FROM requests")).toEqual([{ n: 0 }]);
   });
 
+  it("refuses an e-mail carrying control or format characters, and strips them from the name", async () => {
+    // Lane 09's review: both fields reach Rem's terminal through `invite.mjs --list`, so a
+    // stranger's escape sequence (ESC, the C1 CSI, a bidi override) must not be stored.
+    for (const bad of ["a\u001b]0;x\u0007@example.com", "a\u009b2J@example.com", "a\u202e@example.com", "a\u0000@example.com"]) {
+      expect(await ask(bad), JSON.stringify(bad)).toEqual({ ok: false, reason: "email" });
+    }
+    expect((await ask("x@example.com", { name: "Sam\u001b[2J\u009b1m\u202e\u2028" })).ok).toBe(true);
+    expect(await q("SELECT email, name FROM requests")).toEqual([{ email: "x@example.com", name: "Sam[2J1m" }]);
+  });
+
   it("a second request for an open address stores nothing and hands back no request", async () => {
     expect((await ask("x@example.com")).ok).toBe(true);
     expect(await ask("X@example.com")).toEqual({ ok: false, reason: "duplicate" });

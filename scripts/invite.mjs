@@ -29,6 +29,9 @@ const SEATS = 5;
 // Production (docs/quota-forensic/BRIDGE.md); LAZYBOY_ORIGIN overrides it (lane 28's rehearsal).
 const ORIGIN = "https://lazy-spotify.vercel.app";
 const B32 = "abcdefghijklmnopqrstuvwxyz234567";
+// A stranger typed the e-mail and name: print any control or format character escaped, so none
+// reaches the terminal as an escape sequence (the form refuses them; this covers older rows).
+const shown = (v) => String(v).replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, (c) => `\\u{${c.codePointAt(0).toString(16)}}`);
 
 function newUid(deps) {
   let out = "";
@@ -51,7 +54,7 @@ async function list(deps) {
     if (!r.rows.length) deps.log("no open requests");
     for (const x of r.rows) {
       const when = new Date(Number(x.created_at)).toISOString().slice(0, 16).replace("T", " ");
-      deps.log(`${x.id}  ${x.status}${x.uid ? ` (uid ${x.uid}, ${x.user_status})` : ""}  ${x.email}  "${x.name}"  asked ${when} UTC`);
+      deps.log(`${x.id}  ${x.status}${x.uid ? ` (uid ${x.uid}, ${x.user_status})` : ""}  ${shown(x.email)}  "${shown(x.name)}"  asked ${when} UTC`);
     }
     return 0;
   } finally {
@@ -124,7 +127,7 @@ async function approve(deps, rid) {
     if (done.rowsAffected !== 1) throw new Error(`request ${rid} could not be marked approved`);
     const origin = deps.env.LAZYBOY_ORIGIN || ORIGIN;
     deps.log(`approved ${rid} as uid ${uid}.`);
-    deps.log(`1. If you have not yet: add ${req.email} in the Spotify dashboard, User Management (name and that e-mail).`);
+    deps.log(`1. If you have not yet: add ${shown(req.email)} in the Spotify dashboard, User Management (name and that e-mail).`);
     deps.log(`2. Send them this link (it works once they connect, for 14 days): ${origin}/api/join/link?t=${token}`);
     return 0;
   } finally {

@@ -113,6 +113,19 @@ describe("invite.mjs", () => {
     expect(logs.join("\n")).toContain(`${rid}  pending  sam@example.com  "Sam"`);
   });
 
+  it("--list and --approve print a stored request's control and format characters escaped, never raw", async () => {
+    // Lane 09's review: a row stored before the form refused them, or written by hand.
+    await q(
+      "INSERT INTO requests (id, email, name, status, created_at, status_at, terms_version) VALUES ('rrrrrrrrrrrr', :e, :n, 'pending', :t, :t, 'v')",
+      { e: "x\u001b]0;pwn\u0007@example.com", n: "Sam\u009b2J\u202e", t: clock },
+    );
+    expect(await invite(["--list"], deps())).toBe(0);
+    expect(await invite(["--approve", "rrrrrrrrrrrr"], deps())).toBe(0);
+    const out = logs.join("\n");
+    expect(out).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u202e]/);
+    expect(out).toContain("x\\u{1b}]0;pwn\\u{7}@example.com");
+  });
+
   it("--approve provisions lb-u-<uid> at today's schema with its four keys, then the claim works end to end", async () => {
     const rid = await request("sam@example.com");
     expect(await invite(["--approve", rid], deps())).toBe(0);
