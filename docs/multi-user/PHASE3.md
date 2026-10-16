@@ -45,7 +45,8 @@ one invocation a minute whatever N is).
 - **The fair-share brake** (§7.5), pure, in `src/lib/brake.ts`: the quota day from 14:51 UTC (the anchor
   `getRecentlyPlayedQuotaWindows` uses) and its next reset, the share 426 / N, `normal` / `share` (15-minute
   batches for that user) / `all` (30 for everyone at 426), and `BRAKE_ON = false`, the one constant Phase
-  4a flips. It counts in Phase 3: every harvest increments `sync_state.rp_calls` for the quota day, awaited
+  4a flips (the tick's `PHASE3_TICK.brakeOn` reads it; lane 04 had a separate `false` there, which lane 05's
+  review wired to it). It counts in Phase 3: every harvest increments `sync_state.rp_calls` for the quota day, awaited
   before the call.
 - **The Liked change** (§7.7), pure, in `src/lib/liked-diff.ts`: `likedDiff` keys Liked Songs by track and
   ignores position, so one like writes one row; `likedHead` reads from the newest page until a stored
@@ -85,7 +86,7 @@ one invocation a minute whatever N is).
   observed reset, at most 30 minutes), `store-error`, `timeout`.
 - **The tick** (§7.2), `src/lib/sync/tick.ts`, `runTick(deps, authorization)` with every dependency injected
   (`TickDeps`: the clock, the caller, the queue, `storeFor`, `tokenFor`, `after`, the daily chores, the
-  config; `PHASE3_TICK` holds 45 s, hourly, brake off, 15 s, 20 s, 10 s):
+  config; `PHASE3_TICK` holds 45 s, hourly, the brake as `BRAKE_ON` says (off), 15 s, 20 s, 10 s):
   0. The caller from its secret (`cron-auth.ts`). The Zenbook's caller reads the owner alarm first and gets
      503 when the admin is missing, not `active`, has no token row, or when two or more users or the admin
      failed to decrypt in the last tick or this one. cron-job.org's caller gets `{"ok":true}` in every case.

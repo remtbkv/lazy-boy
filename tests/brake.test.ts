@@ -1,6 +1,6 @@
 // Known answers for the fair-share brake (docs/multi-user/PLAN.md §7.5): the quota day, the share,
 // the two slow modes, and the one constant that switches it on in Phase 4a.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { APP_DAILY_BUDGET, BRAKE_ON, brakeMode, nextQuotaReset, quotaDay, shareOf } from "@/lib/brake";
 import { decideHarvest, state0 } from "./brake-helpers";
 
@@ -67,4 +67,18 @@ describe("completeness, the tail, its retry and the backstop fire in every mode 
       expect(decideHarvest({ brake, now, probe: state0({ changes: 1 }), lastHarvestAt: now - 2 * 60_000, openApp: true })).toBe("open-app");
     });
   }
+});
+
+describe("BRAKE_ON is the one switch Phase 4a flips (§7.5)", () => {
+  it("the tick's Phase 3 numbers read it, so flipping it puts the brake to work", async () => {
+    vi.resetModules();
+    vi.doMock("@/lib/brake", async (orig) => ({ ...(await orig<typeof import("@/lib/brake")>()), BRAKE_ON: true }));
+    try {
+      const { PHASE3_TICK } = await import("@/lib/sync/tick");
+      expect(PHASE3_TICK.brakeOn).toBe(true);
+    } finally {
+      vi.doUnmock("@/lib/brake");
+      vi.resetModules();
+    }
+  });
 });

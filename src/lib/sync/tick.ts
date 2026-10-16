@@ -22,6 +22,7 @@
 import { randomUUID } from "node:crypto";
 import * as appDb from "@/lib/app-db";
 import type { Claim, ClaimedUser, OwnerAlarmRow, Release } from "@/lib/app-db";
+import { BRAKE_ON } from "@/lib/brake";
 import type { CronCaller } from "@/lib/cron-auth";
 import { DAILY_STALE_MS } from "@/lib/health";
 import { EARLY_MS, backoffMs, nextDue, syncStateFor, type HarvestTrigger } from "@/lib/harvest-policy";
@@ -71,7 +72,7 @@ export type TickConfig = {
 export const PHASE3_TICK = {
   stampWindowMs: 45_000,
   backstopMs: 3_600_000,
-  brakeOn: false,
+  brakeOn: BRAKE_ON,
   stepMs: 15_000,
   replyMs: 20_000,
   rescanMinLeftMs: 10_000,
