@@ -67,13 +67,19 @@ src/app/api/cron/store-bench/  store round-trip timings from a production functi
 src/app/api/cron/health/ the hourly health check (cron-job.org, failure e-mail): the owner's
                          capture, isolation events, the daily stamp, Turso's pace, the budget
                          mode, a quiet CPU meter (lib/health.ts)
-src/lib/auth.ts          Auth.js config; the session names a uid (multi-user Phase 1)
-src/lib/token-core.ts    Spotify token refresh (centralized), keyed by uid; token-store-owner.ts
-                         is Phase 1's store (the owner's meta row)
+src/lib/auth.ts          Auth.js config; the session names a uid (multi-user Phases 1-2)
+src/lib/token-core.ts    Spotify token refresh (centralized), keyed by uid, writes conditional on
+                         the row read; token-store-app.ts is its store (user_tokens, encrypted by
+                         token-crypto.ts under TOKEN_KEYS, checked by token-keys.ts's sentinels);
+                         token-move.ts copies the admin's plaintext row in once (and back on
+                         LB_TOKEN_ROLLBACK=1)
+src/lib/app-db.ts        every statement on the app database `lazyboy-app` (users, user_tokens,
+                         sync_state, events, app_meta); its schema is app-schema.ts
 src/lib/identity.ts      the uid, the branded Uid, the identity check, phase1Owner() (the owner
-                         for the session-less paths); session-gate.ts and require-user.ts turn
-                         it into each entry point's answer. EVERY entry point gates with
-                         require*User() before its first read
+                         for the session-less paths); identity-read.ts reads it (and sign-in's
+                         account_id link) from the app database; session-gate.ts and
+                         require-user.ts turn it into each entry point's answer. EVERY entry
+                         point gates with require*User() before its first read
 src/lib/user-cache.ts    the only caller of unstable_cache (uid + owner stamp); isolation.ts
                          records an event when a check catches a cross-user value
 src/lib/session.ts       getSpotify(uid): server-only Spotify client for the gated user
