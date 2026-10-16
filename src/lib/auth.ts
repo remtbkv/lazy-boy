@@ -11,6 +11,7 @@ import { gateJwt, sessionFields, signInClaims } from "@/lib/session-gate";
 import type { OwnedToken } from "@/lib/spotify";
 import { SPOTIFY_NOT_REGISTERED, spotifyUserinfo } from "@/lib/spotify/userinfo";
 import { createTokenCore, isFresh, RefreshError, type UserTokens } from "@/lib/token-core";
+import { withAdminTokenMove } from "@/lib/token-move";
 import { appTokenStore } from "@/lib/token-store-app";
 
 // Spotify banned `localhost` redirect URIs (Nov 2025): only the loopback IP literal
@@ -53,8 +54,10 @@ type SpotifyToken = {
 };
 
 // The token core, per user (src/lib/token-core.ts: the refresh, the in-flight map and the lock,
-// all keyed by uid), over Phase 2's encrypted `user_tokens` (token-store-app.ts).
-const core = createTokenCore(appTokenStore());
+// all keyed by uid), over Phase 2's encrypted `user_tokens` (token-store-app.ts). The admin's
+// first read in a process copies his plaintext `meta` row in once ever, or, with
+// LB_TOKEN_ROLLBACK=1, writes it back (token-move.ts, PLAN.md §11.4).
+const core = createTokenCore(withAdminTokenMove(appTokenStore(), ownerUid));
 
 // ── Request-scoped reads ───────────────────────────────────────────────────────────────
 // One tokens read per request instead of one per callback. /home calls auth() twice (the
