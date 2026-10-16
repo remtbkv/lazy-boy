@@ -1785,7 +1785,7 @@ export async function storePlaylists(rows: StoredPlaylist[], meId: string | null
   // ONE line, before any write path, naming the field that actually differed. The whole fix
   // rests on a claim about WHICH field moves hourly (artwork), and the only way to keep that
   // claim honest in production is to have the probe say so every time it fires: Vercel
-  // captures stdout and the Zenbook's logtail archives it. First differing field only — a dump
+  // captures stdout (`vercel logs`, about an hour of history). First differing field only — a dump
   // of 180 rows an hour is not a diagnostic.
   if (diff.firstDiff) {
     console.log(
