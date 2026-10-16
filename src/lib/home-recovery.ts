@@ -70,6 +70,31 @@ export function settlePayloads(l: Payload, h: Payload): PayloadSettle {
   return { status: "memory", clearLib, clearHist, armRetry, build: true, playsKnown: h !== null };
 }
 
+/** loadIndex's settle once the browser's copy exists (search-cache.ts, STORE_MIGRATION §10): a
+ *  half the network failed to deliver is answered by the stored half, so a history 500 doesn't
+ *  turn the plays the stored set was showing into "didn't load". The ref-clearing and the retry
+ *  stay the network's own. An EMPTY network half is the server's answer and is not replaced.
+ *  `status` is "idb" when only the stored copy could build a set. */
+export function settleWithStored<L extends Payload, H extends Payload>(
+  l: L | null,
+  h: H | null,
+  storedLib: L | null,
+  storedHist: H | null,
+): Omit<PayloadSettle, "status"> & { status: "memory" | "idb" | "fallback"; lib: L | null; hist: H | null } {
+  const net = settlePayloads(l, h);
+  const lib = l ?? storedLib;
+  const hist = h ?? storedHist;
+  const both = settlePayloads(lib, hist);
+  return {
+    ...net,
+    status: net.build ? "memory" : both.build ? "idb" : "fallback",
+    build: both.build,
+    playsKnown: both.playsKnown,
+    lib,
+    hist,
+  };
+}
+
 /** The server's FROZEN_AFTER_DAYS (db.ts): a day is final once it is today-2 or older in the
  *  user's zone. Yesterday stays live — late harvests and the backstop replay land there. */
 const FROZEN_AFTER_DAYS = 2;

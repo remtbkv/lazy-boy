@@ -15,11 +15,21 @@ import {
   persistableDay,
   settleDayFetch,
   settlePayloads,
+  settleWithStored,
   type DaySettle,
 } from "@/lib/home-recovery";
 import { toast } from "@/lib/toast";
 import { addPlay, reconcilePlays, type Provisional } from "@/lib/optimistic-play";
 import { recordAppEvent } from "@/lib/metrics-client";
+import {
+  historyOk,
+  idbKV,
+  libraryOk,
+  readStored,
+  slotFor,
+  writeStored,
+  type Kind,
+} from "@/lib/search-cache";
 import { IdentityTrackMenu } from "@/components/identity-track-menu";
 import { useNowPlaying } from "@/components/now-playing-context";
 import { usePhone, useSearchMode } from "../use-search-mode";
@@ -153,12 +163,20 @@ const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n ==
 // shape of the route; that is what broke production on 2026-08-05. The shape tokens make that
 // a miss rather than a hit, and this is the last line: an unreadable payload counts as NO
 // payload (the other half, or the server, answers), never as an empty or half-built one.
-const fetchPayload = <T,>(url: string, ok: (d: T) => boolean): Promise<T | null> =>
+// `keep` gets the body's text once it has passed: the browser's copy (search-cache.ts) stores
+// that text, so only a body this build could read is ever stored.
+const fetchPayload = <T,>(
+  url: string,
+  ok: (d: unknown) => boolean,
+  keep: (text: string, d: T) => void,
+): Promise<T | null> =>
   fetch(url)
-    .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-    .then((d: T) => {
+    .then((r) => (r.ok ? r.text() : Promise.reject(new Error(String(r.status)))))
+    .then((text) => {
+      const d: unknown = JSON.parse(text);
       if (!ok(d)) throw new Error(`${url}: unrecognised payload shape`);
-      return d;
+      keep(text, d as T);
+      return d as T;
     })
     .catch(() => null);
 
@@ -573,8 +591,26 @@ export function DenHome({
 
   // The payloads are fetched off the render path and then held in memory for the rest of the
   // visit. Persistence across visits is the browser's HTTP cache plus each route's ETag: the
-  // library half revalidates in one 304 with no body unless a playlist changed.
+  // library half revalidates in one 304 with no body unless a playlist changed. On top of that,
+  // the last good body of each half sits in IndexedDB (search-cache.ts, STORE_MIGRATION §10):
+  // on mount the set is built from that copy before the network is asked, so a repeat visit can
+  // search at once, and the fresh pair replaces it when it lands.
+  //
+  // The stored copy feeds SEARCH only, never the day list (`history` stays network-only): it can
+  // be hours old, and a day derived from it could replace a fresher day the page already holds
+  // (today from the server, a day from the session cache). Search results may be minutes stale
+  // until the fresh pair lands; the days are never stale.
   const [entries, setEntries] = useState<Entry[] | null>(null);
+  /** The opaque user key the (app) layout renders on #den-root; null until mount reads it. */
+  const userKey = useRef<string | null>(null);
+  /** What the browser's copy held at mount: answers a half the network then fails to deliver. */
+  const stored = useRef<{ lib: LibraryPayload | null; hist: HistoryPayload | null }>({
+    lib: null,
+    hist: null,
+  });
+  /** Set once the network pair has built `entries`; a slower IndexedDB read must not undo it. */
+  const fresh = useRef(false);
+  const markIdb = useRef(false);
   const libReq = useRef<Promise<LibraryPayload | null> | null>(null);
   const histReq = useRef<Promise<HistoryPayload | null> | null>(null);
   // Whether `entries` can be trusted about PLAYS. False when the library half loaded and the
@@ -603,19 +639,16 @@ export function DenHome({
     // never-played library song.
     if ((!libReq.current || !histReq.current) && Date.now() < retryAt.current) return;
     if (libReq.current && histReq.current) return;
-    if (!libReq.current) indexStatus.current = "fetching";
-    libReq.current ??= fetchPayload<LibraryPayload>(
-      "/api/search/library",
-      (d) => Array.isArray(d?.tracks) && (!d.tracks.length || d.tracks[0]?.length >= 5),
-    );
-    histReq.current ??= fetchPayload<HistoryPayload>(
-      "/api/search/history",
-      (d) =>
-        Array.isArray(d?.tracks) &&
-        Array.isArray(d?.plays) &&
-        // 5, not 4: a v1 body (no durationMs) would derive days with an empty Length column.
-        (!d.tracks.length || d.tracks[0]?.length >= 5),
-    );
+    // A set built from the browser's copy is already answering; it stays "idb" until this lands.
+    if (!libReq.current && indexStatus.current !== "idb") indexStatus.current = "fetching";
+    // The validators are search-cache.ts's, so a stored body is held to the same checks. Every
+    // route body carries its version as `v` (api/search/*/route.ts).
+    const keep = (kind: Kind) => (text: string, d: unknown) => {
+      const v = (d as { v?: string | null }).v ?? null;
+      if (userKey.current) void writeStored(idbKV(), slotFor(userKey.current, kind), v, text);
+    };
+    libReq.current ??= fetchPayload<LibraryPayload>("/api/search/library", libraryOk, keep("library"));
+    histReq.current ??= fetchPayload<HistoryPayload>("/api/search/history", historyOk, keep("history"));
     const [lib, hist] = [libReq.current, histReq.current];
     void Promise.all([lib, hist]).then(([l, h]) => {
       // A refresh that found new plays drops the history request to force a re-fetch; ignore a
@@ -626,14 +659,18 @@ export function DenHome({
       // render "No songs match" for the visit, audit 2026-08-19 T2.6), keeping any earlier
       // successful build; the library half alone cannot answer "have I played this", so it
       // says so rather than rendering its silence as "never".
-      const s = settlePayloads(l, h);
+      // settleWithStored adds the browser's copy: it answers a half the network failed to
+      // deliver (the retry still runs for that half).
+      const s = settleWithStored(l, h, stored.current.lib, stored.current.hist);
       indexStatus.current = s.status;
       if (s.clearLib) libReq.current = null;
       if (s.clearHist) histReq.current = null;
       if (s.armRetry) retryAt.current = Date.now() + RETRY_MS;
       if (!s.build) return;
+      fresh.current = true;
+      markIdb.current = false;
       setPlaysKnown(s.playsKnown);
-      setEntries(buildEntries(l, h));
+      setEntries(buildEntries(s.lib, s.hist));
       // The history half also feeds the day list (buildDays). Only set on success: a failed
       // history fetch must leave an earlier payload — and the days derived from it — standing.
       if (h) setHistory(h);
@@ -648,6 +685,36 @@ export function DenHome({
     if (!searchPerfEnabled() || !query.trim()) return;
     return startSearchProbe(query.trim(), indexStatus.current);
   }, [query, mode]);
+
+  // The browser's copy, read on mount, before the idle fetch below is even scheduled to start.
+  // Declared above that effect on purpose: effects run in order, so the read is issued first.
+  useEffect(() => {
+    const key = document.getElementById("den-root")?.dataset.userKey;
+    if (!key) return;
+    userKey.current = key;
+    const kv = idbKV();
+    void Promise.all([
+      readStored<LibraryPayload>(kv, slotFor(key, "library"), libraryOk),
+      readStored<HistoryPayload>(kv, slotFor(key, "history"), historyOk),
+    ]).then(([l, h]) => {
+      stored.current = { lib: l, hist: h };
+      // Same rules as the network pair: nothing or nothing but empties → no set from it.
+      const s = settlePayloads(l, h);
+      if (!s.build || fresh.current) return;
+      indexStatus.current = "idb";
+      markIdb.current = true;
+      setPlaysKnown(s.playsKnown);
+      setEntries(buildEntries(l, h));
+    });
+    // Mount only; the refs it fills are read by loadIndex.
+  }, []);
+  // Marked once the stored set is committed, i.e. when search stopped waiting on the network
+  // (R3; /usage shows it as `index-idb`). Not made when the network pair got there first.
+  useEffect(() => {
+    if (!entries || !markIdb.current) return;
+    markIdb.current = false;
+    performance.mark("lb:index-idb");
+  }, [entries]);
 
   // Fetched on IDLE after Home has painted, not on focus. Focus was too late in the one case
   // that matters: on a cold data cache the server has to build the index (~2.7s against the
