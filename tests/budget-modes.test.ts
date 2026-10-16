@@ -24,7 +24,7 @@ import { INITIAL_POLL_STATE, PollLoop, STEADY_MS, planNextPoll, type PollOutcome
 import { SyncLoop, ambientGapMs, noteSyncReply, syncIntervalMs } from "@/lib/budget/sync-interval";
 import { GET as cronSync } from "@/app/api/cron/sync/route";
 import { play, rawClient, resetStore } from "./adversarial/helpers";
-import { ownerStore, seedOwnerRow } from "./owner-store";
+import { ownerStore, seedOwnerApp } from "./owner-store";
 
 const MIN = 60_000;
 const MODES: Mode[] = ["normal", "economy", "freeze"];
@@ -205,11 +205,11 @@ describe("the cron tick's library rescan follows the mode", () => {
     process.env.CRON_SECRET = "s";
     spy.librarySyncs = 0;
     await resetStore();
-    await seedOwnerRow(); // the admin's users row the tick's adminStore() reads (Phase 2)
-    // The owner's token row: the tick reads it for the owner alarm before any harvest or rescan
+    // The admin's users row, which the tick's adminStore() reads, and his token of record
+    // (user_tokens, Phase 2): the tick reads it for the owner alarm before any harvest or rescan
     // (the Zenbook's caller; lane 07's pinger as stitched into Phase 1), and without it every
     // call ends in 503 "no token" before reaching the rescan.
-    await ownerStore().setSpotifyTokens({ accessToken: "at", refreshToken: "rt", expiresAt: Date.now() + 3_600_000 });
+    await seedOwnerApp({ accessToken: "at", refreshToken: "rt", expiresAt: Date.now() + 3_600_000 });
   });
 
   async function libraryAgeMinutes(m: number) {

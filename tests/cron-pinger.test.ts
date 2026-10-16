@@ -46,10 +46,11 @@ vi.mock("@/lib/db", async (importOriginal) => {
   };
 });
 
-// The route's token getter, reduced to the stored row: no refresh is under test here.
+// The route's token getter, reduced to the token of record (user_tokens, multi-user Phase 2): no
+// refresh is under test here.
 vi.mock("@/lib/auth", () => ({
   getValidAccessTokenFor: async (uid: Parameters<typeof import("@/lib/db").forUser>[0]) => {
-    const t = await (await import("@/lib/db")).forUser(uid).getSpotifyTokens();
+    const t = await (await import("@/lib/token-store-app")).appTokenStore().get(uid);
     return t ? { uid, accessToken: t.accessToken } : null;
   },
 }));
@@ -83,10 +84,12 @@ vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
   throw new Error(`unexpected Spotify call ${url.pathname}`);
 });
 
-const { ownerStore, seedOwnerRow } = await import("./owner-store");
+const { ownerStore, ownerUid, seedOwnerApp } = await import("./owner-store");
+const { appTokenStore } = await import("@/lib/token-store-app");
 const db = ownerStore();
 // The admin's users row, which the route's adminStore() reads (multi-user Phase 2).
-await seedOwnerRow();
+await seedOwnerApp();
+const tokens = appTokenStore();
 const { GET } = await import("@/app/api/cron/sync/route");
 
 const call = (authorization?: string) =>
@@ -113,7 +116,10 @@ beforeEach(async () => {
   spotify.playing = false;
   spotify.storeDown = false;
   spotify.hold = null;
-  await db.setSpotifyTokens({ accessToken: "at-rem", refreshToken: "rt-rem", expiresAt: base + 3_600_000 });
+  // The token of record (user_tokens). The plaintext meta copy is the rollback week's (PLAN
+  // §11.4) and absent here unless a test plants it.
+  await tokens.set(ownerUid(), { accessToken: "at-rem", refreshToken: "rt-rem", expiresAt: base + 3_600_000 });
+  await db.clearSpotifyTokens();
   // An idle tick: nothing playing, harvested just now, library fresh. Its work is the
   // player check.
   await db.setHarvestGate({ lastActive: 0, lastHarvest: base });
@@ -155,7 +161,7 @@ describe("/api/cron/sync, two pingers", () => {
     expect(await guarded.text()).toBe('{"ok":true}');
 
     at(200_000);
-    await db.clearSpotifyTokens();
+    await tokens.remove(ownerUid());
     const signedOut = await ext();
     expect(signedOut.status).toBe(200);
     expect(await signedOut.text()).toBe('{"ok":true}');
@@ -215,7 +221,7 @@ describe("/api/cron/sync, two pingers", () => {
   it("the Zenbook caller still sees the owner alarm inside the window cron-job.org's tick opened", async () => {
     expect((await ext()).status).toBe(200);
     expect(ticks()).toBe(1);
-    await db.clearSpotifyTokens();
+    await tokens.remove(ownerUid());
     at(30_000);
     const alarm = await zen();
     expect(alarm.status).toBe(503);
@@ -225,6 +231,27 @@ describe("/api/cron/sync, two pingers", () => {
     expect(quiet.status).toBe(200);
     expect(await quiet.text()).toBe('{"ok":true}');
     expect(ticks()).toBe(1);
+  });
+
+  it("the owner alarm reads the token of record: a plaintext copy alone is no token, and none is no alarm", async () => {
+    // Log out removed the user_tokens row; the rollback week's plaintext copy is still there.
+    // Inside the window cron-job.org's tick opened, the Zenbook must still hear the alarm.
+    expect((await ext()).status).toBe(200);
+    expect(ticks()).toBe(1);
+    await tokens.remove(ownerUid());
+    await db.setSpotifyTokens({ accessToken: "at-old", refreshToken: "rt-old", expiresAt: base + 3_600_000 });
+    at(30_000);
+    const alarm = await zen();
+    expect({ status: alarm.status, body: await alarm.json() }).toEqual({ status: 503, body: { ok: false, error: "no token" } });
+
+    // A week on (§11.4 step 6) the plaintext copy is gone and the token of record stays: no
+    // alarm, and the tick runs.
+    await db.clearSpotifyTokens();
+    await tokens.set(ownerUid(), { accessToken: "at-rem", refreshToken: "rt-rem", expiresAt: base + 3_600_000 });
+    at(200_000);
+    const z = await zen();
+    expect(z.status).toBe(200);
+    expect(ticks()).toBe(2);
   });
 
   it("with no owner configured the Zenbook hears 503 and cron-job.org still a bare {\"ok\":true}", async () => {

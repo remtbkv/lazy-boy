@@ -77,7 +77,7 @@ async function tick(caller: CronCaller): Promise<Response> {
   const uid = store.uid;
   // The owner alarm, read before the stamp so the Zenbook sees it whichever pinger's tick ran
   // this window (PLAN §7.2 step 0). A store error here is no verdict: the stamp decides.
-  if (caller === "zenbook" && (await store.getSpotifyTokens().catch(() => undefined)) === null) {
+  if (caller === "zenbook" && (await readTokenRow(uid).catch(() => undefined)) === null) {
     return Response.json({ ok: false, error: "no token" }, { status: 503 });
   }
   // The stamp (PLAN §7.2 step 1): one compare-and-set on a meta row, so a burst of calls does
