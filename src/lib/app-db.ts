@@ -262,6 +262,12 @@ export async function deleteTokensIfUnchanged(uid: string, readBlob: string): Pr
   await one({ sql: "DELETE FROM user_tokens WHERE uid = :uid AND blob = :read", args: { uid, read: readBlob } });
 }
 
+/** Log out's clear: the user's row, whatever it holds. A refresh in flight then lands nothing
+ *  (its write names the blob it read), and only a new sign-in writes a row again. */
+export async function deleteTokens(uid: string): Promise<void> {
+  await one({ sql: "DELETE FROM user_tokens WHERE uid = :uid", args: { uid } });
+}
+
 // ── app_meta: the listed global keys only (T6) ──────────────────────────────────────────
 
 const GLOBAL_KEYS = [

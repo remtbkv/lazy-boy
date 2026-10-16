@@ -2,7 +2,7 @@
 
 Generated from `tests/isolation/authz-registry.ts` and the code by `tests/isolation/authz-doc.ts`; do not edit by hand. `npm test` fails when this file is stale; `AUTHZ_WRITE=1 npx vitest run tests/isolation/authz-map.test.ts` rewrites it. Every cell below is a test (`tests/isolation/authz-{route,auth,action,page}.test.ts`) that runs the entry point through the real Auth.js (a real cookie, src/lib/auth.ts's own callbacks) against a throwaway store seeded with Rem's rows and the scripted Spotify.
 
-57 entry points × 12 principals = 684 cells: 206 allow, 404 deny, 74 isolated. 1 cells are not at their target in today's single-user code; each is pinned to what it does today and names the phase that moves it. 11 findings (cells with no explicit rule), 24 red-team checks (2 pinned).
+57 entry points × 12 principals = 684 cells: 206 allow, 404 deny, 74 isolated. 1 cells are not at their target in today's single-user code; each is pinned to what it does today and names the phase that moves it. 11 findings (cells with no explicit rule), 25 red-team checks (2 pinned).
 
 `AUTHZ_TARGET=1 npx vitest run tests/isolation/authz-` runs every pinned cell and check against its target instead: what fails is what the phases still owe.
 
@@ -202,9 +202,9 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/cron/sync
 
-- File: `src/app/api/cron/sync/route.ts`. Gate today: `src/app/api/cron/sync/route.ts:54`.
+- File: `src/app/api/cron/sync/route.ts`. Gate today: `src/app/api/cron/sync/route.ts:55`.
 - Does, when allowed: the tick, at most one per 90 s whoever calls (the stamp, acquireLock('tick')): currently-playing and recently-played with Rem's stored grant, harvest stamps, plays; a library rescan every 30 min.
-- Calls (from the source): Spotify `currentlyPlaying`; via `getValidAccessTokenFor`, `cronCaller`, `adminStore`, `spotifyClient`, `syncRecentPlays`, `syncLibrary`, `shouldHarvest`, `currentMode`.
+- Calls (from the source): Spotify `currentlyPlaying`; via `readTokenRow`, `getValidAccessTokenFor`, `cronCaller`, `adminStore`, `spotifyClient`, `syncRecentPlays`, `syncLibrary`, `shouldHarvest`, `currentMode`.
 - `anon`: D — cronCaller() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET` (the Zenbook) or `Bearer $CRON_SECRET_EXT` (cron-job.org), timing-safe, an unset secret matching nobody; a cookie is not a secret; no header → 401
 - `rem`: D — cronCaller() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET` (the Zenbook) or `Bearer $CRON_SECRET_EXT` (cron-job.org), timing-safe, an unset secret matching nobody; a cookie is not a secret; Rem's cookie → 401
 - `friendA`, `friendB`, `revoked`, `staleSecret`, `staleLogout`, `forged`: D — cronCaller() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET` (the Zenbook) or `Bearer $CRON_SECRET_EXT` (cron-job.org), timing-safe, an unset secret matching nobody; a cookie is not a secret; a cookie → 401
@@ -264,7 +264,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/auth/session
 
-- File: `src/app/api/auth/[...nextauth]/route.ts`. Gate today: `src/lib/auth.ts:269`.
+- File: `src/app/api/auth/[...nextauth]/route.ts`. Gate today: `src/lib/auth.ts:277`.
 - Does, when allowed: answers the cookie's own session (name, email, expiry, error; never a token) and re-issues the cookie with a fresh 30 days.
 - Calls (from the source): via `Auth.js`.
 - `anon`: D — no cookie → null
@@ -298,7 +298,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/auth/callback/spotify
 
-- File: `src/app/api/auth/[...nextauth]/route.ts`. Gate today: `src/lib/auth.ts:181`.
+- File: `src/app/api/auth/[...nextauth]/route.ts`. Gate today: `src/lib/auth.ts:189`.
 - Does, when allowed: finishes OAuth: exchanges the code, reads /v1/me uncached-by-design, runs signIn (owner only), writes the token row, sets the session cookie.
 - Calls (from the source): via `Auth.js`.
 - `anon`: D — a stranger off the dev-mode allowlist: /v1/me 403 → /login?error=SpotifyNotRegistered, nothing written
@@ -326,7 +326,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 - File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:55`.
 - Does, when allowed: deletes the gated user's Spotify token row (after the response) and this browser's cookie.
-- Calls (from the source): store `forUser`; via `signOut`, `requireActionUser`.
+- Calls (from the source): via `signOut`, `signOutTokens`, `requireActionUser`.
 - `anon`, `revoked`, `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`, `staleSecret`, `forged`: D — requireActionUser refuses → only this browser's cookie is cleared; no token row is touched
 - `rem`: A — the owner signing out: clears his own token row, which stops capture (RULINGS Oct 15 1:33 PM)
 - `friendA`, `friendB`: I — requireActionUser refuses → only this browser's cookie is cleared; no token row is touched
@@ -761,6 +761,7 @@ Every friend cell in the matrix already passes Rem's own identifiers (his playli
 - [holds] an expired cookie, a truncated one, garbage and an unsigned JWT are no session
 - [holds] a session cookie, or Rem's Spotify token, presented as the cron bearer is refused
 - [holds] a sign-in's callbackUrl to another origin lands on this origin
+- [holds] Log out deletes Rem's token of record (user_tokens) and its plaintext copy: a copy of his cookie is refused, and the cron stops (RULINGS Oct 15 1:33 PM)
 - [holds] the revoked friend is refused by their own row (status, then epoch), never as an unknown uid; friends A and B by SIGNUPS=owner, each with only their own token row
 - [holds] the app database down (identity read unavailable) reaches each require*User form as the retryable answer, never a sign-out
 - [holds] a friend's completed sign-in leaves Rem's token row byte for byte

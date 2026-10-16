@@ -20,10 +20,15 @@ import { decryptTokens, encryptTokens } from "@/lib/token-crypto";
 import { tokenKeysReady } from "@/lib/token-keys";
 
 /** The admin's plaintext row in `lazyboy.meta`, his own database (forUser's for his uid). */
-export type Plaintext = { read(): Promise<SpotifyTokens | null>; write(t: SpotifyTokens): Promise<void> };
+export type Plaintext = {
+  read(): Promise<SpotifyTokens | null>;
+  write(t: SpotifyTokens): Promise<void>;
+  clear(): Promise<void>;
+};
 const metaPlaintext = (uid: Uid): Plaintext => ({
   read: () => forUser(uid).getSpotifyTokens(),
   write: (t) => forUser(uid).setSpotifyTokens(t),
+  clear: () => forUser(uid).clearSpotifyTokens(),
 });
 
 const copyKey = (uid: string) => `token_copy:${uid}`;
@@ -75,7 +80,9 @@ export async function rollbackAdminTokens(uid: Uid, plain: Plaintext = metaPlain
 
 /** The store auth.ts runs: the copy (or the rollback's write-back) before the admin's first
  *  token read in this process, and in rollback every later write of his tokens mirrored to
- *  the plaintext row. Every other uid passes straight through. */
+ *  the plaintext row. The admin's Log out also clears the plaintext copy while it exists, so
+ *  a revert inside the rollback week does not resume a capture he stopped. Every other uid
+ *  passes straight through. */
 export function withAdminTokenMove(
   store: TokenStore,
   admin: () => string | null,
@@ -109,6 +116,10 @@ export function withAdminTokenMove(
       const ok = await store.update(uid, t, read);
       if (ok) await mirror(uid, t);
       return ok;
+    },
+    async remove(uid) {
+      await store.remove(uid);
+      if (isAdmin(uid)) await plainOf(uid).clear();
     },
   };
 }

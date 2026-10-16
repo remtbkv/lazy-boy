@@ -24,6 +24,7 @@ import {
   type Row,
   type TransactionMode,
 } from "@libsql/client";
+import { readTokenRow } from "@/lib/app-db";
 import { newUid, phase1Owner, type Uid } from "@/lib/identity";
 import { reportIsolation } from "@/lib/isolation";
 import { userCache } from "@/lib/user-cache";
@@ -2203,9 +2204,10 @@ async function getLastSync(u: UserDb): Promise<string | null> {
 }
 
 /** Whether history is still being captured (capture-health.ts): the last harvest's age and
- *  whether a Spotify token is stored at all. Two meta reads. */
+ *  whether the user has a token row: `user_tokens` in the app database, the token of record
+ *  from multi-user Phase 2 (the plaintext `meta` row is only token-move.ts's rollback copy). */
 async function getCaptureHealth(u: UserDb): Promise<CaptureHealth> {
-  const [lastSync, tokens] = await Promise.all([getLastSync(u), getMeta(u, SPOTIFY_TOKENS_KEY)]);
+  const [lastSync, tokens] = await Promise.all([getLastSync(u), readTokenRow(u.uid)]);
   return captureHealth(Date.now(), lastSync, tokens !== null);
 }
 

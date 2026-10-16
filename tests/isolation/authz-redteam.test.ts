@@ -226,6 +226,22 @@ describe("cookie and token reuse", () => {
     expect(new URL(done.headers.get("location") ?? "").origin).toBe("http://127.0.0.1:3000");
   });
 
+  it("Log out deletes Rem's token of record (user_tokens) and its plaintext copy: a copy of his cookie is refused, and the cron stops (RULINGS Oct 15 1:33 PM)", async () => {
+    await seedRem();
+    await become("rem");
+    const copy = ctx.cookies.get(COOKIE)!;
+    expect(JSON.parse((await tokenRow())!).app).not.toBeNull();
+    const { run } = await import("./authz-harness");
+    const out = await run(async () => (await import("@/app/(app)/actions")).logout());
+    expect(out).toMatchObject({ kind: "redirect" });
+    expect(await tokenRow(), "a token row left after Log out").toBeNull();
+    await become("anon");
+    ctx.cookies.set(COOKIE, copy);
+    expect((await library()).status, "the copied cookie after Log out").toBe(401);
+    ctx.cookies.clear();
+    expect((await cron({ authorization: `Bearer ${SECRETS.cron}` })).status, "the cron after Log out").toBe(503);
+  });
+
   it("the revoked friend is refused by their own row (status, then epoch), never as an unknown uid; friends A and B by SIGNUPS=owner, each with only their own token row", async () => {
     await seedRem();
     const { readIdentity } = await import("@/lib/identity-read");

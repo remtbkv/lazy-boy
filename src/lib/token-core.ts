@@ -33,6 +33,9 @@ export interface TokenStore {
   update(uid: Uid, t: SpotifyTokens, read: StoredTokens): Promise<boolean>;
   /** Clear only the row `read` came from. */
   clear(uid: Uid, read: StoredTokens): Promise<void>;
+  /** Log out: the row goes, whatever it holds, so capture stops (RULINGS Oct 15 1:33 PM); a
+   *  refresh racing it then stores nothing, since its write names a row that is gone. */
+  remove(uid: Uid): Promise<void>;
   /** A cross-instance lease on this user's refresh; the owner string, or null if held. */
   lock(uid: Uid, ttlMs: number): Promise<string | null>;
   unlock(uid: Uid, owner: string): Promise<void>;
@@ -275,6 +278,7 @@ export function createTokenCore(store: TokenStore) {
   return {
     getStored,
     setTokens,
+    removeTokens: (uid: Uid) => store.remove(uid),
     clearTokensIfStale,
     refreshShared,
     getValidAccessToken,

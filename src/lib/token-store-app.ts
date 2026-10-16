@@ -12,6 +12,7 @@
 import "server-only";
 import {
   acquireAppLock,
+  deleteTokens,
   deleteTokensIfUnchanged,
   readTokenRow,
   releaseAppLock,
@@ -73,6 +74,8 @@ export function appTokenStore(): TokenStore {
     async clear(uid, read) {
       await deleteTokensIfUnchanged(uid, read.rev);
     },
+
+    remove: (uid) => deleteTokens(uid),
 
     lock: (uid, ttlMs) => acquireAppLock(lockName(uid), ttlMs),
     unlock: (uid, owner) => releaseAppLock(lockName(uid), owner),

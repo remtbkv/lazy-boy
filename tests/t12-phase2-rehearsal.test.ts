@@ -93,6 +93,9 @@ const plaintext: Plaintext = {
       args: [JSON.stringify(t)],
     });
   },
+  async clear() {
+    await lb.execute("DELETE FROM meta WHERE key = 'spotify_tokens'");
+  },
 };
 
 /** The script's world, local: the Platform API scripted, lazyboy = the copy, lazyboy-app = APP. */

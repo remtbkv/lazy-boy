@@ -37,10 +37,10 @@ vi.mock("@/lib/identity-read", () => ({
       spy.calls.push(`benchStore:${store}`);
       return { store, host: "file", probes: {} };
     },
-    // /api/cron/sync's no-token exit, so its GET returns before touching Spotify.
-    getSpotifyTokens: async () => null,
   }),
 }));
+// /api/cron/sync's no-token exit (no user_tokens row), so its GET returns before touching Spotify.
+vi.mock("@/lib/app-db", () => ({ readTokenRow: async () => null }));
 vi.mock("@/lib/usage-check", () => ({ runUsageCheck: spy.chore("runUsageCheck") }));
 vi.mock("@/lib/budget/daily", () => ({ runBudgetChore: spy.chore("runBudgetChore") }));
 vi.mock("@/lib/auth", () => ({ getValidAccessTokenFor: async () => null }));

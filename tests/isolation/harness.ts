@@ -54,6 +54,11 @@ export function memoryTokenStore(initial: Record<string, SpotifyTokens>) {
       rows.delete(uid);
       revs.delete(uid);
     },
+    async remove(uid) {
+      writes.push({ op: "clear", uid });
+      rows.delete(uid);
+      revs.delete(uid);
+    },
     async lock(uid, ttlMs) {
       const l = locks.get(uid);
       if (l && l.until > Date.now()) return null;

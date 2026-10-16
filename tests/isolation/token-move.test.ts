@@ -61,6 +61,19 @@ describe("the copy (§11.4 step 3)", () => {
     expect(await copyAdminTokens(A)).toBe("ran-before");
   });
 
+  it("Log out removes the admin's row and his plaintext copy, which never comes back; a friend's removes only their own row", async () => {
+    const store = bridge();
+    await store.get(A);
+    await appTokenStore().set(B, { accessToken: "b-at", refreshToken: "b-rt", expiresAt: FAR });
+    await store.remove(B);
+    expect(await appTokenStore().get(B)).toBeNull();
+    expect(await getSpotifyTokens()).toEqual(PLAIN);
+    await store.remove(A);
+    expect(await appTokenStore().get(A)).toBeNull();
+    expect(await getSpotifyTokens()).toBeNull();
+    expect(await bridge().get(A)).toBeNull();
+  });
+
   it("never overwrites a row a sign-in wrote first", async () => {
     await appTokenStore().set(A, { accessToken: "signin-at", refreshToken: "signin-rt", expiresAt: FAR });
     expect((await bridge().get(A))?.accessToken).toBe("signin-at");

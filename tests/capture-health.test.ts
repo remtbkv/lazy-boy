@@ -62,10 +62,15 @@ describe("captureHealthMessage", () => {
 });
 
 describe("getCaptureHealth (real store)", () => {
-  it("reads last_sync and token presence", async () => {
-    const db = (await import("./owner-store")).ownerStore();
+  it("reads last_sync and token presence: the user's user_tokens row, not the plaintext copy", async () => {
+    const { ownerStore, seedOwnerApp } = await import("./owner-store");
+    const db = ownerStore();
+    await seedOwnerApp();
     expect((await db.getCaptureHealth()).reason).toBe("signed out");
+    // The plaintext row is the rollback week's copy (PLAN §11.4): it is no token of record.
     await db.setSpotifyTokens({ accessToken: "a", refreshToken: "r", expiresAt: 0 });
+    expect((await db.getCaptureHealth()).reason).toBe("signed out");
+    await seedOwnerApp({ accessToken: "a", refreshToken: "r", expiresAt: 0 });
     // No last_sync yet: signed in but never synced.
     expect(await db.getCaptureHealth()).toEqual({ ok: false, staleForMs: null, reason: "stale" });
     // A harvest stamps last_sync atomically with its plays.
@@ -85,6 +90,7 @@ describe("getCaptureHealth (real store)", () => {
     ]);
     expect((await db.getCaptureHealth()).ok).toBe(true);
     await db.clearSpotifyTokens();
+    await seedOwnerApp();
   });
 });
 
@@ -96,33 +102,36 @@ vi.mock("@/lib/auth", () => ({ getValidAccessTokenFor: async () => null }));
 describe("cron with no token", () => {
   const call = async () => {
     process.env.CRON_SECRET = "s3cret";
-    // The admin's users row names his database (multi-user Phase 2).
-    await (await import("./owner-store")).seedOwnerApp();
     const { GET } = await import("@/app/api/cron/sync/route");
     return GET(new Request("http://x/api/cron/sync", { headers: { authorization: "Bearer s3cret" } }));
   };
   it("signed out (no stored tokens) → 503 so the pinger's unit fails visibly", async () => {
+    const { ownerStore, seedOwnerApp } = await import("./owner-store");
+    await seedOwnerApp();
+    // A plaintext row left from the rollback week does not count as signed in (PLAN §11.4).
+    await ownerStore().setSpotifyTokens({ accessToken: "a", refreshToken: "r", expiresAt: 0 });
     const res = await call();
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ ok: false, error: "no token" });
+    await ownerStore().clearSpotifyTokens();
   });
   it("tokens stored but no access token (transient refresh failure) → still 200", async () => {
-    const db = (await import("./owner-store")).ownerStore();
-    await db.setSpotifyTokens({ accessToken: "a", refreshToken: "r", expiresAt: 0 });
+    const { seedOwnerApp } = await import("./owner-store");
+    await seedOwnerApp({ accessToken: "a", refreshToken: "r", expiresAt: 0 });
     const res = await call();
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, skipped: "no token" });
-    await db.clearSpotifyTokens();
+    await seedOwnerApp();
   });
   it("no admin row: no owner, 503", async () => {
+    const { seedOwnerApp } = await import("./owner-store");
     const { appDatabaseUrl } = await import("@/lib/app-db");
     const { createClient } = await import("@libsql/client");
-    const { GET } = await import("@/app/api/cron/sync/route");
-    await call();
+    await seedOwnerApp();
     const c = createClient({ url: appDatabaseUrl() });
     await c.execute("DELETE FROM users");
     c.close();
-    const res = await GET(new Request("http://x/api/cron/sync", { headers: { authorization: "Bearer s3cret" } }));
+    const res = await call();
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ ok: false, error: "no owner" });
   });

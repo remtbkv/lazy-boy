@@ -122,6 +122,14 @@ export async function getValidAccessTokenFor(uid: Uid): Promise<OwnedToken | nul
   return t ? { uid: t.uid, accessToken: t.accessToken } : null;
 }
 
+/** Log out's clear (RULINGS Oct 15 1:33 PM): the user's `user_tokens` row goes, so capture
+ *  stops and a copied cookie is refused (a session with no grant is, session-gate.ts) until
+ *  the next sign-in. */
+export async function signOutTokens(uid: Uid): Promise<void> {
+  await core.removeTokens(uid);
+  publishTokens(uid, null);
+}
+
 export const { handlers, signIn, signOut, auth } = NextAuth({
   // We serve on the loopback IP (127.0.0.1) and wrap the route handler, a non-standard
   // host setup. Trust it explicitly so Auth.js never refuses the host with a generic

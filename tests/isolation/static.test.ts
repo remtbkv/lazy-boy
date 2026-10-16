@@ -195,6 +195,7 @@ describe("S3: app-db.ts's exports match the reviewed snapshot", () => {
     "acquireAppLock (function)",
     "appDatabaseUrl (function)",
     "bindAdminAccount (function)",
+    "deleteTokens (function)",
     "deleteTokensIfUnchanged (function)",
     "ensureAppSchema (function)",
     "findUserByAccountId (function)",
