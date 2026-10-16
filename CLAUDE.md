@@ -123,6 +123,10 @@ art → `album-thumb`; sort dropdown → `sort-menu`; bottom search pill → `se
    `spotifyAccessToken()` (`src/lib/auth.ts`), called **after** `auth()` in the same request.
    It is deliberately not a field on the session — anything on the `Session` interface is
    serialized to the browser at `GET /api/auth/session`. See `docs/SECURITY.md`.
+6. **Agents stay off friends' rows.** No agent session reads another user's rows from
+   the store, its backups or its logs. Debugging uses Rem's own rows. Spotify's Developer
+   Policy forbids ingesting Spotify Content into an AI model, and /privacy promises it.
+   Rem's ruling: `docs/multi-user/RULINGS.md` (Oct 15, 6:21 PM).
 
 ## Next.js 16 gotchas (differs from older training data — see AGENTS.md)
 

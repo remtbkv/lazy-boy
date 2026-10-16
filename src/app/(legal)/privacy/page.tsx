@@ -79,8 +79,8 @@ export default function PrivacyPage() {
           Rem&apos;s Microsoft OneDrive for 60 days.
         </li>
         <li>
-          Rem uses an AI assistant (Anthropic&apos;s Claude) to maintain the app, and it can read
-          the database while fixing a problem.
+          Rem uses an AI assistant (Anthropic&apos;s Claude) to maintain the app. It works only
+          with Rem&apos;s own data and never reads yours.
         </li>
       </ul>
 
