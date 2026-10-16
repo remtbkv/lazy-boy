@@ -292,7 +292,6 @@ export function createTokenCore(store: TokenStore) {
   return {
     getStored,
     setTokens,
-    removeTokens: (uid: Uid) => store.remove(uid),
     clearTokensIfStale,
     refreshShared,
     getValidAccessToken,

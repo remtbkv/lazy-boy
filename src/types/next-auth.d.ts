@@ -15,6 +15,8 @@ declare module "next-auth" {
     // could not run; requireUser() answers that with a retryable error, never a sign-out.
     uid?: string;
     admin?: boolean;
+    /** The cookie's sign-in time (epoch s), for Disconnect's ten-minute rule (PLAN.md §5.4). */
+    authTime?: number;
     idUnavailable?: true;
   }
 }

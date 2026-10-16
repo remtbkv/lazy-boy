@@ -24,8 +24,13 @@ export function gateJwt<T>(token: T, verdict: IdentityVerdict): T | null {
  *  serves it only to its own holder (§5.1, security R15); tokens stay off the session. */
 export function sessionFields(
   verdict: IdentityVerdict,
-): { uid?: string; admin?: boolean; idUnavailable?: true } {
-  if (verdict.kind === "allowed") return { uid: verdict.uid, admin: verdict.admin };
+  authTime?: unknown,
+): { uid?: string; admin?: boolean; authTime?: number; idUnavailable?: true } {
+  // `authTime` (the cookie's sign-in time, epoch s) is what Disconnect's ten-minute rule reads
+  // (PLAN.md §5.4); like the uid it is no credential.
+  if (verdict.kind === "allowed") {
+    return { uid: verdict.uid, admin: verdict.admin, ...(typeof authTime === "number" ? { authTime } : {}) };
+  }
   if (verdict.kind === "unavailable") return { idUnavailable: true };
   return {};
 }

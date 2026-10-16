@@ -44,6 +44,7 @@ const REGISTRY: Record<string, Status> = {
   "src/app/(app)/playlists/[id]/page.tsx": { gated: true },
   "src/app/(app)/history-actions.ts": { gated: true },
   "src/app/(app)/actions.ts": { gated: true },
+  "src/app/(app)/disconnect/page.tsx": { gated: true },
 
   "src/app/layout.tsx": { exempt: "the root layout: no user data" },
   "src/app/page.tsx": { exempt: "/: redirects to /home, reads nothing" },
@@ -55,6 +56,8 @@ const REGISTRY: Record<string, Status> = {
   "src/app/(auth)/join/page.tsx": { exempt: "/join: a friend's first visit, no session; shows only the cookie's own request (join-routes.test.ts)" },
   "src/app/api/join/route.ts": { exempt: "the request form's POST: public, bounded in SQL, shut under SIGNUPS=owner (join-request.test.ts)" },
   "src/app/api/join/link/route.ts": { exempt: "the join link: a token whose hash opens one approved invite; reads no user data (join-routes.test.ts)" },
+  "src/app/(auth)/signed-out/page.tsx": { exempt: "the page after Log out: static text, no session or reads (logout-disconnect.test.ts)" },
+  "src/app/(auth)/disconnected/page.tsx": { exempt: "the page after Disconnect: static text, no session or reads" },
   "src/app/kbtest/page.tsx": { exempt: "dev-only keyboard test page; notFound() in production" },
   "src/app/api/build/route.ts": { exempt: "build id, no auth and no store by design (GOTCHAS)" },
   "src/app/api/auth/[...nextauth]/route.ts": { exempt: "Auth.js" },

@@ -124,14 +124,6 @@ export async function getValidAccessTokenFor(uid: Uid): Promise<OwnedToken | nul
   return t ? { uid: t.uid, accessToken: t.accessToken } : null;
 }
 
-/** Log out's clear (RULINGS Oct 15 1:33 PM): the user's `user_tokens` row goes, so capture
- *  stops and a copied cookie is refused (a session with no grant is, session-gate.ts) until
- *  the next sign-in. */
-export async function signOutTokens(uid: Uid): Promise<void> {
-  await core.removeTokens(uid);
-  publishTokens(uid, null);
-}
-
 /** The cron tick's token read (PLAN.md §5.4, §7.2): src/lib/sync/tick.ts's token getter. Unlike
  *  getValidAccessTokenFor it throws every failure and never clears a dead grant (token-core.ts). */
 export function tokenForTick(uid: Uid): Promise<UserTokens | null> {
@@ -291,7 +283,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       // not a credential), and nothing else. The Spotify access token used to be set here —
       // server code now takes it from spotifyAccessTokenFor() instead, which reads the same
       // request-scoped box this callback used to read.
-      Object.assign(session, sessionFields(await identityFor(t.uid, t.ep, t.auth_time)));
+      Object.assign(session, sessionFields(await identityFor(t.uid, t.ep, t.auth_time), t.auth_time));
       session.error = t.error;
       return session;
     },

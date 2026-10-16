@@ -330,6 +330,20 @@ export async function claimInvite(requestId: string, accountId: string, spotifyI
   return claimed.rows[0] ? toUser(claimed.rows[0]) : null;
 }
 
+/** Log out (RULINGS Oct 15 1:33 PM): every browser signed out (session_epoch + 1, so every cookie
+ *  fails the identity read at its next request) and capture stopped (the token row gone, so the
+ *  tick's step for this user makes no Spotify call until a sign-in writes a new one). Nothing
+ *  else of the user's is touched, and the admin's data no more than anyone's. */
+export async function endSessionsAndCapture(uid: Uid): Promise<void> {
+  await (await appClient()).batch(
+    [
+      { sql: "UPDATE users SET session_epoch = session_epoch + 1 WHERE uid = :uid", args: { uid } },
+      { sql: "DELETE FROM user_tokens WHERE uid = :uid", args: { uid } },
+    ],
+    "write",
+  );
+}
+
 // ── the deletion job's statements (Phase 4a, PLAN.md §12.3) ────────────────────────────────
 // deletion.ts holds them as data, so `user.mjs --remove` on the Mac runs the very same SQL; the
 // runtime runs them here, and only them.

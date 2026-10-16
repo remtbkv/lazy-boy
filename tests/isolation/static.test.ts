@@ -249,6 +249,8 @@ describe("S3: app-db.ts's exports match the reviewed snapshot", () => {
     "requestState (function)",
     // The deletion job's runner: only deletion.ts's listed statements (t11-deletion.test.ts).
     "execDeletionStatements (function)",
+    // Log out: one user's epoch and token row, by the gate's uid (logout-disconnect.test.ts).
+    "endSessionsAndCapture (function)",
   ];
 
   it("lists every export", () => {

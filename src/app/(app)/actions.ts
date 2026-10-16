@@ -2,11 +2,15 @@
 
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
-import { unstable_rethrow } from "next/navigation";
-import { signIn, signOut, getValidAccessTokenFor, signOutTokens, spotifyAccessTokenFor } from "@/lib/auth";
+import { redirect, unstable_rethrow } from "next/navigation";
+import { disconnect, DISCONNECT_WORD, logOutEverywhere } from "@/lib/account";
+import { auth, signIn, signOut, getValidAccessTokenFor, spotifyAccessTokenFor } from "@/lib/auth";
 import type { Uid } from "@/lib/identity";
 import { requireActionUser } from "@/lib/require-user";
 import { getSpotify } from "@/lib/session";
+import { LEASE_WINDOW_MS } from "@/lib/deletion";
+import { deleteAccount } from "@/lib/deletion-runtime";
+import { gateFromSession } from "@/lib/session-gate";
 import { spotifyClient, SpotifyError, type OwnedToken, type Track } from "@/lib/spotify";
 import { intersect, keyOf, reinsertPositions, subtract } from "@/lib/spotify/domain";
 import { runTask, taskDone } from "@/lib/tasks/registry";
@@ -48,16 +52,43 @@ function refreshingToken(uid: Uid): () => Promise<OwnedToken> {
 export async function login() {
   await signIn("spotify", { redirectTo: "/home" });
 }
+// Disconnect's fresh sign-in (PLAN.md §5.4, security R11): Spotify's consent again, back to /disconnect.
+export async function reauthForDisconnect() {
+  await signIn("spotify", { redirectTo: "/disconnect" });
+}
+
+// Log out (RULINGS Oct 15 1:33 PM): every browser signed out and the listening history no longer
+// recorded (account.ts), awaited, so capture has stopped by the time the page after it says so.
+// A session whose identity check could not run still signs this browser out.
 export async function logout() {
-  // Only a signed-in user's own token row is cleared: anyone could post this action, and it
-  // used to clear the one global row for whoever asked (AUTHZ.md F4). A refused or
-  // unavailable session still gets its cookie cleared below.
-  const user = await requireActionUser();
-  // Defer the token wipe off the redirect path so logout returns immediately. It still runs
-  // (after the response is sent) so the background cron can't keep syncing post-logout — it
-  // just no longer blocks the user on a remote DB write.
-  if ("uid" in user) after(() => signOutTokens(user.uid).catch(() => {}));
-  await signOut({ redirectTo: "/login" });
+  const g = gateFromSession(await auth());
+  if (g.kind === "allowed") await logOutEverywhere(g.gate);
+  await signOut({ redirectTo: "/signed-out" });
+}
+
+// Disconnect (RULINGS Oct 15 1:17 PM; PLAN.md §5.4, §12.3), from /disconnect's form: the typed word
+// and a sign-in within the last 10 minutes, never the admin; then the deletion job. Steps 1-3 run
+// now; its last step waits out the 50-s lease window, so it is retried once that has passed, and
+// by the daily chores until it finishes.
+export async function disconnectAction(formData: FormData): Promise<{ ok: false; error: string } | void> {
+  const session = await auth();
+  const g = gateFromSession(session);
+  if (g.kind !== "allowed") return { ok: false, error: "Sign in again first." };
+  const r = await disconnect(g.gate, {
+    typed: String(formData.get("confirm") ?? ""),
+    authTime: session?.authTime,
+    nowMs: Date.now(),
+  });
+  if (!r.ok) {
+    if (r.reason === "stale") redirect("/disconnect?fresh=1");
+    return { ok: false, error: r.reason === "admin" ? "Rem's account is never deleted." : `Type ${DISCONNECT_WORD} to confirm.` };
+  }
+  if (r.outcome.kind === "refused") return { ok: false, error: "Couldn't disconnect this account. Ask Rem." };
+  after(async () => {
+    await new Promise((res) => setTimeout(res, LEASE_WINDOW_MS + 2_000));
+    await deleteAccount(g.gate.uid).catch((e) => console.error(`[disconnect] retry: ${String(e)}`));
+  });
+  await signOut({ redirectTo: "/disconnected" });
 }
 
 // ---- playlist tools ----
