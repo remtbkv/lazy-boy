@@ -207,6 +207,14 @@ Each sits in a file queued lanes edit, or needs `forUser` (Phase 1's turn) or th
 10. **CLAUDE.md, ARCHITECTURE.md, GOTCHAS.md**: the cron's shape (a claim, per-user steps, the stamp, two
     pingers), the recorder hourly, the harvest triggers. Left to the turn because queued lanes edit those
     files; this branch adds only this document.
+11. **What the Zenbook's reply carries, before Phase 4a** (lane 05's review; a recommendation, not built).
+    PLAN §7.2 step 5 gives the Zenbook's caller one outcome per user, and `ping.sh` appends every reply to
+    `ping.log`, so from the first friend that file holds each friend's uid with a `change` or `tail`
+    trigger and a count, minute by minute: when they listen. RULES 11 keeps agents off a friend's
+    telemetry in any log, and agents read `ping.log` to debug capture. Either the body names the admin's
+    step alone and counts the rest by outcome code, or `ping.sh` stops keeping bodies. Also: the claim's
+    token join goes unused (each step re-reads its row through `tokenFor`, one more app-database read per
+    user per tick); handing the claimed blob to the token core saves it.
 
 What does not wait on a decision: everything above. Decisions 15, 26 and 28 are ruled (§1).
 
@@ -215,7 +223,11 @@ What does not wait on a decision: everything above. Decisions 15, 26 and 28 are 
 - `lazyboy-cron-sync.timer`: `OnCalendar=*:0/2` in place of `OnUnitActiveSec=2min`, so the Zenbook's ticks
   land on even minutes and cron-job.org's (lane 11's job, every 2 minutes) on odd ones; with both alive the
   app ticks every minute and each user is still probed every 2 minutes (§2's cadence). `daemon-reload` and
-  restart the timer; `ping.log` should show 200s with `steps`.
+  restart the timer; `ping.log` should show 200s with `steps`. Set `AccuracySec=1s` beside it: systemd's
+  default of a minute places each run at a fixed, host-chosen second inside that minute, and anywhere past
+  :15 puts cron-job.org's odd-minute tick less than 45 s after the Zenbook's, so every one of them is
+  skipped by the stamp and the app ticks every 2 minutes, not every minute (each user is still probed every
+  2 minutes, and either pinger alone still keeps it; lane 05's review).
 - `lazyboy-recorder.timer`: hourly instead of every 15 minutes (decision 26): 24 scarce calls a day instead
   of 96, which `APP_DAILY_BUDGET` (450 less 24) already assumes.
 - Afterwards, PLAN §13.1's exit checks: a week with Rem's harvests near ~150 a day (read from the
