@@ -460,11 +460,29 @@ All times are from the **last keystroke** (each keystroke supersedes the previou
 burst of typing reports the wait after you stopped). `paint` = rows on screen, `art1` / `artAll`
 = first and last album image of the VISIBLE rows (off-screen rows are `loading="lazy"` and never
 fetch at all), `stats` = play counts and times filled in, `index` = where the query was answered
-(`memory` / `fetching` / `fallback`). A dash means it never arrived — `stats=—` is a failed
+(`memory` / `idb` / `fetching` / `fallback`; `idb` = the set built from the browser's stored
+copy, before the fresh pair landed). A dash means it never arrived — `stats=—` is a failed
 hydration, which is reported rather than waited out. Everything is behind one boolean read, so
 with the flag off the readout costs nothing. Implementation: `src/lib/search-perf.ts`, which is
 the ablation harness that measured the album-art variants, so its numbers are comparable with
 the ones quoted in the commit history.
+
+## The browser's copy of the search payloads (IndexedDB)
+
+Home keeps the last good body of `/api/search/library` and `/api/search/history` in IndexedDB
+(`lb-search`, `src/lib/search-cache.ts`) and builds the search set from it on mount, then swaps in
+the network pair (`lb:index-idb` on /usage when the stored copy got there first). Four rules that
+are easy to break:
+- **It feeds search, never the day list.** The stored history can be hours old; a day derived from
+  it could replace a fresher day the page holds. `setHistory` takes network bodies only.
+- **The key carries the shape** (`search-shape.ts`, the same token as the Data Cache key and the
+  ETag), so a deploy that bumps a shape makes every stored body a miss, deleted on read. Bump the
+  token, never reuse it. A stored body also passes the network path's validators or is deleted.
+- **It is per user.** Records are keyed and stamped with the opaque key the `(app)` layout renders
+  on `#den-root` (a constant today; multi-user's uid later); another key clears the store, and the
+  sign-out form clears it as it submits (the server action's response can't).
+- **Storage failures are silent misses** (private mode, quota, no IndexedDB): the page then behaves
+  exactly as before the copy existed. Sizes and main-thread cost are in the module header.
 
 ## Verifying UI with Playwright
 

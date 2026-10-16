@@ -156,7 +156,9 @@ file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
   strip, the all-time totals and the opening day's tracks, built on the write path. The day
   cards and the search box then run in the browser against the history payload;
   `getDailyStats` / `getPlaysByDay` / `searchHistory` remain as the server-side path for a
-  cold store, an extended strip, and the fallback while the payload loads.
+  cold store, an extended strip, and the fallback while the payload loads. On a repeat visit
+  the search box answers before the network does, from the browser's IndexedDB copy of both
+  payloads (`lib/search-cache.ts`, STORE_MIGRATION §10); the day list waits for the network copy.
 - **Derived stats, search & resume:** "listened" time is computed per play (the gap since the
   previous play, because `played_at` is when a play ENDED; capped at the song length; under
   5 s counts as zero; a play after an idle stretch is assumed to have run in full) — Spotify

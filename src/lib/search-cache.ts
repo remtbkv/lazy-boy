@@ -18,10 +18,13 @@
 //            "The Data Cache OUTLIVES THE DEPLOY").
 // One record per (userKey, epoch, kind, segment): a write deletes that slot's other versions.
 //
-// The body is stored as the response TEXT, not the parsed object: putting a string is one copy,
-// where putting the parsed payload structured-clones some 20,000 nested arrays on the main thread.
-// A read parses it and runs the same validators as the network path (fetchPayload); a body that
-// fails them is deleted. Every storage failure (private mode, quota, no IndexedDB) reads as a
+// The body is stored as the response TEXT, which is what the network path already holds; a read
+// parses it and runs the same validators as that path (fetchPayload), and a body that fails them is
+// deleted. Measured 2026-10-16 in headless Chromium on the M-series Mac with production's bodies
+// (library 807,930 B, history 1,797,528 B as UTF-8): put() holds the main thread 1.7 ms / 3.7 ms
+// (median of 5), 7.3 / 15.4 ms at 4x CPU throttle, which is why each half gets its own transaction
+// (both in one: 22 ms at 4x, over a 60 Hz frame). Putting the parsed history object instead cost
+// about the same (4.8 ms), so text is a simplicity choice, not a speed one. Every storage failure (private mode, quota, no IndexedDB) reads as a
 // miss and is otherwise silent: the page then behaves exactly as it did before this existed.
 import { HISTORY_INDEX_SHAPE, LIBRARY_INDEX_SHAPE } from "@/lib/search-shape";
 

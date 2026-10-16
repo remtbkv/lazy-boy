@@ -45,7 +45,9 @@ src/app/api/search/       the two payloads Home filters in the browser (authed, 
                          ETag'd): library/ = every track in a playlist or Liked Songs,
                          history/ = every played track + every play. Both load on idle after
                          Home paints; the history half also feeds the day list, which is
-                         grouped out of it client-side instead of fetched per day
+                         grouped out of it client-side instead of fetched per day. The last
+                         good body of each sits in IndexedDB (lib/search-cache.ts) so a repeat
+                         visit searches before the network answers
 src/app/api/now-playing/ live "what's playing"; null when idle (never stale)
 src/app/api/build/       this deployment's build id, unauthenticated, no DB — fetched with
                          credentials omitted so it escapes Vercel's deployment pinning
