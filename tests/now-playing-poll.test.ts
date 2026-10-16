@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   BURST_GAP_MS,
   BURST_MAX,
+  BACKOFF_BASE_MS,
   END_MARGIN_MS,
   IDLE_MS,
   INITIAL_POLL_STATE,
@@ -71,9 +72,10 @@ afterEach(() => {
 });
 
 describe("planNextPoll", () => {
-  it("mid-track and visible: the steady cadence", () => {
+  it("mid-track and visible: the steady cadence, 15 s from Phase 4a (multi-user PLAN §7.6)", () => {
+    expect(STEADY_MS).toBe(15_000);
     const r = planNextPoll(INITIAL_POLL_STATE, { kind: "ok", playing: playing("a", 10_000, 200_000) }, true);
-    expect(r.delay).toBe(STEADY_MS);
+    expect(r.delay).toBe(15_000);
     expect(r.state.boundaryOf).toBeNull();
   });
 
@@ -121,7 +123,7 @@ describe("planNextPoll", () => {
     const ban = planNextPoll(INITIAL_POLL_STATE, { kind: "error", retryAfterMs: 3 * 3600_000 }, true);
     expect(ban.delay).toBe(MAX_RETRY_AFTER_MS);
     const short = planNextPoll(INITIAL_POLL_STATE, { kind: "error", retryAfterMs: 1000 }, true);
-    expect(short.delay).toBe(2 * STEADY_MS); // never sooner than the error backoff
+    expect(short.delay).toBe(2 * BACKOFF_BASE_MS); // never sooner than the error backoff
     let s = INITIAL_POLL_STATE;
     const delays: (number | null)[] = [];
     for (let i = 0; i < 5; i++) {
@@ -180,7 +182,7 @@ describe("PollLoop", () => {
     loop.start();
     await vi.advanceTimersByTimeAsync(60_000);
     loop.stop();
-    expect(n).toBe(1 + Math.floor(60_000 / PAUSED_MS)); // 5, against 11 at the steady rate
+    expect(n).toBe(1 + Math.floor(60_000 / PAUSED_MS)); // 5
   });
 
   it("a 429 backs off for Retry-After before the next request", async () => {
@@ -192,9 +194,9 @@ describe("PollLoop", () => {
         : { kind: "ok", playing: playing("a", 0, 200_000) };
     }, () => true);
     loop.start();
-    await vi.advanceTimersByTimeAsync(40_000);
+    await vi.advanceTimersByTimeAsync(30_000 + STEADY_MS + 1);
     loop.stop();
-    expect(sent.slice(0, 3)).toEqual([0, 30_000, 36_000]);
+    expect(sent.slice(0, 3)).toEqual([0, 30_000, 30_000 + STEADY_MS]);
   });
 
   it("keeps one request in flight: a kick during a request runs once, right after it", async () => {
@@ -287,7 +289,7 @@ describe("one leader polls for every tab", () => {
     await vi.advanceTimersByTimeAsync(0);
     const b = tab(locks, true, counter); // opened in front: takes the lead, inherits the schedule
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(counter.n).toBe(1 + Math.floor(60_000 / STEADY_MS)); // 11, as for one tab
+    expect(counter.n).toBe(1 + Math.floor(60_000 / STEADY_MS)); // 5, as for one tab
     expect([a.election!.isLeader(), b.election!.isLeader()].filter(Boolean)).toHaveLength(1);
   });
 
@@ -307,7 +309,7 @@ describe("one leader polls for every tab", () => {
     expect(b.election!.isLeader()).toBe(true);
     expect(a.election!.isLeader()).toBe(false);
     expect(a.loop!.running).toBe(false);
-    // A last asked at 0; B continues that cadence: 6 s, 12 s, … 60 s — no extra handover poll.
+    // A last asked at 0; B continues that cadence: 15 s, 30 s, … 60 s — no extra handover poll.
     const before = counter.n;
     await vi.advanceTimersByTimeAsync(59_000);
     expect(counter.n - before).toBe(Math.floor(60_000 / STEADY_MS));
@@ -343,7 +345,7 @@ async function oldSchedule(stateAt: (t: number) => PolledPlaying, phaseMs: numbe
   let interval: ReturnType<typeof setInterval> | null = null;
   setTimeout(() => {
     void pollOnce();
-    interval = setInterval(() => void pollOnce(), STEADY_MS);
+    interval = setInterval(() => void pollOnce(), 6_000); // the steady rate it ran at
   }, phaseMs);
   await vi.advanceTimersByTimeAsync(untilMs);
   if (interval) clearInterval(interval);

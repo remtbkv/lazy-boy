@@ -11,6 +11,12 @@ the schedule makes slightly fewer requests while playing and far fewer while pau
 A **manual skip** made in the Spotify app still waits on the 6 s cadence (0–6 s, mean ~3 s, plus
 the round trip); getting that to ~1 s costs a 6× rate, priced in §5 and not built.
 
+**From multi-user Phase 4a the steady cadence is 15 s** (`STEADY_MS`; PLAN §7.6): with five users
+the daily player volume, not the 30-second window, is the limit, and the server's per-user memo
+(`now-playing-memo.ts`, ~5 s) lets one user's tabs share a call. A song that runs out is caught by
+the end-of-track poll exactly as below; a manual skip now waits 0–15 s (mean ~7.5 s) plus the round
+trip. The error backoff keeps its 12/24/48/60 s ladder (`BACKOFF_BASE_MS`).
+
 ## 1. The chain, step by step
 
 A song ends on Rem's phone or desktop at time B. The new row appears when a reply from

@@ -8,8 +8,10 @@
 // if Spotify still reports the old song there, a short burst re-asks until it moves. Manual
 // skips are unpredictable and stay bounded by the steady cadence.
 
-/** Playing, tab visible: the steady cadence (a manual skip shows within this + a round trip). */
-export const STEADY_MS = 6000;
+/** Playing, tab visible: the steady cadence (a manual skip shows within this + a round trip). 15 s
+ *  from Phase 4a, the first friend (multi-user PLAN §7.6): the daily player volume of five users,
+ *  not the 30-second window, is the reason; the end-of-track and focus polls keep their timing. */
+export const STEADY_MS = 15_000;
 /** Paused or idle: nothing changes on its own, so ask less often. A visibility return or any
  *  in-app player action polls at once regardless. */
 export const PAUSED_MS = 15_000;
@@ -24,6 +26,9 @@ export const BURST_MAX = 6;
 /** "Still at the end": the old song with at most this much left counts as Spotify not having
  *  caught up, not as a seek back. */
 export const BOUNDARY_SLACK_MS = 1500;
+/** A failed poll backs off from this, doubling (12, 24, 48, then 60 s): the 6 s cadence the steady
+ *  rate had before Phase 4a, kept so errors retry on the same ladder. */
+export const BACKOFF_BASE_MS = 6000;
 export const MAX_BACKOFF_MS = 60_000;
 /** A 429's Retry-After is honored up to this; a multi-hour quota ban still gets one cheap
  *  look every 5 min (the server's cooldown answers it without calling Spotify). */
@@ -84,7 +89,7 @@ function planCadence(
   if (outcome.kind === "skipped") return { delay: Math.max(0, outcome.retryInMs), state };
   if (outcome.kind === "error") {
     const failures = state.failures + 1;
-    const backoff = Math.min(STEADY_MS * 2 ** failures, MAX_BACKOFF_MS);
+    const backoff = Math.min(BACKOFF_BASE_MS * 2 ** failures, MAX_BACKOFF_MS);
     const delay =
       outcome.retryAfterMs !== undefined
         ? Math.min(Math.max(outcome.retryAfterMs, backoff), MAX_RETRY_AFTER_MS)
