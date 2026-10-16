@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { TERMS_DATE } from "@/lib/terms";
 
 export const metadata: Metadata = { title: "Terms of Use · Lazy Boy" };
 
@@ -9,9 +10,10 @@ export default function TermsPage() {
   return (
     <>
       <h1>Terms of Use</h1>
-      <p>Last updated October 15, 2026.</p>
+      <p>Last updated {TERMS_DATE}.</p>
       <p>
-        By connecting your Spotify account to Lazy Boy you agree to these terms and to the{" "}
+        By asking to join or connecting your Spotify account to Lazy Boy you agree to these terms
+        and to the{" "}
         <Link href="/privacy">Privacy Policy</Link>. If you don&apos;t agree, don&apos;t connect.
       </p>
 
@@ -62,8 +64,9 @@ export default function TermsPage() {
 
       <h2>Leaving</h2>
       <p>
-        You can disconnect at any time; the <Link href="/privacy">Privacy Policy</Link> says how,
-        and what happens to your data. Questions go to{" "}
+        Lazy Boy has room for five people, Rem included, and Rem decides who joins. You can log out
+        or disconnect at any time; the <Link href="/privacy">Privacy Policy</Link> says how, and
+        what happens to your data. Questions go to{" "}
         <a href="mailto:remtbkv@gmail.com">remtbkv@gmail.com</a>.
       </p>
     </>

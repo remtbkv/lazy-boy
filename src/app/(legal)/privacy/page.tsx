@@ -1,29 +1,31 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { TERMS_DATE } from "@/lib/terms";
 
 export const metadata: Metadata = { title: "Privacy Policy · Lazy Boy" };
 
 // Every statement here must be true of the code as it runs today (Spotify Developer Terms,
-// Section V: "a complete and accurate disclosure"). Change the code, change this page.
+// Section V: "a complete and accurate disclosure"). Change the code, change this page, and move
+// TERMS_VERSION (src/lib/terms.ts) so the next person to join accepts the new text.
 export default function PrivacyPage() {
   return (
     <>
       <h1>Privacy Policy</h1>
-      <p>Last updated October 21, 2026.</p>
+      <p>Last updated {TERMS_DATE}.</p>
       <p>
-        Lazy Boy is a free, non-commercial app that Rem Turatbekov runs for himself and a few
+        Lazy Boy is a free, non-commercial app that Rem Turatbekov runs for himself and up to four
         friends. This page says what it does with your data. Lazy Boy collects and uses your data
-        only as this policy describes, and connecting your Spotify account means you agree to it
-        and to the <Link href="/terms">Terms of Use</Link>.
+        only as this policy describes, and asking to join or connecting your Spotify account means
+        you agree to it and to the <Link href="/terms">Terms of Use</Link>.
       </p>
 
       <h2>What it collects</h2>
-      <p>
-        When you connect, Spotify asks you to let Lazy Boy see your profile, read and change your
-        playlists and Liked Songs, see and control what is playing, and read what you recently
-        played. From that, the app stores:
-      </p>
       <ul>
+        <li>
+          when you ask to join: the e-mail address on your Spotify account and the name you give
+          (or a placeholder). Rem uses the address to add you in Spotify&apos;s dashboard, which an
+          app like this needs before it may serve you, and to tell you about your account;
+        </li>
         <li>your Spotify user ID and account ID, and a random ID Lazy Boy gives your account;</li>
         <li>
           your listening history: each song you play, when it ended, and the playlist or album it
@@ -66,19 +68,18 @@ export default function PrivacyPage() {
       <p>
         Only to run the app for you: to show your history, listening time and library back to
         you, to search them, and to do what you ask (merge, clean or compare playlists, queue or
-        play songs).
+        play songs). Each person sees only their own data.
       </p>
 
       <h2>Cookies and browser storage</h2>
       <p>
         Lazy Boy sets a sign-in cookie that keeps you signed in for up to 30 days, short-lived
-        cookies used during the Spotify sign-in, and two cookies holding your timezone. It
-        also keeps caches in your browser so pages and search open faster: small ones in local
-        and session storage, and a copy of your library and listening history in IndexedDB;
-        signing out clears them. There are no ads, analytics or tracking cookies, and Lazy Boy lets no one else place cookies in
-        your browser. Album art loads directly from Spotify&apos;s servers. You can delete these
-        cookies and caches in your browser&apos;s settings at any time; deleting the sign-in
-        cookie signs you out.
+        cookies used during the Spotify sign-in and while your request to join is waiting, and two
+        cookies holding your timezone. It also keeps caches in your browser so pages and search
+        open faster: small ones in local and session storage, and a copy of your library and
+        listening history in IndexedDB; logging out clears them. There are no ads, analytics or
+        tracking cookies, and Lazy Boy lets no one else place cookies in your browser. Album art
+        loads directly from Spotify&apos;s servers.
       </p>
 
       <h2>Where it is kept</h2>
@@ -90,18 +91,24 @@ export default function PrivacyPage() {
           and warnings the server prints.
         </li>
         <li>
-          Your history, library and timezone are in a database on Turso, a hosted database in
-          AWS&apos;s US East region. Lazy Boy&apos;s accounts database (who has an account, and your
-          encrypted sign-in tokens) is on Turso too.
+          Your history, library and timezone are kept in a database of your own on Turso, a hosted
+          database in AWS&apos;s US East region. Lazy Boy&apos;s accounts database (who has an
+          account, your request, and your encrypted sign-in tokens) is on Turso too. Turso keeps
+          one day of point-in-time history of each database, so for up to a day after any change,
+          including a deletion, the earlier version still exists there, your encrypted tokens
+          included.
         </li>
         <li>
-          The diagnostic logs are on a computer Rem owns, at his home, reached over
-          Tailscale&apos;s network.
+          The diagnostic logs are on a computer Rem owns, at his home, reached over Tailscale&apos;s
+          network.
         </li>
         <li>
-          Nightly backup copies of the history database and of the diagnostic logs, with the sign-in
-          tokens removed, are kept on that computer for 14 days and in Rem&apos;s Microsoft
-          OneDrive for 60 days.
+          Your data is not backed up. Rem&apos;s own data is copied nightly to that computer and to his
+          Microsoft OneDrive; those copies hold none of yours.
+        </li>
+        <li>
+          Rem runs Lazy Boy and holds its credentials, so he can technically read your data. The app
+          shows nobody anyone else&apos;s listening.
         </li>
         <li>
           Rem uses an AI assistant (Anthropic&apos;s Claude) to maintain the app. It works only
@@ -118,18 +125,26 @@ export default function PrivacyPage() {
 
       <h2>How long it is kept</h2>
       <p>
-        For as long as you stay connected; your history builds up over that time. If you
-        disconnect, everything Lazy Boy holds about you, backups included, is deleted within five
-        days.
+        For as long as you stay connected; your history builds up over that time. <strong>Log out</strong>{" "}
+        signs you out on every browser and stops recording your listening; what is already there
+        stays, and signing in again resumes (songs played in between come back only as far as
+        Spotify&apos;s last 50). If you disconnect, everything Lazy Boy holds about you is deleted
+        within five days. If you remove Lazy Boy at Spotify without disconnecting, Lazy Boy notices
+        within about an hour and deletes your data on the fourth day, unless you sign in again
+        first.
       </p>
 
       <h2>Disconnecting and deletion</h2>
       <p>
-        To disconnect, remove Lazy Boy at{" "}
-        <a href="https://www.spotify.com/account/apps/">spotify.com/account/apps</a> (Manage
-        apps, then Remove access); from then on the app cannot read anything from your account.
-        Then email Rem at <a href="mailto:remtbkv@gmail.com">remtbkv@gmail.com</a> to have your
-        data deleted, and it is gone within five days.
+        Signed in, choose <strong>Disconnect</strong> (at <Link href="/disconnect">/disconnect</Link>):
+        download your history first if you want a copy, then confirm. Your database, your encrypted
+        tokens, your request and your diagnostic logs are deleted, most of it at once and all of it
+        within five days; Lazy Boy keeps only a note that your account was deleted, and when, for
+        five days, so a later sign-in can be told.
+        Then remove Lazy Boy at{" "}
+        <a href="https://www.spotify.com/account/apps/">spotify.com/account/apps</a> (Manage apps,
+        then Remove access): the app cannot do that for you. If you can no longer sign in, email Rem
+        at <a href="mailto:remtbkv@gmail.com">remtbkv@gmail.com</a> and he deletes it the same way.
       </p>
 
       <h2>Children</h2>

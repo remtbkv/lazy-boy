@@ -43,6 +43,24 @@ describe("/privacy and /terms", () => {
     expect(privacy).toContain("Privacy Policy");
     expect(privacy).toContain("remtbkv@gmail.com");
     expect(privacy).toContain("five days");
+    // Phase 4a: true of what the multi-user build stores and does (CLAUDE.md: change what the app
+    // stores, change /privacy).
+    const p = privacy.replace(/<[^>]+>/g, "").replace(/&#x27;|&apos;/g, "'");
+    for (const s of [
+      "the e-mail address on your Spotify account and the name you give",
+      "stored encrypted",
+      "Your data is not backed up",
+      "one day of point-in-time history",
+      "your encrypted tokens included",
+      "he can technically read your data",
+      "It works only with Rem's own data and never reads yours.",
+      "Log out signs you out on every browser and stops recording your listening",
+      "deletes your data on the fourth day",
+      "spotify.com/account/apps",
+    ]) {
+      expect(p, s).toContain(s);
+    }
+    expect(p).not.toContain("14 days and in"); // the single-user backup sentence is gone
 
     const terms = renderToStaticMarkup(createElement(Layout, null, createElement(Terms)));
     expect(terms).toContain("Terms of Use");
@@ -91,15 +109,16 @@ describe("/privacy says what the code stores and logs", () => {
   it("names the browser's IndexedDB copy and the tokens' absence from backups", async () => {
     const t = await text();
     expect(t).toContain("IndexedDB"); // search-cache.ts
-    expect(t).toContain("with the sign-in tokens removed"); // backup.py STRIP
+    // Phase 4a: the nightly copies keep only Rem's rows (ops/zenbook-backup/backup.py, RULINGS Oct
+    // 15 6:21 PM), so a friend's tokens are in none of them.
+    expect(t).toContain("those copies hold none of yours");
   });
 
   it("names Phase 2's accounts database, the account ID and the encrypted tokens", async () => {
     const t = await text();
     expect(t).toContain("your Spotify user ID and account ID"); // users.account_id (identity-read.ts resolveSignIn)
     expect(t).toContain("stored encrypted"); // user_tokens.blob (token-crypto.ts, AES-256-GCM)
-    expect(t).toContain("accounts database (who has an account, and your encrypted sign-in tokens) is on Turso too"); // app-db.ts, lazyboy-app
-    expect(t).toContain("backup copies of the history database"); // the Zenbook's backup.py copies `lazyboy`, not `lazyboy-app`
+    expect(t).toContain("accounts database (who has an account, your request, and your encrypted sign-in tokens) is on Turso too"); // app-db.ts users, requests, user_tokens
     expect(t).not.toContain("timezone and sign-in tokens are in a database"); // the tokens left `lazyboy` for user_tokens
   });
 
