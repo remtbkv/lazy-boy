@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LogOut } from "lucide-react";
+import { LogOut, Unplug } from "lucide-react";
 import { logout } from "./actions";
 import { NowPlaying } from "@/components/now-playing";
 import { useNowPlaying } from "@/components/now-playing-context";
@@ -356,6 +356,15 @@ function AccountMenu({ name, image }: { name: string; image: string | null }) {
               Log out
             </DropdownMenuItem>
           </form>
+          {/* Disconnect (RULINGS Oct 15 1:17 PM): its page offers the export first, then asks for
+              the typed word and a fresh sign-in; for Rem it says his account is never deleted. */}
+          <DropdownMenuItem
+            render={<Link href="/disconnect" />}
+            className="w-full cursor-pointer gap-2 px-1.5 py-1.5 text-muted-foreground"
+          >
+            <Unplug className="size-4" />
+            Disconnect…
+          </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
     </div>
