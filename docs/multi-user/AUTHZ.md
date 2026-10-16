@@ -2,7 +2,7 @@
 
 Generated from `tests/isolation/authz-registry.ts` and the code by `tests/isolation/authz-doc.ts`; do not edit by hand. `npm test` fails when this file is stale; `AUTHZ_WRITE=1 npx vitest run tests/isolation/authz-map.test.ts` rewrites it. Every cell below is a test (`tests/isolation/authz-{route,auth,action,page}.test.ts`) that runs the entry point through the real Auth.js (a real cookie, src/lib/auth.ts's own callbacks) against a throwaway store seeded with Rem's rows and the scripted Spotify.
 
-56 entry points × 12 principals = 672 cells: 203 allow, 395 deny, 74 isolated. 125 cells are not at their target in today's single-user code; each is pinned to what it does today and names the phase that moves it. 11 findings (cells with no explicit rule), 22 red-team checks (10 pinned).
+56 entry points × 12 principals = 672 cells: 203 allow, 395 deny, 74 isolated. 124 cells are not at their target in today's single-user code; each is pinned to what it does today and names the phase that moves it. 11 findings (cells with no explicit rule), 22 red-team checks (9 pinned).
 
 `AUTHZ_TARGET=1 npx vitest run tests/isolation/authz-` runs every pinned cell and check against its target instead: what fails is what the phases still owe.
 
@@ -38,7 +38,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 | GET /api/tasks/[id] | D | A | I ←A P1 | I ←A P1 | D ←A P1 | D | D | D | D | D | D ←A P1 | D |
 | POST /api/playlists/[id]/tracks | D | A | I ←A P1 | I ←A P1 | D ←A P1 | D | D | D | D | D | D | D |
 | POST /api/playlists/sync | D | A | I ←A P1 | I ←A P1 | D ←A P1 | D | D | D | D | D | D | D |
-| GET /api/cron/sync | D | D | D | D | D | A | A | D | A ←D L07 | D | D | D |
+| GET /api/cron/sync | D | D | D | D | D | A | A | D | A | D | D | D |
 | GET /api/cron/usage-check | D | D | D | D | D | A | A | D | D | D | D | D |
 | GET /api/cron/daily | D | D | D | D | D | A | A | D | D | D | D | D |
 | GET /api/cron/store-bench | D | D | D | D | D | A | A | D | D | D | D | D |
@@ -200,16 +200,16 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/cron/sync
 
-- File: `src/app/api/cron/sync/route.ts`. Gate today: `src/app/api/cron/sync/route.ts:50`.
-- Does, when allowed: the tick: currently-playing and recently-played with Rem's stored grant, harvest stamps, plays; a library rescan every 30 min.
-- Calls (from the source): store `getHarvestGate`, `getLibraryScanAttemptAt`, `getLibrarySyncedAt`, `getSpotifyTokens`, `ledgerSyncCall (w)`, `setHarvestGate (w)`, `setLibraryScanAttemptAt (w)`; Spotify `currentlyPlaying`; via `getValidAccessToken`, `cronAuthorized`, `spotifyClient`, `syncRecentPlays`, `syncLibrary`, `shouldHarvest`.
-- `anon`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; no header → 401
-- `rem`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; Rem's cookie → 401
-- `friendA`, `friendB`, `revoked`, `staleSecret`, `staleLogout`, `forged`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; a cookie → 401
+- File: `src/app/api/cron/sync/route.ts`. Gate today: `src/app/api/cron/sync/route.ts:58`.
+- Does, when allowed: the tick, at most one per 90 s whoever calls (the stamp, acquireLock('tick')): currently-playing and recently-played with Rem's stored grant, harvest stamps, plays; a library rescan every 30 min.
+- Calls (from the source): store `acquireLock (w)`, `getHarvestGate`, `getLibraryScanAttemptAt`, `getLibrarySyncedAt`, `getSpotifyTokens`, `ledgerSyncCall (w)`, `setHarvestGate (w)`, `setLibraryScanAttemptAt (w)`; Spotify `currentlyPlaying`; via `getValidAccessToken`, `cronCaller`, `spotifyClient`, `syncRecentPlays`, `syncLibrary`, `shouldHarvest`.
+- `anon`: D — cronCaller() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET` (the Zenbook) or `Bearer $CRON_SECRET_EXT` (cron-job.org), timing-safe, an unset secret matching nobody; a cookie is not a secret; no header → 401
+- `rem`: D — cronCaller() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET` (the Zenbook) or `Bearer $CRON_SECRET_EXT` (cron-job.org), timing-safe, an unset secret matching nobody; a cookie is not a secret; Rem's cookie → 401
+- `friendA`, `friendB`, `revoked`, `staleSecret`, `staleLogout`, `forged`: D — cronCaller() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET` (the Zenbook) or `Bearer $CRON_SECRET_EXT` (cron-job.org), timing-safe, an unset secret matching nobody; a cookie is not a secret; a cookie → 401
 - `vercelCron`: A — Bearer $CRON_SECRET → the tick (vercel.json, 07:00 UTC)
 - `zenbookPinger`: A — Bearer $CRON_SECRET
-- `zenbookRecorder`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; a Spotify bearer is not the secret → 401
-- `cronjobOrg`: A ←D L07 — CRON_SECRET_EXT is unknown today → 401 (its job's old bearer went stale at the Aug 10 rotation); lane 07 accepts it and answers a bare {"ok":true} [F10]
+- `zenbookRecorder`: D — cronCaller() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET` (the Zenbook) or `Bearer $CRON_SECRET_EXT` (cron-job.org), timing-safe, an unset secret matching nobody; a cookie is not a secret; a Spotify bearer is not the secret → 401
+- `cronjobOrg`: A — Bearer $CRON_SECRET_EXT → the tick; the reply is a bare {"ok":true}, never the outcome or the owner alarm (PLAN §7.2 step 0) [F10]
 
 ### GET /api/cron/usage-check
 
@@ -725,10 +725,10 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - **F4. logout runs with no session check.** The logout server action clears the global Spotify token row in after() whoever posts it: no cookie, a forged or stale cookie, a friend. Anyone who can post the action stops closed-app capture until Rem signs in again (the cron then answers 503 'no token'), and plays past Spotify's last 50 are lost. Owner: P1 (lane 12, item 6: every action onto requireActionUser, logout included). (11 cells: action logout)
 - **F5. /usage has no admin rule.** Any session sees the operator's page: the rows-read ledger, per-page client timings and the Spotify call breakdown with raw paths. PLAN §6.2 layer 7 says both 'require is_admin' and 'for any user but the admin, aggregated'; lane 12's brief says admin-only, which this map takes. Owner: P1 (lane 12, item 6). (2 cells: page /usage)
 - **F6. Search payloads carry no user: ETags without a uid, bodies revalidated from the HTTP cache.** The library and history ETags are "lib-<shape>-<version>-<day>" with per-store counters that collide across users, the bodies are `private, max-age=0, must-revalidate` (kept in the HTTP cache after sign-out) and carry no `u`, and the cached reads behind them key on the version alone. Owner: P1 (lane 12, items 3-4; PLAN §6.2 layers 4 and 6). (pinned by the red-team checks below)
-- **F7. One cron check for every cron route, and CRON_SECRET_EXT about to join it.** Until the store split, /api/cron/sync ran the daily chores for any CRON_SECRET holder who sent x-vercel-cron; origin/main moved them to /api/cron/daily (75aea82), so that header opens nothing now (the red team pins it). What is left: all four cron routes share cronAuthorized() in src/lib/cron-auth.ts. Lane 07's brief takes mu/phase1's src/lib/cron-auth.ts byte for byte, a different file under the same name (cronCaller, no cronAuthorized): taken whole it removes the export four routes import; folded into cronAuthorized it opens /api/cron/daily, /api/cron/store-bench and /api/cron/usage-check to cron-job.org's secret, which PLAN §5.5 forbids (EXT opens /api/cron/sync and /api/cron/health only). Today the rule is explicit (EXT is unknown to every route); the cronjobOrg cells of those three routes are the tripwire. Owner: L07 (lane 07: keep cronAuthorized CRON_SECRET-only, add cronCaller beside it); P1 (lane 12's rebase meets the same add/add on cron-auth.ts). (3 cells: GET /api/cron/usage-check; GET /api/cron/daily; GET /api/cron/store-bench)
+- **F7. One cron check for every cron route, and CRON_SECRET_EXT about to join it.** Until the store split, /api/cron/sync ran the daily chores for any CRON_SECRET holder who sent x-vercel-cron; origin/main moved them to /api/cron/daily (75aea82), so that header opens nothing now (the red team pins it). What is left: all four cron routes share cronAuthorized() in src/lib/cron-auth.ts. Lane 07's brief takes mu/phase1's src/lib/cron-auth.ts byte for byte, a different file under the same name (cronCaller, no cronAuthorized): taken whole it removes the export four routes import; folded into cronAuthorized it opens /api/cron/daily, /api/cron/store-bench and /api/cron/usage-check to cron-job.org's secret, which PLAN §5.5 forbids (EXT opens /api/cron/sync and /api/cron/health only). Today the rule is explicit (EXT is unknown to every route); the cronjobOrg cells of those three routes are the tripwire. Owner: L07 (lane 07, done on mu/pinger: cronAuthorized stays CRON_SECRET-only, cronCaller beside it opens /api/cron/sync alone); P1 (lane 12's rebase meets the same add/add on cron-auth.ts). (3 cells: GET /api/cron/usage-check; GET /api/cron/daily; GET /api/cron/store-bench)
 - **F8. /home reads Rem's store before its gate.** home/page.tsx runs getHomePayload, the cooldown and capture health in one Promise.all with auth(): an anonymous request pays three store reads before the redirect (nothing ships; the cost lands on the shared store budget). Owner: P1 (lane 12, item 6: Home's first wave behind the gate). (1 cells: page /home)
 - **F9. Phase 1's claims are not checked: a cookie never expires by age.** auth_time is not read, so a 31-day-old sign-in is still a session as long as the cookie keeps being renewed (F3). PLAN §5.4 bounds a session to 30 days from its sign-in. Owner: P1 (lane 12: the identity check reads auth_time). (pinned by the red-team checks below)
-- **F10. The cron's owner alarm and per-user outcome would go to cron-job.org.** /api/cron/sync answers its outcome (added counts, the 503 'no token' alarm) to whoever holds a secret. PLAN §7.2 step 0: cron-job.org gets a bare {"ok":true}, since it keeps response bodies and disables a job after a run of failures. Owner: L07 (lane 07, item 2). (1 cells: GET /api/cron/sync)
+- **F10. The cron's owner alarm and per-user outcome would go to cron-job.org.** /api/cron/sync answers its outcome (added counts, the 503 'no token' alarm) to whoever holds a secret. PLAN §7.2 step 0: cron-job.org gets a bare {"ok":true}, since it keeps response bodies and disables a job after a run of failures. Owner: L07 (lane 07, item 2, done on mu/pinger: the owner alarm and the outcome answer the Zenbook's CRON_SECRET only, cron-job.org gets a bare {"ok":true}). (1 cells: GET /api/cron/sync)
 - **F11. Background tasks have no owner.** /api/tasks/[id] answers any session the task's full record, result included; only the random id stands in the way. Owner: P1 (mu/phase1 built getTaskFor; lane 12 carries it). (2 cells: GET /api/tasks/[id])
 
 ## 5. Red team (`tests/isolation/authz-redteam.test.ts`)
@@ -751,7 +751,7 @@ Every friend cell in the matrix already passes Rem's own identifiers (his playli
 - [holds] an unset or empty CRON_SECRET matches nobody, not even an empty bearer
 - [holds] x-vercel-cron opens nothing on /api/cron/sync: the chores run only on /api/cron/daily (F7, fixed by 75aea82)
 - [holds] CRON_SECRET_EXT opens none of the daily, bench and usage routes, nor the chores by header (tripwire for lane 07, F7)
-- [L07] cron-job.org's secret is refused today; once accepted, its reply is a bare {"ok":true} (F10)
+- [holds] cron-job.org's secret opens /api/cron/sync, and its reply is a bare {"ok":true} (F10, lane 07)
 - [holds] the Zenbook pinger still gets the 503 owner alarm when no token is stored
 - [holds] searchPlaysAction takes LIKE wildcards and quotes as text, and refuses an anonymous caller
 - [P4a] dailyStatsAction accepts any width up to 100,000 days (PLAN §6.6)
@@ -809,6 +809,3 @@ Every friend cell in the matrix already passes Rem's own identifiers (his playli
   - GET /api/auth/session: staleLogout
   - red team: Rem's cookie copied before Log out works fully again once Rem signs in elsewhere (F3)
   - red team: dailyStatsAction accepts any width up to 100,000 days (PLAN §6.6)
-- **L07**: 1 cells and 1 red-team checks.
-  - GET /api/cron/sync: cronjobOrg
-  - red team: cron-job.org's secret is refused today; once accepted, its reply is a bare {"ok":true} (F10)

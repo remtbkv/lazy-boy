@@ -321,12 +321,11 @@ describe("the cron and pinger secrets", () => {
     expect(await oldMetricSurvived()).toBe(true);
   });
 
-  it("pinned L07: cron-job.org's secret is refused today; once accepted, its reply is a bare {\"ok\":true} (F10)", async () => {
+  it("cron-job.org's secret opens /api/cron/sync, and its reply is a bare {\"ok\":true} (F10, lane 07)", async () => {
     await seedRem();
     await become("cronjobOrg");
     const res = await cron();
-    const seen = { status: res.status, body: await res.text() };
-    expectPinned("L07", seen, (x) => x.status === 401, (x) => x.status === 200 && x.body === '{"ok":true}', "cron-job.org's reply");
+    expect({ status: res.status, body: await res.text() }).toEqual({ status: 200, body: '{"ok":true}' });
   });
 
   it("the Zenbook pinger still gets the 503 owner alarm when no token is stored", async () => {

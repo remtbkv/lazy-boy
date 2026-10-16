@@ -1,9 +1,10 @@
 import { getValidAccessToken } from "@/lib/auth";
-import { cronAuthorized } from "@/lib/cron-auth";
+import { cronCaller, type CronCaller } from "@/lib/cron-auth";
 import { spotifyClient, SpotifyError } from "@/lib/spotify";
 import { syncRecentPlays } from "@/lib/sync/history";
 import { syncLibrary } from "@/lib/sync/library";
 import {
+  acquireLock,
   getHarvestGate,
   getLibraryScanAttemptAt,
   getLibrarySyncedAt,
@@ -35,21 +36,52 @@ async function maybeSyncLibrary(token: () => Promise<string>): Promise<string> {
   return "synced";
 }
 
+// At most one tick per 90 s, whoever calls: with the two pingers on alternate minutes every
+// second call ticks, so Spotify sees the 2-minute cadence either pinger alone keeps
+// (docs/multi-user/PLAN.md §7.9). The window becomes 45 s with Phase 3's per-user claim.
+const TICK_WINDOW_MS = 90_000;
+
 // Backstop sync, triggered by the schedulers: the Zenbook's user timer
-// `lazyboy-cron-sync.timer` every 2 min (the working closed-app path) and Vercel's daily
-// 07:00 UTC cron (vercel.json), the last-resort capture when both pingers are down. The daily
-// chores have their own route, /api/cron/daily. Two more callers only ever 401: the cron-job.org job, whose bearer
-// went stale at the 2026-08-10 CRON_SECRET rotation, and the Zenbook's root-level
-// `lazyboy-sync.timer` (the "second ~5-min pinger" of 2026-08-06), stale since the 07-01
-// rotation (burn lazyboy-review 2026-10-03, Z1/Z2). Runs without a session using the stored
-// token, so history stays current even when the app hasn't been opened. Callers send
-// `Authorization: Bearer $CRON_SECRET`; anything else is rejected so the endpoint can't be
-// triggered by randoms. Every holder of the secret is listed in docs/SECURITY.md.
+// `lazyboy-cron-sync.timer` every 2 min with CRON_SECRET (the working closed-app path), the
+// cron-job.org job every 2 min with CRON_SECRET_EXT (the second pinger, so capture survives a
+// Zenbook outage; PLAN §7.9), and Vercel's daily 07:00 UTC cron (vercel.json) with
+// CRON_SECRET, the last-resort capture when both pingers are down. The daily chores have their
+// own route, /api/cron/daily. The Zenbook's root-level `lazyboy-sync.timer` (the "second ~5-min
+// pinger" of 2026-08-06) only ever 401s, stale since the 07-01 rotation (burn lazyboy-review
+// 2026-10-03, Z1/Z2). Runs without a session using the stored token, so history stays current
+// even when the app hasn't been opened. Callers send `Authorization: Bearer <secret>`; anything
+// else is rejected so the endpoint can't be triggered by randoms. Every holder of either secret
+// is listed in docs/SECURITY.md.
 export async function GET(req: Request) {
-  // Fails closed when CRON_SECRET is unset (cron-auth.ts).
-  if (!cronAuthorized(req)) {
+  // Fails closed when a secret is unset (cron-auth.ts).
+  const caller = cronCaller(req.headers.get("authorization"));
+  if (!caller) {
     return Response.json({ ok: false, error: "forbidden" }, { status: 401 });
   }
+  const res = await tick(caller);
+  // cron-job.org keeps every reply body in its execution history, where per-user outcomes
+  // would record when each person listens, and it disables a job after a run of failures: it
+  // gets neither the outcome nor the owner alarm (PLAN §7.2 step 0, security R14).
+  return caller === "ext" ? Response.json({ ok: true }) : res;
+}
+
+async function tick(caller: CronCaller): Promise<Response> {
+  // The owner alarm, read before the stamp so the Zenbook sees it whichever pinger's tick ran
+  // this window (PLAN §7.2 step 0). A store error here is no verdict: the stamp decides.
+  if (caller === "zenbook" && (await getSpotifyTokens().catch(() => undefined)) === null) {
+    return Response.json({ ok: false, error: "no token" }, { status: 503 });
+  }
+  // The stamp (PLAN §7.2 step 1): one compare-and-set on a meta row, so a burst of calls does
+  // one tick's work and a leaked secret called in a loop costs one tick per window. A failed
+  // stamp skips the tick: nothing runs past the guard unless it holds the window.
+  let stamped: string | null;
+  try {
+    stamped = await acquireLock("tick", TICK_WINDOW_MS);
+  } catch (e) {
+    console.error("[cron] tick stamp failed", e);
+    return Response.json({ ok: true, skipped: "store unavailable" });
+  }
+  if (!stamped) return Response.json({ ok: true, skipped: "recent tick" });
   // Guarded: this runs OUTSIDE the try below, and a store hiccup inside the token read
   // used to escape as a 500 — feeding the external pinger's auto-disable, the exact storm
   // the 429 branch dodges (wave-2 audit, B5).

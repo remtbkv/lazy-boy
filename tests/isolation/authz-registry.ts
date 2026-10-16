@@ -98,7 +98,7 @@ export const FINDINGS: Record<FindingId, { title: string; detail: string; owner:
     title: "One cron check for every cron route, and CRON_SECRET_EXT about to join it",
     detail:
       "Until the store split, /api/cron/sync ran the daily chores for any CRON_SECRET holder who sent x-vercel-cron; origin/main moved them to /api/cron/daily (75aea82), so that header opens nothing now (the red team pins it). What is left: all four cron routes share cronAuthorized() in src/lib/cron-auth.ts. Lane 07's brief takes mu/phase1's src/lib/cron-auth.ts byte for byte, a different file under the same name (cronCaller, no cronAuthorized): taken whole it removes the export four routes import; folded into cronAuthorized it opens /api/cron/daily, /api/cron/store-bench and /api/cron/usage-check to cron-job.org's secret, which PLAN §5.5 forbids (EXT opens /api/cron/sync and /api/cron/health only). Today the rule is explicit (EXT is unknown to every route); the cronjobOrg cells of those three routes are the tripwire.",
-    owner: "L07 (lane 07: keep cronAuthorized CRON_SECRET-only, add cronCaller beside it); P1 (lane 12's rebase meets the same add/add on cron-auth.ts)",
+    owner: "L07 (lane 07, done on mu/pinger: cronAuthorized stays CRON_SECRET-only, cronCaller beside it opens /api/cron/sync alone); P1 (lane 12's rebase meets the same add/add on cron-auth.ts)",
   },
   F8: {
     title: "/home reads Rem's store before its gate",
@@ -116,7 +116,7 @@ export const FINDINGS: Record<FindingId, { title: string; detail: string; owner:
     title: "The cron's owner alarm and per-user outcome would go to cron-job.org",
     detail:
       "/api/cron/sync answers its outcome (added counts, the 503 'no token' alarm) to whoever holds a secret. PLAN §7.2 step 0: cron-job.org gets a bare {\"ok\":true}, since it keeps response bodies and disables a job after a run of failures.",
-    owner: "L07 (lane 07, item 2)",
+    owner: "L07 (lane 07, item 2, done on mu/pinger: the owner alarm and the outcome answer the Zenbook's CRON_SECRET only, cron-job.org gets a bare {\"ok\":true})",
   },
   F11: {
     title: "Background tasks have no owner",
@@ -135,6 +135,7 @@ const R = {
   deadGrantRefused: "the token row is gone, so the jwt callback sets session.error and this gate refuses it",
   deadGrantAllowed: "none: this gate checks only that a session exists (F2)",
   cronOnly: "cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret",
+  cronCaller: "cronCaller() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET` (the Zenbook) or `Bearer $CRON_SECRET_EXT` (cron-job.org), timing-safe, an unset secret matching nobody; a cookie is not a secret",
 };
 
 type UserGate = "session" | "session+grant";
@@ -165,8 +166,8 @@ function publicCells(rule: string, over: Partial<Record<Principal, Cell>> = {}):
   return { ...cells, ...over };
 }
 
-function cronCells(over: Partial<Record<Principal, Cell>> = {}): Record<Principal, Cell> {
-  const deny = (why: string): Cell => ({ target: "deny", rule: `${R.cronOnly}; ${why}` });
+function cronCells(over: Partial<Record<Principal, Cell>> = {}, check: string = R.cronOnly): Record<Principal, Cell> {
+  const deny = (why: string): Cell => ({ target: "deny", rule: `${check}; ${why}` });
   const cells: Record<Principal, Cell> = {
     anon: deny("no header → 401"),
     rem: deny("Rem's cookie → 401"),
@@ -374,18 +375,19 @@ export const ENTRIES: Entry[] = [
     id: "GET /api/cron/sync",
     file: "src/app/api/cron/sync/route.ts",
     kind: "route",
-    gate: "if (!cronAuthorized(req)) {",
-    does: "the tick: currently-playing and recently-played with Rem's stored grant, harvest stamps, plays; a library rescan every 30 min",
-    cells: cronCells({
-      vercelCron: { target: "allow", rule: "Bearer $CRON_SECRET → the tick (vercel.json, 07:00 UTC)" },
-      cronjobOrg: {
-        target: "allow",
-        today: "deny",
-        phase: "L07",
-        rule: "CRON_SECRET_EXT is unknown today → 401 (its job's old bearer went stale at the Aug 10 rotation); lane 07 accepts it and answers a bare {\"ok\":true}",
-        finding: "F10",
+    gate: "if (!caller) {",
+    does: "the tick, at most one per 90 s whoever calls (the stamp, acquireLock('tick')): currently-playing and recently-played with Rem's stored grant, harvest stamps, plays; a library rescan every 30 min",
+    cells: cronCells(
+      {
+        vercelCron: { target: "allow", rule: "Bearer $CRON_SECRET → the tick (vercel.json, 07:00 UTC)" },
+        cronjobOrg: {
+          target: "allow",
+          rule: "Bearer $CRON_SECRET_EXT → the tick; the reply is a bare {\"ok\":true}, never the outcome or the owner alarm (PLAN §7.2 step 0)",
+          finding: "F10",
+        },
       },
-    }),
+      R.cronCaller,
+    ),
     invoke: async () => (await route("@/app/api/cron/sync/route", "GET")())(request("/api/cron/sync")),
   },
   {
