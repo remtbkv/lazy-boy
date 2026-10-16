@@ -202,6 +202,8 @@ describe("S4: module-scope state is on a reviewed list", () => {
     "src/lib/metrics-client.ts: visibleMs": BROWSER,
     "src/lib/metrics-client.ts: visibleSince": BROWSER,
     "src/lib/search-perf.ts: enabled": BROWSER,
+    // Set by the sign-out form for the rest of that page load; signing in again is a navigation.
+    "src/lib/search-cache.ts: ended": BROWSER,
     "src/lib/db.ts: g": "clients by db_name, owner verdicts and schema runs by (uid, db_name), the telemetry client",
     "src/lib/db.ts: storeSizeMemo": "Map keyed by (uid, db_name)",
     "src/lib/db.ts: uniqueRecomputeKickedAt": "Map keyed by (uid, db_name)",
@@ -313,8 +315,7 @@ describe("S6: browser storage names", () => {
     "src/app/(app)/error.tsx: sessionStorage.setItem(KEY)",
   ]);
   // PENDING: user data under a bare name. None left: the (app) layout renders the uid and every
-  // user-data name is built from it. Lane 1905's IndexedDB store arrives at the stitch (lane
-  // 33); its database name must be built the same way, or this check names it.
+  // user-data name is built from it, lane 1905's IndexedDB database included (lane 33's stitch).
   const PENDING = new Set<string>([]);
   // IndexedDB names, opened through indexedDB.open(name, …).
   const IDB = /^(window\.)?indexedDB\.open$/;

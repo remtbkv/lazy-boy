@@ -54,15 +54,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   // picture only.
   const session = await auth();
   const name = session?.user?.name ?? "You";
-  // The opaque key Home's IndexedDB copy of the search payloads is keyed and stamped by
-  // (search-cache.ts, STORE_MIGRATION §10). One user today, so a constant: no user id reaches
-  // the browser, and the email, the random `sub` and `me_id` are each wrong for it. Multi-user
-  // Phase 1's uid replaces it; a different key clears the browser's copy.
-  const userKey = "solo";
   const image = session?.user?.image ?? null;
 
   return (
-    <div id="den-root" data-user-key={userKey} className="flex min-h-dvh flex-col">
+    <div id="den-root" className="flex min-h-dvh flex-col">
       <UserProvider uid={user.uid}>
         <NowPlayingProvider>
           <DenChrome name={name} image={image} />

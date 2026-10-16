@@ -344,7 +344,7 @@ function AccountMenu({ name, image }: { name: string; image: string | null }) {
             action={logout}
             onSubmit={() => {
               clearThisBrowser();
-              void clearStored(idbKV());
+              void clearStored(idbKV(uid));
             }}
           >
             <DropdownMenuItem

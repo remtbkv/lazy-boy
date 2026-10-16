@@ -17,6 +17,7 @@ export const USER_DATA_NAMES = [
   "lb-days", // Home's day list (sessionStorage)
   "clean:active", // a clean in progress (localStorage)
   "lb-ring:", // the now-playing ring colour per album image (sessionStorage)
+  "lb-search", // Home's search payloads (an IndexedDB database, search-cache.ts)
 ] as const;
 
 export type UserDataName = (typeof USER_DATA_NAMES)[number];
@@ -62,10 +63,30 @@ export function bodyIsFor(body: unknown, uid: string): boolean {
   return typeof body === "object" && body !== null && (body as { u?: unknown }).u === uid;
 }
 
-/** This browser's stores: clearUserStorage over localStorage and sessionStorage. Called by the
- *  sign-out form before it submits, and by the fetchers on the signed-out 401. Storage that is
+type Databases = Pick<IDBFactory, "deleteDatabase"> & { databases?: () => Promise<{ name?: string }[]> };
+
+/** Delete every user's IndexedDB database on this device: each name that is user data, per-user
+ *  or the bare name written before Phase 1. The bare one is deleted by name; the per-user ones are
+ *  found with indexedDB.databases(), which a browser without it (Firefox before 126) cannot list,
+ *  so there only the sign-out form's own clear (search-cache.ts clearStored) empties the page
+ *  user's copy. A delete waits for open connections to close; nothing here waits for it. */
+export async function clearUserDatabases(idb: Databases): Promise<string[]> {
+  const listed = idb.databases ? (await idb.databases()).map((d) => d.name ?? "") : [];
+  const names = [...new Set(["lb-search", ...listed.filter(isUserDataKey)])];
+  for (const n of names) idb.deleteDatabase(n);
+  return names;
+}
+
+/** This browser's stores: clearUserStorage over localStorage and sessionStorage, and every
+ *  user's IndexedDB database (clearUserDatabases, off the caller's path). Called by the sign-out
+ *  form before it submits, and by the fetchers on the signed-out 401. Storage that is
  *  unavailable (private mode, a server render) clears nothing. */
 export function clearThisBrowser(): string[] {
+  try {
+    if (typeof indexedDB !== "undefined") void clearUserDatabases(indexedDB).catch(() => {});
+  } catch {
+    /* IndexedDB unreachable: nothing stored there to clear */
+  }
   try {
     return clearUserStorage([localStorage, sessionStorage]);
   } catch {

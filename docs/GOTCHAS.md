@@ -511,7 +511,7 @@ the ones quoted in the commit history.
 ## The browser's copy of the search payloads (IndexedDB)
 
 Home keeps the last good body of `/api/search/library` and `/api/search/history` in IndexedDB
-(`lb-search`, `src/lib/search-cache.ts`) and builds the search set from it on mount, then swaps in
+(`lb-search@<uid>`, `src/lib/search-cache.ts`) and builds the search set from it on mount, then swaps in
 the network pair (`lb:index-idb` on /usage when the stored copy got there first). Five rules that
 are easy to break:
 - **It feeds search, never the day list.** The stored history can be hours old; a day derived from
@@ -519,10 +519,12 @@ are easy to break:
 - **The key carries the shape** (`search-shape.ts`, the same token as the Data Cache key and the
   ETag), so a deploy that bumps a shape makes every stored body a miss, deleted on read. Bump the
   token, never reuse it. A stored body also passes the network path's validators or is deleted.
-- **It is per user.** Records are keyed and stamped with the opaque key the `(app)` layout renders
-  on `#den-root` (a constant today; multi-user's uid later); another key clears the store, and the
-  sign-out form clears it as it submits (the server action's response can't). That clear also ends
-  storing for the page load: a payload still in flight lands after it and would put the copy back.
+- **It is per user.** Each user has their own database, named by `userStorageName`; records are
+  keyed and stamped with the uid the `(app)` layout renders (`useUid()`), another key clears the
+  store, and a body whose `u` is not the page's user is dropped like a network one. The sign-out
+  form, and the signed-out 401, delete every user's database (`clearThisBrowser`; the server
+  action's response can't), and the form's `clearStored` also ends storing for the page load: a
+  payload still in flight lands after it and would put the copy back.
 - **Every network-built set sets `fresh`.** The mount read can resolve seconds late (a slow or busy
   IndexedDB), and it yields only to `fresh`. The refresh's patch path once set `entries` without it
   (the pair's handler bails when the history ref is replaced), so a late read replaced the patched

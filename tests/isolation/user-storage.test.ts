@@ -1,8 +1,10 @@
 // Browser storage per user (PLAN.md §6.2 layer 6, T7's client half). The search routes' ETags
 // and bodies (T7's server half) are in files queued lanes edit and are pending.
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   bodyIsFor,
+  clearIfSignedOut,
+  clearThisBrowser,
   clearUserStorage,
   isSignedOutResponse,
   userStorageName,
@@ -62,5 +64,56 @@ describe("user storage", () => {
     expect(bodyIsFor({ u: B, rows: [] }, A)).toBe(false);
     expect(bodyIsFor({ rows: [] }, A)).toBe(false);
     expect(bodyIsFor(null, A)).toBe(false);
+  });
+});
+
+// The browser's IndexedDB databases, as the sign-out form and the signed-out 401 see them.
+function fakeIndexedDB(names: string[], listable = true) {
+  const live = new Set(names);
+  return {
+    live,
+    deleteDatabase: (n: string) => {
+      live.delete(n);
+      return {} as IDBOpenDBRequest;
+    },
+    ...(listable ? { databases: async () => [...live].map((name) => ({ name, version: 1 })) } : {}),
+  };
+}
+
+describe("the search payloads' IndexedDB copy (lane 1905's, per user since the stitch)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it("sign-out deletes every user's copy, per-user or the bare pre-Phase-1 one, and no other database", async () => {
+    const idb = fakeIndexedDB([userStorageName(A, "lb-search"), userStorageName(B, "lb-search"), "lb-search", "unrelated"]);
+    vi.stubGlobal("indexedDB", idb);
+    vi.stubGlobal("localStorage", fakeStorage({}));
+    vi.stubGlobal("sessionStorage", fakeStorage({}));
+    clearThisBrowser();
+    await settle();
+    expect([...idb.live]).toEqual(["unrelated"]);
+  });
+
+  it("the signed-out 401 deletes them too; a 503 deletes nothing", async () => {
+    const idb = fakeIndexedDB([userStorageName(A, "lb-search")]);
+    vi.stubGlobal("indexedDB", idb);
+    vi.stubGlobal("localStorage", fakeStorage({}));
+    vi.stubGlobal("sessionStorage", fakeStorage({}));
+    clearIfSignedOut({ status: 503, headers: new Headers({ "x-lb-signed-out": "1" }) });
+    await settle();
+    expect([...idb.live]).toEqual([userStorageName(A, "lb-search")]);
+    clearIfSignedOut({ status: 401, headers: new Headers({ "x-lb-signed-out": "1" }) });
+    await settle();
+    expect([...idb.live]).toEqual([]);
+  });
+
+  it("a browser that cannot list its databases still loses the bare one", async () => {
+    const idb = fakeIndexedDB(["lb-search", userStorageName(A, "lb-search")], false);
+    vi.stubGlobal("indexedDB", idb);
+    vi.stubGlobal("localStorage", fakeStorage({}));
+    vi.stubGlobal("sessionStorage", fakeStorage({}));
+    clearThisBrowser();
+    await settle();
+    expect([...idb.live]).toEqual([userStorageName(A, "lb-search")]);
   });
 });

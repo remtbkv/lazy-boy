@@ -614,8 +614,6 @@ export function DenHome({
   // (today from the server, a day from the session cache). Search results may be minutes stale
   // until the fresh pair lands; the days are never stale.
   const [entries, setEntries] = useState<Entry[] | null>(null);
-  /** The opaque user key the (app) layout renders on #den-root; null until mount reads it. */
-  const userKey = useRef<string | null>(null);
   /** What the browser's copy held at mount: answers a half the network then fails to deliver. */
   const stored = useRef<{ lib: LibraryPayload | null; hist: HistoryPayload | null }>({
     lib: null,
@@ -661,7 +659,7 @@ export function DenHome({
     // route body carries its version as `v` (api/search/*/route.ts).
     const keep = (kind: Kind) => (text: string, d: unknown) => {
       const v = (d as { v?: string | null }).v ?? null;
-      if (userKey.current) void writeStored(idbKV(), slotFor(userKey.current, kind), v, text);
+      void writeStored(idbKV(uidRef.current), slotFor(uidRef.current, kind), v, text);
     };
     libReq.current ??= fetchPayload<LibraryPayload>(
       "/api/search/library",
@@ -715,10 +713,10 @@ export function DenHome({
   // The browser's copy, read on mount, before the idle fetch below is even scheduled to start.
   // Declared above that effect on purpose: effects run in order, so the read is issued first.
   useEffect(() => {
-    const key = document.getElementById("den-root")?.dataset.userKey;
-    if (!key) return;
-    userKey.current = key;
-    const kv = idbKV();
+    // Keyed by the page's user, the uid the (app) layout renders: the database is theirs
+    // (userStorageName), and a body whose `u` is anyone else's is dropped (readStored).
+    const key = uidRef.current;
+    const kv = idbKV(key);
     void Promise.all([
       readStored<LibraryPayload>(kv, slotFor(key, "library"), libraryOk),
       readStored<HistoryPayload>(kv, slotFor(key, "history"), historyOk),
