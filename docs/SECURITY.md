@@ -48,10 +48,14 @@ the user-scoping item below is handled by row-level security instead.)
   constant time by one function (`src/lib/cron-auth.ts`). An unset `CRON_SECRET` rejects every
   caller (it does not wave them through), so no cron route can be triggered anonymously in a
   misconfigured deploy. `store-bench` returns timings and the store's host, never a token.
+  `/api/cron/sync` alone also takes `CRON_SECRET_EXT` (cron-job.org's, `cronCaller()`), answers it
+  a bare `{"ok":true}` and does at most one tick per 90 s whoever calls (docs/ARCHITECTURE.md).
 - **`CRON_SECRET` holders.** A rotation must update every copy, or that caller 401s silently:
   Vercel production env (`CRON_SECRET`, Sensitive: write-only, redeploy to apply); the Mac's
-  `.env.local`; the Zenbook's `~/lazyboy-cron/env` (the 2-min `lazyboy-cron-sync.timer`); the
-  cron-job.org job's `Authorization` header, if that job is kept (stale since 2026-08-10).
+  `.env.local`; the Zenbook's `~/lazyboy-cron/env` (the 2-min `lazyboy-cron-sync.timer`). The
+  cron-job.org job's header held a pre-2026-08-10 `CRON_SECRET`; it gets `CRON_SECRET_EXT` instead.
+- **`CRON_SECRET_EXT` holders:** Vercel production env (`CRON_SECRET_EXT`, Sensitive) and the
+  cron-job.org job's `Authorization` header. Nowhere else: it opens only `/api/cron/sync`.
   `/etc/lazyboy-sync.env` (the root `lazyboy-sync.timer`) holds a pre-07-01 secret and is
   slated for removal, not update (burn lazyboy-review 2026-10-03, Z1/Z2).
 - **CSRF.** Auth.js protects its routes; Next.js server actions are POST-only with origin checks.
