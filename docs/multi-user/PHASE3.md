@@ -297,3 +297,25 @@ uid in `toServe`), the not-registered rule (who may be removed), and `releaseLea
 
 When Phase 3's turn comes, cut `mu/phase3-turn` and replay this branch's commits onto production's code
 (DISPATCH §3), then wire §4.
+
+## 8. Lane 05's review (Oct 16)
+
+An adversarial review of `c368f1b` in a fresh context (PLAN §6.2-6.6, §7 and RULINGS read first, then the whole
+diff against `mu/phase2`). Five commits on this branch, each red first as its message says:
+
+- `b3adb5e`, a defect against §7.8: the not-registered rule counted as "working" every user with a success in the
+  last 10 minutes, read at the claim, so users refused in the very tick still counted from their success two
+  minutes before, and so did successes from before the refusals began on other minutes. The admin and a friend
+  refused together removed the friend. Now removal needs the friend's second refusal in a row and another user's
+  calls working since the first (§6's bullet).
+- `9891b2b`, two test gaps: counting a harvest after its call, and releasing a lease with the tick's start time,
+  both survived every Phase 3 test; T4 now catches each.
+- `dd9713a`, a defect against §5.4 step 2: the status move and the event came before the release, so a release
+  refused after a slow store stranded the user in `needs_reconnect` with nothing for the confirmation to find.
+- `f5134ce`, a defect against §7.5: `BRAKE_ON` was read by nothing; the tick carried its own `false`.
+- `1e894c8`, docs: §5's `AccuracySec=1s` and §4 item 11.
+
+Mutants: 22 one-line or few-line changes to the real source (the five the brief names, a step reading a shared
+map in two forms, a token getter bound to the first user, each of this review's fixes reverted, and the brake,
+policy, caller and deadline rules), each run against the Phase 3 test files and restored; all caught at the
+reviewed head. Tests: vitest 837 (lane 04's 830 and 7 from this review).
