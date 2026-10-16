@@ -247,6 +247,8 @@ describe("S3: app-db.ts's exports match the reviewed snapshot", () => {
     "createJoinRequest (function)",
     "requestForJoinToken (function)",
     "requestState (function)",
+    // The deletion job's runner: only deletion.ts's listed statements (t11-deletion.test.ts).
+    "execDeletionStatements (function)",
   ];
 
   it("lists every export", () => {

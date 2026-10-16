@@ -17,6 +17,7 @@ import path from "node:path";
 import { createClient, type Client, type InStatement, type ResultSet } from "@libsql/client";
 import { APP_SCHEMA, APP_SCHEMA_VERSION, appSchemaBatches, USER_STATUSES, type UserStatus } from "@/lib/app-schema";
 import { quotaDay } from "@/lib/brake";
+import { DELETION_SQL, type ExecResult as DeletionExecResult, type Stmt as DeletionStmt } from "@/lib/deletion";
 import { mintUid, newUid, signupsMode, type IdentityRow, type Uid } from "@/lib/identity";
 import { makeStoreFetch, type FetchLike } from "@/lib/store-fetch";
 import { TERMS_VERSION } from "@/lib/terms";
@@ -327,6 +328,19 @@ export async function claimInvite(requestId: string, accountId: string, spotifyI
     "write",
   );
   return claimed.rows[0] ? toUser(claimed.rows[0]) : null;
+}
+
+// ── the deletion job's statements (Phase 4a, PLAN.md §12.3) ────────────────────────────────
+// deletion.ts holds them as data, so `user.mjs --remove` on the Mac runs the very same SQL; the
+// runtime runs them here, and only them.
+
+const LISTED_DELETION_SQL = new Set<string>(Object.values(DELETION_SQL));
+
+/** One write batch of deletion.ts's statements; anything else is refused before it is sent. */
+export async function execDeletionStatements(stmts: DeletionStmt[]): Promise<DeletionExecResult[]> {
+  for (const st of stmts) if (!LISTED_DELETION_SQL.has(st.sql)) throw new Error("app-db: not a deletion statement");
+  const rs = await (await appClient()).batch(stmts, "write");
+  return rs.map((r) => ({ rows: r.rows as unknown as Record<string, unknown>[], rowsAffected: r.rowsAffected }));
 }
 
 // ── user_tokens ─────────────────────────────────────────────────────────────────────────
