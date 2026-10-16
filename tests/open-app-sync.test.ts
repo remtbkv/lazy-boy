@@ -57,12 +57,14 @@ vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
 const appDb = await import("@/lib/app-db");
 const { createClient } = await import("@libsql/client");
 const { appTokenStore } = await import("@/lib/token-store-app");
-const { forUser } = await import("@/lib/db");
+const { forUserAt } = await import("@/lib/db");
 const { mintUid } = await import("@/lib/identity");
 const { POST } = await import("@/app/api/sync/route");
 
 const OWNER = mintUid(process.env.OWNER_UID as string);
-const owner = forUser(OWNER);
+// At the database his users row names (forUserAt, so the test reads as well on a base where
+// forUser resolves the name from the last identity read).
+const owner = forUserAt(OWNER, "lazyboy");
 const MIN = 60_000;
 let raw: import("@libsql/client").Client;
 let userRaw: import("@libsql/client").Client;
