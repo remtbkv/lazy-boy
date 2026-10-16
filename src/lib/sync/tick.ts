@@ -69,17 +69,18 @@ export type TickConfig = {
   signups: "owner" | "invite";
   /** Hourly until the first friend; 2 hours from Phase 4a (§7.4). */
   backstopMs: number;
-  /** brake.ts BRAKE_ON: off in Phase 3. */
+  /** brake.ts BRAKE_ON: off in Phase 3, on from Phase 4a. */
   brakeOn: boolean;
   stepMs: number;
   replyMs: number;
   rescanMinLeftMs: number;
 };
 
-/** Phase 3's numbers (§7.2): 15 s a step, a reply within 20 s, a rescan only with 10 s left. */
+/** The tick's numbers (§7.2): 15 s a step, a reply within 20 s, a rescan only with 10 s left; from
+ *  Phase 4a the 2-hour backstop (§7.4) and the brake on (§7.5). */
 export const PHASE3_TICK = {
   stampWindowMs: 45_000,
-  backstopMs: 3_600_000,
+  backstopMs: 7_200_000,
   brakeOn: BRAKE_ON,
   stepMs: 15_000,
   replyMs: 20_000,

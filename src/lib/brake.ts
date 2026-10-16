@@ -9,10 +9,10 @@
 // everyone moves to one per 30. Completeness, the session tail and its retry, the backstop and
 // opening the app fire in every mode (harvest-policy.ts orders them ahead of the batch).
 //
-// It counts from Phase 3 and switches on with the first friend (Phase 4a): BRAKE_ON.
+// It counted from Phase 3 and is switched on with the first friend (Phase 4a): BRAKE_ON.
 
-/** Phase 4a flips this, and nothing else, to put the brake to work. */
-export const BRAKE_ON = false;
+/** On from Phase 4a (§7.5: N = 2 is the first week the bucket is shared). */
+export const BRAKE_ON = true;
 
 /** 450 a day (60% of the lowest observed ban, 01c §5.1), less the hourly recorder's 24. */
 export const APP_DAILY_BUDGET = 426;

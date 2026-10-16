@@ -2,6 +2,7 @@
 // the two slow modes, and the one constant that switches it on in Phase 4a.
 import { describe, expect, it, vi } from "vitest";
 import { APP_DAILY_BUDGET, BRAKE_ON, brakeMode, nextQuotaReset, quotaDay, shareOf } from "@/lib/brake";
+import { PHASE3_TICK } from "@/lib/sync/tick";
 import { decideHarvest, state0 } from "./brake-helpers";
 
 describe("the quota day starts at 14:51 UTC", () => {
@@ -46,8 +47,13 @@ describe("the share and the modes", () => {
     expect(brakeMode({ mine: 426, total: 426, users: 1, on: true })).toBe("all");
   });
 
-  it("counting but inert in Phase 3: off, every user stays on track-change harvests", () => {
-    expect(BRAKE_ON).toBe(false);
+  it("on from Phase 4a, in the tick's own config, with the 2-hour backstop (§7.4, §7.5)", () => {
+    expect(BRAKE_ON).toBe(true);
+    expect(PHASE3_TICK.brakeOn).toBe(true);
+    expect(PHASE3_TICK.backstopMs).toBe(2 * 3_600_000);
+  });
+
+  it("off (as in Phase 3), counting but inert: every user stays on track-change harvests", () => {
     expect(brakeMode({ mine: 999, total: 999, users: 2, on: false })).toBe("normal");
   });
 
