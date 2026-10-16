@@ -118,9 +118,9 @@ function importersOf(name: string): string[] {
 describe("S3: db.ts exports no per-user function", () => {
   // Every value db.ts exports, as a snapshot a reviewer sees change: forUser and forUserAt (the
   // only way to a user's data), the telemetry store's functions (no user's database), the
-  // app-wide cooldown and budget mode (the admin's database until Phase 2's app_meta), and pure helpers and
-  // constants. A per-user function exported here could run against a database without naming
-  // its user (PLAN.md §6.2 layer 3).
+  // app-wide budget mode (the admin's database), and pure helpers and constants. (The app-wide
+  // cooldown left for app_meta's `cooldown:<bucket>` at Phase 3's turn.) A per-user function
+  // exported here could run against a database without naming its user (PLAN.md §6.2 layer 3).
   const EXPORTS = [
     "HISTORY_INDEX_SHAPE",
     "HOME_PAYLOAD_SHAPE",
@@ -136,7 +136,6 @@ describe("S3: db.ts exports no per-user function", () => {
     "getClientLoadSpeed",
     "getRecentlyPlayedQuotaWindows",
     "getSpotifyCallBreakdown",
-    "getSpotifyCooldownUntil",
     "ledgerAdd",
     "ledgerDayModeledTotal",
     "ledgerSet",
@@ -153,7 +152,6 @@ describe("S3: db.ts exports no per-user function", () => {
     "recordBudgetDay",
     "recordClientMetrics",
     "setBudgetMode",
-    "setSpotifyCooldownUntil",
   ];
 
   it("its value exports match the snapshot", () => {
@@ -274,6 +272,7 @@ describe("S4: module-scope state is on a reviewed list", () => {
     "src/lib/tasks/registry.ts: running": "completion promises by task id; holds no result",
     "src/lib/han-fold.ts: TABLE": "a fixed folding table filled at module load; no user data",
     "src/lib/spotify/client.ts: cooldownUntil": "app-wide on purpose: Spotify's rate limit is per app (PLAN.md §4.3)",
+    "src/lib/spotify/client.ts: bucketUntil": "keyed by quota bucket, app-wide on purpose: a long ban is the developer account's on that endpoint family (PLAN.md §4.3, §7.8)",
     "src/app/(app)/use-search-mode.ts: lastKbHeight": BROWSER,
     "src/components/now-playing-context.tsx: markedNowPlayingReady": BROWSER,
     "src/components/now-playing-context.tsx: npChangeSeq": BROWSER,

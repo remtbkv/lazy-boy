@@ -16,10 +16,11 @@
 //     owner check stops a holder that overran its TTL from releasing the lock someone else
 //     has since acquired." db.ts:2539-2542 — same-millisecond acquisitions must not mint the
 //     same token.
-//   db.ts:2376-2378 (setSpotifyCooldownUntil) — "MAX, not overwrite: a later, shorter ban
-//     must never SHORTEN a persisted longer one."
+//   app-db.ts extendCooldown (formerly db.ts setSpotifyCooldownUntil) — "only ever extended:
+//     a later, shorter ban never shortens a longer one."
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getSpotifyCooldownUntil, setSpotifyCooldownUntil } from "@/lib/db";
+import { createClient } from "@libsql/client";
+import { appDatabaseUrl, extendCooldown, getAppMeta } from "@/lib/app-db";
 import { ownerStore } from "../owner-store";
 import { positions, rawClient, resetStore, sleep, track } from "./helpers";
 
@@ -319,31 +320,39 @@ describe("cross-instance lock", () => {
 });
 
 describe("spotify cooldown is monotonic (T1.10)", () => {
-  beforeEach(resetStore);
+  // A bucket's persisted cooldown in the app database (Phase 3: `cooldown:<bucket>`).
+  const read = async () => Number(await getAppMeta("cooldown:library")) || 0;
+  const clear = async () => {
+    await getAppMeta("schema_version"); // the first open creates the app database
+    const c = createClient({ url: appDatabaseUrl(), intMode: "number" });
+    await c.execute("DELETE FROM app_meta WHERE key = 'cooldown:library'");
+    c.close();
+  };
+  beforeEach(clear);
 
   it("never shortens a persisted longer ban", async () => {
-    expect(await getSpotifyCooldownUntil()).toBe(0);
-    await setSpotifyCooldownUntil(5_000);
-    expect(await getSpotifyCooldownUntil()).toBe(5_000);
-    await setSpotifyCooldownUntil(1_000);
-    expect(await getSpotifyCooldownUntil()).toBe(5_000);
-    await setSpotifyCooldownUntil(0);
-    expect(await getSpotifyCooldownUntil()).toBe(5_000);
-    await setSpotifyCooldownUntil(-9_000);
-    expect(await getSpotifyCooldownUntil()).toBe(5_000);
-    await setSpotifyCooldownUntil(9_000.9);
-    expect(await getSpotifyCooldownUntil()).toBe(9_000);
-    await setSpotifyCooldownUntil(9_000);
-    expect(await getSpotifyCooldownUntil()).toBe(9_000);
+    expect(await read()).toBe(0);
+    await extendCooldown("library", 5_000);
+    expect(await read()).toBe(5_000);
+    await extendCooldown("library", 1_000);
+    expect(await read()).toBe(5_000);
+    await extendCooldown("library", 0);
+    expect(await read()).toBe(5_000);
+    await extendCooldown("library", -9_000);
+    expect(await read()).toBe(5_000);
+    await extendCooldown("library", 9_000.9);
+    expect(await read()).toBe(9_000);
+    await extendCooldown("library", 9_000);
+    expect(await read()).toBe(9_000);
   });
 
   it("is monotone under any arrival order of the same set of bans", async () => {
     const bans = [3_000, 100_000, 250, 99_999, 42];
-    for (const b of [...bans].sort((x, y) => x - y)) await setSpotifyCooldownUntil(b);
-    const ascending = await getSpotifyCooldownUntil();
-    await resetStore();
-    for (const b of [...bans].sort((x, y) => y - x)) await setSpotifyCooldownUntil(b);
-    expect(await getSpotifyCooldownUntil()).toBe(ascending);
+    for (const b of [...bans].sort((x, y) => x - y)) await extendCooldown("library", b);
+    const ascending = await read();
+    await clear();
+    for (const b of [...bans].sort((x, y) => y - x)) await extendCooldown("library", b);
+    expect(await read()).toBe(ascending);
     expect(ascending).toBe(Math.max(...bans));
   });
 });

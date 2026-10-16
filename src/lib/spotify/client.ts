@@ -2,7 +2,8 @@
 // Owns: auth header, JSON, pagination, 429/Retry-After backoff. No domain logic here.
 
 import type { Paging } from "./types";
-import { getApiLogSummary, logSpotifyRequest, setSpotifyCooldownUntil } from "@/lib/db";
+import { extendCooldown } from "@/lib/app-db";
+import { getApiLogSummary, logSpotifyRequest } from "@/lib/db";
 import { reportIsolation } from "@/lib/isolation";
 
 const BASE = "https://api.spotify.com/v1";
@@ -41,17 +42,53 @@ export class SpotifyError extends Error {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// Shared cooldown across ALL Spotify requests (module-scoped). When Spotify 429s, every
-// request — polls, syncs, page loads — should back off, not keep hammering: that's how a
-// brief throttle turns into a long block. A 429 sets this window; other requests check it
-// first and either wait briefly (patient/bulk work) or fail fast (interactive), instead
-// of all of them retrying into the throttle at once.
+// Shared cooldown across ALL Spotify requests (module-scoped). When Spotify rate-limits (a
+// 429, seconds long), every request — polls, syncs, page loads — should back off, not keep
+// hammering: that's how a brief throttle turns into a long block. A 429 sets this window;
+// other requests check it first and either wait briefly (patient/bulk work) or fail fast
+// (interactive), instead of all of them retrying into the throttle at once. The 30-second
+// limit is per app, so this one is app-wide (multi-user PLAN §7.8).
 let cooldownUntil = 0;
 
-/** How long this instance's shared 429 cooldown has left (0 = none). /api/now-playing turns it
- *  into the Retry-After its poller backs off by. */
+// A long ban is a different animal: a QUOTA_EXCEEDED (the 429 body's `reason`), or any 429
+// whose Retry-After is past HARD_BAN_S. Spotify hands those out per endpoint family, so it
+// cools only its BUCKET (PLAN §4.3, 01c S4): a recently-played ban must not stop the player
+// probe the tick runs on, or the library scans. `/me` was banned beside recently-played in
+// August and is treated as the same bucket (§7.1). Module-scoped here, persisted to the app
+// database's `cooldown:<bucket>` for other invocations (the cron's claim reads it).
+export type Bucket = "recently-played" | "player" | "library";
+const bucketUntil = new Map<Bucket, number>();
+
+/** Which quota bucket a request path falls in. */
+export function bucketOf(path: string): Bucket {
+  let p = path;
+  try {
+    p = path.startsWith("http") ? new URL(path).pathname.replace(/^\/v1/, "") : path.split("?")[0];
+  } catch {
+    /* keep the raw path */
+  }
+  if (p === "/me/player/recently-played" || p === "/me") return "recently-played";
+  if (p.startsWith("/me/player")) return "player";
+  return "library";
+}
+
+/** How long this instance's cooldown on the player has left (0 = none): the app-wide rate
+ *  limit or the player bucket's ban, whichever is longer. /api/now-playing turns it into the
+ *  Retry-After its poller backs off by. */
 export function spotifyCooldownMs(): number {
-  return Math.max(0, cooldownUntil - Date.now());
+  return Math.max(0, cooldownUntil - Date.now(), (bucketUntil.get("player") ?? 0) - Date.now());
+}
+
+/** The 429 body's `reason` (`{"error":{"status":429,"message":…,"reason":"QUOTA_EXCEEDED"}}`),
+ *  which nothing read before Phase 3 (01c S4). Null when the body names none. */
+function reasonOf(text: string): string | null {
+  try {
+    const r = (JSON.parse(text) as { error?: { reason?: unknown } })?.error?.reason;
+    if (typeof r === "string" && r) return r.slice(0, 64);
+  } catch {
+    /* not JSON */
+  }
+  return /QUOTA_EXCEEDED/.test(text) ? "QUOTA_EXCEEDED" : null;
 }
 
 // A bearer token, or a getter that returns a currently-valid one. Interactive callers
@@ -111,6 +148,10 @@ export class HttpClient {
       // whole ban, the opposite of the "one probe per persist interval" the design claims
       // (audit 2026-08-19, T1.10). Patient callers ride out short throttles (≤2 min) by
       // sleeping in capped slices until the window has actually passed.
+      // A long ban on this request's bucket: fail fast whoever asks; the ban outlasts any
+      // useful wait, and a poke can only deepen it.
+      const banned = (bucketUntil.get(bucketOf(path)) ?? 0) - Date.now();
+      if (banned > 0) throw new SpotifyError(429, "Spotify has paused this endpoint — long cooldown in effect.");
       for (;;) {
         const cooldown = cooldownUntil - Date.now();
         if (cooldown <= 0) break;
@@ -169,7 +210,10 @@ export class HttpClient {
       // Negative values are junk, not an answer — they used to zero out both the sleep
       // floor and the shared cooldown (wave-3 independent suite, G).
       const rawRetryAfter = Number.isFinite(retryParsed) && retryParsed >= 0 ? retryParsed : null;
-      void logSpotifyRequest({ method, path, status: res.status, retryAfter: rawRetryAfter, source: this.source, uid: this.owner }).catch(
+      // A 429's reason, read from a copy so the caller still gets the body (PLAN §4.3: api_log
+      // + reason, which is how §7.9 finds out how the quota is counted).
+      const reason = res.status === 429 ? reasonOf(await res.clone().text().catch(() => "")) : null;
+      void logSpotifyRequest({ method, path, status: res.status, retryAfter: rawRetryAfter, source: this.source, uid: this.owner, reason }).catch(
         () => {},
       );
 
@@ -179,12 +223,14 @@ export class HttpClient {
       const rlCap = this.patient ? RETRY_AFTER_CAP_S.patient : RETRY_AFTER_CAP_S.fast;
       if (res.status === 429) {
         const retryAfter = Math.min(rawRetryAfter ?? 1, rlCap);
-        // Make every other request back off too, not just this one. The shared window uses
-        // Spotify's ACTUAL ask (bounded at 30 min), not the per-wait retry cap — capping the
-        // cooldown at 5s for a 60s demand kept traffic flowing into the throttle for the
-        // whole 5–120s band (audit 2026-08-19, T2.11).
+        const longBan = reason === "QUOTA_EXCEEDED" || (rawRetryAfter ?? 0) > HARD_BAN_S;
+        // A rate limit: make every other request back off too, not just this one. The shared
+        // window uses Spotify's ACTUAL ask (bounded at 30 min), not the per-wait retry cap —
+        // capping the cooldown at 5s for a 60s demand kept traffic flowing into the throttle
+        // for the whole 5–120s band (audit 2026-08-19, T2.11). A long ban is its bucket's
+        // alone (below).
         const askMs = Math.min((rawRetryAfter ?? 1) * 1000, PERSIST_COOLDOWN_CAP_MS);
-        cooldownUntil = Math.max(cooldownUntil, Date.now() + askMs + 250);
+        if (!longBan) cooldownUntil = Math.max(cooldownUntil, Date.now() + askMs + 250);
         // On the first 429 of this call, log how hard we were hitting Spotify just before
         // it throttled — the data we use to learn where the real limit is.
         if (rateLimited === 0) {
@@ -198,20 +244,23 @@ export class HttpClient {
             .catch(() => {});
         }
         // If Spotify is asking us to wait far longer than we'd ever usefully retry (it
-        // hands out multi-hour bans when an endpoint is hammered), stop now: more calls
-        // can't succeed in any reasonable window and only risk deepening the ban.
-        if ((rawRetryAfter ?? 0) > HARD_BAN_S) {
+        // hands out multi-hour bans when an endpoint is hammered), or says the quota is
+        // spent, stop now: more calls can't succeed in any reasonable window and only risk
+        // deepening the ban.
+        if (longBan) {
           // Persist the backoff so other serverless invocations (cron ticks, on-load
-          // polls) honor it — module-scoped `cooldownUntil` is wiped between invocations,
-          // so without this every tick re-pokes the banned endpoint.
-          const untilMs = Date.now() + Math.min((rawRetryAfter ?? 0) * 1000, PERSIST_COOLDOWN_CAP_MS);
-          cooldownUntil = Math.max(cooldownUntil, untilMs);
+          // polls) honor it — module-scoped state is wiped between invocations, so without
+          // this every tick re-pokes the banned endpoint. A QUOTA_EXCEEDED without a usable
+          // Retry-After waits the whole cap.
+          const bucket = bucketOf(path);
+          const untilMs = Date.now() + Math.min(rawRetryAfter === null ? Infinity : rawRetryAfter * 1000, PERSIST_COOLDOWN_CAP_MS);
+          bucketUntil.set(bucket, Math.max(bucketUntil.get(bucket) ?? 0, untilMs));
           // AWAITED: this write is the entire cross-invocation mechanism, and a void'd
           // promise right before `return` can be frozen with the invocation on Vercel —
           // the ban then never persists and every tick re-pokes (audit 2026-08-19, T1.10).
-          await setSpotifyCooldownUntil(untilMs).catch(() => {});
+          await extendCooldown(bucket, untilMs).catch(() => {});
           console.warn(
-            `[spotify] hard ban on ${method} ${path} — Retry-After=${rawRetryAfter}s; persisted cooldown ${Math.round((untilMs - Date.now()) / 60000)}min`,
+            `[spotify] hard ban on ${method} ${path} (${bucket}, ${reason ?? "no reason"}) — Retry-After=${rawRetryAfter}s; persisted cooldown ${Math.round((untilMs - Date.now()) / 60000)}min`,
           );
           return res;
         }

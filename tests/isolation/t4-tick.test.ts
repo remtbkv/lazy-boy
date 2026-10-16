@@ -414,6 +414,14 @@ describe("T4: the rest of the tick", () => {
     expect(Number((await row(who)).next_rescan_at)).toBe(NOW + 30 * MIN);
   });
 
+  it("no rescan while the library bucket cools down (a long ban on it, client.ts)", async () => {
+    install({ [`at-${A}`]: healthy(A), [`at-${B}`]: healthy(B) });
+    await q("INSERT INTO app_meta (key, value) VALUES ('cooldown:library', :v)", { v: String(NOW + 10 * MIN) });
+    const { deps } = tickDeps({ now: () => NOW, stores });
+    await runTick(deps, ZEN);
+    expect(stores[A].rescans + stores[B].rescans).toBe(0);
+  });
+
   it("no rescan when less than 10 s of the 20 remain", async () => {
     install({ [`at-${A}`]: healthy(A), [`at-${B}`]: healthy(B) });
     const { deps } = tickDeps({ now: () => NOW, stores, config: { replyMs: 5_000 } });

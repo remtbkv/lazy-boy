@@ -1,8 +1,8 @@
 // The two kinds of 429 (PLAN.md §7.8, 01c S4), through the real Spotify client: a rate limit is
 // the app-wide cooldown, seconds long, and nobody's failure; a QUOTA_EXCEEDED cools its bucket
-// until the observed reset (at most the client's 30-minute cap) and backs nobody off. Its own file
-// because client.ts keeps its cooldown in module state: until Phase 3's turn splits it by bucket
-// (PHASE3.md §4), a long ban there stops every Spotify call in the process.
+// until the observed reset (at most the client's 30-minute cap) and backs nobody off, while the
+// other buckets carry on (client.ts keeps a cooldown per bucket from Phase 3's turn). Its own
+// file because client.ts keeps its cooldowns in module state.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAppMeta } from "@/lib/app-db";
 import { mintUid, type Uid } from "@/lib/identity";
@@ -76,5 +76,28 @@ describe("429s by kind", () => {
     t = NOW + 2 * 60_000;
     await runTick(deps, ZEN);
     expect(recentCalls()).toBe(before);
+  }, 30_000);
+
+  it("QUOTA_EXCEEDED on recently-played stops neither the player probe nor a library call in the same process", async () => {
+    const quota = '{"error":{"status":429,"message":"Too many requests","reason":"QUOTA_EXCEEDED"}}';
+    const spotify = tickSpotify({
+      [`at-${R}`]: { player: { trackId: "r-now", isPlaying: true, progressMs: 1 }, recent: { status: 429, body: quota } },
+    });
+    vi.stubGlobal("fetch", spotify.fetch);
+    let t = NOW + 86_400_000;
+    const { deps } = tickDeps({ now: () => t, stores, config: { signups: "owner" } });
+    await runTick(deps, ZEN);
+    const probes = () => spotify.calls.filter((c) => c.path === "/v1/me/player").length;
+    expect(probes()).toBe(1);
+    // A minute later, past the stamp: the user is due again 2 minutes on, so move there. Their
+    // probe is the player bucket's, which the recently-played ban does not hold.
+    t += 3 * 60_000;
+    await runTick(deps, ZEN);
+    expect(probes()).toBe(2);
+    // The library bucket goes too: a playlist read from the same process reaches Spotify.
+    const { spotifyClient } = await import("@/lib/spotify");
+    const sp = spotifyClient(R, { uid: R, accessToken: `at-${R}` }, false, "test-library");
+    await sp.resources.playlist("pl-x").catch(() => {});
+    expect(spotify.calls.some((c) => c.path === "/v1/playlists/pl-x")).toBe(true);
   }, 30_000);
 });

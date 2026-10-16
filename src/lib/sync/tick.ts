@@ -303,8 +303,10 @@ async function confirmGrant(deps: TickDeps, uid: Uid, now: number): Promise<void
   await deps.queue.finishGrantConfirm(uid, result, now);
 }
 
-/** At most one library rescan (§7.7), for the most overdue user whose step succeeded. */
-async function maybeRescan(deps: TickDeps, served: Served[], now: number, deadline: number): Promise<string | null> {
+/** At most one library rescan (§7.7), for the most overdue user whose step succeeded, and none
+ *  while the library bucket cools down (a long ban on it, client.ts). */
+async function maybeRescan(deps: TickDeps, claim: Claim, served: Served[], now: number, deadline: number): Promise<string | null> {
+  if (now < (claim.cooldowns.library ?? 0)) return null;
   const due = served
     .filter((s) => s.outcome?.code === "ok" && s.store && (s.user.nextRescanAt === null || s.user.nextRescanAt <= now))
     .sort((a, b) => (a.user.nextRescanAt ?? 0) - (b.user.nextRescanAt ?? 0));
@@ -398,7 +400,7 @@ async function tick(deps: TickDeps, zenbook: boolean, after: (work: Promise<unkn
     await serve(deps, claim, served, tick, now, clock, false);
     if (claim.confirmUid) await confirmGrant(deps, claim.confirmUid, now).catch((e) => console.error(`[tick] confirm: ${String(e)}`));
     if (replyAt - Date.now() >= deps.config.rescanMinLeftMs) {
-      const uid = await maybeRescan(deps, served, now, replyAt).catch((e) => {
+      const uid = await maybeRescan(deps, claim, served, now, replyAt).catch((e) => {
         console.error(`[tick] rescan: ${String(e)}`);
         return null;
       });
