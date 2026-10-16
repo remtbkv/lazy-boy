@@ -51,7 +51,9 @@ import {
   dump,
   installSpotify,
   observe,
+  remBearerUsed,
   request,
+  run,
   seedRem,
   sessionCookie,
   spotifyCalls,
@@ -59,6 +61,7 @@ import {
 } from "./authz-harness";
 import { ctx, flushAfter } from "./authz-context";
 import { expectPinned } from "./authz-cells";
+import { DAILY_STATS_DAYS } from "@/lib/history-days";
 
 const COOKIE = "authjs.session-token";
 
@@ -125,7 +128,7 @@ describe("cache keys and ETags across users", () => {
     await library();
     await history();
     const { dailyStatsAction, allTimePlaysAction, dayTracksAction } = await import("@/app/(app)/history-actions");
-    await dailyStatsAction(14);
+    await dailyStatsAction(DAILY_STATS_DAYS);
     await allTimePlaysAction();
     await dayTracksAction(new Date(Date.now() - 3_600_000).toISOString().slice(0, 10));
     expect(keyLog.calls.length).toBeGreaterThan(0);
@@ -145,12 +148,24 @@ describe("cache keys and ETags across users", () => {
 });
 
 describe("cookie and token reuse", () => {
-  it("pinned P4a: Rem's cookie copied before Log out works fully again once Rem signs in elsewhere (F3)", async () => {
-    // seedRem() restores the token row: Rem signed in again on another device.
-    // The copy is byte-identical to a live cookie today: Log out changed nothing it carries.
-    // Target: Log out bumps session_epoch; the copy's `ep` (0) no longer matches and it is refused.
-    const obs = await observe("rem", async () => (await import("@/app/api/sync/route")).POST());
-    expectPinned("P4a", obs.observed, (o) => o === "allow", (o) => o === "deny", "a cookie copied before Log out, after Rem signs in elsewhere");
+  it("Rem's cookie copied before Log out stays refused once Rem signs in elsewhere (F3, closed in P4a)", async () => {
+    await seedRem();
+    await become("rem");
+    const copy = ctx.cookies.get(COOKIE) as string;
+    // The real Log out (actions.ts → account.ts): session_epoch + 1 and his token row gone.
+    await run(async () => (await import("@/app/(app)/actions")).logout());
+    // Rem signs in again on another device: a live token row again (his new cookie carries the new epoch).
+    const { appTokenStore } = await import("@/lib/token-store-app");
+    const { mintUid } = await import("@/lib/identity");
+    await appTokenStore().set(mintUid(OWNER_UID as string), { accessToken: "at-REM", refreshToken: "rt-REM", expiresAt: 4_000_000_000 });
+    expect(await tokenRow(), "Rem's token row restored by the new sign-in").not.toBeNull();
+    // The copy, replayed: its `ep` (0) no longer matches, so it is refused before any read or call.
+    await become("anon");
+    ctx.cookies.set(COOKIE, copy);
+    spotifyCalls.length = 0;
+    const res = await (await import("@/app/api/sync/route")).POST();
+    expect(res.status, "a cookie copied before Log out, after Rem signs in elsewhere").toBe(401);
+    expect(remBearerUsed()).toBe(false);
   });
 
   it("a 31-day-old sign-in (auth_time) is refused (P1, F9)", async () => {
@@ -404,12 +419,25 @@ describe("the search payloads and their bounds", () => {
     expect(await searchPlaysAction("%")).toEqual([]);
   });
 
-  it("pinned P4a: dailyStatsAction accepts any width up to 100,000 days (PLAN §6.6)", async () => {
+  it("dailyStatsAction answers only the width Home sends, so a client cannot mint scans (PLAN §6.6, P4a)", async () => {
     await seedRem();
     await become("rem");
     const { dailyStatsAction } = await import("@/app/(app)/history-actions");
-    const rows = await dailyStatsAction(99_999);
-    expectPinned("P4a", rows.length, (n) => n > 0, (n) => n === 0, "a 99,999-day dailyStatsAction");
+    for (const width of [99_999, 14, 0, -1, 1e9, Number.NaN]) {
+      expect(await dailyStatsAction(width), `a ${width}-day dailyStatsAction`).toEqual([]);
+    }
+    expect((await dailyStatsAction(DAILY_STATS_DAYS)).length, "the width Home sends").toBeGreaterThan(0);
+  });
+
+  it("searchPlaysAction takes ten a minute per user; the eleventh reads nothing (PLAN §6.6, P4a)", async () => {
+    await seedRem();
+    await become("rem");
+    const { clearUserBuckets } = await import("@/lib/user-bucket");
+    clearUserBuckets();
+    const { searchPlaysAction } = await import("@/app/(app)/history-actions");
+    for (let i = 0; i < 10; i++) expect((await searchPlaysAction("REM-only")).length, `call ${i + 1}`).toBeGreaterThan(0);
+    expect(await searchPlaysAction("REM-only"), "the eleventh call in the minute").toEqual([]);
+    clearUserBuckets();
   });
 });
 

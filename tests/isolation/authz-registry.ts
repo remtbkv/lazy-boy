@@ -28,10 +28,12 @@ import {
   PRINCIPALS,
   REM_DAY,
   REM_PLAYLIST,
+  remSessionState,
   params,
   request,
 } from "./authz-harness";
 import { ctx } from "./authz-context";
+import { DAILY_STATS_DAYS } from "@/lib/history-days";
 
 export type Target = "allow" | "deny" | "isolated";
 export type Phase = "P1" | "P2" | "P3" | "P4a" | "L07";
@@ -54,6 +56,8 @@ export type Entry = {
   refused?: (o: Outcome) => boolean;
   /** Runs after the principal is set up, before the call (e.g. start a task to poll). */
   before?: () => Promise<void>;
+  /** Rem's state outside his database that this entry changes (his app-database rows). */
+  watch?: () => Promise<string>;
 };
 
 // ── Findings: cells for which today's code has no explicit rule ────────────────────────────
@@ -134,7 +138,7 @@ const R = {
   friend:
     "requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read",
   deadGrantRefused:
-    "the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)",
+    "Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too",
   cronOnly: "cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret",
   cronCaller: "cronCaller() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET` (the Zenbook) or `Bearer $CRON_SECRET_EXT` (cron-job.org), timing-safe, an unset secret matching nobody; a cookie is not a secret",
 };
@@ -259,6 +263,10 @@ const nowPlayingRefused = (o: Outcome) =>
   o.kind === "response" && o.status === 200 && (JSON.parse(o.text) as { playing?: unknown }).playing === null;
 const callbackRefused = (o: Outcome) =>
   o.kind === "response" && /\/login\?error=|error=/.test(o.headers.get("location") ?? "");
+/** Log out's answer to anyone: this browser signed out and sent to /signed-out. Whether it ended
+ *  anything is read from Rem's session state (the entry's `watch`), not from the redirect. */
+const signedOutOnly = (o: Outcome) =>
+  o.kind === "redirect" && ["/signed-out", "/login"].includes(new URL(o.to, "http://127.0.0.1:3000").pathname);
 
 // ── The entries ──────────────────────────────────────────────────────────────────────────
 export const ENTRIES: Entry[] = [
@@ -429,6 +437,47 @@ export const ENTRIES: Entry[] = [
     }),
     invoke: async () => (await route("@/app/api/cron/health/route", "GET")())(request("/api/cron/health")),
   },
+  {
+    id: "POST /api/cron/probe",
+    reaches: false,
+    file: "src/app/api/cron/probe/route.ts",
+    kind: "route",
+    gate: "if (cronCaller(req.headers.get(\"authorization\")) !== \"zenbook\") {",
+    does: "the planted probe: forges one cache entry under a uid's key stamped with another uid, then reads it back so exactly one isolation event results; reads no user data",
+    cells: cronCells({
+      vercelCron: { target: "allow", rule: "cronCaller(): Bearer $CRON_SECRET (the Zenbook's secret, which Vercel's cron also carries)" },
+      zenbookPinger: { target: "allow", rule: "cronCaller(): Bearer $CRON_SECRET" },
+      cronjobOrg: { target: "deny", rule: "CRON_SECRET_EXT may tick and ask for health, never raise an alarm: cronCaller() answers ext → 401" },
+    }),
+    // An empty body: the gate is what is mapped; a valid one would forge a cache entry under Rem's key.
+    invoke: async () => (await route("@/app/api/cron/probe/route", "POST")())(request("/api/cron/probe", { method: "POST", body: {} })),
+  },
+  {
+    id: "POST /api/join",
+    file: "src/app/api/join/route.ts",
+    kind: "route",
+    gate: null,
+    does: "the request form's POST: stores one request (e-mail, name, terms version) in the app database through createJoinRequest and sets the signed request cookie; 303 back to /join",
+    cells: publicCells("public: a friend's first visit, no session; createJoinRequest bounds it in SQL and SIGNUPS=owner shuts it; it creates no database and reads no user data"),
+    invoke: async () =>
+      (await route("@/app/api/join/route", "POST")())(
+        request("/api/join", {
+          method: "POST",
+          body: new URLSearchParams({ email: "x@example.test", name: "", agree: "on" }).toString(),
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+        }),
+      ),
+  },
+  {
+    id: "GET /api/join/link",
+    file: "src/app/api/join/link/route.ts",
+    kind: "route",
+    gate: null,
+    does: "the join link: a token whose hash opens one approved, unclaimed, live invite sets the request cookie; anything else goes back to /join; reads no user data",
+    cells: publicCells("public: the token is the capability (only its hash is stored); an unknown one is sent back to /join with nothing set"),
+    invoke: async () =>
+      (await route("@/app/api/join/link/route", "GET")())(request(`/api/join/link?t=${"A".repeat(43)}`)),
+  },
   // Auth.js
   {
     id: "GET /api/auth/session",
@@ -446,9 +495,7 @@ export const ENTRIES: Entry[] = [
       revoked: { target: "deny", rule: "the jwt callback's identity check refuses a uid that is not OWNER_UID → no session (null)" },
       staleLogout: {
         target: "deny",
-        today: "allow-own",
-        phase: "P4a",
-        rule: "none: the copied cookie still decodes and is re-issued with a fresh 30 days (F3)",
+        rule: "Log out bumped session_epoch, so the jwt callback's identity read refuses the copy (ep 0) and Auth.js clears it: no session (F3 closed in P4a)",
         finding: "F3",
       },
     },
@@ -551,16 +598,19 @@ export const ENTRIES: Entry[] = [
     id: "action logout",
     file: "src/app/(app)/actions.ts",
     kind: "action",
-    gate: "const user = await requireActionUser();",
-    does: "deletes the gated user's Spotify token row (after the response) and this browser's cookie",
+    gate: "await logOutFrom(gateFromSession(await auth()));",
+    does: "bumps the gated user's session_epoch and deletes their token row (account.ts, awaited), then this browser's cookie; /signed-out",
     cells: (() => {
       const refused: Cell = {
         target: "deny",
-        rule: "requireActionUser refuses → only this browser's cookie is cleared; no token row is touched",
+        rule: "the session gate refuses → logOutFrom ends nothing; only this browser's cookie is cleared (→ /signed-out)",
       };
       return {
         anon: refused,
-        rem: { target: "allow", rule: "the owner signing out: clears his own token row, which stops capture (RULINGS Oct 15 1:33 PM)" },
+        rem: {
+          target: "allow",
+          rule: "the owner logging out: every session ended (epoch + 1) and his token row deleted, which stops capture (RULINGS Oct 15 1:33 PM)",
+        },
         friendA: { ...refused, target: "isolated" },
         friendB: { ...refused, target: "isolated" },
         revoked: refused,
@@ -569,11 +619,43 @@ export const ENTRIES: Entry[] = [
         zenbookRecorder: refused,
         cronjobOrg: refused,
         staleSecret: refused,
-        staleLogout: { target: "deny", rule: "requireActionUser refuses a session whose grant is gone; nothing to clear either" },
+        staleLogout: { target: "deny", rule: "the identity read refuses the copy (its epoch moved at the first Log out); nothing left to end" },
         forged: refused,
       } satisfies Record<Principal, Cell>;
     })(),
+    refused: signedOutOnly,
+    watch: remSessionState,
     invoke: async () => action("logout"),
+  },
+  {
+    id: "action disconnectAction",
+    file: "src/app/(app)/actions.ts",
+    kind: "action",
+    gate: "const g = gateFromSession(session);",
+    does: "removes the gated user's account through the deletion job (account.ts disconnect): the typed word, a sign-in within 10 minutes, never the admin",
+    cells: userCells("the session gate refuses → { ok: false } before anything is read", {
+      rem: {
+        target: "deny",
+        rule: "decision 21 as ruled: nothing deletes Rem's data; disconnect() refuses the admin before the deletion job, with the word typed and a fresh sign-in",
+      },
+      friendA: { target: "isolated", rule: "a friend's own account only (the job refuses any row but `lb-u-<uid>` for the caller's uid); no row in the harness, so refused" },
+      friendB: { target: "isolated", rule: "a friend's own account only (the job refuses any row but `lb-u-<uid>` for the caller's uid); no row in the harness, so refused" },
+    }),
+    watch: remSessionState,
+    invoke: async () => {
+      const fd = new FormData();
+      fd.set("confirm", "disconnect");
+      return action("disconnectAction", fd);
+    },
+  },
+  {
+    id: "action reauthForDisconnect",
+    file: "src/app/(app)/actions.ts",
+    kind: "action",
+    gate: null,
+    does: "starts OAuth (signIn('spotify')) back to /disconnect: the fresh sign-in Disconnect asks for",
+    cells: publicCells("public: starting a sign-in reads and writes nothing"),
+    invoke: async () => action("reauthForDisconnect"),
   },
   ...(
     [
@@ -636,9 +718,9 @@ export const ENTRIES: Entry[] = [
     [
       ["dockDataAction", "reads every stored playlist, me_id, the clean-backup preference and the sync stamp", []],
       ["dayTracksAction", "reads one day's plays", [REM_DAY]],
-      ["dailyStatsAction", "reads per-day play counts for up to 100,000 days", [14]],
+      ["dailyStatsAction", "reads per-day play counts for every day; any width but the one Home sends is refused (PLAN §6.6)", [DAILY_STATS_DAYS]],
       ["allTimePlaysAction", "reads the 300 most-played tracks", []],
-      ["searchPlaysAction", "LIKE-searches every play by name or artist", ["REM"]],
+      ["searchPlaysAction", "LIKE-searches every play by name or artist, ten a minute per user", ["REM"]],
     ] as const
   ).map(
     ([name, does, args]): Entry => ({
@@ -702,6 +784,18 @@ export const ENTRIES: Entry[] = [
     invoke: async () => (await import("@/app/(app)/usage/page")).default(),
   },
   {
+    id: "page /disconnect",
+    reaches: false,
+    file: "src/app/(app)/disconnect/page.tsx",
+    kind: "page",
+    gate: "const gate = await requirePageUser();",
+    does: "the export button, the typed word and the fresh sign-in for a friend; for the admin, a note that his account is never deleted and Log out only",
+    cells: userCells("requirePageUser: no session → redirect('/login') before any read", {
+      rem: { target: "allow", rule: "Rem's page: Log out only (decision 21 as ruled)" },
+    }),
+    invoke: async () => (await import("@/app/(app)/disconnect/page")).default(),
+  },
+  {
     id: "page /friends",
     file: "src/app/(app)/friends/page.tsx",
     kind: "page",
@@ -737,6 +831,42 @@ export const ENTRIES: Entry[] = [
     does: "the sign-in button; a live session is sent on to /home",
     cells: publicCells("public: the sign-in page"),
     invoke: async () => (await import("@/app/(auth)/login/page")).default({ searchParams: Promise.resolve({}) } as never),
+  },
+  {
+    id: "page /join",
+    file: "src/app/(auth)/join/page.tsx",
+    kind: "page",
+    gate: null,
+    does: "PLAN §12.6's text and the request form, or, with a request cookie, where that request stands; the closed notice under SIGNUPS=owner",
+    cells: publicCells("public: a friend's first visit; it reads only the request its own signed cookie names"),
+    invoke: async () => (await import("@/app/(auth)/join/page")).default({ searchParams: Promise.resolve({}) }),
+  },
+  {
+    id: "page /signed-out",
+    file: "src/app/(auth)/signed-out/page.tsx",
+    kind: "page",
+    gate: null,
+    does: "the page after Log out: recording stopped, how to resume; clears this browser's stores",
+    cells: publicCells("public: static text, no session or reads"),
+    invoke: async () => (await import("@/app/(auth)/signed-out/page")).default(),
+  },
+  {
+    id: "page /disconnected",
+    file: "src/app/(auth)/disconnected/page.tsx",
+    kind: "page",
+    gate: null,
+    does: "the page after Disconnect: remove the app at spotify.com/account/apps; clears this browser's stores",
+    cells: publicCells("public: static text, no session or reads"),
+    invoke: async () => (await import("@/app/(auth)/disconnected/page")).default(),
+  },
+  {
+    id: "page /reconnect",
+    file: "src/app/(auth)/reconnect/page.tsx",
+    kind: "page",
+    gate: null,
+    does: "decision 20's page for a dead Spotify grant: what happened, what to do, then the sign-in",
+    cells: publicCells("public: static text and the sign-in, no session or reads"),
+    invoke: async () => (await import("@/app/(auth)/reconnect/page")).default(),
   },
   {
     id: "page /privacy",

@@ -25,7 +25,7 @@ export function runCells(kinds: Kind[]): void {
         const cell = e.cells[p];
         const pin = cell.today ? ` [today ${cell.today}; ${cell.phase} makes it ${cell.target}]` : "";
         it(`${PRINCIPAL_LABEL[p]} → ${cell.target}${pin}`, async () => {
-          const obs = await observe(p, () => e.invoke!(p), { refused: e.refused, before: e.before });
+          const obs = await observe(p, () => e.invoke!(p), { refused: e.refused, before: e.before, watch: e.watch });
           const want = expectedObservations(e, cell);
           if (process.env.AUTHZ_DEBUG) console.log(`${e.id} | ${p} | ${describeObservation(obs)}`);
           const note = cell.today && !TARGET_MODE

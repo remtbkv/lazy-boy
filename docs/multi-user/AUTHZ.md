@@ -2,7 +2,7 @@
 
 Generated from `tests/isolation/authz-registry.ts` and the code by `tests/isolation/authz-doc.ts`; do not edit by hand. `npm test` fails when this file is stale; `AUTHZ_WRITE=1 npx vitest run tests/isolation/authz-map.test.ts` rewrites it. Every cell below is a test (`tests/isolation/authz-{route,auth,action,page}.test.ts`) that runs the entry point through the real Auth.js (a real cookie, src/lib/auth.ts's own callbacks) against a throwaway store seeded with Rem's rows and the scripted Spotify.
 
-57 entry points × 12 principals = 684 cells: 206 allow, 404 deny, 74 isolated. 1 cells are not at their target in today's single-user code; each is pinned to what it does today and names the phase that moves it. 11 findings (cells with no explicit rule), 25 red-team checks (2 pinned).
+67 entry points × 12 principals = 804 cells: 293 allow, 433 deny, 78 isolated. 0 cells are not at their target in today's single-user code; each is pinned to what it does today and names the phase that moves it. 11 findings (cells with no explicit rule), 26 red-team checks (0 pinned).
 
 `AUTHZ_TARGET=1 npx vitest run tests/isolation/authz-` runs every pinned cell and check against its target instead: what fails is what the phases still owe.
 
@@ -43,7 +43,10 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 | GET /api/cron/daily | D | D | D | D | D | A | A | D | D | D | D | D |
 | GET /api/cron/store-bench | D | D | D | D | D | A | A | D | D | D | D | D |
 | GET /api/cron/health | D | D | D | D | D | A | A | D | A | D | D | D |
-| GET /api/auth/session | D | A | I | I | D | D | D | D | D | D | D ←a P4a | D |
+| POST /api/cron/probe | D | D | D | D | D | A | A | D | D | D | D | D |
+| POST /api/join | A | A | A | A | A | A | A | A | A | A | A | A |
+| GET /api/join/link | A | A | A | A | A | A | A | A | A | A | A | A |
+| GET /api/auth/session | D | A | I | I | D | D | D | D | D | D | D | D |
 | GET /api/auth/csrf | A | A | A | A | A | A | A | A | A | A | A | A |
 | GET /api/auth/providers | A | A | A | A | A | A | A | A | A | A | A | A |
 | POST /api/auth/signin/spotify | A | A | A | A | A | A | A | A | A | A | A | A |
@@ -51,6 +54,8 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 | POST /api/auth/signout | A | A | A | A | A | A | A | A | A | A | A | A |
 | action login | A | A | A | A | A | A | A | A | A | A | A | A |
 | action logout | D | A | I | I | D | D | D | D | D | D | D | D |
+| action disconnectAction | D | D | I | I | D | D | D | D | D | D | D | D |
+| action reauthForDisconnect | A | A | A | A | A | A | A | A | A | A | A | A |
 | action mergeAction | D | A | I | I | D | D | D | D | D | D | D | D |
 | action saveQueueAction | D | A | I | I | D | D | D | D | D | D | D | D |
 | action subtractPreviewAction | D | A | I | I | D | D | D | D | D | D | D | D |
@@ -77,10 +82,15 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 | page /playlists | D | A | I | I | D | D | D | D | D | D | D | D |
 | page /playlists/[id] | D | A | I | I | D | D | D | D | D | D | D | D |
 | page /usage | D | A | D | D | D | D | D | D | D | D | D | D |
+| page /disconnect | D | A | I | I | D | D | D | D | D | D | D | D |
 | page /friends | A | A | A | A | A | A | A | A | A | A | A | A |
 | layout (app) | D | A | I | I | D | D | D | D | D | D | D | D |
 | page / | A | A | A | A | A | A | A | A | A | A | A | A |
 | page /login | A | A | A | A | A | A | A | A | A | A | A | A |
+| page /join | A | A | A | A | A | A | A | A | A | A | A | A |
+| page /signed-out | A | A | A | A | A | A | A | A | A | A | A | A |
+| page /disconnected | A | A | A | A | A | A | A | A | A | A | A | A |
+| page /reconnect | A | A | A | A | A | A | A | A | A | A | A | A |
 | page /privacy | A | A | A | A | A | A | A | A | A | A | A | A |
 | page /terms | A | A | A | A | A | A | A | A | A | A | A | A |
 | layout (legal) | A | A | A | A | A | A | A | A | A | A | A | A |
@@ -107,7 +117,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### POST /api/sync
 
@@ -120,7 +130,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### POST /api/metrics
 
@@ -133,7 +143,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### GET /api/search/library
 
@@ -146,7 +156,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### GET /api/search/history
 
@@ -159,7 +169,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### GET /api/tasks/[id]
 
@@ -172,7 +182,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### POST /api/playlists/[id]/tracks
 
@@ -185,7 +195,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### POST /api/playlists/sync
 
@@ -198,7 +208,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### GET /api/cron/sync
 
@@ -262,6 +272,33 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `zenbookRecorder`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; a Spotify bearer is not the secret → 401
 - `cronjobOrg`: A — cronCaller(): Bearer $CRON_SECRET_EXT opens this route and /api/cron/sync only (PLAN §5.5)
 
+### POST /api/cron/probe
+
+- File: `src/app/api/cron/probe/route.ts`. Gate today: `src/app/api/cron/probe/route.ts:27`.
+- Does, when allowed: the planted probe: forges one cache entry under a uid's key stamped with another uid, then reads it back so exactly one isolation event results; reads no user data.
+- Calls (from the source): via `countEvents`, `cronCaller`, `isUidShape`, `forgeProbeEntry`, `readProbeEntry`.
+- `anon`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; no header → 401
+- `rem`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; Rem's cookie → 401
+- `friendA`, `friendB`, `revoked`, `staleSecret`, `staleLogout`, `forged`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; a cookie → 401
+- `vercelCron`: A — cronCaller(): Bearer $CRON_SECRET (the Zenbook's secret, which Vercel's cron also carries)
+- `zenbookPinger`: A — cronCaller(): Bearer $CRON_SECRET
+- `zenbookRecorder`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; a Spotify bearer is not the secret → 401
+- `cronjobOrg`: D — CRON_SECRET_EXT may tick and ask for health, never raise an alarm: cronCaller() answers ext → 401
+
+### POST /api/join
+
+- File: `src/app/api/join/route.ts`. Gate today: none (public).
+- Does, when allowed: the request form's POST: stores one request (e-mail, name, terms version) in the app database through createJoinRequest and sets the signed request cookie; 303 back to /join.
+- Calls (from the source): via `createJoinRequest`, `requestCookieHeader`.
+- `anon`, `rem`, `friendA`, `friendB`, `revoked`, `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`, `staleSecret`, `staleLogout`, `forged`: A — public: a friend's first visit, no session; createJoinRequest bounds it in SQL and SIGNUPS=owner shuts it; it creates no database and reads no user data
+
+### GET /api/join/link
+
+- File: `src/app/api/join/link/route.ts`. Gate today: none (public).
+- Does, when allowed: the join link: a token whose hash opens one approved, unclaimed, live invite sets the request cookie; anything else goes back to /join; reads no user data.
+- Calls (from the source): via `requestForJoinToken`, `joinTokenHash`, `requestCookieHeader`.
+- `anon`, `rem`, `friendA`, `friendB`, `revoked`, `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`, `staleSecret`, `staleLogout`, `forged`: A — public: the token is the capability (only its hash is stored); an unknown one is sent back to /join with nothing set
+
 ### GET /api/auth/session
 
 - File: `src/app/api/auth/[...nextauth]/route.ts`. Gate today: `src/lib/auth.ts:271`.
@@ -273,7 +310,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — the jwt callback's identity check refuses a uid that is not OWNER_UID → no session (null)
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D ←a P4a — none: the copied cookie still decodes and is re-issued with a fresh 30 days (F3) [F3]
+- `staleLogout`: D — Log out bumped session_epoch, so the jwt callback's identity read refuses the copy (ep 0) and Auth.js clears it: no session (F3 closed in P4a) [F3]
 
 ### GET /api/auth/csrf
 
@@ -324,13 +361,33 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action logout
 
-- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:115`.
-- Does, when allowed: deletes the gated user's Spotify token row (after the response) and this browser's cookie.
+- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:66`.
+- Does, when allowed: bumps the gated user's session_epoch and deletes their token row (account.ts, awaited), then this browser's cookie; /signed-out.
 - Calls (from the source): via `logOutFrom`, `signOut`, `gateFromSession`.
-- `anon`, `revoked`, `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`, `staleSecret`, `forged`: D — requireActionUser refuses → only this browser's cookie is cleared; no token row is touched
-- `rem`: A — the owner signing out: clears his own token row, which stops capture (RULINGS Oct 15 1:33 PM)
-- `friendA`, `friendB`: I — requireActionUser refuses → only this browser's cookie is cleared; no token row is touched
-- `staleLogout`: D — requireActionUser refuses a session whose grant is gone; nothing to clear either
+- `anon`, `revoked`, `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`, `staleSecret`, `forged`: D — the session gate refuses → logOutFrom ends nothing; only this browser's cookie is cleared (→ /signed-out)
+- `rem`: A — the owner logging out: every session ended (epoch + 1) and his token row deleted, which stops capture (RULINGS Oct 15 1:33 PM)
+- `friendA`, `friendB`: I — the session gate refuses → logOutFrom ends nothing; only this browser's cookie is cleared (→ /signed-out)
+- `staleLogout`: D — the identity read refuses the copy (its epoch moved at the first Log out); nothing left to end
+
+### action disconnectAction
+
+- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:76`.
+- Does, when allowed: removes the gated user's account through the deletion job (account.ts disconnect): the typed word, a sign-in within 10 minutes, never the admin.
+- Calls (from the source): via `disconnect`, `signOut`, `deleteAccount`, `gateFromSession`.
+- `anon`: D — the session gate refuses → { ok: false } before anything is read
+- `rem`: D — decision 21 as ruled: nothing deletes Rem's data; disconnect() refuses the admin before the deletion job, with the word typed and a fresh sign-in
+- `friendA`, `friendB`: I — a friend's own account only (the job refuses any row but `lb-u-<uid>` for the caller's uid); no row in the harness, so refused
+- `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
+- `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
+- `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
+
+### action reauthForDisconnect
+
+- File: `src/app/(app)/actions.ts`. Gate today: none (public).
+- Does, when allowed: starts OAuth (signIn('spotify')) back to /disconnect: the fresh sign-in Disconnect asks for.
+- Calls (from the source): via `signIn`.
+- `anon`, `rem`, `friendA`, `friendB`, `revoked`, `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`, `staleSecret`, `staleLogout`, `forged`: A — public: starting a sign-in reads and writes nothing
 
 ### action mergeAction
 
@@ -343,7 +400,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action saveQueueAction
 
@@ -356,7 +413,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action subtractPreviewAction
 
@@ -369,7 +426,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action saveCompareDiffAction
 
@@ -382,7 +439,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action addToQueueAction
 
@@ -395,7 +452,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action playTrackAction
 
@@ -408,7 +465,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action playFromPlaylistAction
 
@@ -421,7 +478,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action playPlaylistAction
 
@@ -434,7 +491,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action saveToLikedAction
 
@@ -447,7 +504,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action removeFromPlaylistAction
 
@@ -460,7 +517,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action playerSetPlayingAction
 
@@ -473,7 +530,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action playPlaylistTrackAction
 
@@ -486,7 +543,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action resumePlaylistAction
 
@@ -499,7 +556,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action startCleanAction
 
@@ -512,7 +569,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action deletePlaylistAction
 
@@ -525,7 +582,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action trackMenuAction
 
@@ -538,7 +595,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action dockDataAction
 
@@ -551,7 +608,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action dayTracksAction
 
@@ -564,12 +621,12 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action dailyStatsAction
 
 - File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:18`.
-- Does, when allowed: reads per-day play counts for up to 100,000 days.
+- Does, when allowed: reads per-day play counts for every day; any width but the one Home sends is refused (PLAN §6.6).
 - Calls (from the source): store `forUser`; via `requireActionUser`, `tzOffsetMinutes`.
 - `anon`: D — gated(): requireActionUser refused → an empty answer before any read
 - `rem`: A — the owner's session: the identity check allows OWNER_UID, Phase 1's one user (src/lib/identity.ts)
@@ -577,7 +634,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action allTimePlaysAction
 
@@ -590,12 +647,12 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action searchPlaysAction
 
 - File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:18`.
-- Does, when allowed: LIKE-searches every play by name or artist.
+- Does, when allowed: LIKE-searches every play by name or artist, ten a minute per user.
 - Calls (from the source): store `forUser`; via `requireActionUser`, `allowUserCall`.
 - `anon`: D — gated(): requireActionUser refused → an empty answer before any read
 - `rem`: A — the owner's session: the identity check allows OWNER_UID, Phase 1's one user (src/lib/identity.ts)
@@ -603,7 +660,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### action refreshHistoryAction
 
@@ -616,7 +673,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### page /home
 
@@ -629,7 +686,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### page /playlists
 
@@ -642,7 +699,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### page /playlists/[id]
 
@@ -655,7 +712,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### page /usage
 
@@ -668,7 +725,20 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
+
+### page /disconnect
+
+- File: `src/app/(app)/disconnect/page.tsx`. Gate today: `src/app/(app)/disconnect/page.tsx:19`.
+- Does, when allowed: the export button, the typed word and the fresh sign-in for a friend; for the admin, a note that his account is never deleted and Log out only.
+- Calls (from the source): via `requirePageUser`.
+- `anon`: D — requirePageUser: no session → redirect('/login') before any read
+- `rem`: A — Rem's page: Log out only (decision 21 as ruled)
+- `friendA`, `friendB`: I — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
+- `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
+- `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
+- `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### page /friends
 
@@ -687,7 +757,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - `revoked`: D — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted
 - `staleSecret`, `forged`: D — the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)
-- `staleLogout`: D — the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)
+- `staleLogout`: D — Log out bumped session_epoch (account.ts), so the copy's `ep` no longer matches and the identity read refuses it; its token row is gone too
 
 ### page /
 
@@ -701,6 +771,31 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 - Does, when allowed: the sign-in button; a live session is sent on to /home.
 - Calls (from the source): via `loginErrorMessage`.
 - `anon`, `rem`, `friendA`, `friendB`, `revoked`, `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`, `staleSecret`, `staleLogout`, `forged`: A — public: the sign-in page
+
+### page /join
+
+- File: `src/app/(auth)/join/page.tsx`. Gate today: none (public).
+- Does, when allowed: PLAN §12.6's text and the request form, or, with a request cookie, where that request stands; the closed notice under SIGNUPS=owner.
+- Calls (from the source): via `requestState`, `signupsMode`, `verifyRequestCookie`.
+- `anon`, `rem`, `friendA`, `friendB`, `revoked`, `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`, `staleSecret`, `staleLogout`, `forged`: A — public: a friend's first visit; it reads only the request its own signed cookie names
+
+### page /signed-out
+
+- File: `src/app/(auth)/signed-out/page.tsx`. Gate today: none (public).
+- Does, when allowed: the page after Log out: recording stopped, how to resume; clears this browser's stores.
+- `anon`, `rem`, `friendA`, `friendB`, `revoked`, `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`, `staleSecret`, `staleLogout`, `forged`: A — public: static text, no session or reads
+
+### page /disconnected
+
+- File: `src/app/(auth)/disconnected/page.tsx`. Gate today: none (public).
+- Does, when allowed: the page after Disconnect: remove the app at spotify.com/account/apps; clears this browser's stores.
+- `anon`, `rem`, `friendA`, `friendB`, `revoked`, `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`, `staleSecret`, `staleLogout`, `forged`: A — public: static text, no session or reads
+
+### page /reconnect
+
+- File: `src/app/(auth)/reconnect/page.tsx`. Gate today: none (public).
+- Does, when allowed: decision 20's page for a dead Spotify grant: what happened, what to do, then the sign-in.
+- `anon`, `rem`, `friendA`, `friendB`, `revoked`, `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`, `staleSecret`, `staleLogout`, `forged`: A — public: static text and the sign-in, no session or reads
 
 ### page /privacy
 
@@ -755,7 +850,7 @@ Every friend cell in the matrix already passes Rem's own identifiers (his playli
 - [holds] search bodies are `private, no-store` and stamped with the uid as `u` (P1)
 - [holds] every cached read behind the search payloads and Home keys on the user (P1: userCache)
 - [holds] a friend's cookie with Rem's token expired refreshes nothing of Rem's (P1: the identity check first)
-- [P4a] Rem's cookie copied before Log out works fully again once Rem signs in elsewhere (F3)
+- [holds] Rem's cookie copied before Log out stays refused once Rem signs in elsewhere (F3, closed in P4a)
 - [holds] a 31-day-old sign-in (auth_time) is refused (P1, F9)
 - [holds] GET /api/auth/session re-issues a replayed cookie with a fresh expiry (F3)
 - [holds] an expired cookie, a truncated one, garbage and an unsigned JWT are no session
@@ -772,13 +867,10 @@ Every friend cell in the matrix already passes Rem's own identifiers (his playli
 - [holds] cron-job.org's secret opens /api/cron/sync, and its reply is a bare {"ok":true} (F10, lane 07)
 - [holds] the Zenbook pinger still gets the 503 owner alarm when no token is stored
 - [holds] searchPlaysAction takes LIKE wildcards and quotes as text, and refuses an anonymous caller
-- [P4a] dailyStatsAction accepts any width up to 100,000 days (PLAN §6.6)
+- [holds] dailyStatsAction answers only the width Home sends, so a client cannot mint scans (PLAN §6.6, P4a)
+- [holds] searchPlaysAction takes ten a minute per user; the eleventh reads nothing (PLAN §6.6, P4a)
 - [holds] an anonymous /home sends no store statement before its redirect (P1, F8)
 - [holds] every other gated page and route sends no statement for an anonymous caller
 
 ## 6. What waits on which phase
 
-- **P4a**: 1 cells and 2 red-team checks.
-  - GET /api/auth/session: staleLogout
-  - red team: Rem's cookie copied before Log out works fully again once Rem signs in elsewhere (F3)
-  - red team: dailyStatsAction accepts any width up to 100,000 days (PLAN §6.6)

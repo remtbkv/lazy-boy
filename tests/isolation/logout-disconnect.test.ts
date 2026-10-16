@@ -7,6 +7,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { disconnect, disconnectRefusal, logOutEverywhere, logOutFrom } from "@/lib/account";
+import { forUser } from "@/lib/db";
 import { mintUid } from "@/lib/identity";
 import { readIdentity } from "@/lib/identity-read";
 import type { Gate } from "@/lib/session-gate";
@@ -14,7 +15,7 @@ import { createTokenCore } from "@/lib/token-core";
 import { appTokenStore } from "@/lib/token-store-app";
 import { freshAppDb, seedUser } from "./harness";
 
-const A = "aaaaaaaaaaaa"; // Rem
+const A = process.env.OWNER_UID as string; // Rem: forUser maps his uid to the simulated `lazyboy`
 const B = "bbbbbbbbbbbb";
 const NOW = Date.now();
 const NOW_S = Math.floor(NOW / 1000);
@@ -58,9 +59,14 @@ describe("Log out", () => {
   });
 
   it("does the same for Rem, and nothing of his is deleted", async () => {
+    // Phase 2's week: his plaintext row still sits in `lazyboy` beside the token of record.
+    const rem = forUser(mintUid(A));
+    await rem.setSpotifyTokens({ accessToken: "at-plain", refreshToken: "rt-plain", expiresAt: 4_000_000_000 });
     await logOutEverywhere(gate(A, true));
     expect(await readIdentity({ uid: A, ep: 0, auth_time: NOW_S - 60 })).toEqual({ kind: "refused", reason: "epoch" });
     expect((await q("SELECT count(*) AS n FROM user_tokens WHERE uid = :u", { u: A }))[0].n).toBe(0);
+    // The plaintext row goes too, so the cron's "no token" alarm sees him signed out.
+    expect(await rem.getSpotifyTokens()).toBeNull();
     expect((await q("SELECT status, db_name, is_admin FROM users WHERE uid = :u", { u: A }))[0]).toEqual({ status: "active", db_name: "lazyboy", is_admin: 1 });
     // A fresh sign-in (epoch 1 on its new cookie) is allowed again and writes a new token row.
     expect((await readIdentity({ uid: A, ep: 1, auth_time: NOW_S })).kind).toBe("allowed");

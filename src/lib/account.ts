@@ -8,6 +8,7 @@
 //     nothing ever deletes Rem's data).
 import "server-only";
 import { endSessionsAndCapture } from "@/lib/app-db";
+import { forUser } from "@/lib/db";
 import type { DeletionOutcome } from "@/lib/deletion";
 import { deleteAccount } from "@/lib/deletion-runtime";
 import type { Gate, GateResult } from "@/lib/session-gate";
@@ -17,6 +18,9 @@ export const FRESH_SIGN_IN_S = 10 * 60;
 
 export async function logOutEverywhere(gate: Gate): Promise<void> {
   await endSessionsAndCapture(gate.uid);
+  // The admin's plaintext row, which Phase 2 keeps in `lazyboy` for a week (PLAN §11.4 step 6):
+  // the cron route's "no token" alarm still reads it, so it goes with the token of record.
+  if (gate.admin) await forUser(gate.uid).clearSpotifyTokens();
 }
 
 /** Log out for whatever the session gate answered. Unavailable (the identity check could not run)

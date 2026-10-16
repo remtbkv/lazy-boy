@@ -123,13 +123,13 @@ export async function become(p: Principal): Promise<void> {
       ctx.cookies.set(COOKIE, await sessionCookie("rem", SECRETS.authForged));
       return;
     case "staleLogout": {
-      // A copy of Rem's cookie taken before he pressed Log out. Log out clears his token row
-      // (Phase 2: his `user_tokens` row, PHASE2.md §4 item 1; the plaintext `meta` row with it)
-      // and deletes the browser's cookie, but the JWE itself stays valid for its 30 days.
+      // A copy of Rem's cookie taken before he pressed Log out. Log out is the real one
+      // (account.ts, Phase 4a): session_epoch + 1 and his token rows gone. The JWE itself still
+      // decodes for its 30 days; its `ep` (0) no longer matches.
       ctx.cookies.set(COOKIE, await sessionCookie("rem"));
-      const c = await raw();
-      await c.execute({ sql: "DELETE FROM meta WHERE key = ?", args: [TOKENS_KEY] });
-      await (await appRaw()).execute({ sql: "DELETE FROM user_tokens WHERE uid = ?", args: [OWNER_UID as string] });
+      const { logOutEverywhere } = await import("@/lib/account");
+      const { mintUid } = await import("@/lib/identity");
+      await logOutEverywhere({ uid: mintUid(OWNER_UID as string), admin: true });
       return;
     }
     case "vercelCron":
@@ -444,6 +444,12 @@ export async function tokenRow(): Promise<string | null> {
   return JSON.stringify({ meta: r.rows[0] ? String(r.rows[0].value) : null, app: a.rows[0] ?? null });
 }
 
+/** What Log out changes for Rem outside his database: his token rows and his session_epoch. */
+export async function remSessionState(): Promise<string> {
+  const ep = await (await appRaw()).execute({ sql: "SELECT session_epoch FROM users WHERE uid = ?", args: [OWNER_UID as string] });
+  return JSON.stringify({ tokens: await tokenRow(), epoch: ep.rows[0]?.session_epoch ?? null });
+}
+
 // ── Invoking an entry point and reading what it did ──────────────────────────────────────
 export type Outcome =
   | { kind: "response"; status: number; text: string; headers: Headers }
@@ -557,16 +563,23 @@ export function refusedByDefault(o: Outcome): boolean {
 export async function observe(
   p: Principal,
   fn: () => Promise<unknown>,
-  opts: { refused?: (o: Outcome) => boolean; seed?: { tokenExpiresAt?: number }; before?: () => Promise<void> } = {},
+  opts: {
+    refused?: (o: Outcome) => boolean;
+    seed?: { tokenExpiresAt?: number };
+    before?: () => Promise<void>;
+    /** State outside Rem's database that counts as his too (e.g. his app-database rows). */
+    watch?: () => Promise<string>;
+  } = {},
 ): Promise<Observation> {
   await seedRem(opts.seed);
   await become(p);
   await opts.before?.();
   spotifyCalls.length = 0;
   generation++;
-  const before = await dump();
+  const snapshot = async () => `${await dump()}|${opts.watch ? await opts.watch() : ""}`;
+  const before = await snapshot();
   const outcome = await run(fn);
-  const after = await dump();
+  const after = await snapshot();
   const text =
     outcome.kind === "response"
       ? `${outcome.text} ${outcome.headers.get("etag") ?? ""}`
