@@ -266,11 +266,11 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   is isolated, and the route answers 200 with each outcome: it notifies nobody. It does not
   re-enable the cron-job.org job (the old block's `ensureCronJobEnabled`): that job holds a
   stale secret, so re-enabling it only bought a daily "disabled automatically" e-mail.
-- **Two clients — core and telemetry — and no replica. `getClient()` is every read, every
-  write and all of `meta`; `getTelemetryClient()` is `api_log`, `client_metrics` and
-  `usage_ledger` and nothing else** (`docs/STORE_MIGRATION.md`). Never put a log-table
-  statement on the core client or in a core batch, and never await a telemetry call on a user
-  path: the telemetry store is the Zenbook behind the Funnel, which stalls, and its fetch gives
+- **Two clients — a user's database and telemetry — and no replica. The user's database
+  (`forUser(uid)`, multi-user Phase 1) is every read, every write and all of that user's
+  `meta`; `getTelemetryClient()` is `api_log`, `client_metrics` and `usage_ledger` and nothing
+  else** (`docs/STORE_MIGRATION.md`). Never put a log-table statement on a user's database or
+  in its batch, and never await a telemetry call on a user path (static check S7): the telemetry store is the Zenbook behind the Funnel, which stalls, and its fetch gives
   up after one 4 s attempt so a stall costs a log row. `tests/telemetry-down.test.ts` holds
   the sync and the Home payload read to their normal time with that store hanging or refusing.
   Since 2026-10-16 core is Turso `lazyboy` and telemetry the Zenbook. **A `void` telemetry call
@@ -443,7 +443,8 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   (`getPlaylistTracks`) + run in parallel with auth; the only network write is the Spotify
   play call.
 - **`db.ts` query conventions (follow them for new queries — they're in the file header).**
-  Everything goes through `getClient()`; there is no second client. Keep a scan off every
+  Everything goes through the user's database (`u.client()` inside db.ts, `forUser(uid)`
+  outside it); there is no second client for user data. Keep a scan off every
   render path — Home reads its materialized `meta` payload and the browser filters the search
   payloads, so a new render-path read should join one of those rather than add a scan. Keep
   `INNER JOIN` for `lower(artist)`/`lower(name)` identity lookups so the planner uses
@@ -454,6 +455,36 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   `dropWriteSeqCache()`. Serial reads stack (~20-30ms each against Turso, more over the
   funnel), so dedupe or `Promise.all` them. Never turn a single-session timing against a remote
   store into a rule.
+
+## Multi-user Phase 1: the owner check, the keys, `--user`
+
+- **A database names its owner, and the app checks it on open.** The first use of a database
+  for a uid in a process reads `meta.owner_uid`, `schema_version`, `min_reader` and
+  `store_epoch` (db.ts, "Clients"). A remote database without them is refused: Rem's `lazyboy`
+  needs `scripts/phase1-meta-keys.mjs --user <OWNER_UID> --apply` BEFORE the first deploy of
+  this code, or every request fails with "the database has no owner_uid or store_epoch". A
+  local file without them is provisioned for whoever opens it first.
+- **`.env.local`'s `OWNER_UID` must be production's** when it points at Rem's database. A dev
+  server with another uid is refused there ("this database belongs to another user") and
+  records an `isolation` event; if `.env.local` also points telemetry at the Zenbook, that
+  event lands where the hourly health check reads it and turns it red.
+- **A branch's schema never reaches Rem's database from a dev server.** An additive step is
+  applied only by production code (`VERCEL_ENV=production`) or on a local file; a dev server
+  or a test pointed at a remote database refuses with "waits for the production deploy".
+- **Every store script needs `--user <OWNER_UID>`** (`scripts/script-user.mjs`), checked before
+  it opens anything, and refuses a database whose `owner_uid` names someone else. The
+  backstop replay runs for the admin alone.
+- **`OWNER_UID` unset** refuses every sign-in, and the cron, the daily chores, the bench and
+  the health check answer 503/500 "no owner".
+- **The per-user cache boxes and memos are keyed by (uid, db_name)**: `seqBox`, the ordered
+  plays box, the unique-song throttle, the store-size memo. A new per-request box or module
+  memo in db.ts takes the same key, or static check S4 names it.
+- **The open's verdict is cached per (uid, db_name) for the life of the process.** A restore
+  that writes a new `store_epoch` reaches warm instances only when they restart (a deploy);
+  Phase 2 moves a restored user to a new db_name, which is checked afresh.
+- **Tests:** `tests/setup.ts` sets `OWNER_UID`; `tests/owner-store.ts` is the owner's store;
+  per-user files come from `tests/isolation/user-dbs.ts` (`STORE_URL_TEMPLATE`). A reset keeps
+  the four open keys (`resetStore`), since they say whose file it is.
 
 ## Measuring a search from the browser (`lb-perf`)
 
@@ -678,6 +709,16 @@ viewport-relative) and zeroes the clearance. Keep fixed-position extras (back-to
 
 ## Deployment skew + stale tabs
 
+**No pinning in production today** (multi-user PLAN §10.2, security §5). Skew Protection is a
+Vercel Pro feature and the team is on Hobby; production shows no pinning (no `dpl=` marker in
+`/login`, no `__vdpl` cookie). So after a deploy an open tab's requests reach the NEW
+deployment, and old deployments answer only on their protected deployment URLs. The probe
+below still matters (it is what would catch pinning if it ever came back, and it bounds how
+long an old bundle keeps calling new routes), but a hit from an "old deployment" in the
+meter's log, or a fence 503, means someone reached a protected deployment URL or a dev server
+or script on an old `.env.local`: worth a look, not a wait. The pinned-tab case described here
+is the mechanism as it was measured on Aug 7-8, under a pinning setup production does not run.
+
 A deploy does not reach an open tab until that tab reloads, so a tab left open keeps
 executing the old bundle — and calling whatever the old code called — indefinitely. That is
 what the Aug 7→8 burn was: one always-on tab on a pre-fix build, refreshing ~2×/min at a flat
@@ -742,8 +783,9 @@ breadcrumb a phantom row is undiagnosable from the store.
 
 ## Production security
 
-See `docs/SECURITY.md` before any public deploy. Biggest item: the listen-history DB is
-**not user-scoped** (single-user). `/api/cron/sync` is **fail-closed** — it requires
+See `docs/SECURITY.md` before any public deploy. The data is a database per user, reached only
+through `forUser(uid)` after `requireUser()` (multi-user Phase 1); until Phase 2's app database,
+the one user it knows is `OWNER_UID`. `/api/cron/sync` is **fail-closed** — it requires
 `CRON_SECRET` to be set (and matched); an unset secret rejects every caller, so the schedulers
 won't run until it's configured. Baseline security headers are in `next.config.ts`.
 

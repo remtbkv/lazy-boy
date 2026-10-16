@@ -2,11 +2,14 @@
 // has a known answer (tests/isolation/health.test.ts); /api/cron/health gathers the inputs.
 //
 // It answers red with a one-word reason and nothing about anyone's listening. An input that
-// cannot be measured yet is null and listed as unchecked, never read as healthy or as red:
-//   - isolation events: Phase 1 records them as telemetry rows (isolation.ts), and the read
-//     belongs in db.ts, which queued lanes edit; it is wired in Phase 1's turn;
-//   - the daily chores' stamp: /api/cron/daily does not exist until STORE_MIGRATION lane 1901;
-//   - Turso's month-to-date pace: the store is self-hosted until the cutover (lane 1903).
+// cannot be measured is null and listed as unchecked, never read as healthy or as red:
+//   - isolation events: Phase 1 records them as telemetry rows (isolation.ts); the route reads
+//     those newer than the last one a check reported, so each turns it red once; telemetry
+//     down = unchecked;
+//   - the daily chores' stamp (`daily_at`, written when /api/cron/daily finishes); never
+//     stamped yet = unchecked;
+//   - Turso's month-to-date pace, as the daily chores' usage check last measured it; no
+//     verdict in the last 26 hours (unconfigured, or the platform API down) = unchecked.
 // The owner's capture uses capture-health.ts's rule (no token row, or no harvest in two
 // hours). PLAN.md says 30 minutes since his last successful tick; before Phase 3 there is no
 // per-tick stamp, and `last_sync` moves only on a harvest, which the harvest gate holds back

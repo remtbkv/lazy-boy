@@ -1,11 +1,13 @@
-# Multi-user Phase 1, built ahead of its turn
+# Multi-user Phase 1
 
-Lane 0226_lb_mu_phase1, Oct 15, 2026, branch `mu/phase1` (worktree
-`~/projects/lazyboy-wt/mu-phase1`), cut from `main` at `6577f4b`. Nothing here is merged, pushed or
-deployed, and nothing touched production data, the Zenbook store or Vercel.
+Built ahead of its turn by lane 0226_lb_mu_phase1 (Oct 15, 2026, branch `mu/phase1`, cut from `main`
+at `6577f4b`; §1-§3), then finished in its turn by lane 1945_lb_mu_12_p1_build (Oct 16, 2026, branch
+`mu/phase1-turn`, `mu/phase1` rebased onto `origin/main` `7aeb438`; §6). Nothing here is merged,
+pushed or deployed, and nothing touched production data, the Zenbook store or Vercel.
 
-Status: complete for this lane, Oct 15, 2026, 1:30 AM. §2 is what landed, §3 what proves it, §4 what is
-left and why.
+Status: Phase 1's turn complete, Oct 16, 2026, about 3 AM, except the two pieces left to lane
+1945_lb_mu_33_p1_stitch (§4, §7). Review it as one diff (§5): lane 13 reviews after lane 33's stitch,
+lane 14 deploys (§4's deploy steps).
 
 ## 1. What this branch is
 
@@ -28,6 +30,7 @@ and bodies, and the reads and gates inside Home and the search routes.
 
 ## 2. What is built
 
+What lane 0226 built ahead of the turn (§6 is what the turn added; where they differ, §6 holds).
 Each item names the PLAN.md section it implements. Behaviour Rem would notice on a deploy of this
 branch: every existing session cookie is refused once (it carries no uid), so he signs in once;
 and with `OWNER_UID` unset or malformed every sign-in is refused (`.env.example` says how to
@@ -142,58 +145,53 @@ one and must pass.
 | `now-playing-route.test.ts` (changed) | its session mock carries a uid; new: an unavailable identity check is a 503 |
 | `spotify-userinfo.test.ts` (changed) | the profile fetch's pinned arguments now include `cache: "no-store"` |
 
-## 4. Left for Rem's decisions, or for the phase's turn
+## 4. What is left
 
-**Waiting on a decision of Rem's** (PLAN.md §18's last table, Phase 1 row):
+Lane 0226's list (Rem's decisions, and the work in files queued lanes edited) is done in Phase 1's turn
+(§6), apart from:
 
-| item | decision | why it waits |
-|---|---|---|
-| the per-user database half: `forUser(uid)` and its client map keyed by `db_name`, the one URL template, the owner check on open (`meta.owner_uid` per `(uid, db_name)`), the versioned open (`schema_version`, `min_reader`, schema steps from production only), `store_epoch`, the harness's per-user files (`app.db`, `u1.db`, `u2.db`), T1, T8, and the planted "URL template that ignores the uid" | 11, a database per person | the shape of every one of these is the per-user database model; under a shared store they would be a `user_id` column instead |
-| the cron-job.org job that calls `/api/cron/health` hourly, with failure e-mail | 14, the e-mailed alarm (it lifts STORE_MIGRATION's R6) | the route is built and tested; creating the job is the alerting mechanism R6 forbids until Rem says yes |
-| `OWNER_UID` in Production, the second `AUTH_SECRET` rotation, writing the four `meta` keys into `lazyboy` | deploy steps that wait for his go-ahead (§18's preamble) | they change production; this branch never deploys |
+**Left for lane 1945_lb_mu_33_p1_stitch**, which rebases this branch onto `main` once lanes 1905-1906
+and 1910-1911 have merged (§7 lists every place this branch meets their files):
 
-**Left for Phase 1's turn**, because the work sits in files queued lanes edit (§13.4); none needs a
-decision:
+- lane 1905's IndexedDB store (STORE_MIGRATION §10) keyed by the uid: its user key is the uid the
+  `(app)` layout renders (`useUid()`), its database and store names come from `userStorageName`, its
+  stored bodies pass `bodyIsFor` like the network's, and its sign-out clear joins this branch's in the
+  same form. Static check S6 now reads `indexedDB.open` names, so 1905's constant key fails `npm test`
+  until it is the uid;
+- lane 1910's scoped orphan pass and identity-first predicate (`recomputeOrphanFlags`,
+  `storePlaylists`, `store-diff.ts`, `read-costs.ts`) through `forUser`: its bodies go inside this
+  branch's signatures (the user's database first), as §7 says.
 
-- the mechanical edit through `db.ts` (`forUser`, its 74 exports and their callers) and S3;
-- db.ts's seven cached reads onto `userCache` (S1's pending entry) and T2 over them; its two
-  `cache()` boxes keyed by uid; its four module-state entries (S4's pending list);
-- the uid in the search ETags and bodies and the client dropping a body with another `u` (T7's
-  server half), in the two search routes and Home's loaders;
-- the `(app)` layout rendering the uid for the browser, then the 12 pending storage names onto
-  `userStorageName` (S6), the sign-out form calling `clearUserStorage` (lane 1905 adds its own
-  IndexedDB clear to the same form, STORE_MIGRATION §10 edit 3), and the client fetchers clearing
-  on `isSignedOutResponse`;
-- the remaining entry points onto `requireUser` (the census's pending rows): Home and its first
-  wave behind the gate, `/usage` admin-only, `history-actions.ts`, the search routes, `/api/sync`,
-  and each action in `actions.ts` onto `requireActionUser` (the Phase 0 lane edits `logout` there);
-- `/api/metrics` taking the uid from the session and refusing reserved event names such as
-  `isolation` (T15). Until then a client can post an `isolation` row, which can only cause a false
-  alarm once the health check reads them;
-- the health check's isolation-event read (a `db.ts` function over the telemetry rows), the daily
-  chores' stamp (`/api/cron/daily`, lane 1901) and Turso's pace (after lane 1903): listed as
-  `unchecked` in its reply until then;
-- S7 (no await on the telemetry client), which needs lane 1901's client;
-- T10 and the scripts' required `--user` with its `scriptUser` minter: the import scripts are
-  queued, and the helper needs `forUser`.
+**Deploy steps, lane 14's** (each changes production; PLAN §11.4, §13.1):
 
-- the Spotify client asserting that a token's owner is the caller and tagging `api_log` with the
-  uid (§5.2's last row): the assertion only means something once callers hand the client a uid
-  and a uid-bound token, which is the mechanical edit; the `api_log` column is in `db.ts`.
+1. `OWNER_UID` in Production (generated once, `.env.example` says how) and the same value in
+   `.env.local`, so a dev server pointed at Rem's database is its owner (GOTCHAS "Multi-user Phase 1").
+2. Before the deploy: `node --env-file=.env.local scripts/phase1-meta-keys.mjs --user <OWNER_UID>
+   --dry-run`, then `--apply`, on Rem's `lazyboy`. Without the four keys every request is refused
+   ("the database has no owner_uid or store_epoch"). They are the only writes Phase 1 makes to his data.
+3. The second `AUTH_SECRET` rotation with the deploy (every older cookie is refused anyway: it names
+   no uid), and a day later the production deployments built before it deleted (SECURITY.md,
+   "Rollback").
+4. After the deploy: Rem signs in once; the fault injection (STORE_MIGRATION §8 step 14); the rollback
+   rehearsed (revert the merge, never Instant Rollback across the rotation); the hourly health job on
+   cron-job.org with failure e-mail is Rem's step (decision 14, `rem_health_job`).
+5. Every store script now takes `--user <OWNER_UID>` (`verify-derived.mjs`, the backstop replay, the
+   importers, `bench-reads.mjs`, `migrate-skip-rule.mjs`, `backfill-scan.mjs`); a runbook step that runs
+   one after the merge adds it.
 
 ## 5. How to review the branch
 
 ```bash
-cd ~/projects/lazyboy-wt/mu-phase1
-git log --oneline main..mu/phase1          # one commit per piece, docs last
-git diff main...mu/phase1 --stat
-npx vitest run tests/isolation             # the isolation suite alone
-npm test                                   # fails only on the two T1 date tests, as main does
-npx tsc --noEmit && npm run lint
+git log --oneline origin/main..mu/phase1-turn   # lane 0226's commits, the authz map, then the turn's
+git diff origin/main...mu/phase1-turn --stat
+npx vitest run tests/isolation                  # the isolation suite alone
+AUTHZ_TARGET=1 npx vitest run tests/isolation/authz-   # fails only P4a (3) and L07 (2): what later phases owe
+npm test && npx tsc --noEmit && npm run lint && npm run build
 ```
 
 Read in this order: `src/lib/identity.ts` and `src/lib/session-gate.ts` (the rules), the
-callbacks at the bottom of `src/lib/auth.ts` (where they run), `src/lib/token-core.ts` against
+callbacks at the bottom of `src/lib/auth.ts` (where they run), db.ts's "Clients" section (the
+URL rule, the open, `guardedClient`) and `forUser` at its bottom, `src/lib/token-core.ts` against
 `main`'s `auth.ts` (`git diff main...mu/phase1 -- src/lib/auth.ts` shows what moved; the refresh
 rules are meant to be identical apart from the uid), then `tests/isolation/planted-bugs.test.ts`
 and `static.test.ts`. To see a check fail on purpose, copy `main`'s version of a fixed file over
@@ -201,10 +199,116 @@ this one (`git show main:src/lib/spotify/resources.ts > src/lib/spotify/resource
 suite, and copy it back from `git show mu/phase1:…`; §3's red table lists which tests that turns
 red.
 
-Still owed before this reaches production, by PLAN.md §13.1's Phase 1 row: an adversarial review
-of the whole Phase 1 diff in a fresh context told to find a cross-user path (this lane did not run
-one, and the diff is not finished until the items of §4 land); the rollback rehearsal; and
-STORE_MIGRATION step 14's fault injection. When Phase 1's turn comes, rebase onto `origin/main`:
-expect conflicts in `CLAUDE.md` and `docs/GOTCHAS.md` (queued lanes edit both) and in
-`actions.ts` beside the Phase 0 lane's `logout` gate; the code in the new files should not
-conflict.
+Still owed before this reaches production, by PLAN.md §13.1's Phase 1 row: lane 33's stitch
+(§4, §7); an adversarial review of the whole Phase 1 diff in a fresh context told to find a
+cross-user path (lane 13); the rollback rehearsal and STORE_MIGRATION step 14's fault injection
+(lane 14). The turn's rebase met conflicts in `src/lib/cron-auth.ts` (both exports kept:
+`cronAuthorized` CRON_SECRET-only, `cronCaller` for the health check), the now-playing route's
+imports and `CLAUDE.md`'s file map; `actions.ts` merged clean (the Phase 0 `logout` gate never
+landed on `main`, so this branch's `requireActionUser` is the first).
+
+## 6. Phase 1's turn (lane 1945_lb_mu_12_p1_build, Oct 16, 2026)
+
+`mu/phase1` rebased onto `origin/main` `7aeb438` (the store split), lane 1947's authorization map
+cherry-picked (`82b360b`), then one commit per piece. Every gate green: `tsc --noEmit`, `npm run lint`,
+`npm test` (65 vitest files, 1,584 tests, and the node suites), `npm run build`.
+
+What landed, by PLAN section:
+
+- **`forUser(uid)` over a database per user** (§4.2, §6.2 layer 3; commit `3f1d889`). db.ts's per-user
+  functions take the user's database as their first argument and none is exported; `forUser` binds
+  them into a `UserStore` (62 methods). The edit kept every function body where it was, so a rebase
+  over db.ts conflicts only where both sides changed a body. Clients come from one factory
+  (`makeStoreClient`, every one on `makeStoreFetch`); `lazyboy` is `TURSO_DATABASE_URL`, every other
+  db_name `STORE_URL_TEMPLATE` with `{db}`; no template, no URL. Phase 1's directory maps `OWNER_UID`
+  to `lazyboy` and throws for anything else. `forUserAt(uid, db_name)` is what Phase 2's identity read
+  calls; nothing in `src` imports it (S2). The app-wide cooldown stays module-level, in the admin's
+  database until Phase 2's `app_meta`. The telemetry functions stay module-level; their rows carry
+  `user_id`.
+- **The versioned open** (§4.5). The first use of (uid, db_name) in a process reads the four keys in
+  one statement: batched with a first plain read (whose result is used only once the owner matches),
+  or on its own round trip before a first write. Refusals: another owner (an `owner-mismatch` event),
+  `min_reader` above the code ("updating"), a schema behind that this process may not bring up to date
+  (only `VERCEL_ENV=production` or a local file may), a remote database without the keys. A local file
+  without them is provisioned for its first opener (dev, the tests). Schema version 1 is
+  `CORE_SCHEMA` plus `migrateCore`, so a database at the current version pays none of `init()`'s eight
+  serial round trips. `scripts/phase1-meta-keys.mjs` writes the keys (lane 14, §4).
+- **Caches and state** (§6.2 layer 4). The seven cached reads ride `userCache` (the uid and the store
+  epoch in every key, the owner stamped on every entry; S1's pending entry closed); the two `cache()`
+  boxes and the two module memos are keyed by (uid, db_name) (S4's pending list closed).
+- **`requireUser` on every entry point** (§5.1, §5.4; T3's census has no pending row). Home's reads
+  start after its gate; `/usage` is the admin's (404 otherwise); a session whose grant is gone is
+  refused everywhere, as the pages always did (AUTHZ F2); `logout` clears only the gated user's token
+  row (F4).
+- **The browser** (§6.2 layer 6; `fd72cf4`). The search ETags carry the uid and the store epoch, the
+  bodies `u`, served `private, no-store`; the `(app)` layout renders the uid; every user-data storage
+  name is built by `userStorageName` (S6's twelve pending names closed); sign-out clears them; the
+  fetchers clear on the signed-out 401; Home drops a payload whose `u` is not its user.
+- **`/api/metrics`** takes the uid from the session and drops server-only event names (`isolation`).
+- **The health check** reads isolation events (each red once), the daily chores' `daily_at` and the
+  pace verdict the chores record; with every input measurable nothing is unchecked.
+- **The Spotify client is made for a user** (§5.2's last row): a token naming anyone else is refused
+  before the request (`TokenOwnerError`, a `token-owner` event); `api_log` carries the user. S7: no
+  user path awaits telemetry.
+- **Scripts** (`797e91e`): `scripts/script-user.mjs`, a required `--user` on the six store scripts,
+  the backstop replay admin-only, a database naming another owner refused.
+- **The authorization map at Phase 1's targets** (`5c8dcfe`): every P1 cell and red-team check meets
+  its target; `/api/cron/health` is in the map.
+- **Tests** (`cea5ae0`): T1 (every `UserStore` method as A and as B over two users' files, one fixture
+  per method), T2 over the seven real cached reads, T7 through the search routes with two users, T8
+  and the versioned open, the fourth planted bug (a URL template that ignores the uid), T10, T15's
+  client half, the health inputs, token owners. Each was shown failing first against a plant or the
+  pre-turn code; the commit messages say which.
+
+Choices where PLAN or the brief left one open, and why:
+
+- **Function bodies stay in place** (a first parameter, not a class): the mechanical edit is a
+  signature and a `getClient()` per function, which keeps lane 33's rebase over lanes 1910's db.ts
+  changes to the bodies both sides touched.
+- **A local file without the four keys is provisioned for whoever opens it first**; a remote one is
+  refused. PLAN §4.5 lets dev migrate its own local files and has the harness provision through the
+  production code; claiming an unowned local file is what both need.
+- **The open's verdict is cached per process** (PLAN §4.5): a restore that writes a new `store_epoch`
+  reaches a warm instance at its next deploy.
+- **The health check marks isolation events reported** with `isolation_seen` in the admin's `meta`, and
+  the daily chores' `daily_at` and pace verdict sit there too: Phase 2's `app_meta` is where they go.
+  These are bookkeeping keys, not data; the four open keys stay the only data Phase 1 writes for Rem.
+- **A refused token is not retried**: the Spotify client resolves its bearer before the fetch's retry
+  block, so a token naming someone else fails at once instead of three times as a network error.
+- **`/usage` answers a non-admin `notFound()`**, which the map counts as refused.
+
+## 7. For lane 33: where this branch meets lanes 1905, 1906, 1910 and 1911
+
+- `src/lib/db.ts`, every per-user function: the user's database `u: UserDb` is the first parameter,
+  `getClient()` is `u.client()`, and every call to another per-user function passes `u` (`getMeta(u,
+  …)`, `setMeta(u, …)`, `bumpWriteSeq(u)`, `dropWriteSeqCache(u)`, `ledgerAddLinear(u, …)`,
+  `recomputeOrphanFlags(u, …)`, `recomputeSkipFlags(u)`). Lane 1910's bodies of
+  `recomputeOrphanFlags` and `storePlaylists`, and any helper it adds that touches the store, go in
+  that shape; nothing per-user is exported. A new method callers need goes in `USER_FNS` (bottom of
+  db.ts) and in static check S3's snapshot only if it is module-level (it should not be).
+- `recordPlays`, `storePlaylistTracks`, `deletePlaylistFromDb` and `storePlaylists` call
+  `recomputeOrphanFlags(u, { … })`: lane 1910's scoped pass changes what those calls pass.
+- `src/lib/read-costs.ts` and `src/lib/store-diff.ts`: untouched here. A new ledgered reader that is
+  linear in history size uses `ledgerAddLinear(u, …)`, whose size lookup is per user.
+- Tests lanes 1910-1911 add call db.ts through `ownerStore()` (`tests/owner-store.ts`) or
+  `forUserAt(uid, db)` with `useUserFiles()` (`tests/isolation/user-dbs.ts`); a new `UserStore`
+  method needs a T1 fixture (`tests/isolation/user-store.test.ts`), or T1 fails. `resetStore()` keeps
+  the four open keys.
+- `src/app/(app)/layout.tsx`: lane 1905 renders a constant user key; this branch renders
+  `<UserProvider uid>`. Use the uid (`useUid()`).
+- `src/app/(app)/chrome.tsx`, the sign-out form: this branch's `onSubmit={() => clearThisBrowser()}`;
+  lane 1905 adds its IndexedDB clear to the same form. Both run.
+- `src/app/(app)/home/den-home.tsx`: `fetchPayload(url, uid, ok)` drops a body whose `u` is not the
+  page's and clears on the signed-out 401. Lane 1905's stored copy is checked the same way
+  (`bodyIsFor`) and keyed `(uid, epoch, kind, segment, version, shape)`; the store epoch is in both
+  ETags (`"lib-<shape>-<uid>-<epoch>-<version>-<day>"`), not yet in the body, so lane 33 either reads
+  it from the ETag or adds it to the body as `e`.
+- `src/lib/user-storage.ts`: `USER_DATA_NAMES` lists every user-data name `clearUserStorage` removes;
+  1905's IndexedDB name joins it (its clear is 1905's own, since `clearUserStorage` covers Storage
+  only). Static check S6 fails on an `indexedDB.open` name not built by `userStorageName`.
+- `src/app/api/search/{library,history}/route.ts`: gated by `requireRouteUser`, bodies `private,
+  no-store` with `u`; if lane 1905-1906 change them, keep both.
+- `src/app/api/cron/sync/route.ts` and `src/lib/cron-auth.ts` meet lane 07 (`mu/pinger`), not 1905 or
+  1910: this branch runs the tick for `phase1Owner()` through `forUser` and keeps both
+  `cronAuthorized()` and `cronCaller()`; lane 07's guard and `CRON_SECRET_EXT` go on top.
+

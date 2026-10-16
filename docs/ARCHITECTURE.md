@@ -31,8 +31,15 @@ Spotify HTTP — it goes through `resources.ts`. `domain.ts` imports nothing app
 
 - Auth.js v5 (`next-auth@beta`) with the built-in Spotify provider.
 - Scopes (ported from the prototype) requested at sign-in — see `src/lib/auth.ts`.
-- The Spotify **access/refresh tokens live in the DB** (`spotify_tokens` via `src/lib/db.ts`),
-  which is the single source of truth. The JWT cookie is kept lean (tokens deleted from it
+- **The session names its user** (multi-user Phase 1, `docs/multi-user/PHASE1.md`): sign-in
+  puts a uid (`OWNER_UID` in Phase 1), a session epoch and `auth_time` on the cookie, and every
+  later request runs the identity check (`src/lib/identity.ts`) before anything is read.
+  `requireUser()` (`src/lib/require-user.ts`) turns its answer into each entry point's: the
+  branded `Uid`, a refusal (redirect, 401 with the signed-out marker, `{ ok: false }`), or a
+  retryable "unavailable". It is the only source of a uid for a request.
+- The Spotify **access/refresh tokens live in the DB** (`spotify_tokens` in the user's
+  database, read through `src/lib/token-core.ts`, keyed by uid), which is the single source of
+  truth. The JWT cookie is kept lean (tokens deleted from it
   after sign-in); a cookie copy is only retained as a fallback if the DB write fails, and an
   older cookie-stored session is migrated into the DB on its next request.
 - The `jwt` callback refreshes the access token when it's within ~1 min of expiry, using
@@ -46,37 +53,45 @@ Spotify HTTP — it goes through `resources.ts`. `domain.ts` imports nothing app
   change" is the wrong signal). The lock is owner-tokened: `acquireLock` returns a token
   that `releaseLock` requires, so a holder that overran its TTL can't free a lock someone
   else has since taken.
-- `session` callback exposes `session.accessToken` (server-side use only) and `session.error`.
-- `getValidAccessToken()` is the session-less accessor for background jobs (cron, tasks) — it
-  reuses the same DB tokens and shared lock, so request and background refreshes coordinate.
+- `session` callback exposes `session.uid`, `session.admin` and `session.error`, never a token.
+  `spotifyAccessTokenFor(uid)` reads the request's token after the gate;
+  `getValidAccessTokenFor(uid)` is the session-less accessor for background jobs (cron, tasks) —
+  it reuses the same DB tokens and shared lock, so request and background refreshes coordinate.
+  Both return the token with its owner (`{ uid, accessToken }`).
 - This is the single place tokens are minted/refreshed — fixes the prototype's scattered
   `_ensure_token()` calls.
 
 ## Route protection
 
-No middleware/proxy. The `(app)` segment's `layout.tsx` is a Server Component that calls
-`auth()`; if there's no session (or `session.error`), it `redirect()`s to `/login`. Every
-authed page is a child of that layout, so the gate is enforced once.
+No middleware/proxy. Every page, layout, route handler and server action that reads user data
+calls `requireUser()` (`requirePageUser`, `requireRouteUser`, `requireActionUser`) before its
+first read; a layout is not a gate, because Next renders it in parallel with its page
+(SECURITY.md). The census in `tests/isolation/entry-points.test.ts` and the authorization map
+(`docs/multi-user/AUTHZ.md`, every entry point against every principal) fail on a new entry
+point nobody accounted for.
 
 ## Getting an authed Spotify client
 
 ```ts
-// in a Server Component / action / route handler
-const sp = await getSpotify()                 // src/lib/session — authed, redirects on a dead session
+// in a Server Component / action / route handler, after the gate
+const { uid } = await requirePageUser()       // or requireActionUser / requireRouteUser
+const sp = await getSpotify(uid)              // src/lib/session — redirects when the token row is gone
 const playlists = await sp.myPlaylists()
 
 // or bind a client to an explicit token (e.g. a background task's refreshing getter):
-const sp = spotifyClient(token)               // src/lib/spotify
+const sp = spotifyClient(uid, token)          // src/lib/spotify
 ```
 
-`spotifyClient(token)` returns a `Service` bound to that token. Nothing below the action
+`spotifyClient(uid, token)` returns a `Service` made for that user. Nothing below the action
 layer reads the session directly.
 
-`token` is a `TokenSource` — either the request's access-token string (fresh for the
-request's lifetime) **or** a `() => Promise<string>` getter. Interactive callers pass the
-string; **background tasks pass a getter** (`refreshingToken()` in `actions.ts`) so a run
-that outlives the ~1 h token refreshes mid-flight instead of dying on a 401. See
-*Background tasks*.
+`token` is a `TokenSource` — the request's token (`{ uid, accessToken }`, fresh for the
+request's lifetime) **or** a getter returning one. Interactive callers pass the token;
+**background tasks pass a getter** (`refreshingToken(uid)` in `actions.ts`) so a run that
+outlives the ~1 h token refreshes mid-flight instead of dying on a 401. See *Background tasks*.
+Every token must name the client's user: one naming anyone else is refused before the request
+leaves (`TokenOwnerError`, and an isolation event), and every call's `api_log` row carries the
+user.
 
 ## Background tasks (clean playlist)
 
@@ -95,7 +110,8 @@ that outlives the ~1 h token refreshes mid-flight instead of dying on a 401. See
   (e.g. Vercel), the instance that polls `/api/tasks/[id]` may not be the one that ran the
   task, so progress can 404 — fine for local/single-instance use; the Redis/DB swap is what
   makes it production-safe. The same per-instance limit applies to the Spotify client's
-  rate-limit cooldown and the playlist cache (both module-scoped). See `docs/GOTCHAS.md`.
+  rate-limit cooldown (module-scoped). Each task records its owner, and `getTaskFor(id, uid)`
+  answers another user's task as missing. See `docs/GOTCHAS.md`.
 
 ## Data fetching & caching
 
@@ -114,8 +130,9 @@ that outlives the ~1 h token refreshes mid-flight instead of dying on a 401. See
 
 ## Listen-history store (`src/lib/db.ts`)
 
-A second data layer, independent of Spotify: **libSQL** (`@libsql/client`) against a
-**self-hosted `sqld`** on the Zenbook, reached from Vercel over a Tailscale Funnel.
+A second data layer, independent of Spotify: **libSQL** (`@libsql/client`), a database per
+user. Rem's, `lazyboy`, is on Turso after the store migration's cutover (STORE_MIGRATION.md);
+before it, a **self-hosted `sqld`** on the Zenbook, reached from Vercel over a Tailscale Funnel.
 `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` point at it (the names are historical — they
 carried Turso Cloud until 2026-08-08); with both unset it falls back to a local SQLite
 file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
@@ -171,18 +188,31 @@ file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
 - **Verifying the derived values.** `alltime_stats`, `unique_song_count` and `plays.ctx_orphan`
   are caches kept fresh by hand-maintained invalidation, so they can silently drift from the
   source rows. `node --env-file=.env.local scripts/verify-derived.mjs` recomputes all three from
-  source against the primary and exits 1 with the named diff when a stored value disagrees
+  source against the primary (`--user <OWNER_UID>` required) and exits 1 with the named diff when a stored value disagrees
   (read-only; `--demo` injects and restores a deliberate corruption to show it actually fails).
-- **Two clients: core and telemetry** (`docs/STORE_MIGRATION.md`). `getClient()` holds the
-  app's data — `tracks`, `plays`, `contexts`, `meta`, `playlists`, `playlist_tracks`,
-  `saved_tracks` — on `TURSO_DATABASE_URL`. `getTelemetryClient()` holds the three log tables —
+- **A database per user, reached only through `forUser(uid)`** (multi-user PLAN §4, §6.2 layer
+  3). Every per-user function in `db.ts` takes the user's database as its first argument and
+  none is exported; `forUser(uid)` binds them (a `UserStore`), so a call that forgets the user
+  does not compile (static check S3 holds db.ts's exports to a reviewed list). Phase 1 maps one
+  uid, `OWNER_UID`, to `lazyboy` (`TURSO_DATABASE_URL`); every other db_name comes from
+  `STORE_URL_TEMPLATE` with `{db}`, and an unknown uid throws, never falling back to Rem's URL.
+  The first open of a database for a uid in a process reads `owner_uid`, `schema_version`,
+  `min_reader` and `store_epoch` in one statement batched with the first read: a wrong owner
+  is refused (and recorded as an isolation event), a newer `min_reader` refuses, and a schema
+  behind by additive steps is applied only by production code or on a local file. The seven
+  cached reads ride `userCache` (`src/lib/user-cache.ts`: the uid and the store epoch in every
+  key, the owner stamped on every entry). Scripts that touch a user's data require `--user`
+  (`scripts/script-user.mjs`); `scripts/phase1-meta-keys.mjs` writes the four keys.
+- **Two clients: user data and telemetry** (`docs/STORE_MIGRATION.md`). A user's database holds
+  `tracks`, `plays`, `contexts`, `meta`, `playlists`, `playlist_tracks`, `saved_tracks`. `getTelemetryClient()` holds the three log tables —
   `api_log`, `client_metrics`, `usage_ledger` — on `TELEMETRY_DATABASE_URL`, with its own init
   (a separate telemetry client never creates core tables, nor the core client telemetry ones)
   and a store fetch of one 4 s attempt. No user path awaits it: its writes are fired with
   `void` or run in `after()` (`/api/metrics`), and `/usage` settles its log sections one by one
-  so a dead telemetry store empties those sections, not the page. Unset (or equal to the core
-  URL), telemetry rides the core client: tests, dev and the pre-migration single store.
-- **No replica.** `getClient()` serves every read, every write and all of `meta`. The libSQL
+  so a dead telemetry store empties those sections, not the page. Unset (or equal to Rem's URL),
+  the log tables sit in Rem's database: tests, dev and the pre-migration single store. Its rows
+  carry `user_id`.
+- **No replica.** A user's database serves every read, every write and all of its `meta`. The libSQL
   **embedded replica** that used to serve row-scanning reads was switched
   off in production on 2026-08-03 (each cold serverless instance bootstrapped the whole ~17 MB
   copy, burning 77% of Turso's 3 GB/mo syncs quota in three days) and deleted from `db.ts` on
@@ -190,8 +220,8 @@ file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
   payload materialized into `meta` on the write path (`rebuildHomePayload`), the day list and
   search filter a payload the browser holds (`/api/search/{library,history}`), and what remains
   are indexed, bounded hits. Scanning reads that survive — the two payload rebuilds, the
-  all-time list — run once per content version behind `unstable_cache`, keyed on
-  `meta.write_seq`.
+  all-time list — run once per content version behind `userCache`, keyed on the user, the
+  store epoch and `meta.write_seq`.
 - **The store lives on the Zenbook, and stays there.** Turso's free org hard-blocked reads on
   2026-08-08 at 102.8% of the month's rows_read; production could render nothing, and the
   emergency bridge became the architecture when Rem chose to keep it. `sqld` holds the data at
