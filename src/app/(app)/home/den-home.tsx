@@ -840,6 +840,11 @@ export function DenHome({
           if (patched.plays !== hist.plays) {
             histReq.current = Promise.resolve(patched);
             const lib = libReq.current ? await libReq.current : null;
+            // This set is fresher than the browser's copy, and the pair's own handler, which
+            // would have said so, bails once the history ref is replaced: a late IndexedDB
+            // read must not undo it, nor mark index-idb for it.
+            fresh.current = true;
+            markIdb.current = false;
             setEntries(buildEntries(lib, patched));
             // Same delta, same object: the derived days re-group off the patched payload, so a
             // play that just landed is in yesterday's rows too if that is where it belongs.
