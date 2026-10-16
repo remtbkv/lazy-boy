@@ -211,12 +211,14 @@ async function serve(
     // A blob or key the deployment cannot read: nothing about the user is written (§5.3), and
     // the lease lapses on its own.
     if (o.code === "decrypt") return;
-    if (o.code === "invalid-grant") {
-      // §5.4 step 1: stop at once, keep the data and the blob.
+    const released = await queue.releaseLease(s.user.uid, tick, clock(), releaseFor(s.user, o, now));
+    if (o.code === "invalid-grant" && released) {
+      // §5.4 step 1: stop at once, keep the data and the blob. Only once the release has landed
+      // (it writes the error the confirmation looks for), so a slow store cannot leave the user
+      // stopped with no confirmation due, and a step that outlived its lease writes nothing.
       await queue.moveStatus(s.user.uid, "active", "needs_reconnect", now);
       await queue.recordAppEvent("invalid-grant", s.user.uid, now);
     }
-    await queue.releaseLease(s.user.uid, tick, clock(), releaseFor(s.user, o, now));
   };
 
   await Promise.allSettled(

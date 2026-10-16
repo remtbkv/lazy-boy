@@ -251,7 +251,10 @@ What does not wait on a decision: everything above. Decisions 15, 26 and 28 are 
   within 2 minutes of a sign-in; `decrypt` writes nothing and lets the 50-s lease lapse.
 - **`invalid_grant` bookkeeping** lives in `sync_state.last_error` (`invalid_grant` → `confirming` →
   `confirmed`, or cleared) and in `events` (`invalid-grant` per hit, `grant-wide` at two users or the admin),
-  so the health check e-mails each. Steps 4-5 (expiry or `revoked`, deletion on day 4) are Phase 4a's.
+  so the health check e-mails each. The status move and the event follow the lease's release, and only
+  when it landed: written before it (lane 04's order), a release refused after a slow store left the user
+  `needs_reconnect` with no `invalid_grant` for the confirmation to find (lane 05's review). Steps 4-5
+  (expiry or `revoked`, deletion on day 4) are Phase 4a's.
 - **QUOTA_EXCEEDED** cools its bucket to min(the next 14:51 UTC reset, 30 minutes), the client's re-probe cap.
 - **The daily lock** is 15 minutes; chores that throw keep it until then, so a failing chore retries every
   15 minutes, not every tick.
