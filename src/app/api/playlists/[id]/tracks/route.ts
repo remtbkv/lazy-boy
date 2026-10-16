@@ -2,6 +2,7 @@ import { spotifyAccessTokenFor } from "@/lib/auth";
 import { requireRouteUser } from "@/lib/require-user";
 import { spotifyClient, SpotifyError } from "@/lib/spotify";
 import { forUser } from "@/lib/db";
+import { allowUserCall, PLAYLIST_TRACKS_LIMIT } from "@/lib/user-bucket";
 
 // Background freshness check for one playlist's cached track list. The detail page renders
 // from the DB cache instantly and fires this; here we make ONE cheap call to read the
@@ -11,6 +12,10 @@ import { forUser } from "@/lib/db";
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const user = await requireRouteUser();
   if (user instanceof Response) return user;
+  // §6.6: ten a minute per user per instance, so a stuck tab cannot spend Spotify's shared window.
+  if (!allowUserCall("playlist-tracks", user.uid, Date.now(), PLAYLIST_TRACKS_LIMIT.limit, PLAYLIST_TRACKS_LIMIT.windowMs)) {
+    return Response.json({ ok: false, error: "slow down", retry: true }, { status: 429, headers: { "retry-after": "60" } });
+  }
   const accessToken = await spotifyAccessTokenFor(user.uid);
   if (!accessToken) {
     return Response.json({ ok: false, error: "unauthorized" }, { status: 401 });
