@@ -4,8 +4,8 @@
 // back: a skip flagged its predecessor). Also recomputes the all-time totals and drops the
 // materialized Home payload, both of which embed the old verdicts.
 //
-//   node --env-file=.env.local scripts/migrate-skip-rule.mjs           # dry run: counts only
-//   node --env-file=.env.local scripts/migrate-skip-rule.mjs --apply   # write
+//   node --env-file=.env.local scripts/migrate-skip-rule.mjs --user <OWNER_UID>           # dry run: counts only
+//   node --env-file=.env.local scripts/migrate-skip-rule.mjs --user <OWNER_UID> --apply   # write
 //
 // Run --apply AFTER the code with the new rule is live: until then the old code keeps ruling
 // new plays the old way. Re-running is safe — it only writes rows whose verdict differs, and
@@ -15,11 +15,14 @@
 // itself rules with — so this cannot drift from the store.
 import { createClient } from "@libsql/client";
 import { allTimeStats, isSkip, playedAtConvention } from "../src/lib/skip-rule.ts";
+import { checkScriptDb, scriptUserOrExit } from "./script-user.mjs";
 
+const USER = scriptUserOrExit(process.argv.slice(2));
 const URL = process.env.TURSO_DATABASE_URL;
 if (!URL) throw new Error("TURSO_DATABASE_URL missing (run with --env-file=.env.local)");
 const APPLY = process.argv.includes("--apply");
 const client = createClient({ url: URL, authToken: process.env.TURSO_AUTH_TOKEN, intMode: "number" });
+await checkScriptDb(client, USER, URL);
 
 // Same fetch as db.ts orderedRealPlays(), plus the row id to write back to.
 const PLAYS_ORDERED_SQL = `

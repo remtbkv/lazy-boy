@@ -10,7 +10,7 @@ import path from "node:path";
 import { createClient } from "@libsql/client";
 import { beforeAll, describe, expect, it } from "vitest";
 import { type PlayRecord } from "@/lib/db";
-import { ownerStore } from "./owner-store";
+import { ownerStore, ownerUid } from "./owner-store";
 import { insertedRuns } from "../scripts/import-tail.mjs";
 
 const owner = ownerStore();
@@ -20,7 +20,7 @@ const scratch = mkdtempSync(path.join(tmpdir(), "lazyboy-import-"));
 const root = path.resolve(__dirname, "..");
 
 function run(script: string, ...args: string[]) {
-  const r = spawnSync(process.execPath, [path.join(root, "scripts", script), ...args, "--db", DB], {
+  const r = spawnSync(process.execPath, [path.join(root, "scripts", script), ...args, "--user", ownerUid(), "--db", DB], {
     cwd: root,
     encoding: "utf8",
   });
