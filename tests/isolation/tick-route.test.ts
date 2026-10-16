@@ -117,8 +117,11 @@ const q = async (sql: string, args: Record<string, string | number | null> = {})
 
 async function seed(o: { expired?: boolean } = {}): Promise<void> {
   run++;
-  app = freshAppDb();
+  // The users' files first: from Phase 2's turn useUserFiles() also points APP_DATABASE_URL at
+  // its own app.db; freshAppDb() after it makes this test's raw client and app-db.ts open the
+  // same file.
   freshUserFiles();
+  app = freshAppDb();
   await getAppMeta("schema_version"); // the first open creates app.db at the code's version
   for (const uid of [A, B]) {
     await q(
