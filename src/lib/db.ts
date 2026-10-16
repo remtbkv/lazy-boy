@@ -2763,8 +2763,8 @@ async function storeSavedDiff(
   const cachedTracks = await readCachedTracks(client, [...new Set(incoming.map((t) => t.id))]);
   const stmts: InStatement[] = tracksNeedingWrite(incoming, cachedTracks).map(trackUpsertStmt);
   const renamed = identityChanges(incoming, cachedTracks);
-  // `position` keeps its column (NOT NULL) and nothing reads it: a new row takes its place in
-  // what was read, an existing one keeps whatever it had.
+  // `position` keeps its column and nothing reads it: a new row takes its index among this
+  // write's rows, an existing one keeps whatever it had.
   upserts.forEach((t, i) => {
     stmts.push({
       sql: `INSERT INTO saved_tracks (track_id, added_at, position) VALUES (:tid, :added, :pos)
