@@ -3,6 +3,7 @@
 // refresh would have joined the first's and received the first's tokens, the one leak in the
 // census that is silent (01e A2). These run the core against a two-user store in memory.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getAppMeta } from "@/lib/app-db";
 import { createTokenCore } from "@/lib/token-core";
 import {
   A,
@@ -12,6 +13,7 @@ import {
   expectConcurrentRefreshIsolated,
   expectRefreshLosesToSignIn,
   expectStoreAnswersOwnRow,
+  freshAppDb,
   memoryTokenStore,
   scriptedSpotify,
   until,
@@ -100,11 +102,27 @@ describe("token core, two users in one process", () => {
     expect(rows.has(B)).toBe(false);
   });
 
-  it("assertTokenOwner throws on a token another user's getter produced", () => {
+  it("a token-owner refusal is an isolation event: the caller's uid and the code, no token (PLAN.md §6.5)", async () => {
+    const db = freshAppDb();
+    await getAppMeta("tick_at"); // the app database opens empty, so a missing row is the answer
+    const logged: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...a) => void logged.push(a.join(" ")));
+    const { core } = setup({});
+    await expect(
+      core.setTokens(B, { uid: A, accessToken: "at-secret", refreshToken: "rt-secret", expiresAt: FAR } as never),
+    ).rejects.toThrow(/owner/);
+    expect((await db.raw().execute("SELECT uid, code FROM events")).rows).toEqual([{ uid: B, code: "token-owner" }]);
+    expect(logged).toContain(`[isolation] token-owner uid=${B}`);
+    expect(logged.join("\n")).not.toMatch(/secret/);
+    db.close();
+    vi.restoreAllMocks();
+  });
+
+  it("assertTokenOwner throws on a token another user's getter produced", async () => {
     const { core } = setup({});
     const t = { uid: A, accessToken: "a", refreshToken: "r", expiresAt: FAR } as never;
-    expect(() => core.assertTokenOwner(t, A)).not.toThrow();
-    expect(() => core.assertTokenOwner(t, B)).toThrow(/owner/);
+    await expect(core.assertTokenOwner(t, A)).resolves.toBeUndefined();
+    await expect(core.assertTokenOwner(t, B)).rejects.toThrow(/owner/);
   });
 });
 

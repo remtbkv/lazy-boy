@@ -6,7 +6,8 @@
 //   - the cross-instance refresh lock, the stored row and every write are per uid, through a
 //     `TokenStore` (Phase 2: `user_tokens`, encrypted, token-store-app.ts);
 //   - a token object names its owner, and `setTokens` / `assertTokenOwner` refuse a mismatch,
-//     so a refactor that shares a promise or cache across users fails on the first mixed call;
+//     so a refactor that shares a promise or cache across users fails on the first mixed call,
+//     and record a `token-owner` isolation event first (PLAN.md §6.5);
 //   - a refresh writes, and a dead grant clears, only over the row it read (Phase 2, security
 //     R3-R4): a refresh that read the old grant before a sign-in cannot overwrite the new one,
 //     and one finishing after the deletion job removed the row stores nothing.
@@ -14,6 +15,7 @@
 // single-user code's, unchanged; their comments say why each is there.
 import type { SpotifyTokens } from "@/lib/db";
 import type { Uid } from "@/lib/identity";
+import { reportIsolation } from "@/lib/isolation";
 
 const TOKEN_URL = "https://accounts.spotify.com/api/token";
 
@@ -129,8 +131,10 @@ export function createTokenCore(store: TokenStore) {
     expiresAt: t.expiresAt,
   });
 
-  function assertTokenOwner(t: UserTokens, uid: Uid): void {
-    if (t.uid !== uid) throw new Error(`token owner mismatch`);
+  async function assertTokenOwner(t: UserTokens, uid: Uid): Promise<void> {
+    if (t.uid === uid) return;
+    await reportIsolation("token-owner", uid);
+    throw new Error(`token owner mismatch`);
   }
 
   // A row as read: the tokens, owned, and the version a write over it must name.
@@ -146,7 +150,7 @@ export function createTokenCore(store: TokenStore) {
 
   /** A sign-in's write (the store lands it only while the user is live). */
   async function setTokens(uid: Uid, t: UserTokens): Promise<void> {
-    assertTokenOwner(t, uid);
+    await assertTokenOwner(t, uid);
     await store.set(uid, t);
   }
 
@@ -154,7 +158,7 @@ export function createTokenCore(store: TokenStore) {
   // newer grant) or is gone (the deletion job), this refresh stores nothing and answers with
   // whatever fresh grant the row now holds.
   async function writeRefreshed(uid: Uid, updated: UserTokens, read: StoredTokens): Promise<UserTokens> {
-    assertTokenOwner(updated, uid);
+    await assertTokenOwner(updated, uid);
     if (await store.update(uid, updated, read)) return updated;
     const now = await getStored(uid);
     if (now && isFresh(now)) return now;
@@ -260,7 +264,7 @@ export function createTokenCore(store: TokenStore) {
     if (isFresh(stored)) return stored;
     try {
       const fresh = await refreshShared(uid);
-      assertTokenOwner(fresh, uid);
+      await assertTokenOwner(fresh, uid);
       return fresh;
     } catch (e) {
       if (e instanceof RefreshError && e.terminal) await clearTokensIfStale(uid, stored.refreshToken);
