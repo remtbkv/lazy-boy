@@ -16,6 +16,9 @@
 // Phase 3 adds: a tick that hands a step another user's store; a lease released without its
 // owner check. Lane 40 adds the suites' store reverted to a plain `file:` client, which runs a
 // statement handed named args it does not use; Turso refuses it (lane 23's production failure).
+//
+// Phase 4a adds: a claim without its compare-and-set; a Log out that leaves capture on; a deletion
+// with no admin refusal; a now-playing memo keyed by nobody.
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
@@ -25,7 +28,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { checkIdentity, type SessionClaims, type Uid } from "@/lib/identity";
 import { appIdentityLookup, readIdentity } from "@/lib/identity-read";
 import { createTokenCore, type TokenStore } from "@/lib/token-core";
-import { getAppMeta, releaseLease, setAppMetaIfAbsent } from "@/lib/app-db";
+import { claimInvite, endSessionsAndCapture, execDeletionStatements, getAppMeta, releaseLease, setAppMetaIfAbsent } from "@/lib/app-db";
+import { runDeletion, type DeletionDeps } from "@/lib/deletion";
+import { clearNowPlayingMemo, memoizedNowPlaying, rememberNowPlaying } from "@/lib/now-playing-memo";
 import { decryptTokens, encryptTokens, open, parseTokenKeys, seal, tokenAad, type TokenKey } from "@/lib/token-crypto";
 import { tokenKeysReady } from "@/lib/token-keys";
 import { appTokenStore } from "@/lib/token-store-app";
@@ -38,6 +43,10 @@ import {
   EXPIRED,
   expectCiphertextBoundToUser,
   expectConcurrentRefreshIsolated,
+  expectDeletionRefusesAdmin,
+  expectInviteClaimedOnce,
+  expectLogOutStopsCapture,
+  expectMemoPerUser,
   expectFreshIvPerWrite,
   expectRefreshLosesToSignIn,
   expectSignupsOwnerRefusesFriend,
@@ -366,5 +375,94 @@ describe("planted: the suites' store reverted to a plain file: client", () => {
   it("and the suites' client refuses it, as Turso does", async () => {
     const c = createClient({ url: "file::memory:" });
     await expect(c.batch(batch, "read")).rejects.toThrow("too many parameters, expected 1 found 2");
+  });
+});
+
+// ── Phase 4a: sign-up, Log out, deletion, the now-playing memo ──────────────────────────────
+// A claim with no compare-and-set (it rebinds a claimed invite and claims a pending request); a
+// Log out that signs out but leaves capture on; a deletion with no admin refusal; a memo keyed by
+// nobody.
+describe("planted: a claim without its compare-and-set", () => {
+  it("the claimed-once check catches it", async () => {
+    const db = freshAppDb();
+    await getAppMeta("schema_version");
+    const buggy = async (rid: string, aid: string, sid: string) =>
+      ((
+        await db.raw().execute({
+          sql: "UPDATE users SET account_id = ?, spotify_id = ?, status = 'active' WHERE uid = (SELECT uid FROM requests WHERE id = ?) RETURNING uid",
+          args: [aid, sid, rid],
+        })
+      ).rows[0] as { uid: string } | undefined) ?? null;
+    await expect(expectInviteClaimedOnce(db.raw(), buggy)).rejects.toThrow();
+  });
+  it("and passes over the real claim", async () => {
+    const db = freshAppDb();
+    await getAppMeta("schema_version");
+    await expectInviteClaimedOnce(db.raw(), claimInvite);
+  });
+});
+
+describe("planted: a Log out that leaves capture on", () => {
+  async function twoUsers() {
+    const db = freshAppDb();
+    await getAppMeta("schema_version");
+    for (const u of [A, B]) await seedUser(db.raw(), { uid: u, status: "active" });
+    return db;
+  }
+  it("the stops-capture check catches it", async () => {
+    const db = await twoUsers();
+    const buggy = async (uid: Uid) => void (await db.raw().execute({ sql: "UPDATE users SET session_epoch = session_epoch + 1 WHERE uid = ?", args: [uid] }));
+    await expect(expectLogOutStopsCapture(db.raw(), buggy)).rejects.toThrow();
+  });
+  it("and passes over the real Log out", async () => {
+    const db = await twoUsers();
+    await expectLogOutStopsCapture(db.raw(), endSessionsAndCapture);
+  });
+});
+
+describe("planted: a deletion with no admin refusal", () => {
+  async function admin() {
+    const db = freshAppDb();
+    await getAppMeta("schema_version");
+    await seedUser(db.raw(), { uid: A, status: "active", admin: true });
+    return db;
+  }
+  const deps = (): DeletionDeps => ({
+    exec: execDeletionStatements,
+    ownerOf: async () => null,
+    destroy: async () => {},
+    telemetry: { deleteUser: async () => {}, appendLifecycle: async () => {} },
+    now: Date.now,
+    by: "test",
+  });
+  it("the never-the-admin check catches it", async () => {
+    const db = await admin();
+    const buggy = async (uid: string) => {
+      await db.raw().execute({ sql: "UPDATE users SET status = 'deleting', session_epoch = session_epoch + 1 WHERE uid = ?", args: [uid] });
+      return { kind: "pending" };
+    };
+    await expect(expectDeletionRefusesAdmin(db.raw(), buggy)).rejects.toThrow();
+  });
+  it("and passes over the real job", async () => {
+    const db = await admin();
+    await expectDeletionRefusesAdmin(db.raw(), (uid) => runDeletion(uid, deps()));
+  });
+});
+
+describe("planted: a now-playing memo keyed by nobody", () => {
+  it("the per-user check catches it", () => {
+    let last: { playing: unknown } | null = null;
+    expect(() =>
+      expectMemoPerUser(
+        () => last,
+        (_u, _n, p) => {
+          last = { playing: p };
+        },
+      ),
+    ).toThrow();
+  });
+  it("and passes over the real memo", () => {
+    clearNowPlayingMemo();
+    expectMemoPerUser(memoizedNowPlaying, rememberNowPlaying);
   });
 });

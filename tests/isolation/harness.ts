@@ -266,3 +266,57 @@ export async function expectConcurrentRefreshIsolated(
   const tokenCalls = spotify.calls.filter((c) => c.url.includes("/api/token"));
   expect(tokenCalls.map((c) => c.refreshToken).sort()).toEqual(["rt-A", "rt-B"]);
 }
+
+// ── Phase 4a's checks, which the planted-bug self-test also runs against broken versions ──────
+
+type ClaimFn = (rid: string, accountId: string, spotifyId: string, now: number) => Promise<{ uid: string } | null>;
+
+/** The claim (PLAN.md §5.1, T9): an approved invite binds the first account that claims it, once;
+ *  a second account, a bound invite whose request still reads approved, and a pending request
+ *  claim nothing. Needs a fresh app database; seeds its own rows. */
+export async function expectInviteClaimedOnce(raw: Client, claim: ClaimFn): Promise<void> {
+  const now = Date.now();
+  const req = (id: string, email: string) =>
+    raw.execute({
+      sql: "INSERT INTO requests (id, email, name, status, created_at, status_at, terms_version) VALUES (?, ?, 'n', 'pending', ?, ?, 'v')",
+      args: [id, email, now, now],
+    });
+  await req("rrrrrrrrrrr1", "x@example.com");
+  await seedApprovedInvite(raw, { rid: "rrrrrrrrrrr1", uid: "xxxxxxxxxxxx", invitedAt: now - 1000 });
+  expect((await claim("rrrrrrrrrrr1", "acct-x", "sp-x", now))?.uid).toBe("xxxxxxxxxxxx");
+  expect(await claim("rrrrrrrrrrr1", "acct-z", "sp-z", now)).toBeNull();
+  await raw.execute("UPDATE requests SET status = 'approved' WHERE id = 'rrrrrrrrrrr1'");
+  expect(await claim("rrrrrrrrrrr1", "acct-z", "sp-z", now)).toBeNull();
+  await req("rrrrrrrrrrr2", "y@example.com");
+  expect(await claim("rrrrrrrrrrr2", "acct-y", "sp-y", now)).toBeNull();
+  const [x] = (await raw.execute("SELECT account_id FROM users WHERE uid = 'xxxxxxxxxxxx'")).rows;
+  expect(x.account_id).toBe("acct-x");
+}
+
+/** Log out (RULINGS Oct 15 1:33 PM): the epoch moves and the token row goes, for that uid only. */
+export async function expectLogOutStopsCapture(raw: Client, logOut: (uid: Uid) => Promise<void>): Promise<void> {
+  for (const u of [A, B]) {
+    await raw.execute({ sql: "INSERT INTO user_tokens (uid, blob, expires_at, granted_at) VALUES (?, 'v1.x', 0, 0)", args: [u] });
+  }
+  await logOut(A);
+  const rows = (await raw.execute("SELECT u.uid, u.session_epoch, count(t.uid) AS tokens FROM users u LEFT JOIN user_tokens t ON t.uid = u.uid WHERE u.uid IN (?, ?) GROUP BY u.uid ORDER BY u.uid", [A, B])).rows;
+  expect(rows.map((r) => [r.uid, r.session_epoch, r.tokens])).toEqual([
+    [A, 1, 0],
+    [B, 0, 1],
+  ]);
+}
+
+/** The deletion job's first refusal (PLAN.md §12.3, decision 21 as ruled): never the admin. */
+export async function expectDeletionRefusesAdmin(raw: Client, run: (uid: string) => Promise<{ kind: string }>): Promise<void> {
+  const o = await run(A);
+  expect(o.kind).toBe("refused");
+  const [a] = (await raw.execute({ sql: "SELECT status, session_epoch FROM users WHERE uid = ?", args: [A] })).rows;
+  expect(a).toEqual({ status: "active", session_epoch: 0 });
+}
+
+/** /api/now-playing's memo (PLAN.md §6.6): one user's answer is never another's. */
+export function expectMemoPerUser(get: (uid: Uid, now: number) => { playing: unknown } | null, set: (uid: Uid, now: number, p: unknown) => void): void {
+  set(A, 1_000, "A-only-track");
+  expect(get(A, 1_001)).toEqual({ playing: "A-only-track" });
+  expect(get(B, 1_001)).toBeNull();
+}
