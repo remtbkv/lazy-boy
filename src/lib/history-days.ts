@@ -29,6 +29,10 @@ export type MemoryDays = {
   newest: string | null;
 };
 
+/** The one width Home asks dailyStatsAction for (every day there is), and the only one it
+ *  answers (multi-user PLAN §6.6): each distinct width was a fresh scan and a new cache entry. */
+export const DAILY_STATS_DAYS = 100_000;
+
 /** Epoch minutes (what the payloads carry) → the ISO string the formatters take. */
 export function iso(minute: number): string {
   return new Date(minute * 60000).toISOString();

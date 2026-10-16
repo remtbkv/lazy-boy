@@ -7,7 +7,7 @@ import { exactTimeShort, formatDuration, timeAgo } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { searchPerfEnabled, startSearchProbe, type IndexStatus } from "@/lib/search-perf";
 import { patchHistoryPayload } from "@/lib/history-patch";
-import { buildDays, iso, type HistoryPayload } from "@/lib/history-days";
+import { buildDays, DAILY_STATS_DAYS, iso, type HistoryPayload } from "@/lib/history-days";
 import {
   foldHandoff,
   handoffBeaconMeta,
@@ -418,7 +418,7 @@ export function DenHome({
     // pressing "See all" after an hour of listening replaced the live strip with the
     // mount-time snapshot (audit 2026-08-19, T2.7).
     if (!allDailyPromise.current || Date.now() - allDailyPromise.current.at > 60_000) {
-      allDailyPromise.current = { p: dailyStatsAction(100000), at: Date.now() };
+      allDailyPromise.current = { p: dailyStatsAction(DAILY_STATS_DAYS), at: Date.now() };
     }
     return allDailyPromise.current.p;
   };

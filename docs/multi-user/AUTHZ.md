@@ -176,9 +176,9 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### POST /api/playlists/[id]/tracks
 
-- File: `src/app/api/playlists/[id]/tracks/route.ts`. Gate today: `src/app/api/playlists/[id]/tracks/route.ts:12`.
+- File: `src/app/api/playlists/[id]/tracks/route.ts`. Gate today: `src/app/api/playlists/[id]/tracks/route.ts:13`.
 - Does, when allowed: reads one playlist's snapshot from Spotify with Rem's grant; re-fetches and rewrites its cached tracks when changed.
-- Calls (from the source): store `forUser`; Spotify `playlist`, `playlistTracks`; via `spotifyAccessTokenFor`, `requireRouteUser`, `spotifyClient`.
+- Calls (from the source): store `forUser`; Spotify `playlist`, `playlistTracks`; via `spotifyAccessTokenFor`, `requireRouteUser`, `spotifyClient`, `allowUserCall`.
 - `anon`: D — requireRouteUser: no session → 401 with the signed-out marker before any read
 - `rem`: A — the owner's session: the identity check allows OWNER_UID, Phase 1's one user (src/lib/identity.ts)
 - `friendA`, `friendB`: I — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
@@ -324,9 +324,9 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action logout
 
-- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:114`.
+- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:115`.
 - Does, when allowed: deletes the gated user's Spotify token row (after the response) and this browser's cookie.
-- Calls (from the source): via `logOutEverywhere`, `signOut`, `gateFromSession`.
+- Calls (from the source): via `logOutFrom`, `signOut`, `gateFromSession`.
 - `anon`, `revoked`, `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`, `staleSecret`, `forged`: D — requireActionUser refuses → only this browser's cookie is cleared; no token row is touched
 - `rem`: A — the owner signing out: clears his own token row, which stops capture (RULINGS Oct 15 1:33 PM)
 - `friendA`, `friendB`: I — requireActionUser refuses → only this browser's cookie is cleared; no token row is touched
@@ -334,7 +334,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action mergeAction
 
-- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:114`.
+- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:115`.
 - Does, when allowed: creates a playlist from several on Rem's account; records it in playlists.
 - Calls (from the source): store `forUser`; Spotify `mergePlaylists`; via `requireActionUser`, `getSpotify`.
 - `anon`: D — requireActionUser: no session → { ok: false } before any read
@@ -347,7 +347,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action saveQueueAction
 
-- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:114`.
+- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:115`.
 - Does, when allowed: reads Rem's queue and saves it as a new playlist; records it.
 - Calls (from the source): store `forUser`; Spotify `saveQueue`; via `requireActionUser`, `getSpotify`.
 - `anon`: D — requireActionUser: no session → { ok: false } before any read
@@ -360,7 +360,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action subtractPreviewAction
 
-- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:114`.
+- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:115`.
 - Does, when allowed: reads cached (or live) tracks of the named playlists; returns the set difference.
 - Calls (from the source): store `forUser`; Spotify `playlistTracks`; via `requireActionUser`, `getSpotify`, `intersect`, `keyOf`, `subtract`.
 - `anon`: D — requireActionUser: no session → { ok: false } before any read
@@ -373,9 +373,9 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action saveCompareDiffAction
 
-- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:114`.
+- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:115`.
 - Does, when allowed: creates a playlist on Rem's account from the given uris; records it.
-- Calls (from the source): store `forUser`; Spotify `createFromUris`; via `requireActionUser`, `getSpotify`.
+- Calls (from the source): store `forUser`; Spotify `createFromUris`; via `requireActionUser`, `getSpotify`, `allowUserCall`.
 - `anon`: D — requireActionUser: no session → { ok: false } before any read
 - `rem`: A — the owner's session: the identity check allows OWNER_UID, Phase 1's one user (src/lib/identity.ts)
 - `friendA`, `friendB`: I — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
@@ -386,7 +386,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action addToQueueAction
 
-- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:114`.
+- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:115`.
 - Does, when allowed: adds a track to Rem's playback queue.
 - Calls (from the source): Spotify `addToQueue`; via `requireActionUser`, `getSpotify`.
 - `anon`: D — requireActionUser: no session → { ok: false } before any read
@@ -399,7 +399,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action playTrackAction
 
-- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:114`.
+- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:115`.
 - Does, when allowed: starts a track on Rem's active device.
 - Calls (from the source): Spotify `playTracks`; via `requireActionUser`, `getSpotify`.
 - `anon`: D — requireActionUser: no session → { ok: false } before any read
@@ -412,7 +412,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action playFromPlaylistAction
 
-- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:114`.
+- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:115`.
 - Does, when allowed: starts a playlist at a track on Rem's device.
 - Calls (from the source): Spotify `playContext`; via `requireActionUser`, `getSpotify`.
 - `anon`: D — requireActionUser: no session → { ok: false } before any read
@@ -425,7 +425,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action playPlaylistAction
 
-- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:114`.
+- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:115`.
 - Does, when allowed: starts a playlist on Rem's device.
 - Calls (from the source): Spotify `playContext`; via `requireActionUser`, `getSpotify`.
 - `anon`: D — requireActionUser: no session → { ok: false } before any read
@@ -438,7 +438,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action saveToLikedAction
 
-- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:114`.
+- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:115`.
 - Does, when allowed: saves a track to Rem's Liked Songs.
 - Calls (from the source): Spotify `saveTrack`; via `requireActionUser`, `getSpotify`.
 - `anon`: D — requireActionUser: no session → { ok: false } before any read
@@ -451,7 +451,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action removeFromPlaylistAction
 
-- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:114`.
+- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:115`.
 - Does, when allowed: removes a track from one of Rem's playlists; rewrites the cached copy.
 - Calls (from the source): store `forUser`; Spotify `playlist`, `playlistTracks`, `removeFromPlaylist`, `addItemsAt`; via `requireActionUser`, `getSpotify`, `reinsertPositions`.
 - `anon`: D — requireActionUser: no session → { ok: false } before any read
@@ -464,7 +464,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action playerSetPlayingAction
 
-- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:114`.
+- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:115`.
 - Does, when allowed: pauses or resumes Rem's playback.
 - Calls (from the source): Spotify `resumePlayback`, `pausePlayback`; via `requireActionUser`, `getSpotify`.
 - `anon`: D — requireActionUser: no session → { ok: false } before any read
@@ -477,7 +477,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action playPlaylistTrackAction
 
-- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:114`.
+- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:115`.
 - Does, when allowed: plays a track within a playlist on Rem's device.
 - Calls (from the source): Spotify `playContext`; via `requireActionUser`, `getSpotify`.
 - `anon`: D — requireActionUser: no session → { ok: false } before any read
@@ -490,7 +490,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action resumePlaylistAction
 
-- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:114`.
+- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:115`.
 - Does, when allowed: reads the playlist's cached order and Rem's plays in it; starts playback after the last one.
 - Calls (from the source): store `forUser`; Spotify `playlistTracks`, `playContext`; via `requireActionUser`, `getSpotify`.
 - `anon`: D — requireActionUser: no session → { ok: false } before any read
@@ -503,7 +503,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action startCleanAction
 
-- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:114`.
+- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:115`.
 - Does, when allowed: dedupes a playlist into a new one on Rem's account (and a backup); takes a clean:<id> lock; a background reconcile task.
 - Calls (from the source): store `forUser`; via `getValidAccessTokenFor`, `spotifyAccessTokenFor`, `requireActionUser`, `getSpotify`, `spotifyClient`, `runTask`, `taskDone`, `cleanPhase1`, `reconcileClean`.
 - `anon`: D — requireActionUser: no session → { ok: false } before any read
@@ -516,7 +516,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action deletePlaylistAction
 
-- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:114`.
+- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:115`.
 - Does, when allowed: unfollows a playlist on Rem's account and deletes it from the store.
 - Calls (from the source): store `forUser`; Spotify `deletePlaylist`; via `getValidAccessTokenFor`, `spotifyAccessTokenFor`, `requireActionUser`, `getSpotify`, `spotifyClient`, `runTask`, `taskDone`, `syncLibrary`.
 - `anon`: D — requireActionUser: no session → { ok: false } before any read
@@ -529,7 +529,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action trackMenuAction
 
-- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:114`.
+- File: `src/app/(app)/actions.ts`. Gate today: `src/app/(app)/actions.ts:115`.
 - Does, when allowed: looks a track up by name and artist in Rem's library, with the playlists that hold it.
 - Calls (from the source): store `forUser`; via `requireActionUser`, `getSpotify`.
 - `anon`: D — requireActionUser: no session → { ok: false } before any read
@@ -542,7 +542,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action dockDataAction
 
-- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:16`.
+- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:18`.
 - Does, when allowed: reads every stored playlist, me_id, the clean-backup preference and the sync stamp.
 - Calls (from the source): store `forUser`; via `requireActionUser`.
 - `anon`: D — gated(): requireActionUser refused → an empty answer before any read
@@ -555,7 +555,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action dayTracksAction
 
-- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:16`.
+- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:18`.
 - Does, when allowed: reads one day's plays.
 - Calls (from the source): store `forUser`; via `requireActionUser`, `tzOffsetMinutes`.
 - `anon`: D — gated(): requireActionUser refused → an empty answer before any read
@@ -568,7 +568,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action dailyStatsAction
 
-- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:16`.
+- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:18`.
 - Does, when allowed: reads per-day play counts for up to 100,000 days.
 - Calls (from the source): store `forUser`; via `requireActionUser`, `tzOffsetMinutes`.
 - `anon`: D — gated(): requireActionUser refused → an empty answer before any read
@@ -581,7 +581,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action allTimePlaysAction
 
-- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:16`.
+- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:18`.
 - Does, when allowed: reads the 300 most-played tracks.
 - Calls (from the source): store `forUser`; via `requireActionUser`.
 - `anon`: D — gated(): requireActionUser refused → an empty answer before any read
@@ -594,9 +594,9 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action searchPlaysAction
 
-- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:16`.
+- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:18`.
 - Does, when allowed: LIKE-searches every play by name or artist.
-- Calls (from the source): store `forUser`; via `requireActionUser`.
+- Calls (from the source): store `forUser`; via `requireActionUser`, `allowUserCall`.
 - `anon`: D — gated(): requireActionUser refused → an empty answer before any read
 - `rem`: A — the owner's session: the identity check allows OWNER_UID, Phase 1's one user (src/lib/identity.ts)
 - `friendA`, `friendB`: I — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
@@ -607,7 +607,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### action refreshHistoryAction
 
-- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:16`.
+- File: `src/app/(app)/history-actions.ts`. Gate today: `src/app/(app)/history-actions.ts:18`.
 - Does, when allowed: re-reads the strip, the all-time totals, the visible day and the plays the client's index is missing from Rem's store; no Spotify call (decision 15).
 - Calls (from the source): store `forUser`, `ledgerAdd (w)`; via `requireActionUser`, `tzOffsetMinutes`.
 - `anon`: D — gated(): requireActionUser refused → NO_REFRESH before any read

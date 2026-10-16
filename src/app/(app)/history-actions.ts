@@ -3,8 +3,10 @@
 import { unstable_rethrow } from "next/navigation";
 import { requireActionUser } from "@/lib/require-user";
 import { forUser, ledgerAdd, type DayStats, type StoredPlaylist, type TrackStats, type UserStore } from "@/lib/db";
+import { DAILY_STATS_DAYS } from "@/lib/history-days";
 import { HISTORY_REFRESH_EXTRA_ROWS } from "@/lib/read-costs";
 import { tzOffsetMinutes } from "@/lib/tz";
+import { allowUserCall, SEARCH_PLAYS_LIMIT } from "@/lib/user-bucket";
 
 // Listen-history data actions for Home — DB reads only; from Phase 3 that includes
 // refreshHistoryAction (below), which used to harvest. Every one of them returns personal data, so each
@@ -53,12 +55,13 @@ export async function dayTracksAction(day: string): Promise<TrackStats[]> {
   return store.getPlaysByDay(day, tz);
 }
 
-/** Older day stats — the strip starts with the recent window and extends on demand. */
+/** Older day stats — the strip starts with the recent window and extends on demand. Only the
+ *  width Home sends (PLAN §6.6): any other is refused before a read. */
 export async function dailyStatsAction(days: number): Promise<DayStats[]> {
   const store = await gated();
-  if (!store) return [];
+  if (!store || days !== DAILY_STATS_DAYS) return [];
   const tz = await tzOffsetMinutes(store);
-  return store.getDailyStats(tz, Math.min(days, 100000));
+  return store.getDailyStats(tz, DAILY_STATS_DAYS);
 }
 
 /** Most-played all-time — fetched on demand when the All time view is opened. */
@@ -182,5 +185,7 @@ export async function searchPlaysAction(query: string): Promise<TrackStats[]> {
   if (!store) return [];
   const q = query.trim();
   if (!q) return [];
+  // An unindexable LIKE per call: ten a minute per user per instance (PLAN §6.6).
+  if (!allowUserCall("search-plays", store.uid, Date.now(), SEARCH_PLAYS_LIMIT.limit, SEARCH_PLAYS_LIMIT.windowMs)) return [];
   return store.searchHistory(q, 500);
 }

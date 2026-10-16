@@ -2,8 +2,8 @@
 // security R13): a fixed window per (limit name, uid), in this process. With Fluid compute few
 // instances serve everyone, so an in-process count catches a stuck tab cheaply; it does not stop a
 // determined user spreading calls across instances (that answer is `user.mjs --disable`).
-// `/api/playlists/[id]/tracks` uses it here; Phase 4a's turn puts `searchPlaysAction` (ten a minute)
-// and the player actions behind it too.
+// `/api/playlists/[id]/tracks`, `searchPlaysAction` (ten a minute each) and the player actions in
+// actions.ts (thirty a minute, shared) use it.
 import "server-only";
 import type { Uid } from "@/lib/identity";
 
@@ -31,3 +31,10 @@ export function clearUserBuckets(): void {
 
 /** §6.6: `/api/playlists/[id]/tracks`, ten a minute per user per instance (01b S13). */
 export const PLAYLIST_TRACKS_LIMIT = { limit: 10, windowMs: 60_000 } as const;
+
+/** §6.6: `searchPlaysAction`, an unindexable LIKE per call: ten a minute per user per instance. */
+export const SEARCH_PLAYS_LIMIT = { limit: 10, windowMs: 60_000 } as const;
+
+/** §6.6, security R13: every player action of one user shares one window. Thirty a minute is past
+ *  a person queueing an album track by track, and a stuck tab reaches it within seconds. */
+export const PLAYER_LIMIT = { limit: 30, windowMs: 60_000 } as const;

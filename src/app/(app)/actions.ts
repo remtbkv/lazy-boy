@@ -17,6 +17,7 @@ import { runTask, taskDone } from "@/lib/tasks/registry";
 import { cleanPhase1, reconcileClean } from "@/lib/clean/run";
 import { syncLibrary } from "@/lib/sync/library";
 import { forUser, type UserStore } from "@/lib/db";
+import { allowUserCall, PLAYER_LIMIT } from "@/lib/user-bucket";
 
 export type ActionResult<T = object> =
   | ({ ok: true } & T)
@@ -349,17 +350,23 @@ export async function saveCompareDiffAction(
 }
 
 // ---- player (web-player simulation) ----
+// Every player action of one user shares one per-user window (PLAN §6.6, security R13): a stuck
+// tab cannot spend the app's shared Spotify rate window. Checked after the gate, before the token.
+const PLAYER_BUSY = { ok: false, error: "Too many player commands in a minute. Wait a moment and try again." } as const;
+const playerAllowed = (uid: Uid) => allowUserCall("player", uid, Date.now(), PLAYER_LIMIT.limit, PLAYER_LIMIT.windowMs);
+
 export async function addToQueueAction(uri: string): Promise<ActionResult> {
   try {
     const user = await requireActionUser();
     if ("ok" in user) return user;
+    if (!playerAllowed(user.uid)) return PLAYER_BUSY;
     const sp = await getSpotify(user.uid, "action:addToQueue");
     await sp.addToQueue(uri);
     return { ok: true };
   } catch (e) {
     unstable_rethrow(e);
     if (e instanceof SpotifyError && (e.status === 404 || e.status === 403)) {
-      return { ok: false, error: "No active device — start playing on Spotify first." };
+      return { ok: false, error: playbackError(e) };
     }
     return fail(e);
   }
@@ -370,13 +377,14 @@ export async function playTrackAction(uri: string): Promise<ActionResult> {
   try {
     const user = await requireActionUser();
     if ("ok" in user) return user;
+    if (!playerAllowed(user.uid)) return PLAYER_BUSY;
     const sp = await getSpotify(user.uid, "action:playTrack");
     await sp.playTracks([uri]);
     return { ok: true };
   } catch (e) {
     unstable_rethrow(e);
     if (e instanceof SpotifyError && (e.status === 404 || e.status === 403)) {
-      return { ok: false, error: "No active device — start playing on Spotify first." };
+      return { ok: false, error: playbackError(e) };
     }
     return fail(e);
   }
@@ -391,13 +399,14 @@ export async function playFromPlaylistAction(
   try {
     const user = await requireActionUser();
     if ("ok" in user) return user;
+    if (!playerAllowed(user.uid)) return PLAYER_BUSY;
     const sp = await getSpotify(user.uid, "action:playFromPlaylist");
     await sp.playContext(`spotify:playlist:${playlistId}`, trackUri);
     return { ok: true };
   } catch (e) {
     unstable_rethrow(e);
     if (e instanceof SpotifyError && (e.status === 404 || e.status === 403)) {
-      return { ok: false, error: "No active device — start playing on Spotify first." };
+      return { ok: false, error: playbackError(e) };
     }
     return fail(e);
   }
@@ -566,6 +575,7 @@ async function playerControl(
   try {
     const user = await requireActionUser();
     if ("ok" in user) return user;
+    if (!playerAllowed(user.uid)) return PLAYER_BUSY;
     const sp = await getSpotify(user.uid, source);
     await fn(sp);
     return { ok: true };
@@ -620,6 +630,7 @@ export async function resumePlaylistAction(
     // instant either way; only cold (never-cached) playlists fall back to a live fetch.
     const user = await requireActionUser();
     if ("ok" in user) return user;
+    if (!playerAllowed(user.uid)) return PLAYER_BUSY;
     const sp = await getSpotify(user.uid, "action:resumePlaylist");
     const store = forUser(user.uid);
     const [cached, plays] = await Promise.all([
