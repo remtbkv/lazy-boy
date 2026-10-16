@@ -4,6 +4,7 @@
 // and the invalid_grant bookkeeping. Each statement against a real app database file.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as app from "@/lib/app-db";
+import { mintUid } from "@/lib/identity";
 import { makeStoreFetch } from "@/lib/store-fetch";
 import { freshAppDb, seedUser } from "./harness";
 
@@ -92,7 +93,7 @@ describe("the claim (§7.2 step 2, security R2, T6's claim half)", () => {
   it("a leased user is not due: a second tick, or an open tab, gets nobody", async () => {
     await app.claimDueUsers({ tick: "t1", now: NOW, signups: "invite" });
     expect((await app.claimDueUsers({ tick: "t2", now: NOW + 1_000, signups: "invite" })).users).toEqual([]);
-    expect(await app.claimUser({ uid: A, tick: "tab", now: NOW + 1_000, dueOnly: false })).toBeNull();
+    expect((await app.claimUser({ uid: mintUid(A), tick: "tab", now: NOW + 1_000, dueOnly: false, signups: "invite" })).users).toEqual([]);
   });
 
   it("only active, unpaused, due users: never needs_reconnect, removed, disabled or deleting", async () => {
@@ -186,24 +187,39 @@ describe("the release: a compare-and-set on the lease owner (§7.2 step 3)", () 
 });
 
 describe("one user's claim, for the open app (§7.6)", () => {
+  const uidA = mintUid(A);
   beforeEach(async () => {
     await seedUser(db.raw(), { uid: A, status: "active" });
     await sync(A, { next_probe_at: NOW + 100_000 });
   });
 
   it("a load leases the user whether or not they are due; the timer only when due", async () => {
-    expect(await app.claimUser({ uid: A, tick: "tab1", now: NOW, dueOnly: true })).toBeNull();
-    const u = await app.claimUser({ uid: A, tick: "tab2", now: NOW, dueOnly: false });
-    expect(u).toMatchObject({ uid: A, dbName: `lb-u-${A}` });
+    expect((await app.claimUser({ uid: uidA, tick: "tab1", now: NOW, dueOnly: true, signups: "invite" })).users).toEqual([]);
+    const c = await app.claimUser({ uid: uidA, tick: "tab2", now: NOW, dueOnly: false, signups: "invite" });
+    expect(c.users).toHaveLength(1);
+    expect(c.users[0]).toMatchObject({ uid: A, dbName: `lb-u-${A}` });
+    expect(c.activeUsers).toBe(1);
     expect(await app.releaseLease(A, "tab2", NOW + 1, { state: "idle", nextProbeAt: NOW + 100_000, failures: 0, lastError: null, lastOkAt: null, lastHarvestAt: null })).toBe(true);
   });
 
-  it("never a user who is not active", async () => {
+  it("never a user who is not active, nor a friend under SIGNUPS=owner", async () => {
+    expect((await app.claimUser({ uid: uidA, tick: "tab", now: NOW, dueOnly: false, signups: "owner" })).users).toEqual([]);
     await q("UPDATE users SET status = 'needs_reconnect' WHERE uid = :u", { u: A });
-    expect(await app.claimUser({ uid: A, tick: "tab", now: NOW, dueOnly: false })).toBeNull();
+    expect((await app.claimUser({ uid: uidA, tick: "tab", now: NOW, dueOnly: false, signups: "invite" })).users).toEqual([]);
   });
 });
 
+describe("who succeeded lately (§7.8's not-registered rule)", () => {
+  it("lists the users whose last step succeeded within 10 minutes", async () => {
+    await seedUser(db.raw(), { uid: A, status: "active" });
+    await seedUser(db.raw(), { uid: B, status: "active" });
+    await sync(A, { next_probe_at: NOW + 999_999 });
+    await sync(B, { next_probe_at: NOW + 999_999 });
+    await q("UPDATE sync_state SET last_ok_at = :t WHERE uid = :u", { t: NOW - 9 * 60_000, u: A });
+    await q("UPDATE sync_state SET last_ok_at = :t WHERE uid = :u", { t: NOW - 11 * 60_000, u: B });
+    expect((await app.claimDueUsers({ tick: "t", now: NOW, signups: "invite" })).okRecent).toEqual([A]);
+  });
+});
 describe("the brake's counter (§7.5 item 1)", () => {
   beforeEach(async () => {
     await seedUser(db.raw(), { uid: A, status: "active" });

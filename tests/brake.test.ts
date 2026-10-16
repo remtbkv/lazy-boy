@@ -1,7 +1,7 @@
 // Known answers for the fair-share brake (docs/multi-user/PLAN.md §7.5): the quota day, the share,
 // the two slow modes, and the one constant that switches it on in Phase 4a.
 import { describe, expect, it } from "vitest";
-import { APP_DAILY_BUDGET, BRAKE_ON, brakeMode, quotaDay, shareOf } from "@/lib/brake";
+import { APP_DAILY_BUDGET, BRAKE_ON, brakeMode, nextQuotaReset, quotaDay, shareOf } from "@/lib/brake";
 import { decideHarvest, state0 } from "./brake-helpers";
 
 describe("the quota day starts at 14:51 UTC", () => {
@@ -15,6 +15,12 @@ describe("the quota day starts at 14:51 UTC", () => {
   it("holds across the year boundary and before the anchor", () => {
     expect(quotaDay(Date.UTC(2027, 0, 1, 14, 0))).toBe("2026-12-31");
     expect(quotaDay(Date.UTC(2025, 11, 31, 15, 0))).toBe("2025-12-31");
+  });
+
+  it("the next reset is the end of the current quota day", () => {
+    expect(nextQuotaReset(Date.UTC(2026, 9, 16, 14, 50, 59))).toBe(Date.UTC(2026, 9, 16, 14, 51));
+    expect(nextQuotaReset(Date.UTC(2026, 9, 16, 14, 51))).toBe(Date.UTC(2026, 9, 17, 14, 51));
+    expect(nextQuotaReset(Date.UTC(2026, 9, 16, 23, 0))).toBe(Date.UTC(2026, 9, 17, 14, 51));
   });
 });
 

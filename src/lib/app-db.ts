@@ -14,7 +14,7 @@
 import "server-only";
 import fs from "node:fs";
 import path from "node:path";
-import { createClient, type Client, type InStatement } from "@libsql/client";
+import { createClient, type Client, type InStatement, type ResultSet } from "@libsql/client";
 import { APP_SCHEMA, APP_SCHEMA_VERSION, appSchemaBatches, USER_STATUSES, type UserStatus } from "@/lib/app-schema";
 import { quotaDay } from "@/lib/brake";
 import { mintUid, type IdentityRow, type Uid } from "@/lib/identity";
@@ -373,6 +373,7 @@ export const TICK_STATEMENT_TIMEOUT_MS = 5_000;
 const LEASE_MS = 50_000;
 const DUE_EARLY_MS = 30_000;
 const CONFIRM_AFTER_MS = 10 * 60_000;
+const OK_RECENT_MS = 10 * 60_000;
 
 /** The fetch under one request of a tick statement: one attempt, `timeoutMs` long. */
 export function oneAttemptFetch(doFetch: FetchLike = fetch, timeoutMs = TICK_STATEMENT_TIMEOUT_MS): FetchLike {
@@ -469,6 +470,9 @@ export type Claim = {
   cooldowns: Record<string, number>;
   /** At most one `needs_reconnect` user whose invalid_grant is due its confirming refresh (§5.4). */
   confirmUid: Uid | null;
+  /** Users whose last step succeeded within 10 minutes: a 403 "not registered" removes a friend
+   *  only while someone else's calls still work (§7.8), whichever tick served them. */
+  okRecent: Uid[];
 };
 
 const ACTIVE_LEASABLE = `u.status = 'active' AND (:signups = 'invite' OR u.is_admin = 1)`;
@@ -489,22 +493,55 @@ const toClaimed = (r: Record<string, unknown>): ClaimedUser => ({
   rpCalls: Number(r.rp_calls),
 });
 
+type ClaimArgs = { tick: string; now: number; signups: "owner" | "invite"; until: number; day: string; confirm: number; recent: number };
+const claimArgs = (o: { tick: string; now: number; signups: "owner" | "invite"; quotaDay?: string }): ClaimArgs => ({
+  tick: o.tick,
+  now: o.now,
+  signups: o.signups,
+  until: o.now + LEASE_MS,
+  day: o.quotaDay ?? quotaDay(o.now),
+  confirm: o.now - CONFIRM_AFTER_MS,
+  recent: o.now - OK_RECENT_MS,
+});
+
+// The tick's view, read in the claim's batch: app-wide scalars and uids, never a user's data.
+const viewStatements = (args: ClaimArgs): InStatement[] => [
+  {
+    sql: `SELECT
+            (SELECT COALESCE(SUM(rp_calls), 0) FROM sync_state WHERE quota_day = :day) AS rp_total,
+            (SELECT count(*) FROM users u WHERE ${ACTIVE_LEASABLE}) AS active_users,
+            (SELECT value FROM app_meta WHERE key = 'daily_at') AS daily_at,
+            (SELECT u.uid FROM users u JOIN sync_state s ON s.uid = u.uid
+               WHERE u.status = 'needs_reconnect' AND (:signups = 'invite' OR u.is_admin = 1)
+                 AND s.last_error = 'invalid_grant' AND u.status_at <= :confirm
+               ORDER BY u.status_at LIMIT 1) AS confirm_uid`,
+    args,
+  },
+  "SELECT key, value FROM app_meta WHERE key LIKE 'cooldown:%'",
+  { sql: "SELECT uid FROM sync_state WHERE last_ok_at >= :recent", args },
+];
+
+function toClaim(leased: ResultSet, [view, cooldowns, ok]: ResultSet[]): Claim {
+  const v = view.rows[0];
+  return {
+    users: leased.rows.map(toClaimed),
+    rpTotal: Number(v.rp_total),
+    activeUsers: Number(v.active_users),
+    dailyAt: numOrNull(v.daily_at),
+    cooldowns: Object.fromEntries(cooldowns.rows.map((r) => [String(r.key).slice("cooldown:".length), Number(r.value)])),
+    confirmUid: v.confirm_uid == null ? null : mintUid(String(v.confirm_uid)),
+    okRecent: ok.rows.map((r) => mintUid(String(r.uid))),
+  };
+}
+
 /** The claim (§7.2 step 2, security R2): one write batch, one round trip. Gives every active user
  *  without a queue row one, due now; leases every due `active` user (only the admin under
  *  `SIGNUPS=owner`) for 50 s; returns them joined to `db_name` and their token row; and reads the
  *  tick's view. A leased user is not due, so two ticks, or a tick and an open tab, never work on
  *  one user at once. */
 export async function claimDueUsers(o: { tick: string; now: number; signups: "owner" | "invite"; quotaDay?: string }): Promise<Claim> {
-  const args = {
-    tick: o.tick,
-    now: o.now,
-    signups: o.signups,
-    until: o.now + LEASE_MS,
-    due: o.now + DUE_EARLY_MS,
-    day: o.quotaDay ?? quotaDay(o.now),
-    confirm: o.now - CONFIRM_AFTER_MS,
-  };
-  const [, , leased, view, cooldowns] = await onTickClient((c) =>
+  const args = { ...claimArgs(o), due: o.now + DUE_EARLY_MS };
+  const rs = await onTickClient((c) =>
     c.batch(
       [
         {
@@ -526,40 +563,28 @@ export async function claimDueUsers(o: { tick: string; now: number; signups: "ow
                 WHERE s.lease_owner = :tick AND s.lease_until = :until`,
           args,
         },
-        {
-          sql: `SELECT
-                  (SELECT COALESCE(SUM(rp_calls), 0) FROM sync_state WHERE quota_day = :day) AS rp_total,
-                  (SELECT count(*) FROM users u WHERE ${ACTIVE_LEASABLE}) AS active_users,
-                  (SELECT value FROM app_meta WHERE key = 'daily_at') AS daily_at,
-                  (SELECT u.uid FROM users u JOIN sync_state s ON s.uid = u.uid
-                     WHERE u.status = 'needs_reconnect' AND (:signups = 'invite' OR u.is_admin = 1)
-                       AND s.last_error = 'invalid_grant' AND u.status_at <= :confirm
-                     ORDER BY u.status_at LIMIT 1) AS confirm_uid`,
-          args,
-        },
-        "SELECT key, value FROM app_meta WHERE key LIKE 'cooldown:%'",
+        ...viewStatements(args),
       ],
       "write",
     ),
   );
-  const v = view.rows[0];
-  return {
-    users: leased.rows.map(toClaimed),
-    rpTotal: Number(v.rp_total),
-    activeUsers: Number(v.active_users),
-    dailyAt: numOrNull(v.daily_at),
-    cooldowns: Object.fromEntries(cooldowns.rows.map((r) => [String(r.key).slice("cooldown:".length), Number(r.value)])),
-    confirmUid: v.confirm_uid == null ? null : mintUid(String(v.confirm_uid)),
-  };
+  return toClaim(rs[2], rs.slice(3));
 }
 
 /** One user's claim, for the open app (§7.6): the same lease, so an open tab and the cron never
- *  harvest one user at once. `dueOnly` for the tab's own timer, which makes a user due only when
- *  no tick has run in 5 minutes; a load or a return to the tab leases whether or not they are due.
- *  Null when the user is leased, paused, not due, or not `active`. */
-export async function claimUser(o: { uid: Uid | string; tick: string; now: number; dueOnly: boolean }): Promise<ClaimedUser | null> {
-  const args = { uid: o.uid, tick: o.tick, now: o.now, until: o.now + LEASE_MS, due: o.dueOnly ? o.now + DUE_EARLY_MS : null };
-  const live = `EXISTS (SELECT 1 FROM users u WHERE u.uid = :uid AND u.status = 'active')`;
+ *  harvest one user at once, and the same view. `dueOnly` for the tab's own timer, which makes a
+ *  user due only when no tick has run in 5 minutes; a load or a return to the tab leases whether
+ *  or not they are due. `users` is empty when the user is leased, paused, not due, or not
+ *  `active` (or not the admin under `SIGNUPS=owner`). */
+export async function claimUser(o: {
+  uid: Uid;
+  tick: string;
+  now: number;
+  dueOnly: boolean;
+  signups: "owner" | "invite";
+}): Promise<Claim> {
+  const args = { ...claimArgs(o), uid: o.uid, due: o.dueOnly ? o.now + DUE_EARLY_MS : null };
+  const live = `EXISTS (SELECT 1 FROM users u WHERE u.uid = :uid AND ${ACTIVE_LEASABLE})`;
   const rs = await (await appClient()).batch(
     [
       {
@@ -579,11 +604,11 @@ export async function claimUser(o: { uid: Uid | string; tick: string; now: numbe
               WHERE s.uid = :uid AND s.lease_owner = :tick AND s.lease_until = :until`,
         args,
       },
+      ...viewStatements(args),
     ],
     "write",
   );
-  const row = rs[2].rows[0];
-  return row ? toClaimed(row) : null;
+  return toClaim(rs[2], rs.slice(3));
 }
 
 /** What a step's release writes: the next due time and the outcome's counters. Null keeps the
