@@ -71,6 +71,15 @@ function chunk<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
+function savedOf(items: RawSavedTrackItem[]): Track[] {
+  const out: Track[] = [];
+  for (const i of items) {
+    const t = normTrack(i.track);
+    if (t) out.push({ ...t, addedAt: i.added_at });
+  }
+  return out;
+}
+
 export class Resources {
   readonly http: HttpClient;
   constructor(token: TokenSource, patient = false, source = "untagged", owner: string | null = null) {
@@ -122,12 +131,14 @@ export class Resources {
   async playlistTracks(
     id: string,
     onProgress?: (collected: number, total: number) => void,
+    opts: { paceMs?: number } = {},
   ): Promise<Track[]> {
     // Spotify migrated playlist tracks to the `/items` endpoint; the old
     // `/tracks` endpoint now returns 403.
     const items = await this.http.getAll<RawPlaylistTrackItem>(
       `/playlists/${id}/items?limit=100`,
       onProgress,
+      opts,
     );
     const out: Track[] = [];
     for (const i of items) {
@@ -199,17 +210,21 @@ export class Resources {
   // ---- library ----
   async savedTracks(
     onProgress?: (collected: number, total: number) => void,
+    opts: { paceMs?: number } = {},
   ): Promise<Track[]> {
     const items = await this.http.getAll<RawSavedTrackItem>(
       "/me/tracks?limit=50",
       onProgress,
+      opts,
     );
-    const out: Track[] = [];
-    for (const i of items) {
-      const t = normTrack(i.track);
-      if (t) out.push({ ...t, addedAt: i.added_at });
-    }
-    return out;
+    return savedOf(items);
+  }
+
+  /** One page of Liked Songs, newest first, from `cursor` (null: the first page): the library
+   *  scan reads from the top until it meets a stored like (multi-user PLAN §7.7). */
+  async savedTracksPage(cursor: string | null): Promise<{ tracks: Track[]; total: number; next: string | null }> {
+    const page = await this.http.page<RawSavedTrackItem>(cursor ?? "/me/tracks?limit=50");
+    return { tracks: savedOf(page.items), total: page.total ?? 0, next: page.next };
   }
 
   /** Cheap Liked-Songs change-probe: total count + the newest added_at, without

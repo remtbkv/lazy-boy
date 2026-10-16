@@ -493,13 +493,14 @@ describe("getAll", () => {
     expect((err as SpotifyError).status).toBe(502);
   });
 
-  it("a self-referencing next link terminates with a 508 after 500 pages", async () => {
-    // "Termination was delegated entirely to Spotify's `next` — a self-referencing link would
-    //  loop forever. 500 pages ~ 25k items" (client.ts:249-253)
+  it("a self-referencing next link terminates with a 508 as soon as a cursor repeats", async () => {
+    // "Termination was delegated entirely to Spotify's `next`, and a self-referencing link
+    //  would loop forever; a cursor already read ends it." (client.ts getAll; Phase 3 replaced
+    //  the 500-page cap, which failed every scan of a list over 25,000 items, PLAN §7.7)
     script(...times(600, page([1], "https://api.spotify.com/v1/x?offset=0", 10_000)));
     const err = await new HttpClient("tok").getAll("/x").catch((e) => e);
     expect((err as SpotifyError).status).toBe(508);
-    expect(fetchCalls).toHaveLength(500);
+    expect(fetchCalls).toHaveLength(2);
   });
 });
 
