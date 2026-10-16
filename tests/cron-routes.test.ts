@@ -39,8 +39,6 @@ vi.mock("@/lib/identity-read", () => ({
     },
   }),
 }));
-// /api/cron/sync's no-token exit (no user_tokens row), so its GET returns before touching Spotify.
-vi.mock("@/lib/app-db", () => ({ readTokenRow: async () => null }));
 vi.mock("@/lib/usage-check", () => ({ runUsageCheck: spy.chore("runUsageCheck") }));
 vi.mock("@/lib/budget/daily", () => ({ runBudgetChore: spy.chore("runBudgetChore") }));
 vi.mock("@/lib/auth", () => ({ getValidAccessTokenFor: async () => null, tokenForTick: async () => null }));

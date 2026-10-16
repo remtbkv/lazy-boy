@@ -1,6 +1,7 @@
 import "server-only";
 import { pruneApiLog, pruneClientMetrics, type UserStore } from "@/lib/db";
 import { runUsageCheck } from "@/lib/usage-check";
+import { runBudgetChore } from "@/lib/budget/daily";
 
 // The daily chores (QUEUE.md C2; docs/STORE_MIGRATION.md §6.7; multi-user PLAN §7.11), run by
 // /api/cron/daily (Vercel's cron, 09:00 UTC) and by a cron tick that finds `app_meta.daily_at`
@@ -40,6 +41,9 @@ const CHORES: Chore[] = [
       return status === 200 ? "ok" : `status ${status}: ${JSON.stringify(body).slice(0, 300)}`;
     },
   ],
+  // The budget (CAPACITY §6): the meter's and Turso's month-to-date, projected; the record
+  // /usage shows and the app-wide mode the hot paths and the health check read.
+  ["runBudgetChore", () => runBudgetChore()],
 ];
 
 /** Every chore once, each isolated; their outcomes by name. */
