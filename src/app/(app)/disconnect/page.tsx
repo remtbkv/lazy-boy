@@ -10,10 +10,14 @@ export const dynamic = "force-dynamic";
 // Disconnect (RULINGS Oct 15 1:17 PM; PLAN.md §5.4, §12.3): the export first, then the typed word
 // and a sign-in within the last ten minutes. Rem's own account is never deleted (decision 21 as
 // ruled), so his page offers Log out only.
+async function signedInRecently(): Promise<boolean> {
+  const authTime = (await auth())?.authTime;
+  return typeof authTime === "number" && Date.now() / 1000 - authTime <= FRESH_SIGN_IN_S;
+}
+
 export default async function DisconnectPage() {
   const gate = await requirePageUser();
-  const authTime = (await auth())?.authTime;
-  const fresh = typeof authTime === "number" && Date.now() / 1000 - authTime <= FRESH_SIGN_IN_S;
+  const fresh = await signedInRecently();
   return (
     <main className="mx-auto w-full max-w-lg space-y-6 p-6 text-sm">
       <h1 className="text-2xl font-semibold tracking-tight">Disconnect</h1>

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createClient, type Client } from "@libsql/client";
 import { beforeEach, describe, expect, it } from "vitest";
+import { APP_SCHEMA_VERSION } from "@/lib/app-schema";
 // @ts-expect-error -- a plain-Node script with no type declarations
 import { main } from "../scripts/phase2-app-db.mjs";
 
@@ -144,7 +145,8 @@ describe("step 1", () => {
     ]);
     expect((await c.execute("SELECT key, value FROM app_meta ORDER BY key")).rows).toEqual([
       { key: "min_reader", value: "1" },
-      { key: "schema_version", value: "1" },
+      // Every APP_SCHEMA step; Phase 4a's requests table is additive, so min_reader stays 1.
+      { key: "schema_version", value: String(APP_SCHEMA_VERSION) },
     ]);
     expect((await c.execute("SELECT count(*) AS n FROM user_tokens")).rows[0].n).toBe(0);
     expect(logs.join("\n")).not.toContain(SECRET);
