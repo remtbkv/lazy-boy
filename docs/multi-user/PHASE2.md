@@ -264,3 +264,52 @@ the admin bridge's notion of who the admin is (`OWNER_UID`).
 
 When Phase 2's turn comes, cut `mu/phase2-turn` and replay this branch's commits onto production's code
 (DISPATCH §3). Expect conflicts in `CLAUDE.md` (queued lanes edit it) and none in the new files.
+
+## 6. Replayed onto Phase 1's turn: `mu/p2-base` (lane 1945_lb_mu_31_stack, Oct 16, 2026)
+
+Lane 31 replayed this branch's 14 commits once onto `mu/phase1-turn` (`46538cd`, lane 12), so lanes 15 (Phase 2's
+wiring), 17 and 19 start from the same commits and the stitch meets one resolution of each conflict (DISPATCH §3).
+`git range-diff mu/phase1..a90104d 46538cd..mu/p2-base` shows all 14, plus one new commit. Patches that changed,
+and why:
+
+- `57b3de7`, `5c6d126`, `f7537a1` (`planted-bugs.test.ts`): Phase 1's turn planted the fourth bug (a URL template
+  that ignores the uid) in the same file; both sets of plants kept. `f7537a1` (`static.test.ts`): S3 now has both
+  halves, db.ts's from Phase 1's turn and app-db.ts's from here, and S7 exists, so the "waits for forUser" notes go.
+- `62a3cd5`: `isolation.ts` keeps Phase 1's lazy import of db.ts (the cycle through userCache) and the uid on the
+  telemetry row, and adds this branch's awaited `events` row. `token-store-owner.ts` and its test are deleted as
+  here, over Phase 1's turn's `forUser` version of them; nothing else called them.
+- `89d2fcb`: `identity.ts`'s `ownerUid` comment no longer names the auth.ts shims Phase 1's turn deleted.
+- `95a68e2`: db.ts no longer exports its meta token functions, so `token-move.ts` reads and writes the admin's
+  plaintext row through `forUser(uid)`, and `copyAdminTokens` / `rollbackAdminTokens` take a `Uid`. Its test's
+  admin is `OWNER_UID`, the one uid Phase 1's directory maps to Rem's database.
+- `a04b085`: `--verify` runs `verify-derived.mjs --user <OWNER_UID>`, which Phase 1's turn made required.
+- `e79e614`: T12's synthetic backup is written through the owner's `UserStore` (it now carries Phase 1's four
+  meta keys, the shape a post-Phase-1 backup has); its verify-derived run passes `--user`.
+- `fa9ac6b`: `CLAUDE.md`'s file map: Phase 1's turn's cron lines with this branch's token and app-database lines.
+- New, `mu p2-base: the authorization suite on Phase 2's identity read and token store`: lane 1947's suite came
+  with Phase 1's turn and had never run over this branch. Its harness now seeds the app database as §11.4 leaves
+  it (the admin row, his encrypted token, the copy marked done, the plaintext row kept); 65 tests were red without
+  it. `AUTHZ_TARGET=1` fails only the P4a and L07 pins, as on `mu/phase1-turn`.
+
+No resolution needed new behaviour. What this base changes in §4's list, for lane 15:
+
+- **Item 1 is where Phase 1's turn's code meets this branch, and logout is the one that breaks a Phase 1 promise
+  on this base.** `logout` (Phase 1's turn: `forUser(user.uid).clearSpotifyTokens()`) clears the plaintext row,
+  while the token of record is now `user_tokens`: after Log out capture continues and a copied cookie is still
+  allowed, against RULINGS Oct 15 1:33 PM and AUTHZ F3/F4's Phase 1 fix. The authorization map cannot see it: its
+  `staleLogout` principal deletes both rows itself, and the logout cell counts any change to Rem's database as
+  the clear. Wire logout onto the user's `user_tokens` row and have the logout cell read `tokenRow()`, which reads
+  both rows. The other two callers are unchanged in kind: `/api/cron/sync`'s "no token" (`store.getSpotifyTokens()`)
+  and `getCaptureHealth` with the health route read the plaintext row.
+- **Item 2**: Phase 1's turn has `forUserAt(uid, dbName)` (S2 pins that nothing in `src` imports it yet) and
+  `readIdentityRow` returns `dbName`; routing each request's store through it is the wiring.
+- **Item 8**: Phase 1's turn's health check reads isolation events from telemetry (`isolationEventsAfter`, marked
+  with `isolation_seen` in the admin's `meta`); `reportIsolation` still writes that row beside the `events` row,
+  so the check works on this base; moving it onto `events` is the wiring.
+- **Item 13 is done by Phase 1's turn** (every entry point on `require*User()`, T3's census empty; the owner
+  shims gone). What stays for lane 15: a test that Phase 2's unavailable read (`idUnavailable`) reaches each
+  `require*User()` form as the retryable answer.
+- The authorization harness's scripted `/v1/me` carries no `account_id`, as today's Spotify answer is recorded,
+  so Rem's sign-in there is refused (`NoAccountId`) while the callback's `rem` cell still reads allow (its oracle
+  counts the code exchange and the `/me` call made with his bearer). The sign-in itself is decision 31's question
+  and identity-read.test.ts's T9; the cell proves less than its rule says until the profile carries the field.
