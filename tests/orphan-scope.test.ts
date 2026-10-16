@@ -42,6 +42,7 @@ vi.mock("@libsql/client", async (orig) => {
 });
 
 import {
+  deletePlaylistFromDb,
   ORPHAN_PREDICATE,
   recordPlays,
   removeCachedPlaylistTrack,
@@ -369,12 +370,177 @@ describe("identity-first predicate", () => {
   });
 
   it("starts from the song: own row, identity index, then memberships by track", async () => {
-    await rawClient();
-    const c = await rawClient();
+    await rawClient(); // the schema
+    // Its own client, closed after: an EXPLAIN through the shared one left the file locked, and
+    // the next test's resetStore failed with SQLITE_BUSY (lane 1911).
+    const c = createClient({ url: process.env.TURSO_DATABASE_URL as string, intMode: "number" });
     const plan = await c.execute(`EXPLAIN QUERY PLAN SELECT (${ORPHAN_PREDICATE}) FROM plays p`);
+    c.close();
     const detail = plan.rows.map((r) => String(r.detail)).join("\n");
     expect(detail).toMatch(/SEARCH me USING (INDEX sqlite_autoindex_tracks_1|PRIMARY KEY) \(id=\?\)/);
     expect(detail).toMatch(/SEARCH tm USING INDEX idx_tracks_artist_name/);
     expect(detail).toMatch(/SEARCH plm USING INDEX idx_pltracks_track \(track_id=\?\)/);
+  });
+});
+
+// Lane 1911's attack list (the review brief): each write that can touch a verdict input, and the
+// two scope chunk boundaries. Every step is checked as scoped == full on every play.
+describe("review (lane 1911): the attack list", () => {
+  beforeEach(async () => {
+    await resetStore();
+    sent.length = 0;
+  });
+
+  async function seedMembers(rows: [playlistId: string, position: number, trackId: string][]) {
+    const c = await rawClient();
+    await c.batch(
+      rows.map(([pid, pos, tid]) => ({
+        sql: "INSERT INTO playlist_tracks (playlist_id, position, track_id) VALUES (?, ?, ?)",
+        args: [pid, pos, tid],
+      })),
+      "write",
+    );
+  }
+
+  it("a reorder-only rewrite purges nothing and issues no pass", async () => {
+    await storePlaylists([pl("A"), pl("B")], "me");
+    await storePlaylistTracks("A", [track("a1")]);
+    await storePlaylistTracks("B", [track("b1")]);
+    await seedTracks([["z9", "Song z9", "Artist z9"]]);
+    await seedPlays([
+      ["a1", "spotify:playlist:A", null],
+      ["z9", "spotify:playlist:B", null],
+    ]);
+    await ruleAll();
+    sent.length = 0;
+
+    await storePlaylists([pl("B"), pl("A")], "me");
+
+    expect(orphanPasses()).toEqual([]);
+    expect((await flags()).map((r) => r.stored)).toEqual([0, 1]);
+    await expectScopedEqualsFull();
+  });
+
+  it("an emptied playlist: its plays become unverifiable, so 0", async () => {
+    await storePlaylists([pl("P")], "me");
+    await storePlaylistTracks("P", [track("t1")]);
+    await seedTracks([["z9", "Song z9", "Artist z9"]]);
+    await seedPlays([
+      ["t1", "spotify:playlist:P", null],
+      ["z9", "spotify:playlist:P", null],
+    ]);
+    await ruleAll();
+    expect((await flags()).map((r) => r.stored)).toEqual([0, 1]);
+
+    await storePlaylistTracks("P", []);
+
+    expect((await flags()).map((r) => r.stored)).toEqual([0, 0]);
+    await expectScopedEqualsFull();
+  });
+
+  it("removed, then re-added under the same id, then re-cached: back to the first verdicts", async () => {
+    await storePlaylists([pl("A"), pl("B")], "me");
+    await storePlaylistTracks("A", [track("a1")]);
+    await storePlaylistTracks("B", [track("b1")]);
+    await seedTracks([["z9", "Song z9", "Artist z9"]]);
+    await seedPlays([
+      ["b1", "spotify:playlist:B", null],
+      ["z9", "spotify:playlist:B", null],
+      ["z9", "spotify:playlist:A", null],
+    ]);
+    await ruleAll();
+    expect((await flags()).map((r) => r.stored)).toEqual([0, 1, 1]);
+
+    await storePlaylists([pl("A")], "me"); // unfollowed: B's rows purged
+    expect((await flags()).map((r) => r.stored)).toEqual([0, 0, 1]);
+    await expectScopedEqualsFull();
+
+    sent.length = 0;
+    await storePlaylists([pl("A"), pl("B")], "me"); // followed again: nothing to purge
+    expect(orphanPasses()).toEqual([]);
+    await expectScopedEqualsFull();
+
+    await storePlaylistTracks("B", [track("b1")]); // its tracks fetched again
+    expect((await flags()).map((r) => r.stored)).toEqual([0, 1, 1]);
+    await expectScopedEqualsFull();
+  });
+
+  it("a play naming a playlist never cached stays 0 through other writes, and is ruled once cached", async () => {
+    await storePlaylists([pl("A"), pl("U")], "me");
+    await storePlaylistTracks("A", [track("a1")]);
+    await seedTracks([["z9", "Song z9", "Artist z9"]]);
+    await seedPlays([["z9", "spotify:playlist:U", null]]);
+    await ruleAll();
+    await storePlaylists([pl("A")], "me"); // U leaves the list; it had no rows to purge
+    await storePlaylistTracks("A", [track("a1"), track("a2")]);
+    expect((await flags()).map((r) => r.stored)).toEqual([0]);
+    await expectScopedEqualsFull();
+
+    await storePlaylistTracks("U", [track("a1")]); // opened by URL
+    expect((await flags()).map((r) => r.stored)).toEqual([1]);
+    await expectScopedEqualsFull();
+  });
+
+  it("deletePlaylistFromDb re-rules that playlist's plays", async () => {
+    await storePlaylists([pl("D"), pl("K")], "me");
+    await storePlaylistTracks("D", [track("d1")]);
+    await storePlaylistTracks("K", [track("k1")]);
+    await seedTracks([["z9", "Song z9", "Artist z9"]]);
+    await seedPlays([
+      ["z9", "spotify:playlist:D", null],
+      ["z9", "spotify:playlist:K", null],
+    ]);
+    await ruleAll();
+    expect((await flags()).map((r) => r.stored)).toEqual([1, 1]);
+
+    await deletePlaylistFromDb("D");
+
+    expect((await flags()).map((r) => r.stored)).toEqual([0, 1]);
+    await expectScopedEqualsFull();
+  });
+
+  it("a purge wider than one scope chunk (105 playlists) re-rules every one of them", async () => {
+    const ids = Array.from({ length: 105 }, (_, i) => `P${String(i).padStart(3, "0")}`);
+    await storePlaylists(ids.map((id) => pl(id)), "me");
+    await seedTracks([
+      ...ids.map((id): [string, string, string] => [`m${id}`, `Song m${id}`, "Art"]),
+      ["z9", "Song z9", "Artist z9"],
+    ]);
+    await seedMembers(ids.map((id): [string, number, string] => [id, 0, `m${id}`]));
+    await seedPlays(ids.map((id): [string, string, null] => ["z9", `spotify:playlist:${id}`, null]));
+    await ruleAll();
+    expect((await flags()).every((r) => r.stored === 1)).toBe(true);
+    sent.length = 0;
+
+    await storePlaylists([], "me"); // unfollow everything
+
+    expect(orphanPasses()).toHaveLength(2);
+    expect((await flags()).every((r) => r.stored === 0)).toBe(true);
+    await expectScopedEqualsFull();
+  });
+
+  it("renames wider than one identity chunk (51 tracks, 102 identities) re-rule both halves of each", async () => {
+    const n = 51;
+    const ix = Array.from({ length: n }, (_, i) => i);
+    await seedTracks([
+      ...ix.map((i): [string, string, string] => [`r${i}`, `Old ${i}`, "Art"]),
+      ...ix.map((i): [string, string, string] => [`z${i}`, `old ${i}`, "ART"]), // r's old identity
+      ...ix.map((i): [string, string, string] => [`y${i}`, `New ${i}`, "Art"]), // r's new identity
+    ]);
+    await seedMembers(ix.map((i): [string, number, string] => ["Q", i, `r${i}`]));
+    const Q = "spotify:playlist:Q";
+    await seedPlays([
+      ...ix.map((i): [string, string, null] => [`z${i}`, Q, null]),
+      ...ix.map((i): [string, string, null] => [`y${i}`, Q, null]),
+    ]);
+    await ruleAll();
+    expect((await flags()).map((r) => r.stored)).toEqual([...ix.map(() => 0), ...ix.map(() => 1)]);
+    sent.length = 0;
+
+    await storeSavedTracks(ix.map((i) => track(`r${i}`, { title: `New ${i}`, artist: "Art" })));
+
+    expect(orphanPasses()).toHaveLength(2);
+    expect((await flags()).map((r) => r.stored)).toEqual([...ix.map(() => 1), ...ix.map(() => 0)]);
+    await expectScopedEqualsFull();
   });
 });
