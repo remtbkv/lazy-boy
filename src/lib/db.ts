@@ -452,10 +452,10 @@ function guardedClient(uid: Uid, dbName: string): StoreClient {
     let results: ResultSet[];
     try {
       results = await c.batch([OPEN_READ, ...stmts], "read");
-    } catch (e) {
-      // The batch failed as a whole: no meta table yet, or the read itself failed. The open
-      // on its own decides which, and the read then runs (and fails, if it was the read).
-      if (!isNoMetaTable(e)) throw e;
+    } catch {
+      // The batch failed as a whole: no meta table yet, a read of a column a pending schema
+      // step adds, or the read itself. The open on its own settles the database (or throws),
+      // and the read then runs again (and fails again, if the fault was the read's).
       await openAlone(uid, dbName, c);
       return c.batch(stmts, "read");
     }

@@ -139,6 +139,16 @@ describe("schema states (PLAN §4.5)", () => {
     expect((await keys("behind")).schema_version).toBe(String(USER_SCHEMA_VERSION));
   });
 
+  it("a first read of a column a pending step adds: the step is applied and the read answers", async () => {
+    copyAs("rt-src", "behind-col");
+    await setKey("behind-col", "schema_version", "0");
+    const c = createClient({ url: `file:${fileOf("behind-col")}` });
+    await c.execute("ALTER TABLE contexts DROP COLUMN checked_at");
+    c.close();
+    await expect(forUserAt(A, "behind-col").unresolvedContextUris()).resolves.toEqual(expect.any(Array));
+    expect((await keys("behind-col")).schema_version).toBe(String(USER_SCHEMA_VERSION));
+  });
+
   it("a local file with owner_uid but no store_epoch gets one, for its owner only", async () => {
     copyAs("rt-src", "noepoch");
     await setKey("noepoch", "store_epoch", null);
