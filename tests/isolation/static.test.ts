@@ -396,6 +396,41 @@ describe("S7: no user path awaits the telemetry store", () => {
   });
 });
 
+describe("the planted-bug self-test keeps every plant (PLAN.md §6.4)", () => {
+  // planted-bugs.test.ts proves each check fails over a broken implementation; a plant deleted
+  // there would pass unseen, so the four PLAN §6.4 names are listed here (lane 13's review).
+  // Each must keep a case that expects the check to fail (`.rejects`) and one over the real code.
+  const PLANTS = [
+    "planted: an unstable_cache keyed without the user",
+    "planted: the cache stub reverted to a pass-through",
+    "planted: one in-flight refresh promise for every user",
+    "planted: a URL template that ignores the uid",
+  ];
+
+  it("each plant is there, with a failing case and a passing one", () => {
+    const rel = "tests/isolation/planted-bugs.test.ts";
+    const text = readFileSync(path.join(ROOT, rel), "utf8");
+    const sf = ts.createSourceFile(rel, text, ts.ScriptTarget.Latest, true);
+    const found = new Map<string, { cases: number; rejects: boolean }>();
+    visit(sf, (n) => {
+      if (!ts.isCallExpression(n) || n.expression.getText(sf) !== "describe") return;
+      const title = n.arguments[0];
+      if (!title || !ts.isStringLiteral(title) || !title.text.startsWith("planted:")) return;
+      let cases = 0;
+      visit(n.arguments[1], (m) => {
+        if (ts.isCallExpression(m) && m.expression.getText(sf) === "it") cases++;
+      });
+      found.set(title.text, { cases, rejects: /\.rejects\./.test(n.arguments[1].getText(sf)) });
+    });
+    for (const p of PLANTS) {
+      const hit = [...found.entries()].find(([t]) => t.startsWith(p));
+      expect(hit, `${p} is gone from ${rel}`).toBeDefined();
+      expect(hit![1].cases, `${p}: a failing case and a passing one`).toBeGreaterThanOrEqual(2);
+      expect(hit![1].rejects, `${p}: no case expects the check to fail`).toBe(true);
+    }
+  });
+});
+
 describe("S8: no nested async server component reads user data or calls Spotify", () => {
   // A component nested in a page renders after, and apart from, the page body's gate; T3 can
   // only reach what the page body does. In each page.tsx, an async function component other
