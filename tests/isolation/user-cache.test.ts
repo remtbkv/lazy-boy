@@ -72,6 +72,18 @@ describe("userCache", () => {
     expect(() => userCache("dup", async () => 2, ["x"], { revalidate: 60 })).toThrow(/name/);
   });
 
+  it("under next dev a module reload may register its names again", () => {
+    const env = process.env as Record<string, string | undefined>;
+    const was = env.NODE_ENV;
+    env.NODE_ENV = "development";
+    try {
+      userCache("reloaded", async () => 1, [], { revalidate: 60 });
+      expect(() => userCache("reloaded", async () => 1, [], { revalidate: 60 })).not.toThrow();
+    } finally {
+      env.NODE_ENV = was;
+    }
+  });
+
   it("a wrapper's callback captured in a closure is still told apart by its name", async () => {
     const one = userCache("one", async (uid) => `one:${data[uid]}`, [], { revalidate: 60 });
     const two = userCache("two", async (uid) => `two:${data[uid]}`, [], { revalidate: 60 });

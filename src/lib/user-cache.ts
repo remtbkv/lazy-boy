@@ -29,7 +29,11 @@ export function userCache<A extends unknown[], R>(
   keyParts: string[],
   opts: { revalidate: number },
 ): (uid: Uid, storeEpoch: string, ...args: A) => Promise<R> {
-  if (names.has(name)) throw new Error(`userCache name "${name}" is already taken`);
+  // Not under `next dev`: an edit re-evaluates db.ts, whose wrappers register again, while this
+  // module (and its set of names) stays loaded.
+  if (names.has(name) && process.env.NODE_ENV !== "development") {
+    throw new Error(`userCache name "${name}" is already taken`);
+  }
   names.add(name);
   return async (uid, storeEpoch, ...args) => {
     const cached = unstable_cache(
