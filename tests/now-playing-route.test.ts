@@ -115,6 +115,17 @@ describe("/api/now-playing", () => {
     expect(res2.headers.get("Retry-After")).toBe("1"); // no cooldown recorded: the 1 s floor
   });
 
+  // A tab rendered for user A keeps polling after a sign-in in another tab hands the browser's
+  // cookie to user B: the reply must say whose it is, or that tab shows, caches and relays B's
+  // player under A's names (multi-user PLAN §6.2 layer 6, lane 13's review).
+  it("names its user (`u`) on every signed-in answer, and no one on a signed-out one", async () => {
+    expect((await (await GET()).json()).u).toBe("aaaaaaaaaaaa");
+    state.currentlyPlaying = async () => PLAYING;
+    expect((await (await GET()).json()).u).toBe("aaaaaaaaaaaa");
+    state.signedIn = false;
+    expect((await (await GET()).json()).u).toBeUndefined();
+  });
+
   it("answers non-200 when the store blips while resolving the context name", async () => {
     state.currentlyPlaying = async () => PLAYING;
     state.getContextName = async () => {

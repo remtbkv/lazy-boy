@@ -13,8 +13,12 @@ import { forUser } from "@/lib/db";
 // already makes — no extra endpoint, no extra request — and lets a tab left open across a
 // deploy notice its bundle is stale and reload itself (src/lib/build-skew.ts,
 // docs/GOTCHAS.md "Deployment skew + stale tabs").
-const reply = (playing: unknown) =>
-  Response.json({ playing, build: process.env.NEXT_PUBLIC_BUILD_ID });
+// A signed-in answer names its user (`u`): every (app) page polls this, so it is how a tab
+// rendered for one user learns that the browser's cookie now names another (a sign-in in
+// another tab) instead of showing, caching and relaying that user's player under the first
+// one's names (multi-user PLAN §6.2 layer 6; user-storage.ts namesAnotherUser).
+const reply = (playing: unknown, u?: string) =>
+  Response.json({ playing, build: process.env.NEXT_PUBLIC_BUILD_ID, ...(u ? { u } : {}) });
 
 export async function GET() {
   const user = await requireUser();
@@ -29,14 +33,14 @@ export async function GET() {
   // Deliberately 200 {playing:null}, not 401: the poll runs every 6s, and a just-expired
   // session would otherwise error-spam the console until re-login. Nothing leaks — the
   // signed-out answer is indistinguishable from "nothing playing".
-  if (user.kind !== "allowed" || !accessToken) {
-    return reply(null);
-  }
-  const store = forUser(user.gate.uid);
+  if (user.kind !== "allowed") return reply(null);
+  const uid = user.gate.uid;
+  if (!accessToken) return reply(null, uid);
+  const store = forUser(uid);
   try {
-    const sp = spotifyClient(user.gate.uid, accessToken, false, "now-playing");
+    const sp = spotifyClient(uid, accessToken, false, "now-playing");
     const playing = await sp.currentlyPlaying();
-    if (!playing) return reply(null);
+    if (!playing) return reply(null, uid);
 
     let context: { name: string; type: string } | null = null;
     if (playing.context) {
@@ -65,7 +69,7 @@ export async function GET() {
 
     // Spread first, then overwrite the raw {type,uri} context with the resolved
     // {name,type} one (later keys win).
-    return reply({ ...playing, context });
+    return reply({ ...playing, context }, uid);
   } catch (e) {
     // Rate-limited: say so, with how long to wait, so the poller backs off for that long
     // instead of asking again on its steady cadence (src/lib/now-playing-poll.ts).

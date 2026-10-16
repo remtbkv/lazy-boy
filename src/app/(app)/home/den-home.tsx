@@ -178,7 +178,7 @@ const fetchPayload = <T,>(
 ): Promise<T | null> =>
   fetch(url)
     .then((r) => {
-      clearIfSignedOut(r);
+      clearIfSignedOut(r, uid);
       return r.ok ? r.text() : Promise.reject(new Error(String(r.status)));
     })
     .then((text) => {

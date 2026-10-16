@@ -7,6 +7,8 @@ import {
   clearThisBrowser,
   clearUserStorage,
   isSignedOutResponse,
+  leaveForAnotherUser,
+  namesAnotherUser,
   userStorageName,
   USER_DATA_NAMES,
 } from "@/lib/user-storage";
@@ -65,6 +67,35 @@ describe("user storage", () => {
     expect(bodyIsFor({ rows: [] }, A)).toBe(false);
     expect(bodyIsFor(null, A)).toBe(false);
   });
+
+  // A tab rendered for A whose cookie now names B (B signed in in another tab): only a body that
+  // names someone, and someone else, says so; a signed-out body names no one.
+  it("namesAnotherUser: true only for a body naming a different user", () => {
+    expect(namesAnotherUser({ u: B, playing: null }, A)).toBe(true);
+    expect(namesAnotherUser({ u: A, playing: null }, A)).toBe(false);
+    expect(namesAnotherUser({ playing: null }, A)).toBe(false);
+    expect(namesAnotherUser(null, A)).toBe(false);
+  });
+});
+
+describe("a tab that finds the browser signed in as someone else", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("clears every user's storage, its own included, and reloads", () => {
+    const local = fakeStorage({ [userStorageName(A, "lb-nowplaying")]: "B's player", "lb-perf": "1" });
+    const session = fakeStorage({ [userStorageName(A, "lb-days")]: "B's days" });
+    const reload = vi.fn();
+    vi.stubGlobal("localStorage", local);
+    vi.stubGlobal("sessionStorage", session);
+    const idb = fakeIndexedDB([userStorageName(A, "lb-search")], false);
+    vi.stubGlobal("indexedDB", idb);
+    vi.stubGlobal("location", { reload });
+    leaveForAnotherUser(A);
+    expect(local.keys()).toEqual(["lb-perf"]);
+    expect(session.keys()).toEqual([]);
+    expect([...idb.live]).toEqual([]);
+    expect(reload).toHaveBeenCalledOnce();
+  });
 });
 
 // The browser's IndexedDB databases, as the sign-out form and the signed-out 401 see them.
@@ -89,7 +120,7 @@ describe("the search payloads' IndexedDB copy (lane 1905's, per user since the s
     vi.stubGlobal("indexedDB", idb);
     vi.stubGlobal("localStorage", fakeStorage({}));
     vi.stubGlobal("sessionStorage", fakeStorage({}));
-    clearThisBrowser();
+    clearThisBrowser(A);
     await settle();
     expect([...idb.live]).toEqual(["unrelated"]);
   });
@@ -99,21 +130,27 @@ describe("the search payloads' IndexedDB copy (lane 1905's, per user since the s
     vi.stubGlobal("indexedDB", idb);
     vi.stubGlobal("localStorage", fakeStorage({}));
     vi.stubGlobal("sessionStorage", fakeStorage({}));
-    clearIfSignedOut({ status: 503, headers: new Headers({ "x-lb-signed-out": "1" }) });
+    clearIfSignedOut({ status: 503, headers: new Headers({ "x-lb-signed-out": "1" }) }, A);
     await settle();
     expect([...idb.live]).toEqual([userStorageName(A, "lb-search")]);
-    clearIfSignedOut({ status: 401, headers: new Headers({ "x-lb-signed-out": "1" }) });
+    clearIfSignedOut({ status: 401, headers: new Headers({ "x-lb-signed-out": "1" }) }, A);
     await settle();
     expect([...idb.live]).toEqual([]);
   });
 
-  it("a browser that cannot list its databases still loses the bare one", async () => {
-    const idb = fakeIndexedDB(["lb-search", userStorageName(A, "lb-search")], false);
+  // Firefox before 126 has no indexedDB.databases(). The bare name and the page user's own name
+  // are known without a list, so both go; another user's copy cannot be found there (lane 13:
+  // the signed-out 401 used to leave the page user's own copy on such a browser).
+  it("a browser that cannot list its databases still loses the bare one and the page user's", async () => {
+    const idb = fakeIndexedDB(
+      ["lb-search", userStorageName(A, "lb-search"), userStorageName(B, "lb-search")],
+      false,
+    );
     vi.stubGlobal("indexedDB", idb);
     vi.stubGlobal("localStorage", fakeStorage({}));
     vi.stubGlobal("sessionStorage", fakeStorage({}));
-    clearThisBrowser();
+    clearIfSignedOut({ status: 401, headers: new Headers({ "x-lb-signed-out": "1" }) }, A);
     await settle();
-    expect([...idb.live]).toEqual([userStorageName(A, "lb-search")]);
+    expect([...idb.live]).toEqual([userStorageName(B, "lb-search")]);
   });
 });

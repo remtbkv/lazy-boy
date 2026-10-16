@@ -343,7 +343,7 @@ function AccountMenu({ name, image }: { name: string; image: string | null }) {
           <form
             action={logout}
             onSubmit={() => {
-              clearThisBrowser();
+              clearThisBrowser(uid);
               void clearStored(idbKV(uid));
             }}
           >

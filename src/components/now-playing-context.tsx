@@ -24,7 +24,7 @@ import {
   STEADY_MS,
   type PollOutcome,
 } from "@/lib/now-playing-poll";
-import { userStorageName } from "@/lib/user-storage";
+import { leaveForAnotherUser, namesAnotherUser, userStorageName } from "@/lib/user-storage";
 import { useUid } from "@/components/user-context";
 
 export type NowPlayingTrack = {
@@ -285,7 +285,13 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
           ? { kind: "error", retryAfterMs: retryAfterS * 1000 }
           : { kind: "error" };
       }
-      const data = (await res.json()) as { playing: Playing; build?: string };
+      const data = (await res.json()) as { playing: Playing; build?: string; u?: string };
+      // The browser's cookie names someone else now (a sign-in in another tab): this answer is
+      // theirs, so it is neither shown, cached nor relayed, and the page reloads as theirs.
+      if (namesAnotherUser(data, uid)) {
+        leaveForAnotherUser(uid);
+        return { kind: "error" };
+      }
       // The answer is here. Marked before the ordering/suppression guards below for the same
       // reason checkSkew is: those decide whether to DISPLAY this reply, not whether it landed.
       markNowPlayingReady();
@@ -310,7 +316,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       /* transient — keep the last known state rather than flicker */
       return { kind: "error" };
     }
-  }, [broadcast, checkSkew, probeCurrentBuild]);
+  }, [broadcast, checkSkew, probeCurrentBuild, uid]);
 
   useEffect(() => {
     pollOnceRef.current = pollOnce;

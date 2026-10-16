@@ -55,7 +55,7 @@ export function CleanProgressWatcher() {
       }
       const res = await fetch(`/api/tasks/${a.taskId}`).catch(() => null);
       if (!res) return; // transient blip — keep polling
-      clearIfSignedOut(res);
+      clearIfSignedOut(res, uid);
       if (res.status === 404) {
         // The task registry is per-instance on serverless: a poll routed to another
         // instance 404s while the reconcile is running fine, and clearing on the first

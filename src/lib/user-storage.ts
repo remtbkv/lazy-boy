@@ -63,27 +63,36 @@ export function bodyIsFor(body: unknown, uid: string): boolean {
   return typeof body === "object" && body !== null && (body as { u?: unknown }).u === uid;
 }
 
+/** A body that names a user, and not the page's: the browser's cookie now belongs to someone
+ *  else (a sign-in in another tab), so this page's uid, and every storage name built from it,
+ *  is stale. A signed-out body names no one and is not this. */
+export function namesAnotherUser(body: unknown, uid: string): boolean {
+  const u = typeof body === "object" && body !== null ? (body as { u?: unknown }).u : undefined;
+  return typeof u === "string" && u !== uid;
+}
+
 type Databases = Pick<IDBFactory, "deleteDatabase"> & { databases?: () => Promise<{ name?: string }[]> };
 
 /** Delete every user's IndexedDB database on this device: each name that is user data, per-user
- *  or the bare name written before Phase 1. The bare one is deleted by name; the per-user ones are
- *  found with indexedDB.databases(), which a browser without it (Firefox before 126) cannot list,
- *  so there only the sign-out form's own clear (search-cache.ts clearStored) empties the page
- *  user's copy. A delete waits for open connections to close; nothing here waits for it. */
-export async function clearUserDatabases(idb: Databases): Promise<string[]> {
+ *  or the bare name written before Phase 1. The bare one and the page user's are deleted by name;
+ *  other users' are found with indexedDB.databases(), which a browser without it (Firefox before
+ *  126) cannot list, so there theirs stay until their own sign-out. A delete waits for open
+ *  connections to close; nothing here waits for it. */
+export async function clearUserDatabases(idb: Databases, pageUid: string): Promise<string[]> {
   const listed = idb.databases ? (await idb.databases()).map((d) => d.name ?? "") : [];
-  const names = [...new Set(["lb-search", ...listed.filter(isUserDataKey)])];
+  const names = [...new Set(["lb-search", userStorageName(pageUid, "lb-search"), ...listed.filter(isUserDataKey)])];
   for (const n of names) idb.deleteDatabase(n);
   return names;
 }
 
 /** This browser's stores: clearUserStorage over localStorage and sessionStorage, and every
  *  user's IndexedDB database (clearUserDatabases, off the caller's path). Called by the sign-out
- *  form before it submits, and by the fetchers on the signed-out 401. Storage that is
- *  unavailable (private mode, a server render) clears nothing. */
-export function clearThisBrowser(): string[] {
+ *  form before it submits, by the fetchers on the signed-out 401, and by a tab that finds the
+ *  browser signed in as someone else. Storage that is unavailable (private mode, a server render)
+ *  clears nothing. */
+export function clearThisBrowser(pageUid: string): string[] {
   try {
-    if (typeof indexedDB !== "undefined") void clearUserDatabases(indexedDB).catch(() => {});
+    if (typeof indexedDB !== "undefined") void clearUserDatabases(indexedDB, pageUid).catch(() => {});
   } catch {
     /* IndexedDB unreachable: nothing stored there to clear */
   }
@@ -96,6 +105,18 @@ export function clearThisBrowser(): string[] {
 
 /** For the app's own fetchers: clear this browser's user data if the response says the
  *  session is gone. Anything else (a 5xx, a 503, a plain 401) clears nothing. */
-export function clearIfSignedOut(res: { status: number; headers: { get(name: string): string | null } }): void {
-  if (isSignedOutResponse(res)) clearThisBrowser();
+export function clearIfSignedOut(
+  res: { status: number; headers: { get(name: string): string | null } },
+  pageUid: string,
+): void {
+  if (isSignedOutResponse(res)) clearThisBrowser(pageUid);
+}
+
+/** For a tab whose server answers name another user (namesAnotherUser): the previous user is
+ *  signed out on this browser, so their data goes as at a sign-out, and the page reloads so the
+ *  (app) layout renders for whoever the cookie names now. Until then the tab would show, cache
+ *  and relay the new user's answers under the old user's names (multi-user PLAN §6.2 layer 6). */
+export function leaveForAnotherUser(pageUid: string): void {
+  clearThisBrowser(pageUid);
+  location.reload();
 }
