@@ -262,6 +262,12 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   path: the telemetry store is the Zenbook behind the Funnel, which stalls, and its fetch gives
   up after one 4 s attempt so a stall costs a log row. `tests/telemetry-down.test.ts` holds
   the sync and the Home payload read to their normal time with that store hanging or refusing.
+  Since 2026-10-16 core is Turso `lazyboy` and telemetry the Zenbook. **A `void` telemetry call
+  can be lost when the function returns first**: after the cutover, `api_log` rows from the
+  2-min cron ticks fell from 12-17 per 10 min to 0 while every tick answered 200 (lane 1903).
+  On one store the insert rode the connection the awaited core writes were using; on its own
+  client the response goes out before the insert is sent and Vercel suspends the function. Wrap
+  such calls in `after()` (as `/api/metrics` does) rather than awaiting them on the user path.
   Row-scanning reads used to be served by a libSQL embedded replica behind a
   per-request freshness gate; that machinery was switched off in production on 2026-08-03 and
   deleted on 2026-08-11 (see "Retired: the embedded replica" below). What keeps reads cheap now
@@ -368,9 +374,10 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   a table that grows with history; bound it to the batch in hand (`unseenContexts()`: a new
   context can only arrive via the incoming plays, so check those ≤50 URIs; the full scan
   survives as a once-a-day pass for the 30-day negative-cache recheck); (3) the guard is
-  `/api/cron/usage-check` (run daily by `/api/cron/daily`), now dormant against a
-  database production no longer uses — the real counter, checked mechanically, not a convention
-  about benchmarks.
+  `/api/cron/usage-check` (run daily by `/api/cron/daily`), live again since the 2026-10-16 move
+  to Turso `lazyboy` — the real counter, checked mechanically, not a convention about
+  benchmarks. Its per-day reconciliation records `_platform_error` every day until its parser
+  matches the usage endpoint's shape (READ_QUOTA.md, "The reconciliation").
 - **If a query is slow, count the rows it SCANS, not the rows it returns.** Both bad ones
   returned little. `searchHistory` is `LIKE '%q%'`, unindexable by construction, so it scans
   `tracks` — ~6 ms against a local SQLite copy but 1,904 ms median (1,383–3,133, n=7,
@@ -536,7 +543,18 @@ it on, `rm` off, no restart (`FENCE_FILE` overrides the path). A 503 from the st
 a store error in something that should not talk to the Zenbook any more, is this fence working:
 repoint the caller, don't remove the file. Adding a table: put it in `CORE_TABLES` there if it
 is core data, and `meter-proxy.test.mjs` (in `npm test`) re-checks every SQL statement in
-`db.ts` against the classifier.
+`db.ts` against the classifier. **The fence is ON** since 2026-10-16 07:50 UTC (lane 1903).
+
+## Backups hold no Spotify token
+
+`~/lazyboy-backup/backup.py` on the Zenbook backs up Turso `lazyboy` (its `/dump`, with a
+read-only token), the Zenbook's sqld file and the backstop recorder every night at 04:40 New
+York time (quota-forensic/BRIDGE.md, "The nightly snapshot"). Every copy has `meta`'s
+`spotify_tokens%` and `lock:%` rows deleted before it is compressed. A store restored from a
+backup therefore has no token: the cron answers 503 "no token" and capture stops until Rem signs
+in, and the restored `meta` count is short by those rows. That is the design, not a broken
+restore. `turso db create --from-file` refuses a SQLite file that is not in WAL mode; set
+`journal_mode=WAL` and checkpoint the restored copy first.
 
 ## Never let the store compress with brotli (the 26-second query)
 
@@ -646,6 +664,11 @@ And a relayed MISMATCH, poll or probe, never counts on the sender's word: the se
 the stale tab (its pinned poll and its recent pre-deploy probe both report its old id), so it
 makes the receiving tab probe for itself, and only once its own probe has seen a mismatch do
 relayed mismatches feed the streak (`relayedReading`).
+
+Note (2026-10-16, multi-user PLAN §10.2): Skew Protection is a Pro feature and the team is on
+Hobby; production showed no pinning at the store cutover. On Hobby an old tab's requests reach
+the newest deployment, and an old deployment answers only on its own protected URL. The
+pinned-tab handling above is kept for a plan that pins.
 
 The three brakes each cover a different failure, so don't tighten them casually: a mismatch
 must hold **continuously for 3 min**, because a deploy mid-propagation serves old and new

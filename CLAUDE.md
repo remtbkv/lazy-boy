@@ -67,8 +67,9 @@ src/lib/spotify/         client.ts (fetch+pagination+429/403), resources.ts, dom
 src/lib/tasks/           in-memory task registry (clean-playlist progress); swappable iface
 src/lib/db.ts            libSQL store (listen-history + tokens); async; file: fallback in dev.
                          TWO clients: getClient() for the app's data (every read, every write,
-                         all of `meta`), getTelemetryClient() for api_log, client_metrics and
-                         usage_ledger, never awaited on a user path. Unset
+                         all of `meta`; Turso `lazyboy` since 2026-10-16), getTelemetryClient()
+                         for api_log, client_metrics and usage_ledger (sqld on the Zenbook over
+                         the Funnel), never awaited on a user path. Unset
                          TELEMETRY_DATABASE_URL = one store. docs/STORE_MIGRATION.md, GOTCHAS.md
 src/lib/store-fetch.ts   the fetch every store query rides: pins accept-encoding to gzip
                          (brotli on the Zenbook's CPU cost the history payload 26s) and owns
@@ -90,13 +91,15 @@ src/components/          app components + shared: album-thumb, playlist-thumb, s
                          (the playlists grid is app/(app)/playlists/playlists-grid.tsx; the
                          bottom search pill is app/(app)/search-island.tsx)
 docs/                    ARCHITECTURE, FEATURES, ROADMAP, CONVENTIONS, GOTCHAS, SECURITY,
-                         READ_QUOTA (the read-cost ledger + the retired Turso quota's forensics),
-                         STORE_MIGRATION (the planned move of the app's data to Turso: the
-                         contract the 19xx lanes work from)
+                         READ_QUOTA (the read-cost ledger, the Turso quota guard + August's forensics),
+                         STORE_MIGRATION (the app's data moved to Turso on 2026-10-16: the
+                         contract the 19xx lanes work from, and their outcomes in section 12)
 ops/zenbook-meter/       the store meter deployed on the Zenbook (proxy on 8090 in front of
-                         sqld on 8092; exact per-statement rows read/written) + the core fence
-                         (503 for core statements while ~/lazyboy-sqld/FENCE_CORE exists).
-                         READ_QUOTA.md, GOTCHAS.md
+                         sqld on 8092; exact per-statement rows read/written; telemetry only
+                         since the move) + the core fence (503 for core statements while
+                         ~/lazyboy-sqld/FENCE_CORE exists; on since 2026-10-16).
+                         READ_QUOTA.md, GOTCHAS.md. Nightly backups of both stores:
+                         ~/lazyboy-backup/backup.py on the Zenbook, quota-forensic/BRIDGE.md
 scripts/backfill-from-backstop.mjs  replay the Zenbook backstop recorder's captured plays
                          into the primary (the loss-repair path; recorder lives on the
                          Zenbook at ~/lazyboy-recorder, lazyboy-recorder.timer, every 15 min)
