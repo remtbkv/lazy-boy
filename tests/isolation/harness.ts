@@ -3,6 +3,10 @@
 // call carried, and the check functions the planted-bug self-test runs against broken
 // implementations (tests/isolation/planted-bugs.test.ts).
 import { randomBytes } from "node:crypto";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { createClient, type Client } from "@libsql/client";
 import { expect, vi } from "vitest";
 import type { SpotifyTokens } from "@/lib/db";
 import { mintUid, type Uid } from "@/lib/identity";
@@ -73,6 +77,42 @@ export function scriptedSpotify(opts: { dead?: string[]; delayMs?: number } = {}
     return Response.json({ bearer });
   };
   return { calls, fetch: vi.fn(fetchImpl) };
+}
+
+/** Point app-db.ts at a fresh app database file (PLAN.md §6.4: the harness's `app.db`), created
+ *  at first use by the production open path, and hand back a raw client on the same file for
+ *  seeding and for reading what the code wrote. */
+export function freshAppDb(): { url: string; raw: () => Client; close: () => void } {
+  const dir = mkdtempSync(path.join(tmpdir(), "lazyboy-app-"));
+  const url = `file:${path.join(dir, "app.db")}`;
+  process.env.APP_DATABASE_URL = url;
+  let c: Client | null = null;
+  return {
+    url,
+    raw: () => (c ??= createClient({ url, intMode: "number" })),
+    close: () => c?.close(),
+  };
+}
+
+/** A users row, seeded raw (provisioning itself is Phase 4a's invite script). */
+export async function seedUser(
+  raw: Client,
+  u: { uid: string; status: string; admin?: boolean; epoch?: number; accountId?: string | null; spotifyId?: string; statusAt?: number },
+): Promise<void> {
+  await raw.execute({
+    sql: `INSERT INTO users (uid, account_id, spotify_id, db_name, status, status_at, is_admin, session_epoch, invited_at)
+          VALUES (:uid, :aid, :sid, :db, :status, :at, :admin, :ep, 0)`,
+    args: {
+      uid: u.uid,
+      aid: u.accountId === undefined ? `acct-${u.uid}` : u.accountId,
+      sid: u.spotifyId ?? `sp-${u.uid}`,
+      db: u.admin ? "lazyboy" : `lb-u-${u.uid}`,
+      status: u.status,
+      at: u.statusAt ?? 0,
+      admin: u.admin ? 1 : 0,
+      ep: u.epoch ?? 0,
+    },
+  });
 }
 
 type Pair = { accessToken: string; refreshToken: string };
