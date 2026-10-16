@@ -18,6 +18,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { announceTabReset } from "@/lib/tab-reset";
+import { clearStored, idbKV } from "@/lib/search-cache";
 
 // App chrome: ONE top bar, both sizes (the mobile bottom tab bar is gone — two bars ate
 // too much of a phone screen; Rem, 2026-08-12). Mark, quiet nav (Home / Playlists /
@@ -332,7 +333,9 @@ function AccountMenu({ name, image }: { name: string; image: string | null }) {
             <p className="truncate text-sm font-medium text-foreground">{name}</p>
           </div>
           <DropdownMenuSeparator className="bg-border/60" />
-          <form action={logout}>
+          {/* The browser's copy of the search payloads goes with the session (search-cache.ts):
+              cleared as the form submits, since the server action's response can't clear it. */}
+          <form action={logout} onSubmit={() => void clearStored(idbKV())}>
             <DropdownMenuItem
               nativeButton
               render={<button type="submit" />}

@@ -61,6 +61,8 @@ const STORIES: { page: string; title: string; parts: Part[] }[] = [
       // One mark, three visible things: the home payload is a single materialized read, so the
       // day strip, the all-time card and the opening day's song list cannot be timed apart.
       { event: "data-rendered", label: "page data · day cards, all-time, song list", col: "data" },
+      // Only on a visit that found the browser's copy, and only when it beat the network.
+      { event: "index-idb", label: "search from this browser's copy", col: "idb" },
       { event: "history-ready", label: "history in memory · day sliding stops asking", col: "history" },
       { event: "now-playing-ready", label: "now playing answered", col: "playing" },
       { event: "dock-ready", label: "dock library", col: "dock" },

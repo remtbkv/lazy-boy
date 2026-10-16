@@ -3078,6 +3078,7 @@ export const SUMMARY_EVENTS = [
   "cls",
   "data-rendered",
   "history-ready",
+  "index-idb",
   "dock-ready",
   "playlists-rendered",
   "now-playing-ready",
