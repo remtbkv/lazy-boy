@@ -62,6 +62,12 @@ describe("/privacy and /terms", () => {
       // The deleted row keeps account_id for five days (deletion.ts markDeleted), so say so.
       "keeps only your Spotify account ID with a note that the account was deleted",
       "spotify.com/account/apps",
+      // Phase 4a's turn: the backup job keeps only Rem's rows (ops/zenbook-backup, RULINGS Oct 15
+      // 6:21 PM); /usage shows a friend's diagnostics only in totals by page; the host's Data
+      // Cache holds copies under the uid that the deletion job does not reach.
+      "those copies hold none of yours, diagnostic logs included",
+      "only as totals by page",
+      "cached copies of some of what your pages show",
     ]) {
       expect(p, s).toContain(s);
     }

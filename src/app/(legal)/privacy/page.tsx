@@ -88,7 +88,9 @@ export default function PrivacyPage() {
           The app runs on Vercel, which sees each request (including your IP address) as any web
           host does. Vercel also keeps cached copies of some of what your pages show, labelled
           with your account&apos;s random ID, so pages open faster, and its logs hold the errors
-          and warnings the server prints.
+          and warnings the server prints. Lazy Boy stops using a copy within a day; once your
+          account is deleted nothing reads those copies again, and Vercel discards them on its own
+          schedule.
         </li>
         <li>
           Your history, library and timezone are kept in a database of your own on Turso, a hosted
@@ -104,11 +106,12 @@ export default function PrivacyPage() {
         </li>
         <li>
           Your data is not backed up. Rem&apos;s own data is copied nightly to that computer and to his
-          Microsoft OneDrive; those copies hold none of yours.
+          Microsoft OneDrive; those copies hold none of yours, diagnostic logs included.
         </li>
         <li>
           Rem runs Lazy Boy and holds its credentials, so he can technically read your data. The app
-          shows nobody anyone else&apos;s listening.
+          shows nobody anyone else&apos;s listening; Rem&apos;s admin page shows your diagnostic numbers
+          only as totals by page.
         </li>
         <li>
           Rem uses an AI assistant (Anthropic&apos;s Claude) to maintain the app. It works only
