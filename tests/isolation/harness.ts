@@ -10,7 +10,7 @@ import { createClient, type Client } from "@libsql/client";
 import { expect, vi } from "vitest";
 import type { SpotifyTokens } from "@/lib/db";
 import { mintUid, type Uid } from "@/lib/identity";
-import type { TokenStore } from "@/lib/token-core";
+import { createTokenCore, type TokenStore } from "@/lib/token-core";
 import { parseTokenKeys, type TokenKey } from "@/lib/token-crypto";
 
 export const A: Uid = mintUid("aaaaaaaaaaaa");
@@ -23,19 +23,36 @@ export const FAR = 4_000_000_000;
  *  be in Phase 2. `writes` records every set/clear by uid. */
 export function memoryTokenStore(initial: Record<string, SpotifyTokens>) {
   const rows = new Map<string, SpotifyTokens>(Object.entries(initial));
+  // Each row's version (Phase 2: its blob): a refresh writes and a clear deletes only over the
+  // version it read.
+  const revs = new Map<string, number>([...rows.keys()].map((k) => [k, 0]));
+  let rev = 0;
   const locks = new Map<string, { owner: string; until: number }>();
-  const writes: { op: "set" | "clear"; uid: string }[] = [];
+  const writes: { op: "set" | "update" | "clear"; uid: string }[] = [];
+  const put = (uid: string, t: SpotifyTokens) => {
+    rows.set(uid, { accessToken: t.accessToken, refreshToken: t.refreshToken, expiresAt: t.expiresAt });
+    revs.set(uid, ++rev);
+  };
   const store: TokenStore = {
     async get(uid) {
-      return rows.get(uid) ?? null;
+      const t = rows.get(uid);
+      return t ? { ...t, rev: String(revs.get(uid)) } : null;
     },
     async set(uid, t) {
       writes.push({ op: "set", uid });
-      rows.set(uid, { accessToken: t.accessToken, refreshToken: t.refreshToken, expiresAt: t.expiresAt });
+      put(uid, t);
     },
-    async clear(uid) {
+    async update(uid, t, read) {
+      if (String(revs.get(uid)) !== read.rev || !rows.has(uid)) return false;
+      writes.push({ op: "update", uid });
+      put(uid, t);
+      return true;
+    },
+    async clear(uid, read) {
+      if (String(revs.get(uid)) !== read.rev) return;
       writes.push({ op: "clear", uid });
       rows.delete(uid);
+      revs.delete(uid);
     },
     async lock(uid, ttlMs) {
       const l = locks.get(uid);
@@ -54,9 +71,10 @@ export function memoryTokenStore(initial: Record<string, SpotifyTokens>) {
 export type SpotifyCall = { url: string; bearer: string | null; refreshToken: string | null };
 
 /** A scripted Spotify: the token endpoint answers `at:<refresh token>` (or invalid_grant for a
- *  refresh token in `dead`), after `delayMs`, and every call is logged with the bearer it
- *  carried. Install with `vi.stubGlobal("fetch", spotify.fetch)`. */
-export function scriptedSpotify(opts: { dead?: string[]; delayMs?: number } = {}) {
+ *  refresh token in `dead`; with `rotate`, also a new refresh token `<old>+`), after `delayMs`,
+ *  and every call is logged with the bearer it carried. Install with
+ *  `vi.stubGlobal("fetch", spotify.fetch)`. */
+export function scriptedSpotify(opts: { dead?: string[]; delayMs?: number; rotate?: boolean } = {}) {
   const calls: SpotifyCall[] = [];
   const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -71,7 +89,11 @@ export function scriptedSpotify(opts: { dead?: string[]; delayMs?: number } = {}
       if (refreshToken && opts.dead?.includes(refreshToken)) {
         return Response.json({ error: "invalid_grant" }, { status: 400 });
       }
-      return Response.json({ access_token: `at:${refreshToken}`, expires_in: 3600 });
+      return Response.json({
+        access_token: `at:${refreshToken}`,
+        expires_in: 3600,
+        ...(opts.rotate ? { refresh_token: `${refreshToken}+` } : {}),
+      });
     }
     // A data call answers with the bearer's owner, so a test can see whose account it reached.
     return Response.json({ bearer });
@@ -141,6 +163,42 @@ export function expectFreshIvPerWrite(encrypt: Cipher["encrypt"]): void {
     ivs.add(Buffer.from(blob.slice(blob.indexOf(".") + 1), "base64url").subarray(0, 12).toString("hex"));
   }
   expect(ivs.size).toBe(64);
+}
+
+export async function until(cond: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const t0 = Date.now();
+  while (!cond()) {
+    if (Date.now() - t0 > timeoutMs) throw new Error("until: timed out");
+    await new Promise((r) => setTimeout(r, 2));
+  }
+}
+
+/** Security R4 (PLAN.md §5.2): a refresh that read the old grant before a sign-in cannot
+ *  overwrite the new one. A's token is expired; while its refresh is at Spotify, A signs in
+ *  again; afterwards the row holds the sign-in's grant and the refresh answers with it. Needs a
+ *  scripted Spotify with a delay, and A live in `store`. */
+export async function expectRefreshLosesToSignIn(
+  store: TokenStore,
+  spotify: ReturnType<typeof scriptedSpotify>,
+): Promise<void> {
+  const core = createTokenCore(store);
+  await store.set(A, { accessToken: "old-A", refreshToken: "rt-A", expiresAt: EXPIRED });
+  const refreshing = core.getValidAccessToken(A);
+  await until(() => spotify.calls.some((c) => c.url.includes("/api/token")));
+  await store.set(A, { accessToken: "signin-A", refreshToken: "rt-A2", expiresAt: FAR });
+  expect((await refreshing)?.accessToken).toBe("signin-A");
+  expect(await store.get(A)).toMatchObject({ accessToken: "signin-A", refreshToken: "rt-A2", expiresAt: FAR });
+}
+
+/** A store answers each uid with that uid's own row, and nothing once that row is gone. */
+export async function expectStoreAnswersOwnRow(store: TokenStore): Promise<void> {
+  await store.set(A, { accessToken: "at-A", refreshToken: "rt-A", expiresAt: FAR });
+  await store.set(B, { accessToken: "at-B", refreshToken: "rt-B", expiresAt: FAR });
+  expect((await store.get(A))?.accessToken).toBe("at-A");
+  expect((await store.get(B))?.accessToken).toBe("at-B");
+  await store.clear(A, (await store.get(A))!);
+  expect(await store.get(A)).toBeNull();
+  expect((await store.get(B))?.accessToken).toBe("at-B");
 }
 
 /** The core's contract that a shared in-flight promise breaks (01e A2, PLAN.md §5.2): two users

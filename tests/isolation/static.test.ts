@@ -193,6 +193,7 @@ describe("S4: module-scope state is on a reviewed list", () => {
   const REVIEWED: Record<string, string> = {
     "src/lib/user-cache.ts: names": "wrapper names, process-wide on purpose: no user data",
     "src/lib/app-db.ts: g": "the one app-database client, keyed by its URL: global by meaning, holds no user data",
+    "src/lib/token-keys.ts: verdict": "the key check's verdict for the configured keys and database: per deployment, no user data",
     "src/lib/playlists-sync.ts: currentSync": "Map<Uid, task id>",
     "src/lib/tasks/registry.ts: store": "tasks carry their owner; getTaskFor checks it",
     "src/lib/tasks/registry.ts: running": "completion promises by task id; holds no result",

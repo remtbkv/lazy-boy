@@ -18,7 +18,7 @@ import { gateJwt, sessionFields, signInClaims } from "@/lib/session-gate";
 import type { OwnedToken } from "@/lib/spotify";
 import { SPOTIFY_NOT_REGISTERED, spotifyUserinfo } from "@/lib/spotify/userinfo";
 import { createTokenCore, isFresh, RefreshError, type UserTokens } from "@/lib/token-core";
-import { ownerTokenStore } from "@/lib/token-store-owner";
+import { appTokenStore } from "@/lib/token-store-app";
 
 // Spotify banned `localhost` redirect URIs (Nov 2025): only the loopback IP literal
 // `http://127.0.0.1:PORT` is allowed over HTTP. But Next.js normalizes 127.0.0.1 ->
@@ -56,15 +56,12 @@ type SpotifyToken = {
   uid?: string;
   ep?: number;
   auth_time?: number;
-  accessToken?: string;
-  refreshToken?: string;
-  expiresAt?: number;
   error?: "RefreshAccessTokenError";
 };
 
 // The token core, per user (src/lib/token-core.ts: the refresh, the in-flight map and the lock,
-// all keyed by uid). Phase 1 has one user: its store is the owner's plaintext `meta` row.
-const core = createTokenCore(ownerTokenStore(ownerUid));
+// all keyed by uid), over Phase 2's encrypted `user_tokens` (token-store-app.ts).
+const core = createTokenCore(appTokenStore());
 
 // ── Request-scoped reads ───────────────────────────────────────────────────────────────
 // One tokens read per request instead of one per callback. /home calls auth() twice (the
@@ -197,9 +194,10 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     async jwt({ token, account }) {
       const t = token as SpotifyToken;
       // Initial sign-in: name the user on the cookie (uid, session epoch, auth_time, from the
-      // owner constant in Phase 1, never from the incoming cookie), then stash tokens in the
-      // DB (the source of truth) and keep the cookie lean. The DB lets concurrent refreshes
-      // coordinate (see the token core's refreshShared).
+      // owner constant in Phase 1, never from the incoming cookie), then write the encrypted
+      // token row. Tokens never ride in the cookie: one there is bound to no user row and
+      // invisible to the cron, so a sign-in that cannot write its row fails visibly and is
+      // retried (PLAN.md §5.1, 01e A18).
       if (account) {
         const claims = signInClaims(ownerUid(), Date.now());
         if (!claims) return null;
@@ -213,23 +211,10 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           refreshToken: account.refresh_token!,
           expiresAt: account.expires_at!,
         };
-        try {
-          await core.setTokens(uid, tokens);
-          // The session callback reads next, in this same request — hand it what we wrote
-          // instead of making it re-read the row we just stamped.
-          publishTokens(uid, tokens);
-          // Stored in the DB (the source of truth) — keep the cookie lean.
-          delete t.accessToken;
-          delete t.refreshToken;
-          delete t.expiresAt;
-        } catch {
-          // DB write failed (e.g. a transient Turso hiccup). Don't fail the whole
-          // login with a server error — keep the tokens in the JWT cookie instead; the
-          // migration path below moves them to the DB on a later request once it's back.
-          t.accessToken = tokens.accessToken;
-          t.refreshToken = tokens.refreshToken;
-          t.expiresAt = tokens.expiresAt;
-        }
+        await core.setTokens(uid, tokens);
+        // The session callback reads next, in this same request — hand it what we wrote
+        // instead of making it re-read the row we just stamped.
+        publishTokens(uid, tokens);
         delete t.error;
         return t;
       }
@@ -252,25 +237,6 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         // later request resolve the token.
         return t;
       }
-      // Migrate older sessions that kept tokens in the cookie into the DB once.
-      if (!stored && t.refreshToken && t.accessToken && t.expiresAt) {
-        stored = {
-          uid,
-          accessToken: t.accessToken,
-          refreshToken: t.refreshToken,
-          expiresAt: t.expiresAt,
-        };
-        // Best-effort: if the write fails, keep the cookie tokens and retry next time.
-        try {
-          await core.setTokens(uid, stored);
-          publishTokens(uid, stored);
-          delete t.accessToken;
-          delete t.refreshToken;
-          delete t.expiresAt;
-        } catch {
-          /* keep cookie tokens; a later request migrates them */
-        }
-      }
       if (!stored) {
         t.error = "RefreshAccessTokenError";
         return t;
@@ -285,7 +251,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         // refreshShared resolves to the tokens now in the DB (ours, or a winner's) — publish
         // them so the session callback hands out the fresh access token rather than the
         // expired one this request started with.
-        publishTokens(uid, await core.refreshShared(uid, stored.refreshToken));
+        publishTokens(uid, await core.refreshShared(uid));
         delete t.error;
       } catch (e) {
         if (e instanceof RefreshError && e.terminal) {

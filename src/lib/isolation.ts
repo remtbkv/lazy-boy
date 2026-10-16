@@ -2,10 +2,11 @@
 // token or database on its way to another records the uid and a code, never the data. In
 // production a count above zero is a bug report; the hourly health check turns red on one.
 //
-// Phase 1 has no app database, so an event goes to the log (a fixed prefix) and to telemetry
-// as a `client_metrics` row (`page` and `session` "server", `event` "isolation", `meta`
-// "<code>|<uid>"). Phase 2 adds the awaited row in `lazyboy-app.events`.
+// Each event is a log line with a fixed prefix, a telemetry row (`client_metrics`, `page` and
+// `session` "server", `event` "isolation", `meta` "<code>|<uid>"), and, from Phase 2, an awaited
+// row in the app database's `events` table, which the client cannot write (§6.2 layer 7).
 import "server-only";
+import { recordAppEvent } from "@/lib/app-db";
 
 export type IsolationCode = "owner-mismatch" | "cache-stamp" | "token-owner" | "decrypt";
 
@@ -19,8 +20,11 @@ export async function reportIsolation(code: IsolationCode, uid: string): Promise
   // builds its cached reads with userCache, which reports here too, so a static import would
   // close a cycle that leaves userCache uninitialised while db.ts loads.
   const { recordClientMetrics } = await import("@/lib/db");
-  await recordClientMetrics(
-    [{ session: "server", page: "server", event: ISOLATION_EVENT, value: null, meta: `${code}|${uid}` }],
-    uid,
-  ).catch(() => {});
+  await Promise.all([
+    recordAppEvent(code, uid).catch((e) => console.error(`[isolation] events row not written: ${String(e)}`)),
+    recordClientMetrics(
+      [{ session: "server", page: "server", event: ISOLATION_EVENT, value: null, meta: `${code}|${uid}` }],
+      uid,
+    ).catch(() => {}),
+  ]);
 }

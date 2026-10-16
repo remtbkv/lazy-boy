@@ -12,8 +12,9 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Uid } from "@/lib/identity";
-import { createTokenCore } from "@/lib/token-core";
-import { decryptTokens, encryptTokens, tokenAad, type TokenKey } from "@/lib/token-crypto";
+import { createTokenCore, type TokenStore } from "@/lib/token-core";
+import { decryptTokens, encryptTokens, parseTokenKeys, tokenAad, type TokenKey } from "@/lib/token-crypto";
+import { appTokenStore } from "@/lib/token-store-app";
 import { rawClient, resetStore } from "../adversarial/helpers";
 import * as faithful from "../stubs/next-cache-faithful";
 import * as passthrough from "../stubs/next-cache";
@@ -24,8 +25,12 @@ import {
   expectCiphertextBoundToUser,
   expectConcurrentRefreshIsolated,
   expectFreshIvPerWrite,
+  expectRefreshLosesToSignIn,
+  expectStoreAnswersOwnRow,
+  freshAppDb,
   memoryTokenStore,
   scriptedSpotify,
+  seedUser,
 } from "./harness";
 import { expectOwnDatabases, useUserFiles } from "./user-dbs";
 
@@ -69,6 +74,7 @@ beforeEach(async () => {
 afterEach(() => {
   vi.doUnmock("next/cache");
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 describe("planted: an unstable_cache keyed without the user", () => {
@@ -176,5 +182,52 @@ describe("planted: a cipher that reuses its IV", () => {
   });
   it("and passes over the real cipher", () => {
     expectFreshIvPerWrite(encryptTokens);
+  });
+});
+
+// ── Phase 2: the token store over user_tokens ─────────────────────────────────────────────
+async function appStore() {
+  const db = freshAppDb();
+  vi.stubEnv("TOKEN_KEYS", `v1:${randomBytes(32).toString("base64")}`);
+  const store = appTokenStore();
+  await store.get(A);
+  await seedUser(db.raw(), { uid: A, status: "active" });
+  await seedUser(db.raw(), { uid: B, status: "active" });
+  const spotify = scriptedSpotify({ delayMs: 60 });
+  vi.stubGlobal("fetch", spotify.fetch);
+  return { db, store, spotify };
+}
+
+describe("planted: a refresh write that is not conditional (security R4)", () => {
+  it("the refresh-loses-to-sign-in check catches it", async () => {
+    const { store, spotify } = await appStore();
+    // The refresh lands with the sign-in's unconditional upsert instead of over the blob it read.
+    const buggy: TokenStore = { ...store, update: async (uid, t) => (await store.set(uid, t), true) };
+    await expect(expectRefreshLosesToSignIn(buggy, spotify)).rejects.toThrow();
+  });
+  it("and passes over the real store", async () => {
+    const { store, spotify } = await appStore();
+    await expectRefreshLosesToSignIn(store, spotify);
+  });
+});
+
+describe("planted: a TokenStore that answers another uid's row", () => {
+  it("the own-row check catches it", async () => {
+    const { db, store } = await appStore();
+    // The read forgot its WHERE: it answers with whichever row comes first, decrypted as its owner.
+    const buggy: TokenStore = {
+      ...store,
+      async get() {
+        const r = (await db.raw().execute("SELECT uid, blob, expires_at FROM user_tokens ORDER BY uid DESC LIMIT 1")).rows[0];
+        if (!r) return null;
+        const t = decryptTokens(parseTokenKeys(process.env.TOKEN_KEYS), String(r.uid), String(r.blob));
+        return { ...t, expiresAt: Number(r.expires_at), rev: String(r.blob) };
+      },
+    };
+    await expect(expectStoreAnswersOwnRow(buggy)).rejects.toThrow();
+  });
+  it("and passes over the real store", async () => {
+    const { store } = await appStore();
+    await expectStoreAnswersOwnRow(store);
   });
 });
