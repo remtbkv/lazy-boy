@@ -682,6 +682,11 @@ async function migrateTelemetry(client: Client): Promise<void> {
   if (!apiLogCols.has("user_id")) {
     await client.execute("ALTER TABLE api_log ADD COLUMN user_id TEXT");
   }
+  // A 429's `reason` from its body (QUOTA_EXCEEDED, or none for a rate limit): how the quota is
+  // counted is found from these rows (multi-user PLAN §4.3, §7.9).
+  if (!apiLogCols.has("reason")) {
+    await client.execute("ALTER TABLE api_log ADD COLUMN reason TEXT");
+  }
   const metricsInfo = await client.execute("PRAGMA table_info(client_metrics)");
   if (!metricsInfo.rows.some((r) => String(r.name) === "user_id")) {
     await client.execute("ALTER TABLE client_metrics ADD COLUMN user_id TEXT");
@@ -2884,34 +2889,8 @@ async function writeProbe(u: UserDb, p: ProbeState): Promise<void> {
   await setMeta(u, "probe", JSON.stringify(p));
 }
 
-// Spotify rate-limit backoff, persisted so it survives across serverless invocations
-// (the HTTP client's in-memory cooldown is wiped between each cron/API invocation, so
-// without this every scheduled tick would re-poke a banned endpoint). Stored as epoch ms.
-// App-wide by meaning: Spotify's rate limit is per app, so one user's 429 holds everyone off
-
-// (multi-user PLAN §4.3). Phase 1 has no app database, so the row stays where it always was,
-// in the admin's database; Phase 2 moves it to `app_meta` (`cooldown:<bucket>`) and these two
-// keep their signatures.
-export async function getSpotifyCooldownUntil(): Promise<number> {
-  const v = await getMeta(adminDb(), "spotify_cooldown_until");
-  return v ? Number(v) || 0 : 0;
-}
-export async function setSpotifyCooldownUntil(untilMs: number): Promise<void> {
-  // MAX, not overwrite: a later, shorter ban must never SHORTEN a persisted longer one
-  // (audit 2026-08-19, T1.10 — the module-scoped copy in spotify/client.ts already maxes;
-  // the persisted copy silently didn't).
-  const client = await adminDb().client();
-  await client.execute({
-    sql: `INSERT INTO meta (key, value) VALUES ('spotify_cooldown_until', :v)
-          ON CONFLICT(key) DO UPDATE SET
-            value = CASE WHEN CAST(meta.value AS INTEGER) >= CAST(excluded.value AS INTEGER)
-                         THEN meta.value ELSE excluded.value END`,
-    args: { v: String(Math.floor(untilMs)) },
-  });
-}
-
-// The app-wide budget mode (src/lib/budget/, CAPACITY §6), beside the cooldown for the same
-// reason. The daily chores write it; the hot paths read it through a per-process memo of at
+// The app-wide budget mode (src/lib/budget/, CAPACITY §6), in the admin's database. The daily
+// chores write it; the hot paths read it through a per-process memo of at
 // most 10 minutes, so a change reaches every instance within 10 minutes for one meta read per
 // instance per 10 minutes. Meta only: no marker bump.
 const BUDGET_MODE_KEY = "budget_mode";
@@ -3166,6 +3145,8 @@ export async function logSpotifyRequest(entry: {
   source?: string;
   /** The user whose token made the call (the Spotify client's owner). */
   uid?: string | null;
+  /** A 429's `reason` (QUOTA_EXCEEDED); null otherwise. */
+  reason?: string | null;
 }): Promise<void> {
   const client = await getTelemetryClient();
   // Store just the endpoint path (no host, no query string) — enough to see which calls
@@ -3181,9 +3162,9 @@ export async function logSpotifyRequest(entry: {
   // that can't see the dominant source is blind (Rem, 2026-08-16). Self-hosted store —
   // the writes cost nothing.
   await client.execute({
-    sql: `INSERT INTO api_log (ts, method, path, status, retry_after, source, user_id)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    args: [Date.now(), entry.method, p, entry.status, entry.retryAfter, entry.source ?? null, entry.uid ?? null],
+    sql: `INSERT INTO api_log (ts, method, path, status, retry_after, source, user_id, reason)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [Date.now(), entry.method, p, entry.status, entry.retryAfter, entry.source ?? null, entry.uid ?? null, entry.reason ?? null],
   });
   // Prune occasionally rather than on every write.
   if (++apiLogWrites % 256 === 0) await pruneApiLog();
@@ -4003,6 +3984,14 @@ export function forUser(uid: Uid): UserStore {
  *  db_name, and what the tests use for their per-user files. It records the name for forUser,
  *  rebuilding the entry when the name changed. The open's owner check is what stands between a
  *  wrong name and someone else's data. */
+/** The admin's database, for the one app-wide row still kept there (the budget mode); the
+ *  Spotify cooldown moved to app_meta at Phase 3's turn. Throws when OWNER_UID is unset. */
+function adminDb(): UserDb {
+  const owner = phase1Owner();
+  if (!owner) throw new Error("OWNER_UID is unset: there is no admin database");
+  return userDb(owner, PRIMARY_DB);
+}
+
 export function forUserAt(uid: Uid, dbName: string): UserStore {
   const names = userDbNames();
   const was = names.get(uid);
@@ -4019,12 +4008,4 @@ export function forUserAt(uid: Uid, dbName: string): UserStore {
     store[name] = (...args: unknown[]) => (fn as (u: UserDb, ...a: unknown[]) => unknown)(u, ...args);
   }
   return Object.freeze(store) as unknown as UserStore;
-}
-
-/** The admin's database, for the app-wide rows that live there until Phase 2's app database
- *  (the Spotify cooldown). Throws when OWNER_UID is unset. */
-function adminDb(): UserDb {
-  const owner = phase1Owner();
-  if (!owner) throw new Error("OWNER_UID is unset: there is no admin database");
-  return userDb(owner, PRIMARY_DB);
 }

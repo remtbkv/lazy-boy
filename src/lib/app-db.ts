@@ -665,13 +665,14 @@ export async function countRpCall(uid: Uid | string, day: string): Promise<numbe
   return Number(r.rows[0].rp_calls);
 }
 
-/** A bucket's cooldown (`cooldown:<bucket>`, §7.8), only ever extended. */
+/** A bucket's cooldown (`cooldown:<bucket>`, §7.8), only ever extended: a later, shorter ban
+ *  never shortens a longer one (audit 2026-08-19, T1.10). Epoch ms, whole. */
 export async function extendCooldown(bucket: string, until: number): Promise<void> {
   await one({
     sql: `INSERT INTO app_meta (key, value) VALUES (:k, :v)
           ON CONFLICT(key) DO UPDATE SET value = excluded.value
           WHERE CAST(app_meta.value AS INTEGER) < CAST(excluded.value AS INTEGER)`,
-    args: { k: listed(`cooldown:${bucket}`), v: String(until) },
+    args: { k: listed(`cooldown:${bucket}`), v: String(Math.floor(until)) },
   });
 }
 

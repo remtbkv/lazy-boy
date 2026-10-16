@@ -202,7 +202,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/cron/sync
 
-- File: `src/app/api/cron/sync/route.ts`. Gate today: `src/lib/sync/tick.ts:349`.
+- File: `src/app/api/cron/sync/route.ts`. Gate today: `src/lib/sync/tick.ts:351`.
 - Does, when allowed: the tick, at most one per 45 s whoever calls (app_meta.tick_at): the claim of every due user, each one's /me/player probe and, when the policy says so, a recently-played harvest with that user's own grant into their own plays; one library rescan; the daily chores when daily_at is over 26 h old.
 - Calls (from the source): via `runDailyChores`, `adminStore`, `runTick`, `liveTickDeps`.
 - `anon`: D — cronCaller() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET` (the Zenbook) or `Bearer $CRON_SECRET_EXT` (cron-job.org), timing-safe, an unset secret matching nobody; a cookie is not a secret; no header → 401
