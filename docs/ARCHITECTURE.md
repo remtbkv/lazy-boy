@@ -140,34 +140,33 @@ file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
 `played_at`), `contexts` (resolved playlist/album names), `meta`. Server-only
 (`import "server-only"`). **Every function is async** (the DB is over the network).
 
-- **Sync core** (`sync/history.ts`, `syncRecentPlays`) pulls `/me/player/recently-played`,
-  records new plays (deduped on `played_at`), resolves new playback contexts to names.
-  **Why polling, not a webhook:** Spotify's recently-played endpoint returns only the
-  **last 50 plays** and can't page back further, so completeness depends on polling often
-  enough that <50 plays accumulate between runs (50 ≈ 3h of nonstop listening). There is
-  **no manual sync button** — it's all automatic. Triggered (no `setInterval` — serverless
-  can't run one): in-app while the site is open (`SyncOnLoad` syncs on load, every 2 min,
-  and on tab-focus → `POST /api/sync`, debounced server-side to ~60 s, so an open tab is
-  effectively live; the home history view also refreshes each minute via
-  `refreshHistoryAction`); and — the coverage path for when the app is closed — an **external
-  pinger** hitting `/api/cron/sync` with the stored token every 2 min: the Zenbook's user
-  timer `lazyboy-cron-sync.timer` (`~/lazyboy-cron/ping.sh`). A daily **Vercel Cron**
-  (`vercel.json`, 07:00 UTC) is the backstop. All sync hits share `/api/cron/sync`
-  (`CRON_SECRET`-guarded); the daily chores have their own route and cron entry,
-  `/api/cron/daily` at 09:00 UTC (Routes, below). One retired caller still 401s there until Rem removes it: the
-  Zenbook's root-level `lazyboy-sync.timer` (stale since 07-01) — burn lazyboy-review 2026-10-03, Z1/Z2.
-- **Two pingers, one tick per 90 s** (docs/multi-user/PLAN.md §7.9). The Zenbook's timer sends
-  `Bearer $CRON_SECRET`; a cron-job.org job, every 2 minutes, sends `Bearer $CRON_SECRET_EXT`, so
-  capture survives a Zenbook outage. `cronCaller()` (`src/lib/cron-auth.ts`) names the caller from
-  the secret. Before any work the tick takes a stamp, a compare-and-set on the `meta` row
-  `lock:tick` (`acquireLock("tick", 90_000)`): a call that finds a tick in the last 90 s answers 200
-  and does nothing. With the pingers on alternate minutes every second call ticks, so Spotify sees
-  the 2-minute cadence either pinger alone keeps, and a leaked secret in a loop gets one tick per
-  90 s. The owner alarm (503 "no token", read before the stamp) and the outcome go to `CRON_SECRET`
-  callers only; cron-job.org always gets a bare `{"ok":true}`, since it keeps reply bodies and
-  durations and disables a job after a run of failures. It gets that reply at once and its tick
-  runs in `after()`, so neither the reply's timing nor a 30 s timeout tells whether a harvest ran. `CRON_SECRET_EXT` opens `/api/cron/sync` and nothing else;
-  `CRON_SECRET` opens every cron route.
+- **Sync core**: the cron tick (`sync/tick.ts`, multi-user PLAN §7.2) and each user's step
+  (`sync/step.ts`). A harvest (`sync/history.ts`, `recordRecentPlays`) pulls
+  `/me/player/recently-played`, records new plays (deduped on `played_at`), resolves new
+  playback contexts to names. **Why polling, not a webhook:** Spotify's recently-played
+  endpoint returns only the **last 50 plays** and can't page back further, so completeness
+  depends on polling often enough that <50 plays accumulate between runs (50 ≈ 3h of nonstop
+  listening). There is **no manual sync button** — it's all automatic. Two pingers call
+  `GET /api/cron/sync`: the Zenbook's user timer `lazyboy-cron-sync.timer`
+  (`~/lazyboy-cron/ping.sh`, even minutes, `CRON_SECRET`) and cron-job.org (odd minutes,
+  `CRON_SECRET_EXT`); a daily **Vercel Cron** (`vercel.json`, 07:00 UTC, `CRON_SECRET`) is the
+  backstop. One tick per 45 s whoever calls (`app_meta.tick_at`), so with both pingers alive
+  the app ticks every minute and each user is still probed every 2 minutes. A tick claims every
+  due user (`sync_state` in the app database, a 50-s lease), and runs each one's step under a
+  15-s deadline: their token, a `/me/player` probe (what it saw lives in their `meta.probe`,
+  written only on change), and a harvest only when the policy says so (`harvest-policy.ts`: a
+  track change, the session tail and one retry ~5 min later, 25 changes, the hourly backstop,
+  the open app's catch-up; each tagged `harvest:<trigger>` in `api_log.source`), each harvest
+  counted for the brake first (`brake.ts`, inert until Phase 4a). Then at most one library
+  rescan, the daily chores when `daily_at` is over 26 h old, and the reply within 20 s; the
+  rest finishes in `after()`. The Zenbook hears each step's code (the admin's with its trigger
+  and count); cron-job.org hears `{"ok":true}` at once, its tick after the reply. The open app
+  (`SyncOnLoad` → `POST /api/sync`) runs the same step under the same lease: a load or a
+  return to the tab probes and harvests a change the cron has not, and the 2-minute timer
+  stands in only when no tick has run in 5 minutes. `refreshHistoryAction` only re-reads the
+  store. The daily chores have their own route and cron entry, `/api/cron/daily` at 09:00 UTC
+  (Routes, below). The Zenbook's root-level `lazyboy-sync.timer` (stale since 07-01) still 401s
+  until Rem removes it — burn lazyboy-review 2026-10-03, Z1.
   (A GitHub Actions cron drove this initially but was removed: GitHub schedules best-effort
   and stretched to multi-hour gaps, losing plays against the 50-play window.)
 - Reads: Home's first paint is `getHomePayload()` — one indexed `meta` row holding the day
@@ -266,15 +265,19 @@ file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
 - `tasks/[id]` — clean-playlist progress polling.
 - `playlists/sync` (POST) — one full library scan → DB; client fires it when the store is stale.
 - `now-playing` — live "what's playing"; returns `{ playing: null }` when idle (never stale).
-- `sync` (POST) — on-load history sync; server debounces, skipping if synced <~60 s ago.
-- `cron/sync` (GET) — scheduled history sync. On-time triggers are the Zenbook's
-  `lazyboy-cron-sync.timer` (2 min) and the cron-job.org job (2 min, `CRON_SECRET_EXT`), at most
-  one tick per 90 s between them; a daily Vercel Cron (07:00 UTC) is the backstop.
-  Session-less (uses the stored token).
+- `sync` (POST) — the open app's step for the session's user (`x-sync: load` on a load or a
+  return to the tab, `timer` every 2 min, which acts only when no tick has run in 5 min); also
+  writes the browser's offset and IANA zone (`user_tz_offset`, `user_tz`) when they change.
+- `cron/sync` (GET) — the tick (Sync core, above). Callers: the Zenbook's timer and cron-job.org,
+  a tick a minute between them, and a daily Vercel Cron (07:00 UTC) as the backstop.
+  Session-less: each claimed user's own encrypted token (`user_tokens`).
 - `cron/daily` (GET) — the daily chores, Vercel Cron at 09:00 UTC (after the Zenbook's ~07:00
   UTC reboot, since the prunes and ledger rows go to the telemetry store on it): all-time heal,
   Home payload rebuild, `api_log` + `client_metrics` prunes, the `played_at` convention check,
-  the usage check. Each isolated; answers 200 with every chore's outcome; notifies nobody.
+  the usage check (`src/lib/daily-chores.ts`). Each isolated; answers 200 with every chore's
+  outcome; notifies nobody. It stamps `app_meta.daily_at`; a cron tick that finds the stamp
+  over 26 h old runs the same chores in `after()` under `lock:daily`, so either pinger covers
+  a missed Vercel cron.
 - `cron/usage-check` (GET) — the dormant Turso quota guard + the ledger reconciliation (see
   the listen-history section; logic in `src/lib/usage-check.ts`); 500 on breach or
   misconfiguration so a calling job's failure e-mail is the alarm.
@@ -284,8 +287,8 @@ file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
 
 All check `auth()` and 401 on no session, except the `cron/*` routes: those take
 `Authorization: Bearer $CRON_SECRET` (`src/lib/cron-auth.ts`, constant-time, fail-closed: an
-unset secret rejects all callers) and no session; `cron/sync` alone also takes
-`Bearer $CRON_SECRET_EXT`.
+unset secret rejects all callers) and no session; `cron/sync` and `cron/health` also take
+`Bearer $CRON_SECRET_EXT` (cron-job.org's, `cronCaller`).
 
 ## The budget: the CPU meter and the modes (`src/lib/budget/`)
 

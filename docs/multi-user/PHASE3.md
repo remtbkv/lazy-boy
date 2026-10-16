@@ -4,8 +4,10 @@ Lane 1945_lb_mu_04_p3_build, Oct 15-16, 2026, branch `mu/phase3`, cut from `mu/p
 reviewed head). Nothing here is merged, pushed or deployed. Nothing touched production data, Spotify, the
 Zenbook, Vercel, Turso or the Keychain: every test runs against local database files and a scripted Spotify.
 
-Status: complete for this lane. §2 is what landed, §3 what proves it, §4 what the turn (lane 17) wires and
-why each waits, §5 the Zenbook at deploy, §6 the choices made where PLAN left one open, §7 how to review.
+Status: built (lane 04), reviewed (lane 05), replayed onto Phase 2's base (lane 31, §9) and wired by Phase 3's
+turn (lane 17, `mu/phase3-turn`, §10). §2 is what landed, §3 what proves it, §4 what the turn wired and why each
+waited, §5 the Zenbook at deploy (superseded by §11, lane 23's steps), §6 the choices made where PLAN left one open,
+§7 how to review.
 
 ## 1. What this branch is
 
@@ -349,3 +351,149 @@ No resolution needed new behaviour. What this base changes in §4's list, for la
 - PHASE2.md §6's logout finding carries into this base: today's cron route (`getValidAccessTokenFor`) and the
   tick's `tokenForTick` both read `user_tokens`, which Log out leaves in place, so a user who logs out keeps being
   harvested until lane 15 wires Log out onto that row.
+
+## 10. Phase 3's turn: `mu/phase3-turn` (lane 1945_lb_mu_17_p3_turn, Oct 16, 2026)
+
+Cut from `mu/p3-base` at `2a5e950`, no rebase. Nothing pushed or deployed; no store, Spotify, Vercel, Turso or
+Zenbook state touched (the Zenbook's unit files were read for §11). Each commit's message says how its tests
+were shown failing first.
+
+| §4 item | what landed | commit |
+|---|---|---|
+| 1, the cron route | `/api/cron/sync` is `runTick` over `liveTickDeps` (`src/lib/sync/tick-deps.ts`): `cronCaller`, `appQueue`, `forUserAt(uid, the claim's db_name)`, `tokenForTick`, `after()`, the daily chores (`src/lib/daily-chores.ts`, shared with `/api/cron/daily`), `PHASE3_TICK` with `SIGNUPS`; `maxDuration = 60`. cron-job.org hears `{"ok":true}` before any work and its whole tick runs in `after()` (lane 08's fix, carried into the tick). `daily_at` is `app_meta`'s, stamped by the daily route and the tick, read by the health check. The harvest gate, its two `meta` stamps, `library_scan_attempt_at` and the single-user route go. `tests/cron-pinger.test.ts` replaces main's (lane 07/08) case for case on this route, plus a transient refresh failure | `32bbd70` |
+| 2, probe and policy | the step's store: `meta.probe` (`readProbe`/`writeProbe`), `recordRecentPlays` (the harvest's record half), each harvest's ledger row as before; `harvest:<trigger>` in `api_log.source` (the step's client); the uid on every telemetry row (Phase 1's turn); the handoff beacon names the track by id (`handoffBeaconMeta`) | `32bbd70`, `4d5b76f` |
+| 3 (§4 item 8), capture health | the banner, `/usage` and the health check read `sync_state` and `user_tokens` (`src/lib/capture-read.ts`): red without a usable grant or when the last successful step is over 30 minutes old | `7ab2b69` |
+| 4 (§4 items 2 and 6), the open app | `/api/sync` runs `runOpenApp` (`x-sync: load` on a load or a return, `timer` every 2 min); its debounce goes. `user_tz` (the IANA zone, `tzname` cookie) and `user_tz_offset` written only when they change; the Home payload buckets in `user_tz` with the DST check against it | `2b67b60` |
+| 5 (§4 item 3), decision 15 | `refreshHistoryAction` re-reads the store and calls nobody; `syncRecentPlays` goes | `dfa6494` |
+| 6 (§4 item 7), the rescan | no `/me` (the claim carries `users.spotify_id`; other scans use the stored `me_id`); every `plsnap:` in one statement; `storeSavedTracks` on `likedDiff`, the scan reading Liked from the top with `likedHead` (`storeSavedDiff`); `getAll` follows its cursor with no 500-page cap, background pages paced | `66c9998` |
+| 7 (§4 item 4), cooldowns | the rate limit stays app-wide and seconds long; a long ban (`QUOTA_EXCEEDED`, or Retry-After past 120 s) cools its bucket alone (recently-played with `/me`, player, library), module-scoped and persisted to `app_meta` `cooldown:<bucket>`; the 429's `reason` in `api_log.reason`; the tick's rescan skips while the library bucket cools. db.ts's admin-database cooldown goes | `975ad4c` |
+| 8, the brake's count | the step counts each harvest (lane 04); the client counts every `/me` call for its owner, awaited, before it is sent; `BRAKE_ON` stays false | `66c9998` |
+| 9, T4 and T13 | `tests/isolation/tick-route.test.ts`: the real route with app.db and two users' own databases, encrypted tokens, the real token core; T3's census unchanged (no entry point added) | `87cc05b` |
+| 10, docs | this section, §11, CLAUDE.md, ARCHITECTURE.md, GOTCHAS.md | (this commit) |
+| 11, the Zenbook's reply | the admin's step in full, a friend's by its code alone; a friend's rescan is not named. The tests read the full detail from `TickReply.detail`, which is never sent | `32bbd70` |
+
+**Choices where a choice was open** (PLAN's recommendation where it has one):
+
+- cron-job.org's tick runs entirely in `after()`, not after a 20-s wait: lane 08's finding on main (its reply's
+  timing said whether someone listened), which PLAN §7.2 step 5 predates.
+- The Zenbook's reply keeps one entry per user (PLAN §7.2 step 5) but names only the admin's trigger and count;
+  `ping.sh` keeps writing bodies. That was lane 05's open item 11.
+- `daily_at` moved from the admin's `meta` to `app_meta` (the claim reads it there); the chores still run for the
+  admin alone (`phase1Owner()`), as Phases 1-3 serve nobody else. Their per-user loop is Phase 4a's.
+- A long ban is any 429 with `reason` `QUOTA_EXCEEDED` or Retry-After over 120 s (the client's old hard-ban line);
+  its bucket's cooldown is Retry-After capped at 30 minutes, the whole 30 when there is no Retry-After. The step's
+  own `quota` cooldown (min(next reset, 30 min)) is unchanged; both only ever extend the same row.
+- `/me` is counted in the client because every caller of it is outside the step; recently-played stays counted in
+  the step (lane 04's bound counter), so each call is counted once.
+- `getAll` lost its page cap; a cursor already read ends it with the 508, which covers the self-referencing link
+  the cap was for. `page()` is the resumable primitive; the Liked head read uses it page by page.
+- `/api/sync`'s `x-sync` header (not a body or query): the authz harness invokes `POST()` with no request, and a
+  header read through `headers()` keeps the route's signature.
+- `user_tz` follows design C §3.3: `user_tz_offset` stays as the cookie-less fallback; the payload's zone is
+  `user_tz ?? "America/New_York"`. An unknown zone is never stored.
+
+**Not done, and why:**
+
+- The per-harvest lag roll-up (`lag_p50_s`, `lag_p95_s`, §7.8, PHASE3 §4 item 5): not in this lane's brief or
+  §13.1's Phase 3 row; it needs a column or table and a `/usage` reader.
+- The claim's token join is still unused (each step reads its row through `tokenForTick`, one more app-database
+  read per user per tick); handing the claimed blob to the token core touches the token core's read path, which
+  lane 15 is changing.
+- The request path's dead grant and §5.4 steps 4-5, the R15 check, and the daily chores per user: Phase 4a's.
+- The health check's `events` read: PHASE2.md §4 item 8 (lane 15).
+
+**For lane 34 (the stitch), the shared files this branch touched** (RULES 8): `src/app/api/cron/sync/route.ts`
+(whole file: main's interim pinger route, lane 07/08, is what it replaces), `src/app/api/sync/route.ts`,
+`src/app/api/cron/daily/route.ts`, `src/app/api/cron/health/route.ts`, `src/lib/db.ts` (probe and zone functions,
+`storeSavedTracks`/`storeSavedDiff`/`readSavedRows`/`getPlaylistSnapshots`, `api_log.reason`, removed:
+`getCaptureHealth`, the harvest gate, `library_scan_attempt_at`, `get/setSpotifyCooldownUntil`, `adminDb`, the
+`diffKeyed` import), `src/lib/app-db.ts` (`ClaimedUser.spotifyId`, `extendCooldown` floors),
+`src/lib/spotify/client.ts`, `resources.ts`, `service.ts`, `src/lib/sync/{tick,history,library}.ts`,
+`src/lib/playlists-sync.ts`, `src/app/(app)/history-actions.ts`, `home/page.tsx`, `home/den-home.tsx` (one line),
+`usage/page.tsx`, `src/components/{sync-on-load,timezone-cookie}.tsx`, `src/lib/{capture-health,health,handoff,
+harvest-policy}.ts`, the harness (`tests/isolation/authz-harness.ts`: a fresh `daily_at` in the seeded app
+database; `authz-registry.ts`, `authz-redteam.test.ts`, `static.test.ts`, `user-store.test.ts`), AUTHZ.md
+(regenerated), CLAUDE.md, ARCHITECTURE.md, GOTCHAS.md. Meeting points: `tests/cron-pinger.test.ts` is an add/add
+with main's, take this one; `cron-auth.ts` is untouched (lane 33's reconciliation stands); lane 1910's scoped
+orphan pass (blocked at 5:07 AM, no branch yet) meets `storePlaylists` and `store-diff.ts` unchanged here, and
+db.ts's `storeSavedTracks` no longer calls `diffKeyed`; Phase 2's wiring (lane 15) meets this branch in the health
+route (its `events` read beside `readCapture`), in Log out's `user_tokens` clear (which stops the tick for that
+user), and in `getCaptureHealth`'s removal (lane 15's item 1 rewrote it; `readCapture` replaces it).
+
+## 11. Deploy steps for lane 23
+
+After Phase 2's V3 (DISPATCH §4), from the stitched and reviewed `mu/f-p3`. No new environment variables:
+`CRON_SECRET_EXT` (lane 11), `APP_DATABASE_URL` and `TOKEN_KEYS` (Phase 2) are in place; `SIGNUPS` stays unset
+(`owner`).
+
+1. **Push and wait for Ready** (RULES 10). The telemetry store gains `api_log.reason` on the first telemetry write
+   after the deploy (an additive `ALTER TABLE`, `migrateTelemetry`).
+2. **Run one tick at once**: `ssh ubuntu '~/lazyboy-cron/ping.sh; tail -1 ~/lazyboy-cron/ping.log'` (the
+   script holds the secret; nothing prints it). Until the admin's first step his `sync_state` row has no
+   `last_ok_at`, so the banner and the hourly health check read capture as stale. Expect `http=200` with `steps`
+   holding his `uid`, `outcome: "ok"` and a `backstop` harvest (no harvest yet in `sync_state`). The tick also finds
+   no `app_meta.daily_at` and runs the daily chores in `after()`; `daily_at` then reads a fresh stamp.
+3. **The Zenbook's timers**, under DiveLoop's change lock (RULES 16), in `~/.config/systemd/user/` of the account
+   that runs them today (`remtbkv`):
+
+   ```bash
+   cd ~/.config/systemd/user
+   cp -n lazyboy-cron-sync.timer lazyboy-cron-sync.timer.pre-mu23
+   cp -n lazyboy-recorder.timer lazyboy-recorder.timer.pre-mu23
+   cat > lazyboy-cron-sync.timer <<'UNIT'
+   [Unit]
+   Description=Ping Lazy Boy /api/cron/sync on even minutes (cron-job.org takes the odd ones)
+
+   [Timer]
+   OnCalendar=*:0/2
+   AccuracySec=1s
+   Persistent=true
+
+   [Install]
+   WantedBy=timers.target
+   UNIT
+   cat > lazyboy-recorder.timer <<'UNIT'
+   [Unit]
+   Description=Run lazyboy backstop recorder hourly
+
+   [Timer]
+   OnCalendar=hourly
+   Persistent=true
+   RandomizedDelaySec=30
+
+   [Install]
+   WantedBy=timers.target
+   UNIT
+   systemctl --user daemon-reload
+   systemctl --user restart lazyboy-cron-sync.timer lazyboy-recorder.timer
+   systemctl --user list-timers --all | grep lazyboy
+   ```
+
+   Read Oct 16 7:16 AM: the sync timer is `OnBootSec=3min`, `OnUnitActiveSec=2min`, `AccuracySec=30s`,
+   `Persistent=true`; the recorder's `OnCalendar=*:0/15`, `Persistent=true`, `RandomizedDelaySec=30`. The services
+   are unchanged (`ping.sh`, `curl -m 60`, appends each reply to `ping.log`). Expect the sync timer's next run on an
+   even minute within a second of :00, and the recorder's at the top of the hour; then `ping.log` lines with
+   `{"ok":true,"steps":[…]}` every 2 minutes (the admin's step named, `skipped: "recent tick"` when cron-job.org's
+   odd-minute tick ran under 45 s before, which it should not once both are aligned).
+4. **cron-job.org's job** (Rem's, `rem_pinger_job`): it should run on odd minutes (1, 3, … 59); on even ones both
+   pingers collide and the app ticks every 2 minutes (each user's cadence is unchanged, the redundancy within the
+   minute is lost). Its execution history should show 200 and `{"ok":true}` in well under a second.
+5. **The checks** are DISPATCH §4's V4, then PLAN §13.1's Phase 3 exit checks.
+
+**Rollback.** The Zenbook first, then the app:
+
+```bash
+cd ~/.config/systemd/user
+cp lazyboy-cron-sync.timer.pre-mu23 lazyboy-cron-sync.timer
+cp lazyboy-recorder.timer.pre-mu23 lazyboy-recorder.timer
+systemctl --user daemon-reload
+systemctl --user restart lazyboy-cron-sync.timer lazyboy-recorder.timer
+```
+
+then PLAN §13.5: revert Phase 3's merge on `main` and push. The build before it has the interim pinger's route as
+lane 33 stitched it (`lock:tick`, a 90-s window), which both pingers keep calling; it reads the `meta` stamps this branch
+stopped writing (`player_last_active`, `rp_last_harvest`, `library_scan_attempt_at`), so its first tick harvests
+on the backstop and carries on. PLAN's first rollback step, the window back to 90 s, is `PHASE3_TICK.stampWindowMs`
+(`src/lib/sync/tick.ts`), a one-line commit, for a tick that misbehaves only with both pingers. Nothing this branch
+writes needs undoing: `app_meta` `tick_at`, `daily_at`, `cooldown:*`, `sync_state` rows and each user's
+`meta.probe` and `user_tz` are ignored by the older build.
