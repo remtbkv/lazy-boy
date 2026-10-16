@@ -6,8 +6,9 @@
 // Planted here: an unstable_cache keyed without the user (the uid captured in a closure, which
 // Next's key cannot see); a token core whose in-flight refresh is one promise for everyone;
 // the cache stub reverted to a pass-through (which can see no collision and no forged entry).
-// The fourth bug PLAN.md names, a URL template that ignores the uid, belongs to forUser and
-// the per-user databases (decision 11) and is not built yet.
+// The fourth, a URL template that ignores the uid: every db_name lands in one file.
+import { mkdirSync } from "node:fs";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Uid } from "@/lib/identity";
 import { createTokenCore } from "@/lib/token-core";
@@ -22,6 +23,7 @@ import {
   memoryTokenStore,
   scriptedSpotify,
 } from "./harness";
+import { expectOwnDatabases, useUserFiles } from "./user-dbs";
 
 const data: Record<string, string> = { [A]: "A-only-history", [B]: "B-only-history" };
 
@@ -115,5 +117,21 @@ describe("planted: one in-flight refresh promise for every user (01e A2)", () =>
     vi.stubGlobal("fetch", spotify.fetch);
     const core = createTokenCore(memoryTokenStore(rows()).store);
     await expectConcurrentRefreshIsolated((uid) => core.getValidAccessToken(uid), spotify);
+  });
+});
+
+describe("planted: a URL template that ignores the uid", () => {
+  it("the own-database check catches it: both names open one file, and B's open is refused there", async () => {
+    const dir = useUserFiles();
+    mkdirSync(path.join(dir, "pa"));
+    mkdirSync(path.join(dir, "pb"));
+    // `{db}` is in the template, so the open's own rule accepts it; the `..` throws it away.
+    process.env.STORE_URL_TEMPLATE = `file:${dir}/{db}/../shared.db`;
+    await expect(expectOwnDatabases("pa", "pb")).rejects.toThrow(/belongs to another user/);
+  });
+
+  it("and passes over the real template", async () => {
+    useUserFiles();
+    await expectOwnDatabases("qa", "qb");
   });
 });

@@ -123,12 +123,14 @@ export class HttpClient {
         }
         await sleep(Math.min(cooldown, capMs) + 250);
       }
+      // Outside the try: a token that names someone else is not a network error to retry.
+      const bearer = await this.bearer();
       let res: Response;
       try {
         res = await fetch(url, {
           method,
           headers: {
-            Authorization: `Bearer ${await this.bearer()}`,
+            Authorization: `Bearer ${bearer}`,
             ...(body ? { "Content-Type": "application/json" } : {}),
           },
           body: body ? JSON.stringify(body) : undefined,

@@ -7,6 +7,7 @@ const state = vi.hoisted(() => ({
   signedIn: true,
   afterQueue: [] as (() => unknown)[],
   recorded: [] as unknown[][],
+  uids: [] as unknown[],
   // A telemetry store that never answers.
   record: (rows: unknown[]) => {
     state.recorded.push(rows);
@@ -17,7 +18,12 @@ const state = vi.hoisted(() => ({
 vi.mock("@/lib/auth", () => ({
   auth: async () => (state.signedIn ? { user: {}, uid: "aaaaaaaaaaaa", admin: true } : null),
 }));
-vi.mock("@/lib/db", () => ({ recordClientMetrics: (rows: unknown[]) => state.record(rows) }));
+vi.mock("@/lib/db", () => ({
+  recordClientMetrics: (rows: unknown[], uid: unknown) => {
+    state.uids.push(uid);
+    return state.record(rows);
+  },
+}));
 vi.mock("next/server", () => ({
   after: (task: () => unknown) => {
     state.afterQueue.push(task);
@@ -39,6 +45,11 @@ describe("/api/metrics", () => {
     state.signedIn = true;
     state.afterQueue = [];
     state.recorded = [];
+    state.uids = [];
+    state.record = (rows: unknown[]) => {
+      state.recorded.push(rows);
+      return new Promise<void>(() => {});
+    };
   });
 
   it("answers 204 at once and records after the response", async () => {
@@ -73,6 +84,30 @@ describe("/api/metrics", () => {
       new Request("http://127.0.0.1:3000/api/metrics", { method: "POST", body: "{not json" }),
     );
     expect(bad.status).toBe(204);
+    expect(state.afterQueue).toHaveLength(0);
+  });
+
+  // T15's client half (PLAN.md §6.2 layer 7, security R7): the rows are filed under the
+  // session's uid, and an event name only the server writes never lands from a client.
+  it("files rows under the session's uid, never one from the body, and drops server-only events", async () => {
+    const res = await POST(
+      beacon({
+        session: "s1",
+        uid: "zzzzzzzzzzzz",
+        events: [
+          { page: "/home", event: "fcp", value: 1, uid: "zzzzzzzzzzzz" },
+          { page: "server", event: "isolation", meta: "owner-mismatch|aaaaaaaaaaaa" },
+        ],
+      }),
+    );
+    expect(res.status).toBe(204);
+    void state.afterQueue[0]();
+    expect(state.recorded).toEqual([[{ session: "s1", page: "/home", event: "fcp", value: 1, meta: null, at: null }]]);
+    expect(state.uids).toEqual(["aaaaaaaaaaaa"]);
+  });
+
+  it("a batch of nothing but server-only events records nothing", async () => {
+    await POST(beacon({ session: "s1", events: [{ page: "server", event: "isolation" }] }));
     expect(state.afterQueue).toHaveLength(0);
   });
 });
