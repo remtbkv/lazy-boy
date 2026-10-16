@@ -90,7 +90,8 @@ Each item names the PLAN.md section it implements.
   `getValidAccessToken()` is what triggers the copy.
 - **Isolation events** (§6.5): `reportIsolation` also writes `lazyboy-app.events` (uid, code, time),
   awaited; the log line and the telemetry row stay. An unreachable app database costs the row, logged, not
-  the other two.
+  the other two. The token core's owner assertion records a `token-owner` event with the caller's uid
+  before it throws (added by lane 03's review).
 - **`scripts/phase2-app-db.mjs`** (§11.4 steps 1 and 5): with the platform token from the Keychain item
   `lazyboy-turso-platform` (read into memory, never printed) it creates `lazyboy-app` in group `default`,
   applies `APP_SCHEMA`, and inserts the admin row from `OWNER_UID` and `SPOTIFY_OWNER_ID` with `account_id`
@@ -131,7 +132,8 @@ QUEUE.md T1), identical before this lane changed anything. Their fixed versions 
 **Planted bugs** added to `tests/isolation/planted-bugs.test.ts`, each caught and each passing over the real
 code, kept for good (PLAN §6.4): a cipher that drops the associated data; a cipher that reuses its IV; a
 refresh write that is not conditional; a `TokenStore` that answers another uid's row; an identity read that
-ignores `SIGNUPS`.
+ignores `SIGNUPS`. Lane 03's review added a key check that opens only the first key's sentinel (no test
+pinned "one sentinel per configured key" until then).
 
 | file | what it proves |
 |---|---|
@@ -211,6 +213,19 @@ boundary:
 12. **A decrypt failure on the request path** writes nothing and keeps the session, as §5.3 asks, but the
     page then renders without a Spotify token instead of §5.1's retryable answer: turning it into that
     answer is `requireUser()`'s and the pages' (the gated pages are queued files).
+13. **Every entry point on `requireUser()` before this deploys** (lane 03's review). Phase 1's identity
+    lookup never threw; this one does, by design, when the app database or the key check fails. The
+    `(app)` layout, Home, `/usage`, the search and metrics routes, `/api/sync` and `getSpotify` still gate
+    on a bare `auth()`, which then returns a session with `idUnavailable` and no uid: the layout, Home,
+    `/usage` and the search and metrics routes pass it and serve as single-user code does, while
+    `getSpotify` and `/api/sync` redirect to /login or answer a plain 401 when the token read fails with the
+    database. PHASE1.md §4 moves them at Phase 1's turn (lane 12); lane 15 checks that no `auth()` gate is
+    left outside `require-user.ts` and that the two owner shims in auth.ts are gone.
+14. **Key rotation's runbook** (SECURITY.md, with item 6): the sentinels cover the configured keys only.
+    `TOKEN_KEYS` with the old key dropped, or a wrong key under a new id, passes the cold-start check, and
+    every blob under the missing key fails one user at a time (a `decrypt` event each, users left
+    `active`, nothing written; checked by lane 03). So drop an old key only after
+    `SELECT count(*) FROM user_tokens WHERE blob LIKE '<old id>.%'` reads 0.
 
 **Choices made where PLAN left one open** (PLAN's recommendation where it has one):
 
