@@ -513,3 +513,48 @@ on the backstop and carries on. PLAN's first rollback step, the window back to 9
 (`src/lib/sync/tick.ts`), a one-line commit, for a tick that misbehaves only with both pingers. Nothing this branch
 writes needs undoing: `app_meta` `tick_at`, `daily_at`, `cooldown:*`, `sync_state` rows and each user's
 `meta.probe` and `user_tz` are ignored by the older build.
+
+## 12. Stitched onto Phase 2's turn: `mu/s-p3` (lane 1945_lb_mu_34_stitch, Oct 16, 2026)
+
+`mu/s-p3` is this phase's slice, `4505d5d..0bc8c2f` (lane 31's replay of the build-ahead commits and lane 17's
+turn), replayed with `git rebase --onto mu/s-p2`, where it meets lane 15's turn, the meter and Phase 1 as stitched
+onto `main` (lanes 1905, 1910, 11). `git range-diff 4505d5d..0bc8c2f mu/s-p2..mu/s-p3` (`--creation-factor=100`),
+this section's commit aside: 19 patches unchanged, 9 changed, 7 new. Each changed commit's message ends with a "Stitched onto mu/s-p2"
+paragraph; the meeting points are §10's last two paragraphs, taken as lane 17 wrote them.
+
+- `e4a5a94`, `a45fbc0`: `app-db.ts` and `auth.ts` keep both sides' additions (lane 15's events statements and
+  `signOutTokens`).
+- `32bbd70`: `/api/cron/sync` is `runTick` whole, over the interim pinger and lane 15's lookup; the tick's daily
+  chores and `/api/cron/daily` run on `adminStore()`; the health route reads `adminStore()`, `events` and the
+  meter's inputs; `HealthMark` is `quota_pace` alone; S2's `forUserAt` importers are exactly `identity-read.ts`
+  and `tick-deps.ts`. `tests/cron-pinger.test.ts` is this phase's suite.
+- `7ab2b69`: `getCaptureHealth` goes for `readCapture` (lane 15 had pointed it at `user_tokens`); T15's healthy
+  owner moves to `sync_state` and `app_meta.daily_at`; health.test.ts keeps the meter row and lane 15's
+  plaintext-copy case.
+- `2b67b60`: `/api/sync` and SyncOnLoad are this phase's whole; the meter's hooks land again in a stitch commit.
+- `975ad4c`: the cooldown and `adminDb()` go; `adminDb()` stays one commit for the budget mode.
+- `66c9998`, `6bf99e6`: `storeSavedDiff` takes `likedDiff` and keeps lane 1910's scoped orphan pass (the renamed
+  identities among the incoming tracks go to `recomputeOrphanFlags` after the write).
+- `f6c38aa`: ARCHITECTURE and GOTCHAS take the tick's account; "The budget" section stays.
+
+New commits:
+
+- `stitch: the budget mode moves to app_meta with the cooldowns`: `budget_mode` is app-wide state (PLAN §4.2), so
+  it moves from the admin's `meta` to `app_meta`; `adminDb()` and db.ts's `phase1Owner` import go. At this phase's
+  deploy the stored mode is not carried: until the next daily chores it reads as never written (normal on the hot
+  paths, `unchecked` in the health check). Lane 23 can run `/api/cron/daily` once after the deploy.
+- `stitch: tick-route's raw client opens the app database app-db.ts opens`: lane 15's `useUserFiles()` points
+  `APP_DATABASE_URL` at its own file, so `tick-route.test.ts` seeded a file the route never read (8/8 red).
+- `tests: step-quota's QUOTA_EXCEEDED case holds the wall clock on the tick's instant`: a date bomb, failing on
+  `0bc8c2f` itself since 18:00 UTC Oct 16.
+- `stitch: the tick's rescan follows the budget mode`: `TickDeps.budgetMode`; freeze claims no rescan, economy
+  schedules the next at least 2 hours on, normal is the tick's own cadence.
+- `stitch: the daily budget record runs with the daily chores`: `runBudgetChore` in `daily-chores.ts`, so the
+  daily route and an overdue tick both record it.
+- `stitch: the open app's sync follows the budget mode`: `/api/sync` answers freeze before its writes and adds
+  `intervalMs`; SyncLoop sends `x-sync: load` on start and focus, `timer` on its interval.
+- `stitch: the tick's pinger suite keeps s-p1's and s-p2's cases`: no admin row (503 `no-admin`), and the owner
+  alarm on the token of record, in the tick's codes.
+
+Gates at the slice head: `tsc`, lint, `npm test`, build green; `AUTHZ_TARGET=1 … authz-` fails only the three P4a
+pins. Lane 34's NOTES and OUTCOMES entry have the full range-diff.
