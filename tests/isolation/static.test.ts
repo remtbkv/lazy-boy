@@ -61,9 +61,9 @@ describe("S1: unstable_cache only inside userCache", () => {
 
 describe("S2: a Uid is minted in one place", () => {
   // The gate mints from the session; auth.ts mints Rem's uid in the sign-in branch and in the
-  // two owner-bound Phase 1 shims. Phase 2 adds the cron's claim; the scripts' --user helper
-  // comes with forUser.
-  const MINTERS = new Set(["src/lib/session-gate.ts", "src/lib/auth.ts"]);
+  // two owner-bound Phase 1 shims. Phase 3 adds the cron's claim (app-db.ts, from the rows it
+  // just leased); the scripts' --user helper comes with forUser.
+  const MINTERS = new Set(["src/lib/session-gate.ts", "src/lib/auth.ts", "src/lib/app-db.ts"]);
 
   it("no `as Uid` outside identity.ts", () => {
     const casts: string[] = [];
@@ -213,6 +213,26 @@ describe("S3: app-db.ts's exports match the reviewed snapshot", () => {
     "unreportedEvents (function)",
     "updateTokensIfUnchanged (function)",
     "writeSignInTokens (function)",
+    // Phase 3, the sync queue. Cross-user by design: readOwnerAlarm, claimDueUsers (the claim),
+    // grantFailuresSince; each takes no uid and returns scheduling, never data (sync-queue.test.ts).
+    "Claim (type)",
+    "ClaimedUser (type)",
+    "OwnerAlarmRow (type)",
+    "Release (type)",
+    "TICK_STATEMENT_TIMEOUT_MS (const)",
+    "claimDueUsers (function)",
+    "claimRescan (function)",
+    "claimUser (function)",
+    "countRpCall (function)",
+    "extendCooldown (function)",
+    "finishGrantConfirm (function)",
+    "grantFailuresSince (function)",
+    "oneAttemptFetch (function)",
+    "readOwnerAlarm (function)",
+    "releaseLease (function)",
+    "scheduleRescan (function)",
+    "stampTick (function)",
+    "startGrantConfirm (function)",
   ];
 
   it("lists every export", () => {
