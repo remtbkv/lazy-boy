@@ -395,3 +395,34 @@ db.ts, auth.ts, actions.ts, owner.ts, identity-read.ts, app-db.ts, token-core.ts
 token-store-app.ts, health.ts, the four cron routes, the isolation harness (harness.ts, user-dbs.ts,
 authz-harness.ts), static.test.ts, AUTHZ.md, CLAUDE.md, README.md, .env.example, SECURITY.md, ARCHITECTURE.md,
 GOTCHAS.md.
+
+## 8. Stitched onto the meter: `mu/s-p2` (lane 1945_lb_mu_34_stitch, Oct 16, 2026)
+
+`mu/s-p2` is this phase's slice, `46538cd..1343eeb` (lane 31's replay and lane 15's turn), replayed with
+`git rebase --onto mu/s-meter` on top of Phase 1 as lane 33 stitched it onto `main` (`mu/s-p1`) and the capacity
+meter (`mu/s-meter`). `git range-diff 46538cd..1343eeb mu/s-meter..mu/s-p2` (`--creation-factor=100`), this
+section's commit aside: 15 patches unchanged, 6 changed, 1 new. Each changed commit's message ends with a
+"Stitched onto mu/s-meter" paragraph.
+
+- `2077bbe`, `b850ebb`: `CLAUDE.md`'s file map takes this phase's token, app-database and naming lines and keeps the
+  meter's health-route line and s-p1's "on Turso" and "over the Funnel" words.
+- `261cf70` meets lane 07/08's interim pinger, which lane 33 stitched into Phase 1: `/api/cron/sync` keeps
+  `cronCaller`, cron-job.org's bare `{"ok":true}` with its tick in `after()`, the owner alarm before the 90-second
+  `lock:tick` stamp, and looks the admin up with `adminStore()` inside that tick, after cron-job.org's reply (no
+  admin row: 503 "no owner" to the Zenbook; the app database not answering: 200 "store"). The health route keeps
+  the meter's `getBudgetMode`/`readMeter`. `tests/cron-pinger.test.ts` seeds the admin's users row and wraps
+  `forUserAt` beside `forUser` for its failing-stamp case.
+- `d5c033d`: the cron route keeps `after()` beside `readTokenRow`. `592c1e3`: the health route reads `events`
+  here and keeps the meter's two inputs; S7 keeps the health route as an allowed awaiter, now for `readMeter`;
+  T15 sets the budget mode normal and expects the meter's input `unchecked` (its telemetry store is down by
+  design). `1343eeb`: S4's note for db.ts's `g` names this phase's directory and the meter's mode memo.
+- New, `stitch: the pinger's owner alarm reads the token of record (user_tokens)`: `d5c033d` moved the cron's
+  later "no token" read to `user_tokens` but never saw the interim pinger's alarm, which still read the plaintext
+  row. Stitched as it was, once §11.4 step 6 drops the plaintext row a week after this phase, every Zenbook tick
+  would answer 503 before the stamp and stop capture through the Zenbook. The alarm reads `readTokenRow(uid)`;
+  the pinger suite moved to this phase's tokens with a new case, red 4/8 before the fix.
+
+What the meter needs from this phase stays as the meter built it: `getBudgetMode`/`setBudgetMode` use db.ts's
+`adminDb()`, which this phase keeps for the cooldown. Gates at the slice head: `tsc`, lint, `npm test`, build
+green; `AUTHZ_TARGET=1 … authz-` fails only the three P4a pins. Lane 34's NOTES (`lb_34/NOTES.md`) and OUTCOMES
+entry have the full range-diff.
