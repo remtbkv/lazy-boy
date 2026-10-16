@@ -54,19 +54,24 @@ export function userCache<A extends unknown[], R>(
 }
 
 // ── The planted probe (PLAN.md §13.1, Phase 4a's row; RULINGS Oct 15 9:27 PM) ──────────────────
-// /api/cron/probe, opened by the Zenbook's CRON_SECRET alone: forge one entry under `uid`'s key
-// stamped with another uid (which need not belong to anyone), then read it back through
-// userCache, so its owner check records exactly one `cache-stamp` event for `uid` and the health
-// check turns red. The wrapper is the probe's own, its value a constant, and the nonce a fresh key
-// part per run: no read path that serves data ever meets the forged entry.
+// /api/cron/probe, opened by the Zenbook's CRON_SECRET alone, in two calls: the first forges one
+// entry under `uid`'s key stamped with another uid (which need not belong to anyone); the second
+// reads it back through userCache, so its owner check records exactly one `cache-stamp` event for
+// `uid` and the health check turns red. Two calls, because inside a request Next 16 stores a new
+// unstable_cache entry only when the request ends (unstable-cache.js: pendingRevalidates), so a
+// read in the same request would miss the forged entry. The wrapper is the probe's own, its value
+// a constant, and the nonce a fresh key part per run: no read path that serves data ever meets it.
 const PROBE = "planted-probe";
 const PROBE_OPTS = { revalidate: 300 };
 const probeValue = async (): Promise<{ probe: true }> => ({ probe: true });
 const probeRead = userCache(PROBE, probeValue, ["v1"], PROBE_OPTS);
 
-export async function plantedProbe(uid: string, stamp: string, nonce: string): Promise<void> {
+export async function forgeProbeEntry(uid: string, stamp: string, nonce: string): Promise<void> {
   const u = mintUid(uid);
   if (stamp === uid) throw new Error("planted probe: the stamp must be another uid");
   await unstable_cache(stamped(probeValue, () => mintUid(stamp)), ["u", PROBE, u, nonce, "v1"], PROBE_OPTS)(u);
-  await probeRead(u, nonce);
+}
+
+export async function readProbeEntry(uid: string, nonce: string): Promise<void> {
+  await probeRead(mintUid(uid), nonce);
 }

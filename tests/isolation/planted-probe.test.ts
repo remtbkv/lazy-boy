@@ -1,9 +1,9 @@
 // The planted probe (PLAN.md §13.1, Phase 4a's row; RULINGS Oct 15 9:27 PM): opened only by the
 // Zenbook's CRON_SECRET (never CRON_SECRET_EXT), it forges one cache entry under a named uid's key
 // stamped with another uid, which need not belong to any users row, and reads it back through
-// userCache, so exactly one isolation event results and the health check turns red. Run over the
-// cache stub that keys the way Next 16.2.6 does, so the forged entry really sits under the key the
-// real read uses.
+// userCache, so exactly one isolation event results and the health check turns red. Two calls,
+// since Next stores a new entry only when its request ends. Run over the cache stub that keys the
+// way Next 16.2.6 does, so the forged entry really sits under the key the real read uses.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAppMeta } from "@/lib/app-db";
 import { freshAppDb, seedUser } from "./harness";
@@ -50,20 +50,42 @@ describe("the planted probe", () => {
   it("opens to CRON_SECRET only: not cron-job.org's, not none, not a wrong one; and nothing is written", async () => {
     for (const auth of [null, "Bearer ext-secret", "Bearer nope", "Bearer "]) {
       expect((await probe(auth, { uid: REM, stamp: NOBODY })).status, String(auth)).toBe(401);
+      expect((await probe(auth, { uid: REM, nonce: "00000000-0000-4000-8000-000000000000" })).status, String(auth)).toBe(401);
     }
     expect(await q("SELECT count(*) AS n FROM events")).toEqual([{ n: 0 }]);
     expect(__cache.keys()).toEqual([]);
   });
 
-  it("refuses anything but two different uids", async () => {
-    for (const body of [{}, { uid: REM }, { uid: REM, stamp: REM }, { uid: "../x", stamp: NOBODY }, { uid: REM, stamp: "not-a-uid" }]) {
+  it("refuses anything but a uid with a different stamp, or a uid with a nonce", async () => {
+    for (const body of [
+      {},
+      { uid: REM },
+      { uid: REM, stamp: REM },
+      { uid: "../x", stamp: NOBODY },
+      { uid: REM, stamp: "not-a-uid" },
+      { uid: REM, stamp: NOBODY, nonce: "x" },
+      { uid: REM, nonce: "../../etc" },
+    ]) {
       expect((await probe("Bearer zen-secret", body)).status, JSON.stringify(body)).toBe(400);
     }
     expect(await q("SELECT count(*) AS n FROM events")).toEqual([{ n: 0 }]);
   });
 
+  const run = async (stamp: string) => {
+    const f = await probe("Bearer zen-secret", { uid: REM, stamp });
+    expect(f.status).toBe(202);
+    const { nonce } = await f.json();
+    return probe("Bearer zen-secret", { uid: REM, nonce });
+  };
+
+  it("reading a nonce nobody forged raises nothing", async () => {
+    const r = await probe("Bearer zen-secret", { uid: REM, nonce: "00000000-0000-4000-8000-000000000000" });
+    expect(await r.json()).toEqual({ ok: false, events: 0 });
+    expect(await q("SELECT count(*) AS n FROM events")).toEqual([{ n: 0 }]);
+  });
+
   it("stamps Rem's key with a uid no row holds: exactly one isolation event, the health check red once, the record kept", async () => {
-    const r = await probe("Bearer zen-secret", { uid: REM, stamp: NOBODY });
+    const r = await run(NOBODY);
     expect(r.status).toBe(200);
     expect(await r.json()).toEqual({ ok: true, events: 1 });
     expect(await q("SELECT uid, code FROM events")).toEqual([{ uid: REM, code: "cache-stamp" }]);
@@ -81,8 +103,8 @@ describe("the planted probe", () => {
   });
 
   it("a second run is one more event, never more", async () => {
-    await probe("Bearer zen-secret", { uid: REM, stamp: NOBODY });
-    await probe("Bearer zen-secret", { uid: REM, stamp: "yyyyyyyyyyyy" });
+    await run(NOBODY);
+    await run("yyyyyyyyyyyy");
     expect((await q("SELECT count(*) AS n FROM events"))[0].n).toBe(2);
   });
 });
