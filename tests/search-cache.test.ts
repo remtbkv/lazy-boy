@@ -3,7 +3,6 @@
 // the only part these tests do not reach.
 import { describe, expect, it, vi } from "vitest";
 import {
-  clearStored,
   historyOk,
   libraryOk,
   readStored,
