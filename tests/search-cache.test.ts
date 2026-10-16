@@ -74,6 +74,13 @@ describe("readStored / writeStored", () => {
     expect(await readStored(kv, lib(), libraryOk)).toEqual(body);
   });
 
+  it("a numeric version still yields a key the next read can decode", async () => {
+    const kv = memoryKV();
+    await writeStored(kv, lib(), 670 as unknown as string, JSON.stringify(LIB));
+    expect(await readStored(kv, lib(), libraryOk)).toEqual(LIB);
+    expect(kv.map.size).toBe(1);
+  });
+
   it("a write replaces that half's previous version and leaves the other half alone", async () => {
     const kv = memoryKV();
     await writeStored(kv, lib(), "41", JSON.stringify(LIB));
