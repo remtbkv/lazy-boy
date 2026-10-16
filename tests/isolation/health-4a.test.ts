@@ -7,15 +7,24 @@ import { getAppMeta } from "@/lib/app-db";
 import { healthVerdict } from "@/lib/health";
 import { freshAppDb, seedUser } from "./harness";
 
-vi.mock("@/lib/db", async (orig) => ({
-  ...(await orig<typeof import("@/lib/db")>()),
-  // The owner's capture is healthy here, so every red below is the app database's.
-  getCaptureHealth: async () => ({ ok: true, staleForMs: 60_000, reason: null }),
-  // Telemetry is down for every test in this file.
-  recordClientMetrics: async () => {
-    throw new Error("telemetry down");
-  },
-}));
+vi.mock("@/lib/db", async (orig) => {
+  const real = await orig<typeof import("@/lib/db")>();
+  return {
+    ...real,
+    // The owner's capture is healthy here, so every red below is the app database's.
+    forUser: (uid: Parameters<typeof real.forUser>[0]) => ({
+      ...real.forUser(uid),
+      getCaptureHealth: async () => ({ ok: true, staleForMs: 60_000, reason: null }),
+    }),
+    // Telemetry is down for every test in this file.
+    recordClientMetrics: async () => {
+      throw new Error("telemetry down");
+    },
+    isolationEventsAfter: async () => {
+      throw new Error("telemetry down");
+    },
+  };
+});
 
 const HOUR = 3_600_000;
 let db: ReturnType<typeof freshAppDb>;

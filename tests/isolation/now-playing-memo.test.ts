@@ -14,7 +14,9 @@ vi.mock("@/lib/auth", () => ({
   spotifyAccessTokenFor: async (uid: string) => `tok-${uid}`,
 }));
 vi.mock("@/lib/spotify", () => ({
-  spotifyClient: (token: string) => ({
+  SpotifyError: class SpotifyError extends Error {},
+  spotifyCooldownMs: () => 0,
+  spotifyClient: (_uid: string, token: string) => ({
     currentlyPlaying: async () => {
       state.calls.push(token);
       if (state.fail) throw new Error("429");
@@ -23,7 +25,7 @@ vi.mock("@/lib/spotify", () => ({
     contextName: async () => null,
   }),
 }));
-vi.mock("@/lib/db", () => ({ getContextName: async () => undefined, recordContexts: async () => {} }));
+vi.mock("@/lib/db", () => ({ forUser: () => ({ getContextName: async () => undefined, recordContexts: async () => {} }) }));
 
 const { GET } = await import("@/app/api/now-playing/route");
 const { clearNowPlayingMemo, NOW_PLAYING_MEMO_MS } = await import("@/lib/now-playing-memo");

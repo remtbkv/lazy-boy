@@ -6,8 +6,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createClient, type Client } from "@libsql/client";
 import { describe, expect, it } from "vitest";
-import { getMeId } from "@/lib/db";
-import { USER_SCHEMA_STATEMENTS, userMetaStatement } from "@/lib/user-schema";
+import { USER_SCHEMA_VERSION as DB_USER_SCHEMA_VERSION } from "@/lib/db";
+import { USER_SCHEMA_STATEMENTS, USER_SCHEMA_VERSION, userMetaStatement } from "@/lib/user-schema";
+import { ownerStore } from "../owner-store";
 
 const SEVEN = ["contexts", "meta", "playlist_tracks", "playlists", "plays", "saved_tracks", "tracks"];
 
@@ -25,13 +26,17 @@ async function shape(c: Client) {
 
 describe("user-schema.ts", () => {
   it("builds what db.ts's init() builds, table for table and index for index", async () => {
-    await getMeId(); // db.ts's first open runs init() on the simulated store
+    await ownerStore().getMeId(); // db.ts's first open runs init() on the simulated store
     const dbts = createClient({ url: process.env.TURSO_DATABASE_URL! });
     const fresh = createClient({ url: `file:${path.join(mkdtempSync(path.join(tmpdir(), "lazyboy-us-")), "u.db")}` });
     for (const s of USER_SCHEMA_STATEMENTS) await fresh.execute(s);
     expect(await shape(fresh)).toEqual(await shape(dbts));
     dbts.close();
     fresh.close();
+  });
+
+  it("is version 1 of db.ts's versioned open, so a friend's database opens without a step", () => {
+    expect(USER_SCHEMA_VERSION).toBe(DB_USER_SCHEMA_VERSION);
   });
 
   it("writes the four meta keys once", async () => {

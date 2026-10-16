@@ -9,10 +9,16 @@ import { getAppMeta } from "@/lib/app-db";
 import { freshAppDb, seedUser } from "./harness";
 
 vi.mock("next/cache", async () => await import("../stubs/next-cache-faithful"));
-vi.mock("@/lib/db", async (orig) => ({
-  ...(await orig<typeof import("@/lib/db")>()),
-  getCaptureHealth: async () => ({ ok: true, staleForMs: 60_000, reason: null }),
-}));
+vi.mock("@/lib/db", async (orig) => {
+  const real = await orig<typeof import("@/lib/db")>();
+  return {
+    ...real,
+    forUser: (uid: Parameters<typeof real.forUser>[0]) => ({
+      ...real.forUser(uid),
+      getCaptureHealth: async () => ({ ok: true, staleForMs: 60_000, reason: null }),
+    }),
+  };
+});
 const { __cache } = await import("../stubs/next-cache-faithful");
 
 const REM = "aaaaaaaaaaaa";
