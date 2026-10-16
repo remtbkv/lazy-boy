@@ -2,10 +2,12 @@
 // token store in memory, a scripted Spotify that answers per bearer and logs which bearer each
 // call carried, and the check functions the planted-bug self-test runs against broken
 // implementations (tests/isolation/planted-bugs.test.ts).
+import { randomBytes } from "node:crypto";
 import { expect, vi } from "vitest";
 import type { SpotifyTokens } from "@/lib/db";
 import { mintUid, type Uid } from "@/lib/identity";
 import type { TokenStore } from "@/lib/token-core";
+import { parseTokenKeys, type TokenKey } from "@/lib/token-crypto";
 
 export const A: Uid = mintUid("aaaaaaaaaaaa");
 export const B: Uid = mintUid("bbbbbbbbbbbb");
@@ -71,6 +73,34 @@ export function scriptedSpotify(opts: { dead?: string[]; delayMs?: number } = {}
     return Response.json({ bearer });
   };
   return { calls, fetch: vi.fn(fetchImpl) };
+}
+
+type Pair = { accessToken: string; refreshToken: string };
+export type Cipher = {
+  encrypt: (keys: TokenKey[], uid: string, t: Pair) => string;
+  decrypt: (keys: TokenKey[], uid: string, blob: string) => Pair;
+};
+const testKeys = () => parseTokenKeys(`v1:${randomBytes(32).toString("base64")}`);
+
+/** The associated data's contract (PLAN.md §5.3): A's ciphertext copied into B's row does not
+ *  decrypt as B, so write access to the app database without the key cannot graft one user's
+ *  grant onto another's account. */
+export function expectCiphertextBoundToUser(c: Cipher): void {
+  const keys = testKeys();
+  const blob = c.encrypt(keys, A, { accessToken: "at-A", refreshToken: "rt-A" });
+  expect(c.decrypt(keys, A, blob)).toEqual({ accessToken: "at-A", refreshToken: "rt-A" });
+  expect(() => c.decrypt(keys, B, blob)).toThrow();
+}
+
+/** GCM's contract: never two writes under one key with the same IV. */
+export function expectFreshIvPerWrite(encrypt: Cipher["encrypt"]): void {
+  const keys = testKeys();
+  const ivs = new Set<string>();
+  for (let i = 0; i < 64; i++) {
+    const blob = encrypt(keys, A, { accessToken: "at-A", refreshToken: "rt-A" });
+    ivs.add(Buffer.from(blob.slice(blob.indexOf(".") + 1), "base64url").subarray(0, 12).toString("hex"));
+  }
+  expect(ivs.size).toBe(64);
 }
 
 /** The core's contract that a shared in-flight promise breaks (01e A2, PLAN.md §5.2): two users
