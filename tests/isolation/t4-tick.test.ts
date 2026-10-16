@@ -210,23 +210,38 @@ describe("T4: two users, one tick", () => {
     expect((await q("SELECT status FROM users WHERE uid = :u", { u: A }))[0].status).toBe("active");
   });
 
-  it("…with Spotify's own words, A is removed; B, the admin, is untouched", async () => {
-    const spotify = tickSpotify({ [`at-${B}`]: healthy(B) });
+  /** Spotify refusing the given users with its "not registered" 403; everyone else healthy. */
+  function refuse(...uids: string[]) {
+    const spotify = tickSpotify({ [`at-${A}`]: healthy(A), [`at-${B}`]: healthy(B) });
     const inner = spotify.fetch.getMockImplementation()!;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const bearer = new Headers(init?.headers).get("authorization");
-        if (bearer === `Bearer at-${A}`) return new Response("Check settings on developer.spotify.com/dashboard, the user may not be registered.", { status: 403 });
+        if (uids.some((u) => bearer === `Bearer at-${u}`)) {
+          return new Response("Check settings on developer.spotify.com/dashboard, the user may not be registered.", { status: 403 });
+        }
         return inner(input, init);
       }),
     );
-    const { deps } = tickDeps({ now: () => NOW, stores });
-    const r = await runTick(deps, ZEN);
+  }
+  const statuses = async () => (await q("SELECT uid, status FROM users ORDER BY uid")).map((x) => [x.uid, x.status]);
+
+  it("…with Spotify's own words, A is removed at its second refusal while B, the admin, keeps working", async () => {
+    refuse(A);
+    const r = await runTick(tickDeps({ now: () => NOW, stores }).deps, ZEN);
     const steps = r.body.steps as { uid: string; outcome: string }[];
     expect(steps.find((s) => s.uid === A)?.outcome).toBe("not-registered");
     expect(steps.find((s) => s.uid === B)?.outcome).toBe("ok");
-    expect((await q("SELECT uid, status FROM users ORDER BY uid")).map((x) => [x.uid, x.status])).toEqual([
+    // One refusal proves nothing about A alone: B's success came in the same moment.
+    expect(await statuses()).toEqual([
+      [A, "active"],
+      [B, "active"],
+    ]);
+    expect(await row(A)).toMatchObject({ state: "backoff", last_error: "not-registered" });
+    // Refused again after its backoff, with B served since: A alone is not registered.
+    await runTick(tickDeps({ now: () => NOW + 4 * MIN, stores }).deps, ZEN);
+    expect(await statuses()).toEqual([
       [A, "removed"],
       [B, "active"],
     ]);
@@ -239,6 +254,47 @@ describe("T4: two users, one tick", () => {
     expect((r.body.steps as { outcome: string }[]).map((s) => s.outcome)).toEqual(["not-registered", "not-registered"]);
     expect((await q("SELECT status FROM users ORDER BY uid")).map((x) => x.status)).toEqual(["active", "active"]);
     expect((await q("SELECT state FROM sync_state ORDER BY uid")).map((x) => x.state)).toEqual(["backoff", "backoff"]);
+  });
+
+  it("…and when both had been working until that tick: their earlier successes do not count, nobody is removed", async () => {
+    install({ [`at-${A}`]: healthy(A), [`at-${B}`]: healthy(B) });
+    await runTick(tickDeps({ now: () => NOW, stores }).deps, ZEN);
+    refuse(A, B);
+    for (const m of [4, 8, 16]) await runTick(tickDeps({ now: () => NOW + m * MIN, stores }).deps, ZEN);
+    expect(await statuses()).toEqual([
+      [A, "active"],
+      [B, "active"],
+    ]);
+    expect((await q("SELECT state, last_error FROM sync_state ORDER BY uid")).map((x) => [x.state, x.last_error])).toEqual([
+      ["backoff", "not-registered"],
+      ["backoff", "not-registered"],
+    ]);
+  });
+
+  it("…and when the refusals begin on different minutes (users on different ticks): B's success before the onset does not remove A", async () => {
+    install({ [`at-${A}`]: healthy(A), [`at-${B}`]: healthy(B) });
+    await runTick(tickDeps({ now: () => NOW, stores }).deps, ZEN);
+    refuse(A, B);
+    // A's minute: B is not due, its last success (at NOW) came before anything was refused.
+    await q("UPDATE sync_state SET next_probe_at = :t WHERE uid = :u", { t: NOW + 3 * MIN, u: B });
+    await q("UPDATE sync_state SET next_probe_at = :t WHERE uid = :u", { t: NOW + 2 * MIN, u: A });
+    await runTick(tickDeps({ now: () => NOW + 2 * MIN, stores }).deps, ZEN);
+    // B's minute, then A's second refusal, then both again.
+    for (const m of [3, 4, 8, 12]) await runTick(tickDeps({ now: () => NOW + m * MIN, stores }).deps, ZEN);
+    expect(await statuses()).toEqual([
+      [A, "active"],
+      [B, "active"],
+    ]);
+  });
+
+  it("the admin refused that way while a friend keeps working is never removed: he backs off", async () => {
+    refuse(B);
+    for (const m of [0, 4, 8]) await runTick(tickDeps({ now: () => NOW + m * MIN, stores }).deps, ZEN);
+    expect(await statuses()).toEqual([
+      [A, "active"],
+      [B, "active"],
+    ]);
+    expect(await row(B)).toMatchObject({ state: "backoff", last_error: "not-registered" });
   });
 
   it(

@@ -99,8 +99,9 @@ one invocation a minute whatever N is).
      step still running);
   6. the daily chores in `after()` when `daily_at` is over 26 hours old, under `lock:daily`, stamping
      `daily_at` when they finish.
-  Then: a 403 "not registered" marks a friend `removed` only while another user's calls work (this tick or
-  in the last 10 minutes), never the admin; when everyone fails that way, everyone backs off. §5.4 step 2:
+  Then: a 403 "not registered" marks a friend `removed` only at their second refusal in a row, and only when
+  another user's calls worked after the first (in this tick, or a success stamped since); never the admin;
+  when everyone fails that way, on one tick or on their own minutes, everyone backs off. §5.4 step 2:
   one confirming refresh for at most one user 10 minutes after their `invalid_grant`, which returns them to
   `active` or records `invalid_grant:confirmed`; step 3: two or more users, or the admin, hit within 24
   hours records a `grant-wide` event.
@@ -129,7 +130,7 @@ turn's rebase brings the fix.
 | `tests/brake.test.ts` | the quota day and its reset at 14:51 UTC; 426/N; `share` and `all`; off in Phase 3; completeness, tail, retry, backstop and open-app firing in `share` and `all` | the missing module; 3 mutants |
 | `tests/liked-diff.test.ts` | one like writes one row; unlike, re-like; the first page meeting the store; a head longer than a page; an unlike (with and without a like) forcing a refetch; an empty store read to the end | the missing module; 3 mutants |
 | `tests/isolation/sync-queue.test.ts` | the stamp's window, as a parameter and under a burst; the claim's lease, join and view, SIGNUPS=owner, only due active unpaused users, a lapsed lease due again, the queue row a first tick creates; T6's claim half (a leased user is not due to a second tick or a tab); the release's compare-and-set; the counter across quota days; cooldowns; the rescan claim; the confirmation's due time and once-only claim; the 24-hour count; the owner alarm's read; one attempt per request and the 5-second abort, through the store fetch | Phase 2's `app-db.ts`; 5 mutants (no owner check, no due check, no SIGNUPS, no live-lease check, a second attempt) |
-| `tests/isolation/t4-tick.test.ts` | **T4**: two users, each user's calls with their own bearer and plays in their own store; A failing while B stays `ok`, eight ways: a dead grant (stop and keep, an event, then the confirmation bringing A back, or confirmed dead once), both users dead (`grant-wide`), no token row, a 5xx (backoff), a token that does not decrypt (nothing written), a bare 403 (backoff), a 403 "not registered" (A removed, the admin untouched), everyone refused that way (nobody removed); A's Spotify hanging (A abandoned at 15 s, the reply inside 20 s, real timers); a reply sent before a step finishes (`pending`, the rest in `after()`); one rescan a tick and none with under 10 s left; the daily chores once, under the lock; the open app's catch-up; the tab's timer standing in only after 5 minutes | the first draft (it caught "the user may not be registered" not being read as not-registered); 5 mutants (removal without another user working, invalid_grant not moving the status, a decrypt failure written, the count skipped, no-token backed off) |
+| `tests/isolation/t4-tick.test.ts` | **T4**: two users, each user's calls with their own bearer and plays in their own store; A failing while B stays `ok`, eight ways: a dead grant (stop and keep, an event, then the confirmation bringing A back, or confirmed dead once), both users dead (`grant-wide`), no token row, a 5xx (backoff), a token that does not decrypt (nothing written), a bare 403 (backoff), a 403 "not registered" (A removed at its second refusal, the admin untouched), everyone refused that way (nobody removed, also after both had been working and when the refusals begin on different minutes), the admin refused that way while a friend works (never removed); A's Spotify hanging (A abandoned at 15 s, the reply inside 20 s, real timers); a reply sent before a step finishes (`pending`, the rest in `after()`); one rescan a tick and none with under 10 s left; the daily chores once, under the lock; the open app's catch-up; the tab's timer standing in only after 5 minutes | the first draft (it caught "the user may not be registered" not being read as not-registered); 5 mutants (removal without another user working, invalid_grant not moving the status, a decrypt failure written, the count skipped, no-token backed off) |
 | `tests/isolation/t13-tick-callers.test.ts` | **T13**: no secret, wrong secrets and near misses refused before anything runs; the Zenbook gets codes and counts with no track, name or token; cron-job.org gets `{"ok":true}` after the same work; the owner alarm 503 to the Zenbook only (admin not active, no token row even on a skipped tick, two decrypt failures from the other pinger's tick, the admin's own in this tick; one friend's is not the alarm); a burst of seven calls doing one tick's work; 45 s lets pingers a minute apart both tick and 90 s every other; cron-job.org's body bare when the tick worked, skipped, met a store outage or an alarm; the store down at the claim ending the tick with no Spotify call | 4 mutants (ext answered like the Zenbook, the stamp ignored, the alarm never read, this tick's decrypts ignored) |
 | `tests/isolation/step-quota.test.ts` | a rate-limit 429 backs nobody off; QUOTA_EXCEEDED cools `cooldown:recently-played` to min(reset, 30 min) and the next tick does not ask it | 3 mutants |
 | `tests/isolation/token-core.test.ts` (3 added) | `tokenForTick`: fresh, refreshed, null; invalid_grant throws terminal and clears nothing; a failed read throws | the core before `tokenForTick` |
@@ -239,8 +240,13 @@ What does not wait on a decision: everything above. Decisions 15, 26 and 28 are 
   tags have no seventh.
 - **The cadence lattice** (§2): due times anchored on the time served, not the step's end, so a step's own
   duration never stretches the cadence.
-- **"Every user failed the same way in one tick"** is read as "no other user's calls worked in this tick or
-  the last 10 minutes", because the uid offsets mean a tick often serves a subset.
+- **"Every user failed the same way in one tick"** is read as "no other user's calls worked after this
+  friend's previous refusal", and removal waits for a second refusal in a row (2 minutes later, by when every
+  other user has been served). The uid offsets mean a tick often serves a subset, so a single tick cannot
+  show that everyone failed; and a success from before the onset proves nothing. Lane 04's first reading
+  ("no other user's calls worked in this tick or the last 10 minutes") counted those earlier successes,
+  including the failing users' own, so it removed a friend whenever the admin and the friend were refused
+  in one tick after working minutes before (lane 05's review, `t4-tick.test.ts`).
 - **`no-token` keeps the 2-minute cadence** (one app-database read, no Spotify call) so capture resumes
   within 2 minutes of a sign-in; `decrypt` writes nothing and lets the 50-s lease lapse.
 - **`invalid_grant` bookkeeping** lives in `sync_state.last_error` (`invalid_grant` → `confirming` →
