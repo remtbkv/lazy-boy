@@ -422,6 +422,25 @@ describe("T4: the rest of the tick", () => {
     expect(stores[A].rescans + stores[B].rescans).toBe(0);
   });
 
+  // The budget's app-wide mode (src/lib/budget/, CAPACITY §6): rescans every 30 minutes, 2 hours
+  // or never. The tick's own cadence (30 minutes active, 2.5 hours idle) is the normal mode's.
+  it("economy: a rescan schedules the next one at least 2 hours on", async () => {
+    install({ [`at-${A}`]: healthy(A), [`at-${B}`]: healthy(B) });
+    const { deps } = tickDeps({ now: () => NOW, stores, budgetMode: async () => "economy" });
+    const r = await runTick(deps, ZEN);
+    expect(stores[A].rescans + stores[B].rescans).toBe(1);
+    expect(Number((await row(r.detail!.rescan as string)).next_rescan_at)).toBe(NOW + 120 * MIN);
+  });
+
+  it("freeze: no rescan, and nobody's due time moves", async () => {
+    install({ [`at-${A}`]: healthy(A), [`at-${B}`]: healthy(B) });
+    const { deps } = tickDeps({ now: () => NOW, stores, budgetMode: async () => "freeze" });
+    const r = await runTick(deps, ZEN);
+    expect(stores[A].rescans + stores[B].rescans).toBe(0);
+    expect(r.detail!.rescan).toBeUndefined();
+    expect([(await row(A)).next_rescan_at, (await row(B)).next_rescan_at]).toEqual([null, null]);
+  });
+
   it("no rescan when less than 10 s of the 20 remain", async () => {
     install({ [`at-${A}`]: healthy(A), [`at-${B}`]: healthy(B) });
     const { deps } = tickDeps({ now: () => NOW, stores, config: { replyMs: 5_000 } });

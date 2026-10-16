@@ -27,6 +27,7 @@ import { randomUUID } from "node:crypto";
 import * as appDb from "@/lib/app-db";
 import type { Claim, ClaimedUser, OwnerAlarmRow, Release } from "@/lib/app-db";
 import { BRAKE_ON } from "@/lib/brake";
+import { LIBRARY_RESCAN_MS, type Mode } from "@/lib/budget/modes";
 import type { CronCaller } from "@/lib/cron-auth";
 import { DAILY_STALE_MS } from "@/lib/health";
 import { EARLY_MS, backoffMs, nextDue, syncStateFor, type HarvestTrigger } from "@/lib/harvest-policy";
@@ -94,6 +95,8 @@ export type TickDeps = {
   after: (work: Promise<unknown>) => void;
   /** The daily route's chores (§7.11), idempotent and resumable. */
   dailyChores: () => Promise<void>;
+  /** The budget's app-wide mode (src/lib/budget/mode.ts currentMode, CAPACITY §6). */
+  budgetMode: () => Promise<Mode>;
   config: TickConfig;
 };
 
@@ -304,9 +307,12 @@ async function confirmGrant(deps: TickDeps, uid: Uid, now: number): Promise<void
 }
 
 /** At most one library rescan (§7.7), for the most overdue user whose step succeeded, and none
- *  while the library bucket cools down (a long ban on it, client.ts). */
+ *  while the library bucket cools down (a long ban on it, client.ts). The budget's mode sets a
+ *  floor under the next one's distance (2 hours in economy) or stops them (freeze), CAPACITY §6. */
 async function maybeRescan(deps: TickDeps, claim: Claim, served: Served[], now: number, deadline: number): Promise<string | null> {
   if (now < (claim.cooldowns.library ?? 0)) return null;
+  const floorMs = LIBRARY_RESCAN_MS[await deps.budgetMode()];
+  if (floorMs === null) return null;
   const due = served
     .filter((s) => s.outcome?.code === "ok" && s.store && (s.user.nextRescanAt === null || s.user.nextRescanAt <= now))
     .sort((a, b) => (a.user.nextRescanAt ?? 0) - (b.user.nextRescanAt ?? 0));
@@ -314,7 +320,7 @@ async function maybeRescan(deps: TickDeps, claim: Claim, served: Served[], now: 
   if (!s || !(await deps.queue.claimRescan(s.user.uid, now, now + RESCAN_RETRY_MS))) return null;
   await s.store!.rescanLibrary(spotifyClient(s.user.uid, s.token, true, "cron-library-scan"), deadline);
   const every = syncStateFor(s.outcome!.probe, now) === "active" ? RESCAN_ACTIVE_MS : RESCAN_IDLE_MS;
-  await deps.queue.scheduleRescan(s.user.uid, now + every);
+  await deps.queue.scheduleRescan(s.user.uid, now + Math.max(every, floorMs));
   return s.user.uid;
 }
 

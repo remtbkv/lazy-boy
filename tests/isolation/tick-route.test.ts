@@ -206,6 +206,24 @@ describe("T4 through the route", () => {
     expect(await playsOf(B)).toEqual([`${B}-only-song-1`]);
   }, 40_000);
 
+  it("the stored budget mode reaches the route's rescan: none in freeze, one in normal", async () => {
+    await seed();
+    const { setBudgetMode } = await import("@/lib/db");
+    const playlistReads = () => w.calls.filter((c) => c.path === "/v1/me/playlists").length;
+    try {
+      await setBudgetMode("freeze");
+      await call(ZEN);
+      expect(playlistReads()).toBe(0);
+      expect((await q("SELECT next_rescan_at FROM sync_state")).map((r) => r.next_rescan_at)).toEqual([null, null]);
+    } finally {
+      await setBudgetMode("normal");
+    }
+    await q("DELETE FROM app_meta WHERE key = 'tick_at'"); // past the 45-s stamp
+    await q("UPDATE sync_state SET next_probe_at = 0");
+    await call(ZEN);
+    expect(playlistReads()).toBe(1);
+  });
+
   it("rescans for A and B on one instance: each database holds its own playlist list", async () => {
     await seed();
     vi.useFakeTimers({ toFake: ["Date"] });

@@ -128,6 +128,7 @@ export function tickDeps(o: {
   config?: Partial<TickConfig>;
   storeFor?: TickDeps["storeFor"];
   queue?: TickDeps["queue"];
+  budgetMode?: TickDeps["budgetMode"];
 }) {
   const afters: Promise<unknown>[] = [];
   const daily = vi.fn(async () => {});
@@ -141,6 +142,7 @@ export function tickDeps(o: {
       afters.push(w);
     },
     dailyChores: daily,
+    budgetMode: o.budgetMode ?? (async () => "normal"),
     config: { ...PHASE3_TICK, signups: "invite", ...o.config },
   };
   return { deps, afters, daily };
