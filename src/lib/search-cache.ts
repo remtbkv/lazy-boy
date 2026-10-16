@@ -58,7 +58,7 @@ export function slotFor(userKey: string, kind: Kind): Slot {
 type Tuple = [userKey: string, epoch: string, kind: string, segment: string, version: string, shape: string];
 
 const encode = (s: Slot, version: string | null) =>
-  JSON.stringify([s.userKey, s.epoch, s.kind, s.segment, version ?? "", s.shape] satisfies Tuple);
+  JSON.stringify([s.userKey, s.epoch, s.kind, s.segment, String(version ?? ""), s.shape] satisfies Tuple);
 
 function decode(key: string): Tuple | null {
   try {
