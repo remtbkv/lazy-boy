@@ -1,5 +1,6 @@
 import { forUser, LIBRARY_INDEX_SHAPE } from "@/lib/db";
 import { requireRouteUser } from "@/lib/require-user";
+import { meteredBody } from "@/lib/budget/request-meter";
 
 // The library half of Home's search: every track in a playlist or in Liked Songs, as
 // [name, artist, image, album, playlists] (see "The client-side search payloads" in
@@ -30,7 +31,7 @@ export async function GET(req: Request) {
   // version would let a browser 304 against a body nothing can vouch for.
   if (version === null) {
     const index = await store.getLibraryIndex(null);
-    return new Response(JSON.stringify({ v: null, u: user.uid, ...index }), {
+    return new Response(meteredBody(JSON.stringify({ v: null, u: user.uid, ...index })), {
       headers: { "Cache-Control": "private, no-store", "Content-Type": "application/json" },
     });
   }
@@ -54,7 +55,7 @@ export async function GET(req: Request) {
   }
 
   const index = await store.getLibraryIndex(version);
-  return new Response(JSON.stringify({ v: version, u: user.uid, ...index }), {
+  return new Response(meteredBody(JSON.stringify({ v: version, u: user.uid, ...index })), {
     headers: { ...headers, "Content-Type": "application/json" },
   });
 }

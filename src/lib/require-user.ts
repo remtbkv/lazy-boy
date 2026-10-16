@@ -10,13 +10,18 @@
 import "server-only";
 import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
+import { meterRequest, meterStart } from "@/lib/budget/request-meter";
 import { gateFromSession, type Gate, type GateResult } from "@/lib/session-gate";
 import { SIGNED_OUT_HEADER } from "@/lib/user-storage";
 
 export type { Gate };
 
 export async function requireUser(): Promise<GateResult> {
-  return gateFromSession(await auth());
+  // The CPU meter's choke point for pages, gated routes and actions (lib/budget/request-meter.ts).
+  const m = meterStart();
+  const r = gateFromSession(await auth());
+  meterRequest(m, r.kind === "allowed" ? r.gate.uid : null);
+  return r;
 }
 
 export class RetryableAuthError extends Error {

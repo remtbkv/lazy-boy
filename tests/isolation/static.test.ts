@@ -120,7 +120,7 @@ function importersOf(name: string): string[] {
 describe("S3: db.ts exports no per-user function", () => {
   // Every value db.ts exports, as a snapshot a reviewer sees change: forUser and forUserAt (the
   // only way to a user's data), the telemetry store's functions (no user's database), the
-  // app-wide cooldown (the admin's database until Phase 2's app_meta), and pure helpers and
+  // app-wide cooldown and budget mode (the admin's database until Phase 2's app_meta), and pure helpers and
   // constants. A per-user function exported here could run against a database without naming
   // its user (PLAN.md §6.2 layer 3).
   const EXPORTS = [
@@ -134,6 +134,7 @@ describe("S3: db.ts exports no per-user function", () => {
     "forUser",
     "forUserAt",
     "getApiLogSummary",
+    "getBudgetMode",
     "getClientLoadSpeed",
     "getRecentlyPlayedQuotaWindows",
     "getSpotifyCallBreakdown",
@@ -144,12 +145,17 @@ describe("S3: db.ts exports no per-user function", () => {
     "ledgerSet",
     "logSpotifyRequest",
     "mayApplySchema",
+    "meterFlush",
     "openVerdict",
     "payloadTzOffset",
     "pruneApiLog",
     "pruneClientMetrics",
+    "readBudgetDay",
     "readLedger",
+    "readMeter",
+    "recordBudgetDay",
     "recordClientMetrics",
+    "setBudgetMode",
     "setSpotifyCooldownUntil",
   ];
 
@@ -213,7 +219,11 @@ describe("S4: module-scope state is on a reviewed list", () => {
     "src/lib/search-perf.ts: enabled": BROWSER,
     // Set by the sign-out form for the rest of that page load; signing in again is a navigation.
     "src/lib/search-cache.ts: ended": BROWSER,
-    "src/lib/db.ts: g": "clients by db_name, owner verdicts and schema runs by (uid, db_name), the telemetry client",
+    "src/lib/db.ts: g": "clients by db_name, owner verdicts and schema runs by (uid, db_name), the telemetry client, the app-wide budget mode's memo",
+    "src/lib/budget/request-meter.ts: g": "the process's meter: counts by (day, route, uid), the in-flight requests by Next's request scope, the cold-start flag",
+    "src/lib/budget/request-meter.ts: open": "WeakMap keyed by Next's per-request scope: one in-flight request's counts, gone with it",
+    "src/lib/budget/request-meter.ts: shared": "the process's meter (see g): its cold-start flag",
+    "src/lib/budget/sync-interval.ts: current": BROWSER,
     "src/lib/db.ts: storeSizeMemo": "Map keyed by (uid, db_name)",
     "src/lib/db.ts: uniqueRecomputeKickedAt": "Map keyed by (uid, db_name)",
     "src/lib/db.ts: apiLogWrites": "the telemetry store's prune counter: one log for the app, no user data",
@@ -368,6 +378,10 @@ describe("S7: no user path awaits the telemetry store", () => {
     "recordClientMetrics",
     "getClientLoadSpeed",
     "isolationEventsAfter",
+    "meterFlush",
+    "readMeter",
+    "recordBudgetDay",
+    "readBudgetDay",
   ]);
   const ALLOWED: Record<string, string> = {
     "src/app/api/cron/daily/route.ts": "the daily chores",
@@ -376,6 +390,8 @@ describe("S7: no user path awaits the telemetry store", () => {
     "src/app/api/cron/health/route.ts": "the health check reads isolation events where Phase 1 records them",
     "src/lib/isolation.ts": "an isolation event's only record in Phase 1; a rare path, 4 s cap",
     "src/instrumentation.ts": "server errors only, after the response (STORE_MIGRATION §6 item 4)",
+    "src/lib/budget/request-meter.ts": "the CPU meter's flush, inside after()",
+    "src/lib/budget/daily.ts": "the budget record, run by the daily chores",
   };
 
   it("awaits a telemetry function only in the allowed files", () => {

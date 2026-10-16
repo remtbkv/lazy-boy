@@ -39,6 +39,8 @@ import {
 import { captureHealth, type CaptureHealth } from "@/lib/capture-health";
 import { makeStoreFetch } from "@/lib/store-fetch";
 import { HISTORY_INDEX_SHAPE, LIBRARY_INDEX_SHAPE } from "@/lib/search-shape";
+import { ALLTIME_GATE_MS, isMode, type Mode } from "@/lib/budget/modes";
+import type { MeterSample } from "@/lib/budget/meter";
 import {
   CALIBRATION,
   STEADY_SYNC_TICK_ROWS,
@@ -215,6 +217,7 @@ type StoreGlobals = {
   __lbOpened?: Map<string, Opened>;
   __lbSchemaRuns?: Map<string, Promise<void>>;
   __lbTelemetry?: Map<"telemetry", Promise<Client>>;
+  __lbBudgetMode?: { at: number; mode: Mode | null };
 };
 const g = globalThis as unknown as StoreGlobals;
 const userClients = (): Map<string, Client> => (g.__lbUserClients ??= new Map());
@@ -587,6 +590,32 @@ const TELEMETRY_SCHEMA = `
       meta TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_client_metrics_ts ON client_metrics (ts);
+    -- The CPU meter (src/lib/budget/request-meter.ts): one row per (UTC day, route, user), each
+    -- flush adding its counts. user_id is "-" for no user.
+    CREATE TABLE IF NOT EXISTS cpu_meter (
+      day TEXT NOT NULL,
+      route TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      invocations INTEGER NOT NULL DEFAULT 0,
+      cpu_us INTEGER NOT NULL DEFAULT 0,
+      wall_ms INTEGER NOT NULL DEFAULT 0,
+      bytes INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (day, route, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cpu_meter_updated ON cpu_meter (updated_at);
+    -- The daily budget record (src/lib/budget/daily.ts): each dimension's month-to-date, its
+    -- projection and its mode, for /usage and for the next day's hysteresis.
+    CREATE TABLE IF NOT EXISTS budget_days (
+      day TEXT NOT NULL,
+      dimension TEXT NOT NULL,
+      used REAL,
+      projected REAL,
+      hard_limit REAL NOT NULL,
+      mode TEXT NOT NULL,
+      at INTEGER NOT NULL,
+      PRIMARY KEY (day, dimension)
+    );
 `;
 
 async function migrateCore(client: Client): Promise<void> {
@@ -934,19 +963,19 @@ async function recordPlays(u: UserDb, plays: PlayRecord[]): Promise<number> {
   for (const i of insertResultIdx) added += Number(results[i].rowsAffected);
   // New plays landed → refresh the cached all-time totals so Home reads them instantly
   // (instead of running the expensive gap scan on render). Only on a real change, and at
-  // most every 10 min: the recompute is a full plays scan (~14K rows),
-  // and during a listening session plays land on many consecutive ticks. The card can lag
+  // most every 10 min (30 in economy and freeze, src/lib/budget/modes.ts): the recompute is
+  // a full plays scan (~14K rows), and during a listening session plays land on many
+  // consecutive ticks. The card can lag
   // the newest plays by ≤10 min mid-session; the end-of-session tail is healed by the
   // daily cron's unconditional recompute (cron/sync route).
   if (added > 0) await maybeRecomputeAllTimeStats(u);
   return added;
 }
 
-const ALLTIME_RECOMPUTE_MIN_MS = 10 * 60 * 1000;
-
 async function maybeRecomputeAllTimeStats(u: UserDb): Promise<void> {
   const v = await getMeta(u, "alltime_at");
-  if (v && Date.now() - (Number(v) || 0) < ALLTIME_RECOMPUTE_MIN_MS) return;
+  const gateMs = ALLTIME_GATE_MS[(await getBudgetMode().catch(() => null)) ?? "normal"];
+  if (v && Date.now() - (Number(v) || 0) < gateMs) return;
   await recomputeAllTimeStats(u);
 }
 
@@ -2875,6 +2904,34 @@ export async function setSpotifyCooldownUntil(untilMs: number): Promise<void> {
   });
 }
 
+// The app-wide budget mode (src/lib/budget/, CAPACITY §6), beside the cooldown for the same
+// reason. The daily chores write it; the hot paths read it through a per-process memo of at
+// most 10 minutes, so a change reaches every instance within 10 minutes for one meta read per
+// instance per 10 minutes. Meta only: no marker bump.
+const BUDGET_MODE_KEY = "budget_mode";
+const BUDGET_MODE_MEMO_MS = 10 * 60_000;
+
+/** null = never written (or not a mode). `maxAgeMs` 0 reads the store (the health check). A
+ *  failed read answers the memo's value for another 10 minutes if there is one, else throws. */
+export async function getBudgetMode(maxAgeMs = BUDGET_MODE_MEMO_MS): Promise<Mode | null> {
+  const memo = g.__lbBudgetMode;
+  if (memo && maxAgeMs > 0 && Date.now() - memo.at < maxAgeMs) return memo.mode;
+  try {
+    const v = await getMeta(adminDb(), BUDGET_MODE_KEY);
+    const mode = isMode(v) ? v : null;
+    g.__lbBudgetMode = { at: Date.now(), mode };
+    return mode;
+  } catch (e) {
+    if (!memo || maxAgeMs === 0) throw e;
+    g.__lbBudgetMode = { at: Date.now(), mode: memo.mode };
+    return memo.mode;
+  }
+}
+export async function setBudgetMode(mode: Mode): Promise<void> {
+  await setMeta(adminDb(), BUDGET_MODE_KEY, mode);
+  g.__lbBudgetMode = { at: Date.now(), mode };
+}
+
 // ---- preferences / background-job bookkeeping (meta-backed) ----
 /** Whether "Clean" backs removed songs up to a separate playlist. Persisted globally
  *  (DB, so it follows the user across devices), defaulting to on. */
@@ -3379,6 +3436,84 @@ export async function ledgerDayModeledTotal(day: string): Promise<number> {
     args: { day },
   });
   return res.rows[0] ? Number(res.rows[0].total) || 0 : 0;
+}
+
+// ── The CPU meter and the daily budget record (src/lib/budget/, CAPACITY §6) ──────────────
+// Telemetry like the ledger: meta-class, no marker bump. meterFlush is awaited only inside
+// after() (request-meter.ts) and REJECTS on failure, so the meter keeps the counts for its
+// next flush; the reads are the daily chores', /usage's and the health check's.
+
+/** One flush: every pending (day, route, user) added to what is stored, in one batch. */
+export async function meterFlush(rows: MeterSample[]): Promise<void> {
+  const client = await getTelemetryClient();
+  const at = Date.now();
+  await client.batch(
+    rows.map((r) => ({
+      sql: `INSERT INTO cpu_meter (day, route, user_id, invocations, cpu_us, wall_ms, bytes, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(day, route, user_id) DO UPDATE SET
+              invocations = invocations + excluded.invocations,
+              cpu_us = cpu_us + excluded.cpu_us,
+              wall_ms = wall_ms + excluded.wall_ms,
+              bytes = bytes + excluded.bytes,
+              updated_at = excluded.updated_at`,
+      args: [r.day, r.route, r.uid, r.invocations, Math.round(r.cpuUs), Math.round(r.wallMs), Math.round(r.bytes), at],
+    })),
+    "write",
+  );
+}
+
+/** The meter's sums from `fromDay` (a UTC day) on, and when it last wrote anything at all. */
+export async function readMeter(
+  fromDay: string,
+): Promise<{ cpuUs: number; invocations: number; bytes: number; lastAt: number | null }> {
+  const client = await getTelemetryClient();
+  const res = await client.execute({
+    sql: `SELECT COALESCE(SUM(cpu_us), 0) AS cpu, COALESCE(SUM(invocations), 0) AS inv,
+                 COALESCE(SUM(bytes), 0) AS bytes, (SELECT MAX(updated_at) FROM cpu_meter) AS last
+          FROM cpu_meter WHERE day >= ?`,
+    args: [fromDay],
+  });
+  const r = res.rows[0];
+  return {
+    cpuUs: Number(r?.cpu) || 0,
+    invocations: Number(r?.inv) || 0,
+    bytes: Number(r?.bytes) || 0,
+    lastAt: r?.last == null ? null : Number(r.last),
+  };
+}
+
+export type BudgetDayRow = {
+  day: string;
+  dimension: string;
+  used: number | null;
+  projected: number | null;
+  limit: number;
+  mode: string;
+  at: number;
+};
+
+/** A day's record, replacing any earlier run's for the same day. */
+export async function recordBudgetDay(rows: BudgetDayRow[]): Promise<void> {
+  const client = await getTelemetryClient();
+  await client.batch(
+    rows.map((r) => ({
+      sql: `INSERT OR REPLACE INTO budget_days (day, dimension, used, projected, hard_limit, mode, at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      args: [r.day, r.dimension, r.used, r.projected, r.limit, r.mode, r.at],
+    })),
+    "write",
+  );
+}
+
+/** The latest day's record (empty before the first). */
+export async function readBudgetDay(): Promise<BudgetDayRow[]> {
+  const client = await getTelemetryClient();
+  const res = await client.execute(
+    `SELECT day, dimension, used, projected, hard_limit AS "limit", mode, at FROM budget_days
+     WHERE day = (SELECT MAX(day) FROM budget_days) ORDER BY dimension`,
+  );
+  return plainRows(res.rows) as unknown as BudgetDayRow[];
 }
 
 // The linear terms in the cost model need the store's size. It comes from the cached

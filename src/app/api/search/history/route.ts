@@ -1,5 +1,6 @@
 import { forUser, HISTORY_INDEX_SHAPE } from "@/lib/db";
 import { requireRouteUser } from "@/lib/require-user";
+import { meteredBody } from "@/lib/budget/request-meter";
 
 // The history half of Home's search: every played song plus every individual play, as
 // [track, minute, source] (see "The client-side search payloads" in src/lib/db.ts). This is
@@ -20,7 +21,7 @@ export async function GET(req: Request) {
   // Version unknown (store hiccup): fresh and untagged, same contract as the library route.
   if (version === null) {
     const index = await store.getHistoryIndex(null);
-    return new Response(JSON.stringify({ v: null, u: user.uid, ...index }), {
+    return new Response(meteredBody(JSON.stringify({ v: null, u: user.uid, ...index })), {
       headers: { "Cache-Control": "private, no-store", "Content-Type": "application/json" },
     });
   }
@@ -36,7 +37,7 @@ export async function GET(req: Request) {
   }
 
   const index = await store.getHistoryIndex(version);
-  return new Response(JSON.stringify({ v: version, u: user.uid, ...index }), {
+  return new Response(meteredBody(JSON.stringify({ v: version, u: user.uid, ...index })), {
     headers: { ...headers, "Content-Type": "application/json" },
   });
 }

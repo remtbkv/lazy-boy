@@ -51,6 +51,9 @@ export default function PrivacyPage() {
           ended, how long it played, how far into it Home saw it get and how Home judged it; for a
           song played in a private session, only that it was private and how long it played.
           Errors the server runs into are logged by page and message, with no account&apos;s ID.
+          Per day, how many requests each page and address of the app served for you, the server
+          time they took and how much data they sent are logged too, tagged with your
+          account&apos;s random ID and kept for as long as you stay connected.
         </li>
       </ul>
       <p>

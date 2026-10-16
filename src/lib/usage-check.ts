@@ -110,6 +110,25 @@ async function fetchPlatformDayUsage(
   }
 }
 
+/** The organization's month-to-date usage from Turso's platform API (`rows_read`,
+ *  `rows_written`, ...): the read the pace check below makes, and the one the daily budget
+ *  chore imports (src/lib/budget/daily.ts). Throws when unconfigured, unreachable or refused. */
+export async function fetchOrgUsage(): Promise<Record<string, number>> {
+  const token = process.env.TURSO_PLATFORM_TOKEN;
+  const org = process.env.TURSO_ORG;
+  if (!token || !org) throw new Error("unconfigured: TURSO_PLATFORM_TOKEN / TURSO_ORG missing");
+  const res = await fetch(`https://api.turso.tech/v1/organizations/${org}/usage`, {
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store",
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!res.ok) throw new Error(`platform API ${res.status}`);
+  const body = (await res.json()) as {
+    organization?: { usage?: Record<string, number> };
+  };
+  return body.organization?.usage ?? {};
+}
+
 export type UsageCheckResult = { status: number; body: Record<string, unknown> };
 
 /** The pace check and the reconciliation, as the route's status + JSON body. `allowance`
@@ -127,18 +146,7 @@ export async function runUsageCheck(allowance = DEFAULT_ALLOWANCE): Promise<Usag
   }
   let usage: Record<string, number>;
   try {
-    const res = await fetch(`https://api.turso.tech/v1/organizations/${org}/usage`, {
-      headers: { Authorization: `Bearer ${token}` },
-      cache: "no-store",
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!res.ok) {
-      return { status: 500, body: { ok: false, error: `platform API ${res.status}` } };
-    }
-    const body = (await res.json()) as {
-      organization?: { usage?: Record<string, number> };
-    };
-    usage = body.organization?.usage ?? {};
+    usage = await fetchOrgUsage();
   } catch (e) {
     return {
       status: 500,

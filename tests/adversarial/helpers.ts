@@ -37,6 +37,8 @@ const TABLES = [
   "usage_ledger",
   "api_log",
   "client_metrics",
+  "cpu_meter",
+  "budget_days",
 ];
 
 // The four keys the open checks (db.ts, the versioned open) survive a reset: they say whose

@@ -17,7 +17,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const DB_TS = path.join(here, "..", "..", "src", "lib", "db.ts");
 
 const CORE = ["tracks", "plays", "contexts", "meta", "playlists", "playlist_tracks", "saved_tracks"];
-const TELEMETRY = ["api_log", "client_metrics", "usage_ledger"];
+const TELEMETRY = ["api_log", "client_metrics", "usage_ledger", "cpu_meter", "budget_days"];
 
 /** Every SQL statement in db.ts: each string or template literal that starts with a SQL verb,
  *  `${…}` interpolations replaced by a bare `x`, multi-statement strings (the schemas) split

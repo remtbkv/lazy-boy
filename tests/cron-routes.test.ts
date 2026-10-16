@@ -38,6 +38,7 @@ vi.mock("@/lib/db", () => ({
   }),
 }));
 vi.mock("@/lib/usage-check", () => ({ runUsageCheck: spy.chore("runUsageCheck") }));
+vi.mock("@/lib/budget/daily", () => ({ runBudgetChore: spy.chore("runBudgetChore") }));
 vi.mock("@/lib/auth", () => ({ getValidAccessTokenFor: async () => null }));
 
 const daily = await import("@/app/api/cron/daily/route");
@@ -74,6 +75,7 @@ describe("cron routes", () => {
       "pruneClientMetrics",
       "checkPlayedAtConvention",
       "runUsageCheck",
+      "runBudgetChore",
     ];
     for (const c of chores) expect(spy.calls.filter((x) => x === c), c).toHaveLength(1);
     expect(spy.calls).toHaveLength(chores.length);

@@ -1,5 +1,6 @@
 import "server-only";
 import { timingSafeEqual } from "node:crypto";
+import { meterRequest, meterStart } from "@/lib/budget/request-meter";
 
 /** The CRON_SECRET check every /api/cron/* route but sync uses: `Authorization: Bearer
  *  $CRON_SECRET`, compared in constant time so the secret can't be guessed from response
@@ -22,6 +23,9 @@ function safeEqual(a: string, b: string): boolean {
 }
 
 export function cronCaller(authorization: string | null): CronCaller | null {
+  // The CPU meter's choke point for the cron routes (lib/budget/request-meter.ts);
+  // cronAuthorized comes through here too.
+  meterRequest(meterStart(), null);
   const got = authorization ?? "";
   const zen = process.env.CRON_SECRET;
   const ext = process.env.CRON_SECRET_EXT;
