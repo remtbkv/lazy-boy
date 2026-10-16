@@ -162,6 +162,17 @@ describe("T4: two users, one tick", () => {
     expect((await q("SELECT status FROM users ORDER BY uid")).map((x) => x.status)).toEqual(["needs_reconnect", "needs_reconnect"]);
   });
 
+  it("A has no token row: no Spotify call with anyone's bearer for A, A stays on the 2-minute cadence; B ok", async () => {
+    const spotify = install({ [`at-${A}`]: healthy(A), [`at-${B}`]: healthy(B) });
+    const { deps } = tickDeps({ now: () => NOW, stores, tokenFor: tokenSource({ [A]: () => null }) });
+    const r = await runTick(deps, ZEN);
+    const steps = r.body.steps as { uid: string; outcome: string }[];
+    expect(steps.find((s) => s.uid === A)?.outcome).toBe("no-token");
+    expect(steps.find((s) => s.uid === B)?.outcome).toBe("ok");
+    expect(spotify.calls.every((c) => c.bearer === `at-${B}`)).toBe(true);
+    expect(await row(A)).toMatchObject({ state: "idle", failures: 0, last_error: "no-token", next_probe_at: NOW + 2 * MIN });
+  });
+
   it("Spotify fails A with a 5xx: A backs off alone; B's outcome stays ok", async () => {
     install({ [`at-${A}`]: { player: playing(`${A}-now`), recent: 502 }, [`at-${B}`]: healthy(B) });
     const { deps } = tickDeps({ now: () => NOW, stores });
