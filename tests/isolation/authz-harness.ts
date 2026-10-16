@@ -232,7 +232,7 @@ async function spotifyFetch(input: RequestInfo | URL, init?: RequestInit): Promi
     return Response.json({ snapshot_id: "snap-after" }, { status: 200 });
   }
   if (path === "/me") {
-    // account_id is the sign-in's link to a users row (Phase 2; probe/me_keys.json: dev mode returns it).
+    // account_id is the sign-in's link to a users row (PLAN §5.1): resolveSignIn refuses a profile without it.
     return Response.json({
       id: OWNER_OF[owner] ?? owner,
       account_id: `${owner.toLowerCase()}-account`,
