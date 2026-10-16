@@ -134,8 +134,9 @@ file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
   `refreshHistoryAction`); and — the coverage path for when the app is closed — an **external
   pinger** hitting `/api/cron/sync` with the stored token every 2 min: the Zenbook's user
   timer `lazyboy-cron-sync.timer` (`~/lazyboy-cron/ping.sh`). A daily **Vercel Cron**
-  (`vercel.json`, 07:00 UTC) is the backstop. All scheduled hits share `/api/cron/sync`
-  (`CRON_SECRET`-guarded). Two retired callers still 401 there until Rem removes them: the
+  (`vercel.json`, 07:00 UTC) is the backstop. All sync hits share `/api/cron/sync`
+  (`CRON_SECRET`-guarded); the daily chores have their own route and cron entry,
+  `/api/cron/daily` at 09:00 UTC (Routes, below). Two retired callers still 401 there until Rem removes them: the
   cron-job.org job (stale secret since the 2026-08-10 rotation) and the Zenbook's root-level
   `lazyboy-sync.timer` (stale since 07-01) — burn lazyboy-review 2026-10-03, Z1/Z2.
   (A GitHub Actions cron drove this initially but was removed: GitHub schedules best-effort
@@ -159,8 +160,17 @@ file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
   source rows. `node --env-file=.env.local scripts/verify-derived.mjs` recomputes all three from
   source against the primary and exits 1 with the named diff when a stored value disagrees
   (read-only; `--demo` injects and restores a deliberate corruption to show it actually fails).
-- **One client, and no replica.** `getClient()` serves every read, every write and all of
-  `meta`. The libSQL **embedded replica** that used to serve row-scanning reads was switched
+- **Two clients: core and telemetry** (`docs/STORE_MIGRATION.md`). `getClient()` holds the
+  app's data — `tracks`, `plays`, `contexts`, `meta`, `playlists`, `playlist_tracks`,
+  `saved_tracks` — on `TURSO_DATABASE_URL`. `getTelemetryClient()` holds the three log tables —
+  `api_log`, `client_metrics`, `usage_ledger` — on `TELEMETRY_DATABASE_URL`, with its own init
+  (a separate telemetry client never creates core tables, nor the core client telemetry ones)
+  and a store fetch of one 4 s attempt. No user path awaits it: its writes are fired with
+  `void` or run in `after()` (`/api/metrics`), and `/usage` settles its log sections one by one
+  so a dead telemetry store empties those sections, not the page. Unset (or equal to the core
+  URL), telemetry rides the core client: tests, dev and the pre-migration single store.
+- **No replica.** `getClient()` serves every read, every write and all of `meta`. The libSQL
+  **embedded replica** that used to serve row-scanning reads was switched
   off in production on 2026-08-03 (each cold serverless instance bootstrapped the whole ~17 MB
   copy, burning 77% of Turso's 3 GB/mo syncs quota in three days) and deleted from `db.ts` on
   2026-08-11. What replaced it is not a second client but less reading: Home renders from a
@@ -190,10 +200,11 @@ file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
 - **The quota guard `/api/cron/usage-check` is DORMANT**, and kept for the fallback. It reads
   the org's real usage from Turso's platform API and returns 500 when any metered dimension
   runs ahead of 1.5× the even month pace (or 90% absolute) — a check about a database
-  production no longer reads or writes. It stays wired (daily cron-job.org job, failure e-mail
-  on) because it is the guard that would have to exist on day one of a fallback to Turso, and
-  because its reconciliation half is what writes the platform total and the residual into the
-  ledger `/usage` renders. Needs `TURSO_PLATFORM_TOKEN` + `TURSO_ORG`; unconfigured is
+  production no longer reads or writes. It stays wired because it is the guard that would have
+  to exist on day one of a fallback to Turso, and because its reconciliation half is what
+  writes the platform total and the residual into the ledger `/usage` renders. Its logic lives
+  in `src/lib/usage-check.ts`; `/api/cron/daily` runs it every day and only records the result
+  (the cron-job.org job that called the route has held a stale secret since 2026-08-10). Needs `TURSO_PLATFORM_TOKEN` + `TURSO_ORG`; unconfigured is
   deliberately a 500 — a guard that silently skips is the failure mode it exists to kill.
 - **The read-cost ledger outlives the quota it was built for.** `usage_ledger` + `read-costs.ts`
   still charge every named read path its modeled cost on every call, and `/usage` still renders
@@ -213,13 +224,22 @@ file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
 - `now-playing` — live "what's playing"; returns `{ playing: null }` when idle (never stale).
 - `sync` (POST) — on-load history sync; server debounces, skipping if synced <~60 s ago.
 - `cron/sync` (GET) — scheduled history sync. On-time trigger is the Zenbook's
-  `lazyboy-cron-sync.timer` (2 min); a daily Vercel Cron is the backstop. `CRON_SECRET`-guarded
-  (fail-closed: an unset secret rejects all callers), session-less (uses the stored token).
+  `lazyboy-cron-sync.timer` (2 min); a daily Vercel Cron (07:00 UTC) is the backstop.
+  Session-less (uses the stored token).
+- `cron/daily` (GET) — the daily chores, Vercel Cron at 09:00 UTC (after the Zenbook's ~07:00
+  UTC reboot, since the prunes and ledger rows go to the telemetry store on it): all-time heal,
+  Home payload rebuild, `api_log` + `client_metrics` prunes, the `played_at` convention check,
+  the usage check. Each isolated; answers 200 with every chore's outcome; notifies nobody.
 - `cron/usage-check` (GET) — the dormant Turso quota guard + the ledger reconciliation (see
-  the listen-history section); `CRON_SECRET`-guarded, 500 on breach or misconfiguration so the
-  calling cron job's failure e-mail is the alarm.
+  the listen-history section; logic in `src/lib/usage-check.ts`); 500 on breach or
+  misconfiguration so a calling job's failure e-mail is the alarm.
+- `cron/store-bench` (GET) — store round trips from inside a function: `?store=core` (`SELECT 1`
+  ×30, a one-key `meta` read ×10, the history payload ×2) or `?store=telemetry` (`SELECT 1` ×10);
+  per probe n/p50/p95/max/failures, plus region, store host and cold start. Reads only.
 
-All check `auth()` and 401 on no session, except `cron/sync` (cron secret, no session).
+All check `auth()` and 401 on no session, except the `cron/*` routes: those take
+`Authorization: Bearer $CRON_SECRET` (`src/lib/cron-auth.ts`, constant-time, fail-closed: an
+unset secret rejects all callers) and no session.
 
 ## Player simulation
 

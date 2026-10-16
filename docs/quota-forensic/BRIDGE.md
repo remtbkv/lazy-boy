@@ -42,6 +42,13 @@ the path: stop `lazyboy-meter`, restore `~/lazyboy-sqld/lazyboy-sqld.service.pre
 (port 8090), `daemon-reload`, restart `lazyboy-sqld`. The funnel line below is unchanged —
 it still points at 8090.
 
+The meter also carries the **core fence** (docs/STORE_MIGRATION.md §6.8, GOTCHAS.md "The
+meter's core fence"): while `~/lazyboy-sqld/FENCE_CORE` exists it answers 503 to any request
+naming a core table and logs it as `fenced`; telemetry passes. `touch` on, `rm` off, no
+restart. The source is `ops/zenbook-meter/meter-proxy.mjs` in the repo, with its test beside it
+(`node --test ops/zenbook-meter/meter-proxy.test.mjs`, part of `npm test`); deploy by copying
+it over `~/lazyboy-sqld/meter-proxy.mjs` and restarting `lazyboy-meter`.
+
 - The app is unchanged. `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` are just pointed somewhere
   else; `@libsql/client` speaks the same Hrana-over-HTTP protocol to `sqld` that it speaks to
   Turso.

@@ -43,9 +43,11 @@ the user-scoping item below is handled by row-level security instead.)
   reads either, or they run anyway.
 - **Centralized token refresh** in `src/lib/auth.ts` (no scattered token handling).
 - **No SQL injection.** All libSQL (`@libsql/client`) queries use bound params (`:name`/`?`).
-- **Cron auth (fail-closed).** `/api/cron/sync` is session-less; it requires
-  `Authorization: Bearer $CRON_SECRET`. An unset `CRON_SECRET` rejects every caller (it does
-  not wave them through), so the endpoint can't be triggered anonymously in a misconfigured deploy.
+- **Cron auth (fail-closed).** Every `/api/cron/*` route (`sync`, `daily`, `usage-check`,
+  `store-bench`) is session-less; each requires `Authorization: Bearer $CRON_SECRET`, checked in
+  constant time by one function (`src/lib/cron-auth.ts`). An unset `CRON_SECRET` rejects every
+  caller (it does not wave them through), so no cron route can be triggered anonymously in a
+  misconfigured deploy. `store-bench` returns timings and the store's host, never a token.
 - **`CRON_SECRET` holders.** A rotation must update every copy, or that caller 401s silently:
   Vercel production env (`CRON_SECRET`, Sensitive: write-only, redeploy to apply); the Mac's
   `.env.local`; the Zenbook's `~/lazyboy-cron/env` (the 2-min `lazyboy-cron-sync.timer`); the

@@ -1,10 +1,13 @@
 // Listen-history store. A personal record of which tracks were played, how often,
 // when, and from where. Data comes from Spotify /me/player/recently-played, synced
-// on demand. Backed by libSQL so it persists on Vercel's serverless runtime: the store is a
-// self-hosted `sqld` on the Zenbook, reached over a Tailscale Funnel (docs/quota-forensic/
-// BRIDGE.md), and falls back to a local SQLite file in dev when TURSO_DATABASE_URL is unset.
-// Turso Cloud is a restore target now, not the live store — the metered-quota defences that
-// shaped this file are history unless production ever falls back to it.
+// on demand. Backed by libSQL so it persists on Vercel's serverless runtime, and falls back to
+// a local SQLite file in dev when TURSO_DATABASE_URL is unset. TWO CLIENTS (docs/
+// STORE_MIGRATION.md): core (getClient(), TURSO_DATABASE_URL) for the app's data, telemetry
+// (getTelemetryClient(), TELEMETRY_DATABASE_URL) for the three log tables — api_log,
+// client_metrics, usage_ledger. A core path never awaits telemetry. With TELEMETRY_DATABASE_URL
+// unset, or equal to the core URL, the two are one store. Until that migration's cutover the
+// core store is the self-hosted `sqld` on the Zenbook, reached over a Tailscale Funnel
+// (docs/quota-forensic/BRIDGE.md); after it, Turso, with telemetry staying on the Zenbook.
 import "server-only";
 import { cache } from "react";
 import { unstable_cache } from "next/cache";
@@ -49,9 +52,11 @@ import {
   type TrackFields,
 } from "@/lib/store-diff";
 
-// ── Query conventions (ONE client against a remote store — round trips and plan choice both
-// matter) ──
-// Every read and every write goes through getClient(). There is no second reader: the libSQL
+// ── Query conventions (remote stores — round trips and plan choice both matter) ──
+// Every read and every write of the app's data goes through getClient(); the three log tables
+// go through getTelemetryClient(), and no statement or batch mixes the two (the meter's core
+// fence, ops/zenbook-meter, and its test hold the telemetry side to that). There is no second
+// reader of the core data: the libSQL
 // embedded replica that used to serve scanning reads was switched off in production on
 // 2026-08-03 and deleted on 2026-08-11 (git history holds the code; docs/GOTCHAS.md keeps the
 // post-mortem of why it could not work on serverless).
@@ -356,7 +361,9 @@ async function migrateTelemetry(client: Client): Promise<void> {
 // replication rotation, which made the normal cold start 2-3× SLOWER) are in git history and
 // summarised in docs/GOTCHAS.md.
 //
-// So getClient() is the whole story: one client, every read, every write, all of `meta`.
+// So getClient() is the whole story for the app's data: every read, every write, all of
+// `meta`. getTelemetryClient() carries only the log tables, and only off the awaited path of a
+// user request (fired with `void`, or in after() at /api/metrics), on one 4 s attempt.
 
 // ── The write marker (`meta.write_seq`) ─────────────────────────────────────────────────
 // A counter bumped by every write that changes what a CACHED read serves. It is a content

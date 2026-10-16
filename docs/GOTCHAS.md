@@ -214,7 +214,7 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   hitting `/api/cron/sync` with the stored token every 2 min (the Zenbook's user timer
   `lazyboy-cron-sync.timer`; the cron-job.org job that preceded it has 401'd on a stale
   secret since 2026-08-10), with a daily **Vercel Cron** (`vercel.json`) as the backstop. Every scheduled hit carries `Authorization: Bearer $CRON_SECRET`
-  (fail-closed: an unset secret rejects all callers). A GitHub Actions cron drove this at
+  (fail-closed: an unset secret rejects all callers; `src/lib/cron-auth.ts`). A GitHub Actions cron drove this at
   first but was removed — GitHub schedules best-effort and real spacing stretched to hours,
   which loses plays against the 50-play window; a dedicated pinger holds a tight cadence.
   A rotation of `CRON_SECRET` must update every copy listed in `docs/SECURITY.md`; a pinger
@@ -239,13 +239,30 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   counts **zero** (`LISTEN_MIN_MS`). A play after an idle stretch (previous play more than a
   song-length earlier) is assumed to have run in full — the best estimate available, since
   Spotify reports *when* a play ended, never *how long* it ran. Spotify has flipped this
-  convention before, so the daily cron block runs `checkPlayedAtConvention()` and logs an
+  convention before, so `/api/cron/daily` runs `checkPlayedAtConvention()` and logs an
   error if gaps start matching the EARLIER play. Plays are always the real count; this only
   shapes the "listened" totals. Whole-table totals (`alltime_stats`) are cached in `meta` and
   recomputed on write; per-day totals compute live. Verdicts stored before the fix were
   re-ruled by `scripts/migrate-skip-rule.mjs`.
-- **There is ONE client and no replica — `getClient()` is every read, every write and all of
-  `meta`.** Row-scanning reads used to be served by a libSQL embedded replica behind a
+- **The daily chores have their own route, `/api/cron/daily` — never route by a header.**
+  They sat in `/api/cron/sync` behind `if (req.headers.get("x-vercel-cron"))`, a header Vercel
+  does not send (it sends `x-vercel-cron-schedule`), so the all-time heal, the prunes and the
+  convention check did not run from Aug 10 to Oct 15, 2026: `api_log` kept ~80K rows past its
+  30-day TTL, and nothing failed. The fix needs no sniffing at all: a separate path in
+  `vercel.json` (`0 9 * * *`) behind the same `CRON_SECRET` check, which proves a test
+  (`tests/cron-routes.test.ts`) can call it. 09:00 UTC, not sync's 07:00: the Zenbook reboots
+  around 07:00 UTC and the prunes and ledger rows go to the telemetry store on it. Each chore
+  is isolated, and the route answers 200 with each outcome: it notifies nobody. It does not
+  re-enable the cron-job.org job (the old block's `ensureCronJobEnabled`): that job holds a
+  stale secret, so re-enabling it only bought a daily "disabled automatically" e-mail.
+- **Two clients — core and telemetry — and no replica. `getClient()` is every read, every
+  write and all of `meta`; `getTelemetryClient()` is `api_log`, `client_metrics` and
+  `usage_ledger` and nothing else** (`docs/STORE_MIGRATION.md`). Never put a log-table
+  statement on the core client or in a core batch, and never await a telemetry call on a user
+  path: the telemetry store is the Zenbook behind the Funnel, which stalls, and its fetch gives
+  up after one 4 s attempt so a stall costs a log row. `tests/telemetry-down.test.ts` holds
+  the sync and the Home payload read to their normal time with that store hanging or refusing.
+  Row-scanning reads used to be served by a libSQL embedded replica behind a
   per-request freshness gate; that machinery was switched off in production on 2026-08-03 and
   deleted on 2026-08-11 (see "Retired: the embedded replica" below). What keeps reads cheap now
   is that the render paths barely read: Home paints from a payload materialized into `meta` on
@@ -351,7 +368,7 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   a table that grows with history; bound it to the batch in hand (`unseenContexts()`: a new
   context can only arrive via the incoming plays, so check those ≤50 URIs; the full scan
   survives as a once-a-day pass for the 30-day negative-cache recheck); (3) the guard is
-  `/api/cron/usage-check` + a daily cron-job.org job with failure e-mail, now dormant against a
+  `/api/cron/usage-check` (run daily by `/api/cron/daily`), now dormant against a
   database production no longer uses — the real counter, checked mechanically, not a convention
   about benchmarks.
 - **If a query is slow, count the rows it SCANS, not the rows it returns.** Both bad ones
@@ -504,6 +521,22 @@ turns that redirect into a literal `"NEXT_REDIRECT"` error toast. Every catch th
 `getSpotify()` (or anything else that may `redirect()`) starts with
 `unstable_rethrow(e)` from `next/navigation` — see `fail()` in `(app)/actions.ts`. Keep
 that line first in any new action's catch.
+
+## The meter's core fence (`ops/zenbook-meter/meter-proxy.mjs`)
+
+Once the app's data lives on Turso, the Zenbook's sqld keeps the telemetry tables and a frozen
+copy of the old core tables. Anything still pointing core statements at it — a tab pinned to an
+old deployment, a dev server on an old `.env.local`, a script — would write plays or a rotated
+Spotify token where nobody reads them, silently. While `~/lazyboy-sqld/FENCE_CORE` exists the
+meter answers **503** to any request carrying a statement that names a core table after
+`FROM`, `JOIN`, `INTO`, `UPDATE`, `TABLE`, `ON` or `table_info(` (stored SQL resolved, comments
+stripped; an unresolvable `sql_id` is fenced too) and logs it as `fenced` in the query log.
+Telemetry passes; `client_metrics.meta` is a column and never follows a keyword. `touch` turns
+it on, `rm` off, no restart (`FENCE_FILE` overrides the path). A 503 from the store, surfacing as
+a store error in something that should not talk to the Zenbook any more, is this fence working:
+repoint the caller, don't remove the file. Adding a table: put it in `CORE_TABLES` there if it
+is core data, and `meter-proxy.test.mjs` (in `npm test`) re-checks every SQL statement in
+`db.ts` against the classifier.
 
 ## Never let the store compress with brotli (the 26-second query)
 
