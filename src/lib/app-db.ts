@@ -344,6 +344,53 @@ export async function endSessionsAndCapture(uid: Uid): Promise<void> {
   );
 }
 
+// ── the daily chores Phase 4a adds (PLAN.md §7.11 as RULINGS change it) ─────────────────────
+// No dormant move and no twelve-month deletion (Oct 15 12:26 PM). Cross-user by design: they read
+// uids and times, never data, and each uid they name goes to the deletion job, which refuses the
+// admin itself.
+
+export type DailyCandidates = { deleting: string[]; revokedDue: string[]; invitesExpired: string[]; grantWideRecent: number };
+
+export async function dailyCandidates(now: number, o: { revokedAfterMs: number; grantWideHoldMs: number }): Promise<DailyCandidates> {
+  const args = { revoked: now - o.revokedAfterMs, invites: now - INVITE_TTL_MS, wide: now - o.grantWideHoldMs };
+  const [del, rev, inv, wide] = await (await appClient()).batch(
+    [
+      "SELECT uid FROM users WHERE status = 'deleting' AND is_admin = 0 ORDER BY uid",
+      { sql: "SELECT uid FROM users WHERE status = 'revoked' AND is_admin = 0 AND status_at <= :revoked ORDER BY uid", args },
+      {
+        sql: `SELECT uid FROM users WHERE status IN ('provisioning', 'invited') AND account_id IS NULL AND is_admin = 0
+                AND invited_at <= :invites ORDER BY uid`,
+        args,
+      },
+      { sql: "SELECT count(*) AS n FROM events WHERE code = 'grant-wide' AND at >= :wide", args },
+    ],
+    "read",
+  );
+  const uids = (r: ResultSet) => r.rows.map((x) => String(x.uid));
+  return { deleting: uids(del), revokedDue: uids(rev), invitesExpired: uids(inv), grantWideRecent: Number(wide.rows[0].n) };
+}
+
+/** The sweeps, one write batch: `deleted` rows past five days; token and queue rows (and refresh
+ *  locks) whose uid has no users row (security R3); requests still pending after 14 days (they hold
+ *  an e-mail); the health check's red records past 30 days. Counts per sweep. */
+export async function dailySweeps(now: number, deletedRowTtlMs: number): Promise<Record<string, number>> {
+  const args = { deleted: now - deletedRowTtlMs, pending: now - INVITE_TTL_MS, reds: `health_red:${now - 30 * 86_400_000}` };
+  const names = ["deletedRows", "orphanTokens", "orphanQueue", "orphanLocks", "pendingRequests", "healthRecords"];
+  const rs = await (await appClient()).batch(
+    [
+      { sql: "DELETE FROM users WHERE status = 'deleted' AND is_admin = 0 AND status_at <= :deleted", args },
+      "DELETE FROM user_tokens WHERE uid NOT IN (SELECT uid FROM users)",
+      "DELETE FROM sync_state WHERE uid NOT IN (SELECT uid FROM users)",
+      `DELETE FROM app_meta WHERE key LIKE 'lock:spotify_refresh:%'
+         AND substr(key, length('lock:spotify_refresh:') + 1) NOT IN (SELECT uid FROM users)`,
+      { sql: "DELETE FROM requests WHERE status = 'pending' AND created_at <= :pending", args },
+      { sql: "DELETE FROM app_meta WHERE key LIKE 'health_red:%' AND key < :reds", args },
+    ],
+    "write",
+  );
+  return Object.fromEntries(names.map((n, i) => [n, rs[i].rowsAffected]));
+}
+
 // ── the deletion job's statements (Phase 4a, PLAN.md §12.3) ────────────────────────────────
 // deletion.ts holds them as data, so `user.mjs --remove` on the Mac runs the very same SQL; the
 // runtime runs them here, and only them.

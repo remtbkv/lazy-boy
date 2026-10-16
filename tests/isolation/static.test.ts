@@ -256,6 +256,10 @@ describe("S3: app-db.ts's exports match the reviewed snapshot", () => {
     "markGrantDead (function)",
     "markRevoked (function)",
     "readGrantCase (function)",
+    // The daily chores (§7.11): uids and times for the deletion job, and the sweeps (daily-4a.test.ts).
+    "DailyCandidates (type)",
+    "dailyCandidates (function)",
+    "dailySweeps (function)",
   ];
 
   it("lists every export", () => {
