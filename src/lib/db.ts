@@ -255,8 +255,12 @@ async function initTelemetry(): Promise<Client> {
   const client = separateTelemetry
     ? makeStoreClient(telemetryUrl!, telemetryAuthToken, telemetryFetch)
     : makeStoreClient(url, authToken, retryingFetch);
-  await client.executeMultiple(TELEMETRY_SCHEMA);
-  await migrateTelemetry(client);
+  // Sharing Rem's database, the log tables' DDL is a schema step on it, and only production code
+  // or a local file may apply one (the versioned open's rule, mayApplySchema).
+  if (separateTelemetry || mayApplySchema(url)) {
+    await client.executeMultiple(TELEMETRY_SCHEMA);
+    await migrateTelemetry(client);
+  }
   return client;
 }
 
