@@ -1,4 +1,4 @@
-// Static checks over src/ (PLAN.md §6.4: S1, S2, S4, S5, S6, S8), run on every `npm test`. They
+// Static checks over src/ (PLAN.md §6.4: S1-S8), run on every `npm test`. They
 // parse the source with the TypeScript compiler API, so a comment or a string that merely
 // mentions a pattern does not count. Each allowlist entry says why it is there; an entry marked
 // PENDING is single-user code that Phase 1's turn moves (it sits in a file queued lanes edit),
@@ -181,6 +181,61 @@ describe("S3: db.ts exports no per-user function", () => {
       }
     }
     expect(names.sort()).toEqual([...EXPORTS].sort());
+  });
+});
+
+describe("S3: app-db.ts's exports match the reviewed snapshot", () => {
+  // Every statement on the app database lives in app-db.ts (PLAN.md §6.2 layer 7), so a new
+  // export is a new way to reach every user's identity or tokens. This list changes in the same
+  // commit as the export, where a reviewer sees it. (S3's other half, no per-user function
+  // exported from db.ts at module level, is the block above.)
+  const SNAPSHOT = [
+    "APP_SCHEMA (re-export)",
+    "APP_SCHEMA_VERSION (re-export)",
+    "AppIdentityRow (type)",
+    "TokenRow (type)",
+    "USER_STATUSES (re-export)",
+    "UserRow (type)",
+    "UserStatus (re-export)",
+    "acquireAppLock (function)",
+    "appDatabaseUrl (function)",
+    "bindAdminAccount (function)",
+    "deleteTokensIfUnchanged (function)",
+    "ensureAppSchema (function)",
+    "findUserByAccountId (function)",
+    "getAppMeta (function)",
+    "insertTokensIfAbsent (function)",
+    "moveStatus (function)",
+    "readIdentityRow (function)",
+    "readTokenRow (function)",
+    "recordAppEvent (function)",
+    "recordSignIn (function)",
+    "releaseAppLock (function)",
+    "setAppMeta (function)",
+    "setAppMetaIfAbsent (function)",
+    "updateTokensIfUnchanged (function)",
+    "writeSignInTokens (function)",
+  ];
+
+  it("lists every export", () => {
+    const { sf } = FILES.find((f) => f.rel === "src/lib/app-db.ts")!;
+    const out: string[] = [];
+    const exported = (n: ts.Node) =>
+      (ts.canHaveModifiers(n) ? (ts.getModifiers(n) ?? []) : []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+    for (const st of sf.statements) {
+      if (ts.isExportDeclaration(st) && st.exportClause && ts.isNamedExports(st.exportClause)) {
+        for (const e of st.exportClause.elements) out.push(`${e.name.text} (re-export)`);
+      } else if (ts.isExportAssignment(st)) {
+        out.push("default (export assignment)");
+      } else if (exported(st)) {
+        if (ts.isFunctionDeclaration(st)) out.push(`${st.name?.text} (function)`);
+        else if (ts.isTypeAliasDeclaration(st) || ts.isInterfaceDeclaration(st)) out.push(`${st.name.text} (type)`);
+        else if (ts.isVariableStatement(st)) for (const d of st.declarationList.declarations) out.push(`${d.name.getText(sf)} (const)`);
+        else if (ts.isClassDeclaration(st)) out.push(`${st.name?.text} (class)`);
+        else out.push(`${st.getText(sf).slice(0, 40)} (other)`);
+      }
+    }
+    expect(out.sort()).toEqual([...SNAPSHOT].sort());
   });
 });
 

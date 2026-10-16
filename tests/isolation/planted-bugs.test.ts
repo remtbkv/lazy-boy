@@ -7,6 +7,10 @@
 // Next's key cannot see); a token core whose in-flight refresh is one promise for everyone;
 // the cache stub reverted to a pass-through (which can see no collision and no forged entry).
 // The fourth, a URL template that ignores the uid: every db_name lands in one file.
+//
+// Phase 2 adds: a cipher that drops the associated data; a cipher that reuses its IV; a
+// refresh write that is not conditional on the row it read; a TokenStore that answers another
+// uid's row; an identity read that ignores SIGNUPS.
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
