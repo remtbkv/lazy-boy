@@ -74,6 +74,23 @@ closed. A hosted instance adds a persistent DB + a scheduler.
 
 For full `AUTH_URL` / redirect-URI / token-coordination details, see `docs/ARCHITECTURE.md` and `docs/GOTCHAS.md`.
 
+## Inviting a friend
+
+Up to four friends (Spotify's development mode allows five accounts, yours included), with
+`SIGNUPS=invite` in the deployment's environment:
+
+1. **They request**: send them to `/join`. They enter the e-mail on their Spotify account (a name
+   is optional) and accept the privacy policy and terms.
+2. **You see the request**: `node scripts/invite.mjs --list`, in your own terminal.
+3. **You add them on Spotify**: the developer dashboard → your app → User Management → their
+   e-mail.
+4. **You approve**: `node scripts/invite.mjs --approve <request id>`. It creates their database and
+   prints a join link (good for 14 days) to send them.
+5. **They connect** with Spotify, from the browser they requested in or through the link.
+
+A friend leaves with Disconnect, or `node scripts/user.mjs --remove <uid>`; `SIGNUPS=owner` and a
+redeploy shuts every friend out at once. The runbooks are in `docs/SECURITY.md`.
+
 ## Features
 
 - Clean playlist (strip out songs already saved elsewhere)

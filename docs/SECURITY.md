@@ -178,6 +178,48 @@ token row in `lazyboy.meta`, which Phase 2 keeps for a week after the move:
   `lazyboy` token. A rollback to a build from before the interim pinger's guard pauses the
   cron-job.org job first.
 
+## Inviting a friend (multi-user Phase 4a; PLAN §12.1 as RULINGS Oct 15 12:46 PM rule it)
+
+Two gates, both needed: Spotify's User Management list (five accounts in development mode, Rem's
+included) and an invite in the app database. Production runs `SIGNUPS=invite`; `owner` freezes
+every friend with one redeploy.
+
+1. The friend asks at `/join`: the e-mail on their Spotify account, a name or none, and the
+   policy and terms accepted. The form stores one request (`app-db.ts createJoinRequest`, capped
+   in SQL: 5 an hour, 8 waiting, none once 5 places are held) and leaves a signed request cookie
+   for two days. It creates no database and calls nothing outside the app database.
+2. Rem, in his own terminal (it prints e-mails, so it refuses inside a Claude Code session):
+   `node scripts/invite.mjs --list`.
+3. Rem adds the e-mail in the Spotify dashboard's User Management.
+4. `node scripts/invite.mjs --approve <request id>`: reserves the uid, creates `lb-u-<uid>`
+   with the Keychain's platform token, applies the user schema and its four `meta` keys, marks
+   the row `invited` and prints the join link (14 days). `--decline <request id>` drops a
+   request; `--revoke <uid>` withdraws an unclaimed invite and destroys its empty database.
+5. The friend connects, from the browser that filled in the form or through the link; their
+   sign-in claims the invite once, by compare-and-set (`claimInvite`; T9,
+   `tests/isolation/claim-signin.test.ts`). An unclaimed invite expires on its 14th day.
+
+## Deleting a friend's data (PLAN §12.3; decision 21 as ruled: never Rem's)
+
+- **Their choice**: `/disconnect` (the export first, the typed word, a sign-in within ten
+  minutes). The job runs at once; its last step waits out the 50-s lease window and finishes in
+  `after()` or at the next daily run.
+- **Rem's**: `node scripts/user.mjs --remove <uid>` with `TELEMETRY_DATABASE_URL` and
+  `TELEMETRY_AUTH_TOKEN` in the shell (after a friend asks by e-mail, or after the health check
+  reports them `removed` from the allowlist for a week). `--disable` / `--enable` end and restore
+  their sessions and sync without deleting.
+- **Automatic**: day 4 of a confirmed revocation, held while an app-wide `invalid_grant` event
+  stands, run by the daily chores (`/api/cron/daily`, and the tick when they are overdue), which
+  also retry any deletion still `deleting`.
+- **What it removes**: the sessions (epoch + 1), the token, queue, lock and request rows, the
+  database `lb-u-<uid>` (Turso's Platform API, `TURSO_PLATFORM_TOKEN`, Production only), their
+  telemetry rows, then the users row becomes `deleted` (uid, account_id, status, date) for five
+  days. It refuses the admin, any row not naming `lb-u-<uid>`, and any database whose `owner_uid`
+  is someone else's (T11). Backups hold no friend's data to delete (`ops/zenbook-backup`: the
+  nightly job deletes any `lb-u-` copy first and checks that none is left).
+- **Check it finished**: `/api/cron/health` turns red (`deletion`) on a user `revoked` or
+  `deleting` for over a day; the users row reads `deleted`; `turso db list` has no `lb-u-<uid>`.
+
 ## A suspected cross-user exposure (multi-user PLAN §13.6)
 
 For an isolation event that is not a test, a friend's report, or anything else that suggests

@@ -27,7 +27,9 @@ the dedupe/clean/queue-save algorithms — they are re-specified in `docs/FEATUR
 ## Where things live
 
 ```
-src/app/(auth)/          login page (unauthenticated shell; its consent line links the two below)
+src/app/(auth)/          login page (unauthenticated shell; its consent line links the two below);
+                         /join, and the pages after Log out (/signed-out), Disconnect
+                         (/disconnected) and a dead Spotify grant (/reconnect, decision 20)
 src/app/(legal)/         /privacy and /terms, public, no session or data reads: the privacy policy
                          and end-user agreement Spotify's Developer Terms §V require. Every line
                          must stay true of the code; change what the app stores, change /privacy
@@ -61,7 +63,11 @@ src/app/api/cron/sync/   the tick (lib/sync/tick.ts, wired in tick-deps.ts): two
 src/app/api/cron/daily/  the daily chores (lib/daily-chores.ts; Vercel cron, 09:00 UTC, or a tick
                          when app_meta.daily_at is 26 h old): all-time heal + Home payload
                          rebuild, api_log/client_metrics prunes, the played_at convention check,
-                         the usage check, the budget record. Each isolated; answers 200; notifies nobody
+                         the usage check, the budget record, then Phase 4a's (daily-4a.ts:
+                         deletion retries, day 4 of revoked, invite expiry, sweeps, the
+                         cron-job.org jobs). Each isolated; answers 200; notifies nobody
+src/app/api/cron/probe/  the planted probe (CRON_SECRET only): one forged cache entry, read back,
+                         exactly one isolation event (PHASE4A.md §5)
 src/app/api/cron/usage-check/  Turso quota guard (logic in lib/usage-check.ts): real usage vs
                          month pace, 500 on breach. Its reconciliation feeds /usage; the daily
                          route runs it every day. docs/READ_QUOTA.md
@@ -152,8 +158,12 @@ ops/zenbook-meter/       the store meter deployed on the Zenbook (proxy on 8090 
                          since the move) + the core fence (503 for core statements while
                          /srv/lazyboy-sqld/FENCE_CORE exists; on since 2026-10-16). Runs as
                          its own account, lbsvc, sandboxed: ops/zenbook-meter/README.md.
-                         READ_QUOTA.md, GOTCHAS.md. Nightly backups of both stores:
-                         ~/lazyboy-backup/backup.py on the Zenbook, quota-forensic/BRIDGE.md
+                         READ_QUOTA.md, GOTCHAS.md
+ops/zenbook-backup/      the nightly backup deployed on the Zenbook (~/lazyboy-backup/backup.py):
+                         Rem's rows only (RULINGS Oct 15 6:21 PM): every lb-u-* copy deleted
+                         first, friends never dumped, the app and telemetry copies filtered to
+                         his uid, then a check that no file names a friend's database.
+                         test_backup.py (in npm test); README.md is the install
 scripts/backfill-from-backstop.mjs  replay the Zenbook backstop recorder's captured plays
                          into the primary (the loss-repair path; recorder lives on the
                          Zenbook at ~/lazyboy-recorder, lazyboy-recorder.timer, hourly from
