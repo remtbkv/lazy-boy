@@ -127,35 +127,77 @@ export type DayStats = {
 const FILE_URL = `file:${path.join(process.cwd(), "data", "listens.db")}`;
 const url = process.env.TURSO_DATABASE_URL || FILE_URL;
 const authToken = process.env.TURSO_AUTH_TOKEN;
+// The telemetry store: api_log, client_metrics, usage_ledger (docs/STORE_MIGRATION.md §5).
+// Unset, or the same URL as the core store, means ONE store: getTelemetryClient() returns
+// getClient() and everything behaves as it did before the split (tests, dev).
+const telemetryUrl = process.env.TELEMETRY_DATABASE_URL;
+const telemetryAuthToken = process.env.TELEMETRY_AUTH_TOKEN;
+const separateTelemetry = !!telemetryUrl && telemetryUrl !== url;
 
-// One client + one-time schema init per server process, shared via a promise so
+// One client + one-time schema init per store per server process, shared via a promise so
 // concurrent callers don't race the CREATE TABLEs.
-const g = globalThis as unknown as { __listenDbReady?: Promise<Client> };
+type ReadyKey = "__listenDbReady" | "__telemetryDbReady";
+const g = globalThis as unknown as { [K in ReadyKey]?: Promise<Client> };
 
-function getClient(): Promise<Client> {
-  if (g.__listenDbReady) return g.__listenDbReady;
-  const ready = init();
-  g.__listenDbReady = ready;
+function ready(key: ReadyKey, start: () => Promise<Client>): Promise<Client> {
+  const cached = g[key];
+  if (cached) return cached;
+  const p = start();
+  g[key] = p;
   // If init fails (a transient network blip on first use), drop the cached
   // rejection so the next call retries — otherwise every DB call in this process
   // fails forever until a restart.
-  ready.catch(() => {
-    if (g.__listenDbReady === ready) g.__listenDbReady = undefined;
+  p.catch(() => {
+    if (g[key] === p) g[key] = undefined;
   });
-  return ready;
+  return p;
+}
+
+/** The app's data: tracks, plays, contexts, meta, playlists, playlist_tracks, saved_tracks. */
+function getClient(): Promise<Client> {
+  return ready("__listenDbReady", init);
+}
+
+/** The three log tables, and nothing else. A user path never awaits this client: its calls
+ *  are fired with `void` (or after the response, /api/metrics), and its fetch gives up after
+ *  one 4 s attempt, so a frozen telemetry host costs a log row, never a page. */
+function getTelemetryClient(): Promise<Client> {
+  return separateTelemetry ? ready("__telemetryDbReady", initTelemetry) : getClient();
 }
 
 // Every store query rides this fetch: it forces gzip (brotli on the Zenbook's CPU cost the
 // history payload 26 SECONDS) and owns the retry ladder. store-fetch.ts holds the whole
 // story and the measurements.
 const retryingFetch = makeStoreFetch();
+// The telemetry store's: one attempt, 4 s. The core ladder (3 × 15 s) would hold a log write
+// for 45 s against a frozen host, and a log row is not worth a retry.
+const telemetryFetch = makeStoreFetch(fetch, { attempts: 1, attemptTimeoutMs: 4_000 });
 
 async function init(): Promise<Client> {
   if (url.startsWith("file:")) {
     fs.mkdirSync(path.join(process.cwd(), "data"), { recursive: true });
   }
   const client = createClient({ url, authToken, intMode: "number", fetch: retryingFetch });
-  await client.executeMultiple(`
+  // One store: its init creates both halves, exactly as before the split.
+  await client.executeMultiple(separateTelemetry ? CORE_SCHEMA : CORE_SCHEMA + TELEMETRY_SCHEMA);
+  await migrateCore(client);
+  if (!separateTelemetry) await migrateTelemetry(client);
+  return client;
+}
+
+async function initTelemetry(): Promise<Client> {
+  const client = createClient({
+    url: telemetryUrl!,
+    authToken: telemetryAuthToken,
+    intMode: "number",
+    fetch: telemetryFetch,
+  });
+  await client.executeMultiple(TELEMETRY_SCHEMA);
+  await migrateTelemetry(client);
+  return client;
+}
+
+const CORE_SCHEMA = `
     CREATE TABLE IF NOT EXISTS tracks (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -207,6 +249,9 @@ async function init(): Promise<Client> {
       added_at TEXT,
       position INTEGER
     );
+`;
+
+const TELEMETRY_SCHEMA = `
     CREATE TABLE IF NOT EXISTS api_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       ts INTEGER NOT NULL,
@@ -240,7 +285,9 @@ async function init(): Promise<Client> {
       meta TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_client_metrics_ts ON client_metrics (ts);
-  `);
+`;
+
+async function migrateCore(client: Client): Promise<void> {
   // Migrate older DBs that predate the album/duration columns.
   const info = await client.execute("PRAGMA table_info(tracks)");
   const cols = new Set(info.rows.map((r) => String(r.name)));
@@ -252,13 +299,6 @@ async function init(): Promise<Client> {
   const ctxCols = new Set(ctxInfo.rows.map((r) => String(r.name)));
   if (!ctxCols.has("checked_at")) {
     await client.execute("ALTER TABLE contexts ADD COLUMN checked_at TEXT");
-  }
-  // Which traffic source made each Spotify call (cron-sync, now-playing, an action…) —
-  // added 2026-08-16 so a 429 is attributable to its CALLER, not just its endpoint.
-  const apiLogInfo = await client.execute("PRAGMA table_info(api_log)");
-  const apiLogCols = new Set(apiLogInfo.rows.map((r) => String(r.name)));
-  if (!apiLogCols.has("source")) {
-    await client.execute("ALTER TABLE api_log ADD COLUMN source TEXT");
   }
   // ctx_orphan caches the playlist-membership verdict per play (see sourceExpr). NULL means
   // "not computed yet" — recomputeOrphanFlags() fills it, and until it does the read falls
@@ -293,7 +333,16 @@ async function init(): Promise<Client> {
   await client.execute(
     "CREATE INDEX IF NOT EXISTS idx_plays_orphan_null ON plays (id) WHERE ctx_orphan IS NULL",
   );
-  return client;
+}
+
+async function migrateTelemetry(client: Client): Promise<void> {
+  // Which traffic source made each Spotify call (cron-sync, now-playing, an action…) —
+  // added 2026-08-16 so a 429 is attributable to its CALLER, not just its endpoint.
+  const apiLogInfo = await client.execute("PRAGMA table_info(api_log)");
+  const apiLogCols = new Set(apiLogInfo.rows.map((r) => String(r.name)));
+  if (!apiLogCols.has("source")) {
+    await client.execute("ALTER TABLE api_log ADD COLUMN source TEXT");
+  }
 }
 
 // ── One client, no replica ──────────────────────────────────────────────────────────────
@@ -2607,7 +2656,7 @@ export async function logSpotifyRequest(entry: {
   retryAfter: number | null;
   source?: string;
 }): Promise<void> {
-  const client = await getClient();
+  const client = await getTelemetryClient();
   // Store just the endpoint path (no host, no query string) — enough to see which calls
   // dominate, without bloating rows or storing query params.
   let p = entry.path;
@@ -2638,7 +2687,7 @@ export type SpotifyCallSource = {
   lastTs: number;
 };
 export async function getSpotifyCallBreakdown(hours = 24): Promise<SpotifyCallSource[]> {
-  const client = await getClient();
+  const client = await getTelemetryClient();
   const res = await client.execute({
     sql: `SELECT COALESCE(source, 'untagged') AS source, COUNT(*) AS calls,
                  SUM((status >= 400 OR status = 0) AND status <> 429) AS errors,
@@ -2680,7 +2729,7 @@ export type QuotaWindow = {
 };
 
 export async function getRecentlyPlayedQuotaWindows(): Promise<QuotaWindow[]> {
-  const client = await getClient();
+  const client = await getTelemetryClient();
   // Bounded to the retention window and served by idx_api_log_path_ts — this used to be an
   // unbounded scan on an unindexed predicate, on the page whose subject is read cost.
   const res = await client.execute({
@@ -2734,7 +2783,7 @@ export async function getRecentlyPlayedQuotaWindows(): Promise<QuotaWindow[]> {
 }
 
 export async function pruneApiLog(): Promise<void> {
-  const client = await getClient();
+  const client = await getTelemetryClient();
   await client.execute({
     sql: `DELETE FROM api_log WHERE ts < ?`,
     args: [Date.now() - API_LOG_TTL_MS],
@@ -2745,7 +2794,7 @@ export async function pruneApiLog(): Promise<void> {
  *  read (audit 2026-08-19, T2.16). 30 days kept for post-hoc digging; the daily cron tick
  *  calls this alongside pruneApiLog. ISO-TEXT ts, so the cutoff is the same format. */
 export async function pruneClientMetrics(): Promise<void> {
-  const client = await getClient();
+  const client = await getTelemetryClient();
   await client.execute({
     sql: `DELETE FROM client_metrics WHERE ts < ?`,
     args: [new Date(Date.now() - 30 * 86_400_000).toISOString()],
@@ -2757,7 +2806,7 @@ export async function pruneClientMetrics(): Promise<void> {
 export async function getApiLogSummary(): Promise<{
   windows: { seconds: number; calls: number; rateLimited: number }[];
 }> {
-  const client = await getClient();
+  const client = await getTelemetryClient();
   const now = Date.now();
   const res = await client.execute({
     sql: `SELECT ts, status FROM api_log WHERE ts > ? ORDER BY ts DESC`,
@@ -2817,7 +2866,7 @@ function utcDay(at: number = Date.now()): string {
  *  callers use `void ledgerAdd(...)`, and this never rejects. */
 export async function ledgerAdd(reader: string, modeledRows: number): Promise<void> {
   try {
-    const client = await getClient();
+    const client = await getTelemetryClient();
     await client.execute({
       sql: `INSERT INTO usage_ledger (day, reader, calls, modeled_rows)
             VALUES (:day, :reader, 1, :rows)
@@ -2839,7 +2888,7 @@ export async function ledgerAdd(reader: string, modeledRows: number): Promise<vo
  *  to it. `calls` still increments, so a re-run is visible. Never rejects. */
 export async function ledgerSet(day: string, reader: string, modeledRows: number): Promise<void> {
   try {
-    const client = await getClient();
+    const client = await getTelemetryClient();
     await client.execute({
       sql: `INSERT INTO usage_ledger (day, reader, calls, modeled_rows)
             VALUES (:day, :reader, 1, :rows)
@@ -2856,7 +2905,7 @@ export async function ledgerSet(day: string, reader: string, modeledRows: number
 /** The last `days` days of the ledger, newest day first. A range seek on the primary key
  *  over a table with one row per (day, reader) — tens of rows, not a scan. */
 export async function readLedger(days: number): Promise<LedgerRow[]> {
-  const client = await getClient();
+  const client = await getTelemetryClient();
   const cutoff = utcDay(Date.now() - Math.max(0, days - 1) * 86_400_000);
   const res = await client.execute({
     sql: `SELECT day, reader, calls, modeled_rows AS modeledRows FROM usage_ledger
@@ -2870,7 +2919,7 @@ export async function readLedger(days: number): Promise<LedgerRow[]> {
  *  `_`-prefixed rows are the reconciliation's own output and would otherwise be counted as
  *  spend. This is the left-hand side of the residual. */
 export async function ledgerDayModeledTotal(day: string): Promise<number> {
-  const client = await getClient();
+  const client = await getTelemetryClient();
   const res = await client.execute({
     sql: `SELECT COALESCE(SUM(modeled_rows), 0) AS total FROM usage_ledger
           WHERE day = :day AND substr(reader, 1, 1) <> '_'`,
@@ -3051,7 +3100,7 @@ function splitMeta(raw: string | null): { pv: string; meta: string | null } {
  *  No write_seq bump (see the section note). */
 export async function recordClientMetrics(rows: ClientMetricInput[]): Promise<void> {
   if (rows.length === 0) return;
-  const client = await getClient();
+  const client = await getTelemetryClient();
   const now = Date.now();
   const arrival = new Date(now).toISOString();
   const stamp = (at: number | null | undefined): string => {
@@ -3080,7 +3129,7 @@ function percentile(values: number[], p: number): number {
  *  OPENS_PER_PAGE opens of each page, newest first, each with the ms of every part that
  *  reported. One scan of the window serves both. */
 export async function getClientLoadSpeed(): Promise<ClientLoadSpeed> {
-  const client = await getClient();
+  const client = await getTelemetryClient();
   const cutoff = new Date(Date.now() - CLIENT_METRICS_WINDOW_MS).toISOString();
   const res = await client.execute({
     sql: `SELECT id, ts, session, page, event, value, meta FROM client_metrics
