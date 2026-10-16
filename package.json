@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "s=0; vitest run || s=1; node --test src/lib/store-diff.test.ts || s=1; node scripts/test-build-skew.mjs || s=1; node scripts/test-ledger.mjs || s=1; exit $s"
+    "test": "s=0; vitest run || s=1; node --test src/lib/store-diff.test.ts || s=1; node scripts/test-build-skew.mjs || s=1; node scripts/test-ledger.mjs || s=1; node --test ops/zenbook-meter/meter-proxy.test.mjs || s=1; exit $s"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",
