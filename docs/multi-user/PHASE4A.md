@@ -267,3 +267,40 @@ the deletion runner, `markGrantDead`, the health read); `request-cookie.ts`; `id
 confirmGrant`; `daily-4a.ts`; `user-cache.ts`'s probe; `scripts/invite.mjs`, `user.mjs`. A cross-user path would
 most likely hide in: the claim (an account binding an invite that is not its own), the deletion's refusals, the
 join link's lookup, and the probe's key (an entry a real read could meet).
+
+## 9. Lane 09's review (Oct 16)
+
+An adversarial review in a fresh context (lane 1945_lb_mu_09_p4a_review) found four defects and fixed each on this
+branch with a test shown failing first:
+
+- **`93e5ed4`, an app-wide `invalid_grant` event deleted a friend already revoked.** The verdict was taken only at
+  each user's own confirmation, so a friend confirmed revoked alone stayed `revoked` when a second user's grant died
+  hours later: on the request path no `grant-wide` event is written and the day-4 chore deleted them; through the
+  tick the event held them four days, then deleted them. The day-4 chore now reads each due revocation's own window
+  (24 h either side of its first failure) and moves one with another user's, the admin's or a `grant-wide` event
+  there back to `needs_reconnect`.
+- **`0bc8c4e`, the form stored control characters** (ESC, C1, bidi overrides) in the e-mail and name, which
+  `invite.mjs --list` printed raw into Rem's terminal. The form refuses them in the e-mail and strips them from the
+  name; the script prints any stored one escaped.
+- **`30e3828`, Log out claimed success when the identity check could not run**: it signed this browser out and
+  `/signed-out` said every browser was out and recording had stopped, with nothing ended. `account.ts logOutFrom`
+  now throws in that case, into the `(app)` error boundary.
+- **`c8fab0d`, `/privacy` promised a day-4 deletion** the code withholds for an app-wide event or a ~170-day grant,
+  and did not say the five-day note keeps the Spotify account ID. Both now say what the code does.
+
+Also `a4a87fe`: T9 pins the claim's check that the request reads `approved` (a mutant dropping it survived).
+
+For the turn and the deploy (not defects of this branch):
+
+- `deleteUserTelemetry` deletes nothing until `api_log` and `client_metrics` carry `user_id` (§4 item 10), while
+  `/privacy` says a departing friend's diagnostic logs are deleted. Check the column exists in production before
+  `SIGNUPS=invite`.
+- Once Phase 1's turn moves `db.ts`'s `unstable_cache` reads onto `userCache`, a friend's payloads sit in Vercel's
+  Data Cache under their uid (revalidate up to a day; how long Vercel keeps an entry nobody reads again is not
+  checked). `/privacy` names Vercel only as the host that sees requests, and the deletion job purges no entry.
+- `/login` still says "We only access your library to manage playlists" (from `main`), which the history capture
+  makes untrue.
+- PLAN §12.1's separate opt-in to account e-mails at `/join` is not built; the form's acceptance of the policy, which
+  says the address is used "to tell you about your account", stands in for it.
+- The stated limit of §6 holds: an allowlisted account with no row carrying X's cookie or link claims X's invite and
+  locks X out (lane 09 ran it). It exposes no one's data; Rem sees it at `--list`.
