@@ -410,19 +410,28 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   playlist — used to be two correlated `playlist_tracks` subqueries per *output row*, which
   was ~90 % of `getAllTimePlays`. It was also the wrong shape: the answer only changes when a
   playlist is synced, but the expression re-derived it on every render. Now
-  `recomputeOrphanFlags()` refreshes the flag exactly when membership can have moved —
-  `{newOnly}` for plays just recorded, `{playlistId}` when one playlist's tracks change,
-  unscoped for the backfill and for a library-list rewrite that actually dropped memberships
-  (`needsFullOrphanPass`: the playlist id set moved, or the purge deleted rows — the unscoped
-  pass bills ~2.5M rows, so a rename or a reorder must not trigger it) — and writes only rows whose
+  `recomputeOrphanFlags()` refreshes the flag exactly when an input of the verdict was
+  written, scoped to the plays that write can flip — `{newOnly}` for plays just recorded,
+  `{playlistIds}` for playlists whose memberships changed (`storePlaylistTracks`,
+  `removeCachedPlaylistTrack`, `deletePlaylistFromDb`, and the library-list rewrite's purge,
+  scoped to the ids its `DELETE … RETURNING playlist_id` hands back: the purge also drops
+  rows of a playlist in neither the old nor the new list, so the list diff is not the scope),
+  `{identities}` when a `tracks` row's name or artist changes (`identityChanges`: the plays
+  sharing its old or new identity, from any playlist). Nothing purged runs nothing. No write
+  path runs the unscoped pass any more (it read 5,102,733 rows at 21,950 plays; it stays for
+  the backfill). The predicate starts from the song (own row → `idx_tracks_artist_name` →
+  `idx_pltracks_track`, order pinned by `CROSS JOIN`) instead of walking the playlist's
+  members. It writes only rows whose
   verdict actually flips, so a steady-state sync writes zero rows. Measured on the live DB
   (medians, n=5): all-time list 63 ms → 8.9 ms and history search 36 ms → 5.7 ms against a
   local SQLite copy, rows identical, 0 mismatches against the old expression across all 6,644
   plays. Against **Turso's primary** the same change was only 903 ms → 705 ms and 546 ms →
   344 ms, and one day's plays did not improve at all (41 ms either way) — the win is real on
   local-speed storage and marginal-to-absent where the backend's own variance swamps it.
-  **If you add a way for playlist membership to change, call `recomputeOrphanFlags` from it**
-  — that is the one thing that can now go stale. A `NULL` flag reads as non-orphan, which is
+  **If you add a way for playlist membership or a track's name/artist to change, call
+  `recomputeOrphanFlags` from it, scoped** — no full pass sweeps up a missed one any more.
+  With RETURNING, count the returned `rows`: the file client reports `rowsAffected` 0 for any
+  statement that returns rows. A `NULL` flag reads as non-orphan, which is
   the same answer the old expression gave for a playlist it couldn't verify, so a missed
   recompute degrades to "shows the playlist name" and self-heals on the next sync.
 - **Resume picks up where you left off in a playlist** (`resumePlaylistAction`): it scopes

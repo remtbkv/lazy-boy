@@ -223,7 +223,8 @@ so a cache HIT costs nothing and is counted as nothing. The readers:
 | `search_fallback` | `searchHistory`'s LIKE path (not the bounded empty-query branch) |
 | `contexts_full_pass` | the once-a-day `unresolvedContextUris` scan |
 | `unique_song_count` | `recomputeUniqueSongCount` |
-| `orphan_full_pass` | the UNSCOPED `recomputeOrphanFlags()` — the ~2.5M term; the two bounded scopes are not ledgered |
+| `orphan_full_pass` | the UNSCOPED `recomputeOrphanFlags()` — once the ~2.5M term (5.1M at 21,950 plays); no write path runs it since L10, so it is the backfill or a manual repair |
+| `orphan_purge_pass` | the pass after a list rewrite, scoped to the playlists its purge deleted rows of; modeled as purged playlists × average plays per playlist × 10 (`orphanPurgePassRows`). The other scopes are bounded and not ledgered |
 | `playlist_rewrite` | `storePlaylists`' delete-all + reinsert branch (its read side: the probe and the purge) |
 | `usage_check` | the daily guard's own reads |
 
@@ -285,7 +286,8 @@ returns; **linear-rare** = full scan but only on real change, cost named; **fixe
 | `recomputeOrphanFlags({newOnly})` | was `SCAN plays` per landing tick | **fixed** → bounded (partial index) |
 | `recomputeAllTimeStats` | full plays scan + tracks probes (~14.4K) | **fixed** → throttled 10 min; linear growth remains, queued lever: incremental accumulator |
 | `recomputeOrphanFlags({})` full pass | predicate over every play × its playlist's members. Estimated here at ≈1.3M rows; **measured at 2,544,558** (Aug 7 12:15–12:20 PM ET, windowed usage endpoint — the estimate was ~2× low, see `orphanFullPassRows`) | ~~linear-rare (`library_seq` = 5 lifetime)~~ **FALSIFIED.** It was not rare and it was not cold: it ran on the hourly cron sync for weeks, and it is the single largest term of the whole crisis (~60M/day). The change-probe was never keeping it cold, because a rotating artwork URL counted as a list change. **Now:** the rewrite branch runs it only when membership can actually have moved — the playlist ID SET changed, or the `playlist_tracks` purge reported `rowsAffected > 0` (`needsFullOrphanPass`). A rename, a reorder or a count drift rewrites the list and skips it. Ledgered as `orphan_full_pass`, so a return to hourly is now visible on `/usage` instead of only in the platform counter |
-| `recomputeOrphanFlags({playlistId})` | indexed by `idx_plays_context` + predicate over that playlist's plays | bounded per changed playlist |
+| `recomputeOrphanFlags({playlistIds})` | indexed by `idx_plays_context` + predicate over those playlists' plays | bounded per changed playlist |
+| L10 (lane 1910b, Oct 16) | the rewrite's pass scoped to the purge's `RETURNING playlist_id` (none purged → no pass); renamed tracks re-ruled by `{identities}`; identity-first predicate, ~10 rows a judged play from its plan against ~2 × the playlist's size before (`ORPHAN_ROWS_PER_PLAY`, an estimate) | **fixed** → bounded by the plays from the purged playlists |
 | `readHistoryIndex` (search payload) | full plays scan ×3 probes ≈ 21.6K, once per `write_seq` change | linear-rare: ~15/day ≈ 0.3M/day; grows with history — same queued lever class |
 | `readLibraryIndex` | playlist_tracks scan + probes ≈ 30K, once per `library_seq` change | linear-rare: `library_seq` moved 5× ever |
 | `readDailyStats` | indexed 16-day window (~1.7K + probes) per bump | bounded by window |
