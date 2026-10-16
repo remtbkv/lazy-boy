@@ -112,8 +112,6 @@ const RESCAN_ACTIVE_MS = 30 * 60_000;
 const RESCAN_IDLE_MS = 150 * 60_000;
 const GRANT_WINDOW_MS = 24 * 3_600_000;
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, Math.max(0, ms)));
-
 function withDeadline<T>(p: Promise<T>, at: number, late: () => T): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const t = new Promise<T>((r) => {
@@ -207,7 +205,9 @@ async function serve(
   };
 
   const settle = async (s: Served, o: StepOutcome) => {
-    if (o.cooldown) await queue.extendCooldown(o.cooldown.bucket, o.cooldown.until);
+    if (o.cooldown) {
+      await queue.extendCooldown(o.cooldown.bucket, o.cooldown.until).catch((e) => console.error(`[tick] cooldown: ${String(e)}`));
+    }
     // A blob or key the deployment cannot read: nothing about the user is written (§5.3), and
     // the lease lapses on its own.
     if (o.code === "decrypt") return;
@@ -371,7 +371,7 @@ export async function runTick(deps: TickDeps, authorization: string | null): Pro
       if (uid) extra.rescan = uid;
     }
   })();
-  const done = await Promise.race([work.then(() => true), sleep(replyAt - Date.now()).then(() => false)]);
+  const done = await withDeadline(work.then(() => true), replyAt, () => false);
   if (!done) deps.after(work);
 
   // §5.3: two or more users, or the admin, failing to decrypt in this tick, too.
