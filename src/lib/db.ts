@@ -3259,3 +3259,56 @@ export async function getClientLoadSpeed(): Promise<ClientLoadSpeed> {
   // viewer. The full history stays queryable in the table.
   return { pages: summary, opens: recent, errors: errors.reverse().slice(0, 5) };
 }
+
+// ── Store bench (/api/cron/store-bench) ─────────────────────────────────────────────────
+// Round trips from wherever this code runs, for docs/STORE_MIGRATION.md's R1 (a production
+// function against each store). Serial on purpose: each sample is one round trip, not a share
+// of a parallel burst. A failed probe counts as a failure and adds no sample.
+
+export type BenchProbe = { n: number; p50: number; p95: number; max: number; failures: number };
+export type BenchResult = { store: "core" | "telemetry"; host: string; probes: Record<string, BenchProbe> };
+
+async function benchProbe(n: number, run: () => Promise<unknown>): Promise<BenchProbe> {
+  const ms: number[] = [];
+  let failures = 0;
+  for (let i = 0; i < n; i++) {
+    const t0 = performance.now();
+    try {
+      await run();
+      ms.push(Math.round((performance.now() - t0) * 10) / 10);
+    } catch {
+      failures++;
+    }
+  }
+  return ms.length
+    ? { n, p50: percentile(ms, 0.5), p95: percentile(ms, 0.95), max: Math.max(...ms), failures }
+    : { n, p50: 0, p95: 0, max: 0, failures };
+}
+
+/** The store's host for the bench report: never the token, never a path on disk. */
+function storeHost(u: string): string {
+  return u.startsWith("file:") ? "file" : new URL(u).host;
+}
+
+export async function benchStore(store: "core" | "telemetry"): Promise<BenchResult> {
+  if (store === "telemetry") {
+    return {
+      store,
+      host: storeHost(separateTelemetry ? telemetryUrl! : url),
+      probes: {
+        // Each under the telemetry fetch's own 4 s single attempt.
+        select1: await benchProbe(10, async () => (await getTelemetryClient()).execute("SELECT 1")),
+      },
+    };
+  }
+  return {
+    store,
+    host: storeHost(url),
+    probes: {
+      select1: await benchProbe(30, async () => (await getClient()).execute("SELECT 1")),
+      metaRead: await benchProbe(10, () => getMeta(WRITE_SEQ_KEY)),
+      // Null version = read fresh, never from the data cache.
+      historyIndex: await benchProbe(2, () => getHistoryIndex(null)),
+    },
+  };
+}

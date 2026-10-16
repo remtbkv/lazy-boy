@@ -1,5 +1,5 @@
-import { timingSafeEqual } from "node:crypto";
 import { getValidAccessToken } from "@/lib/auth";
+import { cronAuthorized } from "@/lib/cron-auth";
 import { spotifyClient, SpotifyError } from "@/lib/spotify";
 import { syncRecentPlays } from "@/lib/sync/history";
 import { syncLibrary } from "@/lib/sync/library";
@@ -41,13 +41,6 @@ async function maybeSyncLibrary(token: () => Promise<string>): Promise<string> {
   return "synced";
 }
 
-// Constant-time string compare so the cron secret can't be guessed via response timing.
-function safeEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  return ab.length === bb.length && timingSafeEqual(ab, bb);
-}
-
 // Backstop sync, triggered by the schedulers: the Zenbook's user timer
 // `lazyboy-cron-sync.timer` every 2 min (the working closed-app path) and Vercel's daily
 // cron (vercel.json). Two more callers only ever 401: the cron-job.org job, whose bearer
@@ -58,10 +51,8 @@ function safeEqual(a: string, b: string): boolean {
 // `Authorization: Bearer $CRON_SECRET`; anything else is rejected so the endpoint can't be
 // triggered by randoms. Every holder of the secret is listed in docs/SECURITY.md.
 export async function GET(req: Request) {
-  const secret = process.env.CRON_SECRET;
-  // Fail closed: a missing secret must reject every caller, not wave them through. (An
-  // unset CRON_SECRET in a deploy would otherwise leave this endpoint open to anyone.)
-  if (!secret || !safeEqual(req.headers.get("authorization") ?? "", `Bearer ${secret}`)) {
+  // Fails closed when CRON_SECRET is unset (cron-auth.ts).
+  if (!cronAuthorized(req)) {
     return Response.json({ ok: false, error: "forbidden" }, { status: 401 });
   }
   // The daily Vercel cron doubles as a watchdog: re-enable the cron-job.org job if it

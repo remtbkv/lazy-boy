@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { cronAuthorized } from "@/lib/cron-auth";
 import { ledgerAdd, ledgerDayModeledTotal, ledgerSet } from "@/lib/db";
 import { USAGE_CHECK_ROWS, residualVerdict } from "@/lib/read-costs";
 
@@ -46,12 +46,6 @@ const DATABASE_NAME = process.env.TURSO_DATABASE_NAME || "lazy-boy";
 // The platform API hung for over 20 minutes on 2026-08-08. Whatever it does, it does not get
 // to hold the guard open — a reconciliation that can't complete is recorded and skipped.
 const PLATFORM_TIMEOUT_MS = 15_000;
-
-function safeEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  return ab.length === bb.length && timingSafeEqual(ab, bb);
-}
 
 function utcDay(at: number): string {
   return new Date(at).toISOString().slice(0, 10);
@@ -117,8 +111,7 @@ async function fetchPlatformDayUsage(
 }
 
 export async function GET(req: Request) {
-  const secret = process.env.CRON_SECRET;
-  if (!secret || !safeEqual(req.headers.get("authorization") ?? "", `Bearer ${secret}`)) {
+  if (!cronAuthorized(req)) {
     return Response.json({ ok: false, error: "forbidden" }, { status: 401 });
   }
   const token = process.env.TURSO_PLATFORM_TOKEN;
