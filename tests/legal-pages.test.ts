@@ -56,6 +56,11 @@ describe("/privacy and /terms", () => {
       "It works only with Rem's own data and never reads yours.",
       "Log out signs you out on every browser and stops recording your listening",
       "deletes your data on the fourth day",
+      // Lane 09's review: §5.4 steps 3-4 keep the data when the failure may be Spotify's (several
+      // people at once) or a lapsed six-month grant, so the page must not promise the deletion.
+      "it keeps your data until you sign in again or ask Rem to delete it",
+      // The deleted row keeps account_id for five days (deletion.ts markDeleted), so say so.
+      "keeps only your Spotify account ID with a note that the account was deleted",
       "spotify.com/account/apps",
     ]) {
       expect(p, s).toContain(s);

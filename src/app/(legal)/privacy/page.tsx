@@ -131,7 +131,9 @@ export default function PrivacyPage() {
         Spotify&apos;s last 50). If you disconnect, everything Lazy Boy holds about you is deleted
         within five days. If you remove Lazy Boy at Spotify without disconnecting, Lazy Boy notices
         within about an hour and deletes your data on the fourth day, unless you sign in again
-        first.
+        first. When Lazy Boy cannot tell a removal from a fault (several people&apos;s access
+        stopping at once, or a sign-in about six months old, which Spotify can let lapse), it
+        keeps your data until you sign in again or ask Rem to delete it.
       </p>
 
       <h2>Disconnecting and deletion</h2>
@@ -139,8 +141,8 @@ export default function PrivacyPage() {
         Signed in, choose <strong>Disconnect</strong> (at <Link href="/disconnect">/disconnect</Link>):
         download your history first if you want a copy, then confirm. Your database, your encrypted
         tokens, your request and your diagnostic logs are deleted, most of it at once and all of it
-        within five days; Lazy Boy keeps only a note that your account was deleted, and when, for
-        five days, so a later sign-in can be told.
+        within five days; Lazy Boy keeps only your Spotify account ID with a note that the account
+        was deleted, and when, for five days, so a later sign-in can be told.
         Then remove Lazy Boy at{" "}
         <a href="https://www.spotify.com/account/apps/">spotify.com/account/apps</a> (Manage apps,
         then Remove access): the app cannot do that for you. If you can no longer sign in, email Rem
