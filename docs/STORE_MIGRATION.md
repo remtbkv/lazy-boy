@@ -494,4 +494,6 @@ Open for Rem, not for a lane:
 - The Vercel log capture on the Zenbook has been dead since Aug 9 (invalid token): renew or retire.
 - Run `scripts/migrate-skip-rule.mjs --apply` on production (now Turso) so `verify-derived.mjs` can
   go green (R5).
-- The cron-job.org usage-check job (burn review Z2): delete or re-key; its key does not pull from Vercel.
+- Does a daily cron-job.org job still call `/api/cron/usage-check`? Its last ledger row before Oct 16
+  is Aug 10 and `CRONJOB_API_KEY` does not pull from Vercel, so no lane can read the account. (The
+  2-min cron-job.org sync pinger is a separate matter: re-keyed with `CRON_SECRET_EXT` in 11a9518.)
