@@ -10,7 +10,8 @@
 //
 // Phase 2 adds: a cipher that drops the associated data; a cipher that reuses its IV; a
 // refresh write that is not conditional on the row it read; a TokenStore that answers another
-// uid's row; an identity read that ignores SIGNUPS.
+// uid's row; an identity read that ignores SIGNUPS. Lane 03's review adds a key check that opens
+// only the first key's sentinel.
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
@@ -18,7 +19,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { checkIdentity, type SessionClaims, type Uid } from "@/lib/identity";
 import { appIdentityLookup, readIdentity } from "@/lib/identity-read";
 import { createTokenCore, type TokenStore } from "@/lib/token-core";
-import { decryptTokens, encryptTokens, parseTokenKeys, tokenAad, type TokenKey } from "@/lib/token-crypto";
+import { getAppMeta, setAppMetaIfAbsent } from "@/lib/app-db";
+import { decryptTokens, encryptTokens, open, parseTokenKeys, seal, tokenAad, type TokenKey } from "@/lib/token-crypto";
+import { tokenKeysReady } from "@/lib/token-keys";
 import { appTokenStore } from "@/lib/token-store-app";
 import { rawClient, resetStore } from "../adversarial/helpers";
 import * as faithful from "../stubs/next-cache-faithful";
@@ -33,6 +36,7 @@ import {
   expectRefreshLosesToSignIn,
   expectSignupsOwnerRefusesFriend,
   expectStoreAnswersOwnRow,
+  expectWrongOlderKeyRefuses,
   freshAppDb,
   memoryTokenStore,
   scriptedSpotify,
@@ -255,5 +259,39 @@ describe("planted: an identity read that ignores SIGNUPS (PLAN.md §12.1)", () =
   it("and passes over the real read", async () => {
     await rows();
     await expectSignupsOwnerRefusesFriend((c) => readIdentity(c), claims);
+  });
+});
+
+// ── Lane 03's review: the key check (PLAN.md §5.3) ────────────────────────────────────────
+// token-keys.ts's check with one line changed: it opens the first key's sentinel and trusts the
+// rest, so a wrong older key passes the cold-start check and every blob under it fails one user
+// at a time instead of refusing the deploy.
+function plantedFirstKeyOnlyCheck(): () => Promise<TokenKey[]> {
+  const aad = (id: string) => `lazyboy:sentinel:v1:${id}`;
+  const text = (id: string) => `lazyboy token key sentinel ${id}`;
+  return async () => {
+    const keys = parseTokenKeys(process.env.TOKEN_KEYS);
+    for (const key of keys.slice(0, 1)) {
+      const name = `sentinel:${key.id}`;
+      if ((await getAppMeta(name)) === null) await setAppMetaIfAbsent(name, seal(key, aad(key.id), text(key.id)));
+      const blob = await getAppMeta(name);
+      let got: string | null = null;
+      try {
+        got = blob === null ? null : open([key], aad(key.id), blob);
+      } catch {}
+      if (got !== text(key.id)) throw new Error(`TOKEN_KEYS: key ${key.id} does not open its sentinel`);
+    }
+    return keys;
+  };
+}
+
+describe("planted: a key check that opens only the first key's sentinel (PLAN.md §5.3)", () => {
+  it("the wrong-older-key check catches it", async () => {
+    await appStore();
+    await expect(expectWrongOlderKeyRefuses(plantedFirstKeyOnlyCheck())).rejects.toThrow();
+  });
+  it("and passes over the real check", async () => {
+    await appStore();
+    await expectWrongOlderKeyRefuses(tokenKeysReady);
   });
 });

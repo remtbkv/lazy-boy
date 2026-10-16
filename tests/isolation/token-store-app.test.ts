@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { moveStatus } from "@/lib/app-db";
 import { createTokenCore, type TokenStore } from "@/lib/token-core";
 import { DecryptError } from "@/lib/token-crypto";
-import { TokenKeyError } from "@/lib/token-keys";
+import { TokenKeyError, tokenKeysReady } from "@/lib/token-keys";
 import { appTokenStore } from "@/lib/token-store-app";
 import {
   A,
@@ -15,6 +15,7 @@ import {
   expectConcurrentRefreshIsolated,
   expectRefreshLosesToSignIn,
   expectStoreAnswersOwnRow,
+  expectWrongOlderKeyRefuses,
   freshAppDb,
   scriptedSpotify,
   seedUser,
@@ -192,6 +193,14 @@ describe("TOKEN_KEYS sentinels (PLAN.md §5.3)", () => {
     expect((await rows("SELECT status FROM users ORDER BY uid")).map((x) => x.status)).toEqual(["active", "active"]);
     expect(await rows("SELECT code FROM events")).toEqual([]);
     vi.stubEnv("TOKEN_KEYS", good);
+    expect((await store.get(A))?.accessToken).toBe("at-A");
+  });
+
+  it("a wrong older key, second in TOKEN_KEYS, refuses too and leaves users active", async () => {
+    await store.set(A, { accessToken: "at-A", refreshToken: "rt-A", expiresAt: FAR });
+    await expectWrongOlderKeyRefuses(tokenKeysReady);
+    expect((await rows("SELECT status FROM users ORDER BY uid")).map((x) => x.status)).toEqual(["active", "active"]);
+    expect(await rows("SELECT code FROM events")).toEqual([]);
     expect((await store.get(A))?.accessToken).toBe("at-A");
   });
 

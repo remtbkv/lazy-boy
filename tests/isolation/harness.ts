@@ -217,6 +217,18 @@ export async function expectSignupsOwnerRefusesFriend(
   expect((await read(c.friend)).kind).toBe("allowed");
 }
 
+/** One sentinel per configured key (PLAN.md §5.3): a wrong key refuses to serve wherever it sits
+ *  in TOKEN_KEYS, not only first. After a rotation the older key is second and every blob not yet
+ *  re-encrypted needs it. Needs `TOKEN_KEYS` = one good `v1` key whose sentinel `ready` wrote. */
+export async function expectWrongOlderKeyRefuses(ready: () => Promise<TokenKey[]>): Promise<void> {
+  const good = process.env.TOKEN_KEYS!;
+  const v2 = `v2:${randomBytes(32).toString("base64")}`;
+  vi.stubEnv("TOKEN_KEYS", `${v2},v1:${randomBytes(32).toString("base64")}`);
+  await expect(ready()).rejects.toThrow(/key v1 does not open its sentinel/);
+  vi.stubEnv("TOKEN_KEYS", `${v2},${good}`);
+  expect((await ready()).map((k) => k.id)).toEqual(["v2", "v1"]);
+}
+
 /** The core's contract that a shared in-flight promise breaks (01e A2, PLAN.md §5.2): two users
  *  whose tokens are both expired, refreshed at the same moment in one process, each end with
  *  their own token, after one token-endpoint call each. */
