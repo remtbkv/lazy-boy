@@ -78,13 +78,20 @@ src/lib/token-core.ts    Spotify token refresh (centralized), keyed by uid, writ
                          token-move.ts copies the admin's plaintext row in once (and back on
                          LB_TOKEN_ROLLBACK=1)
 src/lib/app-db.ts        every statement on the app database `lazyboy-app` (users, user_tokens,
-                         sync_state, events, app_meta); its schema is app-schema.ts
+                         sync_state, events, app_meta, requests); its schema is app-schema.ts
 src/lib/sync/            the cron tick (tick.ts: the stamp, the claim, per-user steps, the 20-s
                          reply, one rescan, the daily chores when overdue), each user's step
                          (step.ts: token, /me/player probe, harvest when harvest-policy.ts says
                          so, counted by brake.ts), history.ts (a harvest's record), library.ts
                          (the rescan: no /me, Liked read from the top, liked-diff.ts).
                          capture-read.ts + capture-health.ts: Home's capture line from sync_state
+src/app/(auth)/join/     the request form (Phase 4a): /join, POST /api/join, /api/join/link; the
+                         signed request cookie is request-cookie.ts, the claim app-db claimInvite
+src/lib/deletion.ts      the deletion job (PLAN §12.3), statements as data so scripts/user.mjs runs
+                         the same SQL; deletion-runtime.ts binds it in the runtime; account.ts is
+                         Log out and Disconnect; daily-4a.ts the chores 4a adds
+scripts/invite.mjs       --list / --approve / --revoke / --decline (Rem runs it: e-mails);
+scripts/user.mjs         --disable / --enable / --remove; both via turso-mac.mjs (Keychain token)
 src/lib/identity.ts      the uid, the branded Uid, the identity check, phase1Owner() (the owner
                          for the session-less paths); identity-read.ts reads it (and sign-in's
                          account_id link) from the app database, naming the user's database
