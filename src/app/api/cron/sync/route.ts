@@ -4,20 +4,14 @@ import { spotifyClient, SpotifyError } from "@/lib/spotify";
 import { syncRecentPlays } from "@/lib/sync/history";
 import { syncLibrary } from "@/lib/sync/library";
 import {
-  checkPlayedAtConvention,
   getHarvestGate,
   getLibraryScanAttemptAt,
   getLibrarySyncedAt,
   getSpotifyTokens,
   ledgerSyncCall,
-  pruneApiLog,
-  pruneClientMetrics,
-  rebuildHomePayload,
-  recomputeAllTimeStats,
   setHarvestGate,
   setLibraryScanAttemptAt,
 } from "@/lib/db";
-import { ensureCronJobEnabled } from "@/lib/cronjob";
 import { shouldHarvest } from "@/lib/harvest-gate";
 
 // Rebuild the library index at most every 30 min (snapshot-diffing makes a run cheap, but no
@@ -43,7 +37,8 @@ async function maybeSyncLibrary(token: () => Promise<string>): Promise<string> {
 
 // Backstop sync, triggered by the schedulers: the Zenbook's user timer
 // `lazyboy-cron-sync.timer` every 2 min (the working closed-app path) and Vercel's daily
-// cron (vercel.json). Two more callers only ever 401: the cron-job.org job, whose bearer
+// 07:00 UTC cron (vercel.json), the last-resort capture when both pingers are down. The daily
+// chores have their own route, /api/cron/daily. Two more callers only ever 401: the cron-job.org job, whose bearer
 // went stale at the 2026-08-10 CRON_SECRET rotation, and the Zenbook's root-level
 // `lazyboy-sync.timer` (the "second ~5-min pinger" of 2026-08-06), stale since the 07-01
 // rotation (burn lazyboy-review 2026-10-03, Z1/Z2). Runs without a session using the stored
@@ -54,31 +49,6 @@ export async function GET(req: Request) {
   // Fails closed when CRON_SECRET is unset (cron-auth.ts).
   if (!cronAuthorized(req)) {
     return Response.json({ ok: false, error: "forbidden" }, { status: 401 });
-  }
-  // The daily Vercel cron doubles as a watchdog: re-enable the cron-job.org job if it
-  // auto-disabled after a failure storm (it is no longer the working pinger; see above).
-  // Meant to fire only on Vercel's cron; Vercel does not send this header, so this block
-  // has not run since at least 2026-08-10 (QUEUE.md C2).
-  if (req.headers.get("x-vercel-cron")) {
-    // Each daily chore is isolated: a failure in one must not take down the tick (a 500
-    // here feeds the external pinger's auto-disable — the exact storm the 429 branch
-    // below was written to dodge).
-    await ensureCronJobEnabled().catch((e) => console.error("[cron] pinger heal failed", e));
-    // Daily heal for the throttled all-time recompute: a listening session's last plays
-    // can land inside the 10-min gate and stay uncounted until the next session — this
-    // bounds that staleness at a day for the cost of one full scan.
-    await recomputeAllTimeStats().catch((e) => console.error("[cron] alltime heal failed", e));
-    // …and the heal must reach Home: the card renders the COPY embedded in home_payload,
-    // which only rebuilds when a play lands — without this the healed number was invisible
-    // until the next listen (audit 2026-08-19, T2.2).
-    await rebuildHomePayload().catch((e) => console.error("[cron] payload rebuild failed", e));
-    // Retention is enforced here, not on the write path — the write-path counter resets
-    // with every serverless instance and may never fire (audit 2026-08-19, T2.17).
-    await pruneApiLog().catch(() => {});
-    await pruneClientMetrics().catch(() => {});
-    // Spotify has flipped what played_at marks before; if it does again, every skip verdict
-    // inverts silently. This logs it (skip-rule.ts playedAtConvention).
-    await checkPlayedAtConvention().catch((e) => console.error("[cron] convention check failed", e));
   }
   // Guarded: this runs OUTSIDE the try below, and a store hiccup inside the token read
   // used to escape as a 500 — feeding the external pinger's auto-disable, the exact storm
