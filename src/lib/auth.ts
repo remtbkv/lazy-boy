@@ -4,15 +4,8 @@
 import NextAuth, { customFetch } from "next-auth";
 import Spotify from "next-auth/providers/spotify";
 import { cache } from "react";
-import {
-  checkIdentity,
-  mintUid,
-  ownerOnlyLookup,
-  ownerUid,
-  signupsMode,
-  type IdentityVerdict,
-  type Uid,
-} from "@/lib/identity";
+import { mintUid, ownerUid, type IdentityVerdict, type Uid } from "@/lib/identity";
+import { readIdentity, resolveSignIn, signedInUser, signInRedirect } from "@/lib/identity-read";
 import { isOwnerSignIn } from "@/lib/owner";
 import { gateJwt, sessionFields, signInClaims } from "@/lib/session-gate";
 import type { OwnedToken } from "@/lib/spotify";
@@ -87,16 +80,13 @@ function publishTokens(uid: Uid, t: UserTokens | null): void {
   tokenBox(uid).p = Promise.resolve(t);
 }
 
-// The identity check (docs/multi-user/PLAN.md §5.1), once per request per cookie: the jwt
-// callback and the session callback ask the same box. Phase 1's lookup is the OWNER_UID
-// constant (no app database yet), so it never throws; Phase 2's app-database read can, and
-// that is the "unavailable" outcome.
+// The identity read (docs/multi-user/PLAN.md §5.1), once per request per cookie: the jwt
+// callback and the session callback ask the same box. It reads the app database's `users` row
+// under SIGNUPS (identity-read.ts); a read that throws, or token keys that fail their
+// sentinel, is the "unavailable" outcome.
 const identityFor = cache(
   (uid: unknown, ep: unknown, authTime: unknown): Promise<IdentityVerdict> =>
-    checkIdentity({ uid, ep, auth_time: authTime }, ownerOnlyLookup(ownerUid()), {
-      now: Date.now(),
-      signups: signupsMode(),
-    }),
+    readIdentity({ uid, ep, auth_time: authTime }),
 );
 
 /** The Spotify access token for THIS request — server-only, and deliberately NOT a field on
@@ -180,26 +170,24 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     }),
   ],
   callbacks: {
-    // Owner-only. Runs before jwt, so a refused account never reaches the token write below;
-    // Auth.js answers it with AccessDenied. See lib/owner.ts. With no OWNER_UID configured
-    // there is no uid to put on the cookie, so every sign-in is refused (multi-user Phase 1).
+    // Runs before jwt, so a refused account never reaches the token write below. The owner
+    // guard (lib/owner.ts) stays until Phase 4a; then the app database decides by Spotify's
+    // account_id (identity-read.ts): a refusal is AccessDenied or a named case on /login.
     async signIn({ profile }) {
       if (profile?.id === SPOTIFY_NOT_REGISTERED) return "/login?error=SpotifyNotRegistered";
-      if (!ownerUid()) {
-        console.error("[auth] OWNER_UID is unset or malformed: refusing sign-in");
-        return false;
-      }
-      return isOwnerSignIn(profile?.id ?? undefined);
+      if (!(await isOwnerSignIn(profile?.id ?? undefined))) return false;
+      const o = await resolveSignIn(profile ?? {});
+      return o.kind === "allowed" ? true : signInRedirect(o);
     },
-    async jwt({ token, account }) {
+    async jwt({ token, account, profile }) {
       const t = token as SpotifyToken;
       // Initial sign-in: name the user on the cookie (uid, session epoch, auth_time, from the
-      // owner constant in Phase 1, never from the incoming cookie), then write the encrypted
+      // `users` row signIn just admitted, never from the incoming cookie), then write the encrypted
       // token row. Tokens never ride in the cookie: one there is bound to no user row and
       // invisible to the cron, so a sign-in that cannot write its row fails visibly and is
       // retried (PLAN.md §5.1, 01e A18).
       if (account) {
-        const claims = signInClaims(ownerUid(), Date.now());
+        const claims = signInClaims(await signedInUser(profile ?? {}), Date.now());
         if (!claims) return null;
         t.uid = claims.uid;
         t.ep = claims.ep;

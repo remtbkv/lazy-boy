@@ -9,7 +9,7 @@ import path from "node:path";
 import { createClient, type Client } from "@libsql/client";
 import { expect, vi } from "vitest";
 import type { SpotifyTokens } from "@/lib/db";
-import { mintUid, type Uid } from "@/lib/identity";
+import { mintUid, type IdentityVerdict, type SessionClaims, type Uid } from "@/lib/identity";
 import { createTokenCore, type TokenStore } from "@/lib/token-core";
 import { parseTokenKeys, type TokenKey } from "@/lib/token-crypto";
 
@@ -199,6 +199,22 @@ export async function expectStoreAnswersOwnRow(store: TokenStore): Promise<void>
   await store.clear(A, (await store.get(A))!);
   expect(await store.get(A)).toBeNull();
   expect((await store.get(B))?.accessToken).toBe("at-B");
+}
+
+/** SIGNUPS=owner, the one-variable freeze (PLAN.md §12.1): unset or `owner`, the identity read
+ *  refuses a friend's otherwise live cookie whatever the row says and still admits the admin;
+ *  `invite` admits the friend (the positive control). Needs both rows live in the app database. */
+export async function expectSignupsOwnerRefusesFriend(
+  read: (claims: SessionClaims) => Promise<IdentityVerdict>,
+  c: { admin: SessionClaims; friend: SessionClaims },
+): Promise<void> {
+  for (const mode of ["", "owner"]) {
+    vi.stubEnv("SIGNUPS", mode);
+    expect(await read(c.friend)).toEqual({ kind: "refused", reason: "signups" });
+    expect((await read(c.admin)).kind).toBe("allowed");
+  }
+  vi.stubEnv("SIGNUPS", "invite");
+  expect((await read(c.friend)).kind).toBe("allowed");
 }
 
 /** The core's contract that a shared in-flight promise breaks (01e A2, PLAN.md §5.2): two users

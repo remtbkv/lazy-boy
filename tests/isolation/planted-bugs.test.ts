@@ -11,7 +11,8 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Uid } from "@/lib/identity";
+import { checkIdentity, type SessionClaims, type Uid } from "@/lib/identity";
+import { appIdentityLookup, readIdentity } from "@/lib/identity-read";
 import { createTokenCore, type TokenStore } from "@/lib/token-core";
 import { decryptTokens, encryptTokens, parseTokenKeys, tokenAad, type TokenKey } from "@/lib/token-crypto";
 import { appTokenStore } from "@/lib/token-store-app";
@@ -26,6 +27,7 @@ import {
   expectConcurrentRefreshIsolated,
   expectFreshIvPerWrite,
   expectRefreshLosesToSignIn,
+  expectSignupsOwnerRefusesFriend,
   expectStoreAnswersOwnRow,
   freshAppDb,
   memoryTokenStore,
@@ -229,5 +231,25 @@ describe("planted: a TokenStore that answers another uid's row", () => {
   it("and passes over the real store", async () => {
     const { store } = await appStore();
     await expectStoreAnswersOwnRow(store);
+  });
+});
+
+describe("planted: an identity read that ignores SIGNUPS (PLAN.md §12.1)", () => {
+  const now = Math.floor(Date.now() / 1000);
+  const claims = { admin: { uid: A, ep: 0, auth_time: now }, friend: { uid: B, ep: 0, auth_time: now } };
+  async function rows() {
+    const { db } = await appStore();
+    await db.raw().execute({ sql: "UPDATE users SET is_admin = 1 WHERE uid = ?", args: [A] });
+  }
+
+  it("the freeze check catches it", async () => {
+    await rows();
+    // The lookup is right; the read forgets to pass the deployment's SIGNUPS.
+    const buggy = (c: SessionClaims) => checkIdentity(c, appIdentityLookup, { now: Date.now(), signups: "invite" });
+    await expect(expectSignupsOwnerRefusesFriend(buggy, claims)).rejects.toThrow();
+  });
+  it("and passes over the real read", async () => {
+    await rows();
+    await expectSignupsOwnerRefusesFriend((c) => readIdentity(c), claims);
   });
 });
