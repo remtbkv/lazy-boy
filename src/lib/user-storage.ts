@@ -61,3 +61,20 @@ export function isSignedOutResponse(res: { status: number; headers: { get(name: 
 export function bodyIsFor(body: unknown, uid: string): boolean {
   return typeof body === "object" && body !== null && (body as { u?: unknown }).u === uid;
 }
+
+/** This browser's stores: clearUserStorage over localStorage and sessionStorage. Called by the
+ *  sign-out form before it submits, and by the fetchers on the signed-out 401. Storage that is
+ *  unavailable (private mode, a server render) clears nothing. */
+export function clearThisBrowser(): string[] {
+  try {
+    return clearUserStorage([localStorage, sessionStorage]);
+  } catch {
+    return [];
+  }
+}
+
+/** For the app's own fetchers: clear this browser's user data if the response says the
+ *  session is gone. Anything else (a 5xx, a 503, a plain 401) clears nothing. */
+export function clearIfSignedOut(res: { status: number; headers: { get(name: string): string | null } }): void {
+  if (isSignedOutResponse(res)) clearThisBrowser();
+}

@@ -32,6 +32,8 @@ import {
 } from "@/lib/search-cache";
 import { IdentityTrackMenu } from "@/components/identity-track-menu";
 import { useNowPlaying } from "@/components/now-playing-context";
+import { useUid } from "@/components/user-context";
+import { bodyIsFor, clearIfSignedOut, userStorageName } from "@/lib/user-storage";
 import { usePhone, useSearchMode } from "../use-search-mode";
 import {
   allTimePlaysAction,
@@ -165,15 +167,23 @@ const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n ==
 // payload (the other half, or the server, answers), never as an empty or half-built one.
 // `keep` gets the body's text once it has passed: the browser's copy (search-cache.ts) stores
 // that text, so only a body this build could read is ever stored.
+// A body that names another user (`u`) is no body either: it came from another session's
+// copy, and this page renders only its own user's data (multi-user PLAN §6.2 layer 6, T7).
+// The app's signed-out 401 clears this browser's stored user data (user-storage.ts).
 const fetchPayload = <T,>(
   url: string,
+  uid: string,
   ok: (d: unknown) => boolean,
   keep: (text: string, d: T) => void,
 ): Promise<T | null> =>
   fetch(url)
-    .then((r) => (r.ok ? r.text() : Promise.reject(new Error(String(r.status)))))
+    .then((r) => {
+      clearIfSignedOut(r);
+      return r.ok ? r.text() : Promise.reject(new Error(String(r.status)));
+    })
     .then((text) => {
       const d: unknown = JSON.parse(text);
+      if (!bodyIsFor(d, uid)) throw new Error(`${url}: a payload for another user`);
       if (!ok(d)) throw new Error(`${url}: unrecognised payload shape`);
       keep(text, d as T);
       return d as T;
@@ -290,6 +300,7 @@ export function DenHome({
   initialDay: string;
   initialTracks: TrackStats[];
 }) {
+  const uid = useUid();
   // ---- Day selection (client cache, one action call per uncached day) ----
   const [daily, setDaily] = useState(initialDaily);
   const [allTime, setAllTime] = useState(initialAllTime);
@@ -339,8 +350,7 @@ export function DenHome({
   // return). Today and yesterday are deliberately NOT persisted: today grows as you listen, and
   // yesterday is where late harvests and the backstop replay land — a persisted copy beat the
   // live payload for the tab's life (burn review 2026-10-03, U2). The store is capped so it
-  // can't balloon: this is text only, a few KB a day.
-  const DAY_STORE = "lb-days";
+  // can't balloon: this is text only, a few KB a day. Per user: userStorageName(uid, "lb-days").
   const DAY_STORE_MAX = 20;
   // The store is BUILD-STAMPED: sessionStorage survives reloads — including the build-skew
   // reload — so a deploy that changes TrackStats used to hand the new bundle old-shaped rows
@@ -349,11 +359,11 @@ export function DenHome({
   const DAY_STORE_BUILD = process.env.NEXT_PUBLIC_BUILD_ID ?? "dev";
   useEffect(() => {
     try {
-      const raw = sessionStorage.getItem(DAY_STORE);
+      const raw = sessionStorage.getItem(userStorageName(uid, "lb-days"));
       if (!raw) return;
       const parsed = JSON.parse(raw) as { build?: string; days?: Record<string, TrackStats[]> };
       if (parsed.build !== DAY_STORE_BUILD || !parsed.days) {
-        sessionStorage.removeItem(DAY_STORE);
+        sessionStorage.removeItem(userStorageName(uid, "lb-days"));
         return;
       }
       for (const [day, rows] of Object.entries(parsed.days)) {
@@ -368,7 +378,7 @@ export function DenHome({
     // The server's own rule (db.ts FROZEN_AFTER_DAYS): only today-2 and older are frozen.
     if (!persistableDay(day)) return;
     try {
-      const raw = sessionStorage.getItem(DAY_STORE);
+      const raw = sessionStorage.getItem(userStorageName(uid, "lb-days"));
       const parsed = raw
         ? (JSON.parse(raw) as { build?: string; days?: Record<string, TrackStats[]> })
         : null;
@@ -376,7 +386,10 @@ export function DenHome({
       saved[day] = rows;
       const keys = Object.keys(saved).sort();
       while (keys.length > DAY_STORE_MAX) delete saved[keys.shift() as string];
-      sessionStorage.setItem(DAY_STORE, JSON.stringify({ build: DAY_STORE_BUILD, days: saved }));
+      sessionStorage.setItem(
+        userStorageName(uid, "lb-days"),
+        JSON.stringify({ build: DAY_STORE_BUILD, days: saved }),
+      );
     } catch {
       /* quota / unavailable — the in-memory cache still works */
     }
@@ -627,6 +640,9 @@ export function DenHome({
   const RETRY_MS = 30_000;
   // Where a query would be answered from right now. Only the perf readout reads it.
   const indexStatus = useRef<IndexStatus>("fallback");
+  // The page's user, for the payload check below, through a ref: loadIndex runs from effects
+  // that must not re-run (see its note), and the uid does not change within a page.
+  const uidRef = useRef(uid);
 
   const loadIndex = () => {
     // Idempotent, and it HAS to be: this is called from an effect that also reads `entries`, so
@@ -647,8 +663,18 @@ export function DenHome({
       const v = (d as { v?: string | null }).v ?? null;
       if (userKey.current) void writeStored(idbKV(), slotFor(userKey.current, kind), v, text);
     };
-    libReq.current ??= fetchPayload<LibraryPayload>("/api/search/library", libraryOk, keep("library"));
-    histReq.current ??= fetchPayload<HistoryPayload>("/api/search/history", historyOk, keep("history"));
+    libReq.current ??= fetchPayload<LibraryPayload>(
+      "/api/search/library",
+      uidRef.current,
+      libraryOk,
+      keep("library"),
+    );
+    histReq.current ??= fetchPayload<HistoryPayload>(
+      "/api/search/history",
+      uidRef.current,
+      historyOk,
+      keep("history"),
+    );
     const [lib, hist] = [libReq.current, histReq.current];
     void Promise.all([lib, hist]).then(([l, h]) => {
       // A refresh that found new plays drops the history request to force a re-fetch; ignore a

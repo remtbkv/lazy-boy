@@ -312,29 +312,32 @@ describe("S6: browser storage names", () => {
     "src/app/(app)/error.tsx: sessionStorage.getItem(KEY)",
     "src/app/(app)/error.tsx: sessionStorage.setItem(KEY)",
   ]);
-  // PENDING: user data under a bare name. Each moves to userStorageName(uid, …) once the (app)
-  // layout renders the uid for the browser (a queued file); until then sign-out clears them by
-  // their bare names (user-storage.ts).
-  const PENDING = new Set([
-    "src/components/now-playing-context.tsx: localStorage.setItem(CACHE_KEY)",
-    "src/components/now-playing-context.tsx: localStorage.getItem(CACHE_KEY)",
-    "src/components/now-playing-context.tsx: BroadcastChannel(CHANNEL)",
-    "src/components/now-playing-context.tsx: navigator.locks.request(LEADER_LOCK)",
-    "src/lib/clean-progress.ts: localStorage.getItem(CLEAN_LS_KEY)",
-    "src/lib/clean-progress.ts: localStorage.setItem(CLEAN_LS_KEY)",
-    "src/lib/clean-progress.ts: localStorage.removeItem(CLEAN_LS_KEY)",
-    "src/app/(app)/home/den-home.tsx: sessionStorage.getItem(DAY_STORE)",
-    "src/app/(app)/home/den-home.tsx: sessionStorage.removeItem(DAY_STORE)",
-    "src/app/(app)/home/den-home.tsx: sessionStorage.setItem(DAY_STORE)",
-    "src/app/(app)/chrome.tsx: sessionStorage.getItem(RING_CACHE + image)",
-    "src/app/(app)/chrome.tsx: sessionStorage.setItem(RING_CACHE + image)",
-  ]);
+  // PENDING: user data under a bare name. None left: the (app) layout renders the uid and every
+  // user-data name is built from it. Lane 1905's IndexedDB store arrives at the stitch (lane
+  // 33); its database name must be built the same way, or this check names it.
+  const PENDING = new Set<string>([]);
+  // IndexedDB names, opened through indexedDB.open(name, …).
+  const IDB = /^(window\.)?indexedDB\.open$/;
 
   it("every storage name is built by userStorageName, device-level, or pending", () => {
-    const all = [...new Set(calls((c) => STORAGE.test(c)))];
+    const all = [...new Set(calls((c) => STORAGE.test(c) || IDB.test(c)))];
     const bad = all.filter((s) => !/\(userStorageName\(/.test(s) && !DEVICE.has(s) && !PENDING.has(s));
     expect(bad).toEqual([]);
     for (const p of PENDING) expect(all, `${p} is gone: drop it from PENDING`).toContain(p);
+  });
+
+  // The now-playing leader's Web Lock is requested inside leaderElection (now-playing-poll.ts),
+  // whose second argument is the lock's name.
+  it("every leaderElection lock name is built by userStorageName", () => {
+    const bad: string[] = [];
+    for (const { rel, sf } of FILES) {
+      visit(sf, (n) => {
+        if (!ts.isCallExpression(n) || n.expression.getText(sf) !== "leaderElection") return;
+        const name = n.arguments[1]?.getText(sf) ?? "";
+        if (!/^userStorageName\(/.test(name)) bad.push(`${rel}: leaderElection(…, ${name})`);
+      });
+    }
+    expect(bad).toEqual([]);
   });
 });
 

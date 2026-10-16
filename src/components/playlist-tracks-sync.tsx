@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { clearIfSignedOut } from "@/lib/user-storage";
 
 // Re-fetches a playlist's tracks into the cache, then refreshes the view. The detail
 // page renders this ONLY when the playlist's Spotify snapshot_id differs from the cached
@@ -29,7 +30,10 @@ export function PlaylistTracksSync({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ snapshot }),
     })
-      .then((r) => r.json())
+      .then((r) => {
+        clearIfSignedOut(r);
+        return r.json();
+      })
       .then((d) => {
         // Only refresh when the tracks actually changed — an unchanged snapshot returns
         // {ok:true, changed:false} and must not trigger a needless re-render.

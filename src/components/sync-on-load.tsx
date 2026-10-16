@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { clearIfSignedOut } from "@/lib/user-storage";
 
 // Keeps listen-history current automatically: pings POST /api/sync once when
 // the app loads, then every 2 minutes while the tab is visible, and again whenever the
@@ -15,7 +16,7 @@ export function SyncOnLoad() {
   useEffect(() => {
     const sync = () => {
       if (document.visibilityState === "visible") {
-        fetch("/api/sync", { method: "POST" }).catch(() => {});
+        fetch("/api/sync", { method: "POST" }).then(clearIfSignedOut, () => {});
       }
     };
     sync(); // immediate, so a fresh open catches up right away

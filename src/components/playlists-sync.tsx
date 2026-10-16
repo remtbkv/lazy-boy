@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import type { Task } from "@/lib/tasks/registry";
+import { clearIfSignedOut } from "@/lib/user-storage";
 
 // The 2-minute cron tick owns library freshness — it re-scans whenever the store is more than
 // 30 min old, without a session and whether or not the app is open. So this client kick is a
@@ -33,6 +34,7 @@ async function watchColdStart(taskId: string, refresh: () => void): Promise<void
   try {
     while (Date.now() < deadline) {
       const res = await fetch(`/api/tasks/${taskId}`).catch(() => null);
+      if (res) clearIfSignedOut(res);
       if (!res?.ok) {
         // The task registry is per-instance on serverless, so a poll routed to another
         // instance 404s even while the scan is running fine. Bailing on the first miss
@@ -87,6 +89,7 @@ export function PlaylistsSync({ syncedAt }: { syncedAt: string | null }) {
     lastAttempt = Date.now();
     fetch("/api/playlists/sync", { method: "POST" })
       .then(async (res) => {
+        clearIfSignedOut(res);
         if (!coldStart || !res.ok) return;
         const { taskId } = (await res.json()) as { taskId?: string };
         if (taskId) void watchColdStart(taskId, () => router.refresh());

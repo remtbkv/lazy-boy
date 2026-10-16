@@ -1,7 +1,8 @@
 import type { Viewport } from "next";
-import { redirect } from "next/navigation";
 import { headers } from "next/headers";
 import { auth } from "@/lib/auth";
+import { requirePageUser } from "@/lib/require-user";
+import { UserProvider } from "@/components/user-context";
 import { CleanProgressWatcher } from "@/components/clean-progress";
 import { SyncOnLoad } from "@/components/sync-on-load";
 import { TimezoneCookie } from "@/components/timezone-cookie";
@@ -45,32 +46,38 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const host = (await headers()).get("host") ?? "";
   if (host.startsWith("localhost")) return null;
 
+  // The same gate as every page (a layout is still not a gate: each page gates for itself,
+  // SECURITY.md). Its uid is rendered for the browser, which builds every per-user storage
+  // name from it (multi-user PLAN §6.2 layer 6).
+  const user = await requirePageUser();
+  // A second auth() reads no store: the gate's call filled this request's boxes. Name and
+  // picture only.
   const session = await auth();
-  if (!session || session.error) redirect("/login");
-
-  const name = session.user?.name ?? "You";
+  const name = session?.user?.name ?? "You";
   // The opaque key Home's IndexedDB copy of the search payloads is keyed and stamped by
   // (search-cache.ts, STORE_MIGRATION §10). One user today, so a constant: no user id reaches
   // the browser, and the email, the random `sub` and `me_id` are each wrong for it. Multi-user
   // Phase 1's uid replaces it; a different key clears the browser's copy.
   const userKey = "solo";
-  const image = session.user?.image ?? null;
+  const image = session?.user?.image ?? null;
 
   return (
     <div id="den-root" data-user-key={userKey} className="flex min-h-dvh flex-col">
-      <NowPlayingProvider>
-        <DenChrome name={name} image={image} />
-        {/* BEFORE {children}, deliberately: effects flush in tree order, so the collector's
-            setPage must run before the arriving page's own performance.mark effects — after
-            them, every soft-nav mark was measured against the OLD view's origin, clamped to
-            an exact 0, and pooled into the percentiles (audit 2026-08-19, T2.16). */}
-        <MetricsCollector />
-        {children}
-        <CleanProgressWatcher />
-        <SyncOnLoad />
-        <TimezoneCookie />
-        <ScrollbarHover />
-      </NowPlayingProvider>
+      <UserProvider uid={user.uid}>
+        <NowPlayingProvider>
+          <DenChrome name={name} image={image} />
+          {/* BEFORE {children}, deliberately: effects flush in tree order, so the collector's
+              setPage must run before the arriving page's own performance.mark effects — after
+              them, every soft-nav mark was measured against the OLD view's origin, clamped to
+              an exact 0, and pooled into the percentiles (audit 2026-08-19, T2.16). */}
+          <MetricsCollector />
+          {children}
+          <CleanProgressWatcher />
+          <SyncOnLoad />
+          <TimezoneCookie />
+          <ScrollbarHover />
+        </NowPlayingProvider>
+      </UserProvider>
     </div>
   );
 }
