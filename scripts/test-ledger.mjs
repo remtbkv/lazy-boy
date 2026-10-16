@@ -242,6 +242,12 @@ try {
     true,
   );
   check("nothing purged costs nothing", orphanPurgePassRows(0, 21_950), 0);
+  check(
+    "priced at the user's own store: 1 of 2 playlists at 6 plays (db.ts storePlaylists passes both)",
+    orphanPurgePassRows(1, 6, 2),
+    30,
+  );
+  check("a purge of every playlist models the full pass", orphanPurgePassRows(5, 21_950, 5), orphanFullPassRows(21_950));
   check("the purge pass has its own /usage line", LEDGER_READERS.includes("orphan_purge_pass"), true);
 } finally {
   client.close();

@@ -2353,7 +2353,11 @@ async function storePlaylists(u: UserDb, rows: StoredPlaylist[], meId: string | 
   // client reports 0 for any statement that returns rows (@libsql/client sqlite3.js).
   const purgedIds = [...new Set(results[purgeAt].rows.map((r) => String(r.playlist_id)))];
   if (purgedIds.length > 0) {
-    ledgerAddLinear(u, "orphan_purge_pass", (plays) => orphanPurgePassRows(purgedIds.length, plays));
+    // Priced at this user's store: their plays (ledgerAddLinear) over their playlists before the
+    // rewrite, never fewer than it purged, so the model stays at or under the full pass. The
+    // calibration's playlist count is one store's (Rem's), not every user's.
+    const playlists = Math.max(cached.length, purgedIds.length);
+    ledgerAddLinear(u, "orphan_purge_pass", (plays) => orphanPurgePassRows(purgedIds.length, plays, playlists));
     await recomputeOrphanFlags(u, { playlistIds: purgedIds });
   }
   // The write moved the marker; drop this request's copy so the read that follows re-keys.
