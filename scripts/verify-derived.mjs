@@ -59,10 +59,11 @@ const ORPHAN_PREDICATE = `
             AND EXISTS (SELECT 1 FROM playlist_tracks pl
                         WHERE pl.playlist_id = replace(p.context_uri, 'spotify:playlist:', ''))
             AND NOT EXISTS (
-              SELECT 1 FROM playlist_tracks plm JOIN tracks tm ON tm.id = plm.track_id
-              WHERE plm.playlist_id = replace(p.context_uri, 'spotify:playlist:', '')
-                AND lower(tm.artist) = (SELECT lower(artist) FROM tracks WHERE id = p.track_id)
-                AND lower(tm.name) = (SELECT lower(name) FROM tracks WHERE id = p.track_id))
+              SELECT 1 FROM tracks me CROSS JOIN tracks tm CROSS JOIN playlist_tracks plm
+              WHERE me.id = p.track_id
+                AND lower(tm.artist) = lower(me.artist) AND lower(tm.name) = lower(me.name)
+                AND plm.track_id = tm.id
+                AND plm.playlist_id = replace(p.context_uri, 'spotify:playlist:', ''))
        THEN 1 ELSE 0 END`;
 
 

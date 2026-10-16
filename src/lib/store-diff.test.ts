@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   tracksNeedingWrite,
+  identityChanges,
   newPlays,
   diffPositions,
   diffKeyed,
@@ -111,4 +112,26 @@ test("diffKeyed: identical → nothing; changed/added upserted; removed deleted"
     // b removed
   ];
   assert.deepEqual(diffKeyed(inc, cached), { upserts: inc, deletes: ["b"] });
+});
+
+test("identityChanges: a cached row whose name or artist moved yields its old and new identity", () => {
+  const cached = new Map([
+    ["a", track("a")],
+    ["b", track("b")],
+    ["c", track("c")],
+  ]);
+  const inc = [
+    track("a", { album: "other", albumImage: "other", durationMs: 2 }), // no identity change
+    track("b", { name: "renamed" }),
+    track("c", { artist: "ARTIST-C" }), // case-only: still listed (exact compare, a superset)
+    track("b", { name: "renamed" }), // repeat id
+    track("d"), // not cached: a new row has no prior plays or memberships to re-rule
+  ];
+  assert.deepEqual(identityChanges(inc, cached), [
+    { name: "name-b", artist: "artist-b" },
+    { name: "renamed", artist: "artist-b" },
+    { name: "name-c", artist: "artist-c" },
+    { name: "name-c", artist: "ARTIST-C" },
+  ]);
+  assert.deepEqual(identityChanges([track("a")], cached), []);
 });

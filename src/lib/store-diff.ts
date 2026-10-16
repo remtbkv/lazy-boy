@@ -43,6 +43,32 @@ export function tracksNeedingWrite(
   return out;
 }
 
+/** The song identities a track write moves: for each CACHED row whose name or artist differs
+ *  from the incoming one, its old (name, artist) and its new one. The orphan verdict matches a
+ *  play's song to a playlist's members by identity (`lower(artist), lower(name)`), so a renamed
+ *  row can flip plays from any playlist that shares either identity, and those are the plays
+ *  db.ts re-rules. Exact comparison, so a case-only change is listed too (a superset; SQLite's
+ *  lower() folds only ASCII, so JS case-folding would not be the same rule). A row with no
+ *  cached version is not listed: tracks rows are never deleted and every play and membership
+ *  is written in the same batch as its track's row, so a new row has nothing stored to
+ *  re-rule beyond what that batch's own pass covers. Dedupes by id, like tracksNeedingWrite. */
+export function identityChanges(
+  incoming: TrackFields[],
+  cached: Map<string, TrackFields>,
+): { name: string; artist: string }[] {
+  const out: { name: string; artist: string }[] = [];
+  const seen = new Set<string>();
+  for (const t of incoming) {
+    if (seen.has(t.id)) continue;
+    seen.add(t.id);
+    const c = cached.get(t.id);
+    if (c && (c.name !== t.name || c.artist !== t.artist)) {
+      out.push({ name: c.name, artist: c.artist }, { name: t.name, artist: t.artist });
+    }
+  }
+  return out;
+}
+
 /** Key for the plays-dedup set: one play = (track, timestamp). */
 export function playKey(p: { trackId: string; playedAt: string }): string {
   return `${p.trackId}\n${p.playedAt}`;
@@ -106,8 +132,8 @@ export type PlaylistListDiff = {
   /** Rows whose image moved, in incoming order. Meaningful for both `image-only` (it is the
    *  whole write) and `rewrite` (the reinsert carries them anyway). */
   imageChanges: { id: string; image: string | null }[];
-  /** Do the cached and incoming ID SETS differ? This — not "did anything change" — is what
-   *  says playlist MEMBERSHIP could have moved, and it gates the full orphan pass. */
+  /** Do the cached and incoming ID SETS differ? Logged on storePlaylists' diff line. It does
+   *  not decide the orphan pass: the ids the rewrite's purge deleted rows of do (L10). */
   idSetChanged: boolean;
   firstDiff: PlaylistFieldDiff | null;
 };
@@ -185,22 +211,6 @@ export function diffPlaylistList(
     idSetChanged: !sameIdSet(incoming, cached),
     firstDiff,
   };
-}
-
-/** Does a playlist-list rewrite have to be followed by the UNSCOPED `recomputeOrphanFlags()`?
- *
- *  The full pass is the expensive half of that path, and it exists for one reason: the purge
- *  that follows the reinsert (`DELETE FROM playlist_tracks WHERE playlist_id NOT IN …`) can
- *  drop cached memberships, which flips the orphan verdict of plays that came from those
- *  playlists. Nothing else in a rewrite touches membership — a rename, a reorder or a drifting
- *  track_count rewrites the LIST only, and per-playlist membership edits are already covered by
- *  storePlaylistTracks' scoped `{playlistId}` pass.
- *
- *  So both conditions, not one: `purgedRows > 0` is the direct evidence memberships were
- *  dropped, and `idSetChanged` covers the case where the set moved without the purge biting
- *  (a playlist removed whose tracks were never cached, or one added). */
-export function needsFullOrphanPass(idSetChanged: boolean, purgedRows: number): boolean {
-  return idSetChanged || purgedRows > 0;
 }
 
 export type KeyedRow = { trackId: string; addedAt: string | null; position: number };

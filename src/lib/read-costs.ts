@@ -138,32 +138,36 @@ export function uniqueSongCountRows(members: number = CALIBRATION.libraryMembers
 
 // ── The library-sync write path ─────────────────────────────────────────────────────────
 
-/** How many rows the unscoped orphan pass bills per playlist member it walks: 2 for the walk
- *  itself (the `playlist_tracks` entry and its `tracks` probe) times the ~2× index-entry
- *  factor this file's calibration unknown documents. Back-checked against the measurement
- *  below rather than derived from the query plan alone. */
-const ORPHAN_ROWS_PER_MEMBER = 4;
+/** Rows one orphan verdict reads with the identity-first predicate (db.ts ORPHAN_PREDICATE,
+ *  lane 1910b). Its plan, from EXPLAIN QUERY PLAN: the play (index entry + row, 2), the
+ *  cached-playlist EXISTS (one covering-index entry, 1), the play's own `tracks` row
+ *  (autoindex entry + row, 2), then for each of the k rows sharing its identity and their m
+ *  memberships an index entry and a row (2k + 2m). PLAN §8.2 measured k + m at 2.7 a play on
+ *  average (max 7), so 5 + 5.4 ≈ 10. AN ESTIMATE FROM THE PLAN, not a measurement: one pass
+ *  read off a store's counter is what would replace it. The member walk this replaced cost
+ *  ~2 × the playlist's size per play (379.9 rows a play on the Oct 14 backup copy). */
+const ORPHAN_ROWS_PER_PLAY = 10;
 
-/** `recomputeOrphanFlags({})` — the UNSCOPED full pass, and the single largest figure in this
- *  file. For every play whose context is a cached playlist, ORPHAN_PREDICATE walks that
- *  playlist's whole membership (a `playlist_tracks` entry per member, each with a `tracks`
- *  probe), so the cost multiplies TWO table sizes: plays × the average playlist size
- *  (members / playlists). Nothing else here does that, which is why this one term dwarfs the
- *  rest and why the fix was to stop calling it hourly rather than to make it cheaper.
- *
- *  CALIBRATED AGAINST A MEASUREMENT, not a plan reading: Turso's windowed usage endpoint puts
- *  the hourly library sync's rewrite path at **2,544,558 rows_read in a single 5-minute
- *  bucket** (Aug 7 2026, 12:15–12:20 PM ET), reproduced at 2,547,293 (Aug 7 8:10 PM) and
- *  2,631,014 (Aug 5 3:10 PM, before any August fix shipped) — docs/quota-forensic/PREREG.md,
- *  "The burst decomposition". At the calibration store this models 2.45M against that 2.54M,
- *  ~4% low, the gap being that the store grew between the Aug 6 calibration reading and the
- *  Aug 7 measurement. */
-export function orphanFullPassRows(
+/** `recomputeOrphanFlags({})` — the UNSCOPED pass. No write path runs it since L10 (it is the
+ *  one-time backfill and a manual repair); ledgered as `orphan_full_pass` if it ever does.
+ *  Linear in plays now: the identity-first predicate no longer walks each play's playlist, so
+ *  the old plays × (members / playlists) term is gone. ~0.22M at 21,950 plays, against the
+ *  5,102,733 the member-walk pass read at that size (STORE_MIGRATION §3, measured Oct 13). */
+export function orphanFullPassRows(plays: number = CALIBRATION.plays): number {
+  return ORPHAN_ROWS_PER_PLAY * plays;
+}
+
+/** The pass a library-list rewrite runs after its purge, scoped to the playlists the purge
+ *  deleted rows of (`recomputeOrphanFlags({ playlistIds })`, served by idx_plays_context).
+ *  Its true size is the plays from those playlists, which the caller does not read; this
+ *  models it as the average plays per playlist. Ledgered as `orphan_purge_pass`. One purged
+ *  playlist at 21,950 plays and 115 playlists: ~1.9K rows. Zero purged runs no pass. */
+export function orphanPurgePassRows(
+  purgedPlaylists: number,
   plays: number = CALIBRATION.plays,
-  members: number = CALIBRATION.libraryMembers,
   playlists: number = CALIBRATION.playlists,
 ): number {
-  return ORPHAN_ROWS_PER_MEMBER * plays * (members / playlists);
+  return ORPHAN_ROWS_PER_PLAY * purgedPlaylists * (plays / playlists);
 }
 
 /** `storePlaylists`' rewrite branch, READ side: the change-probe's ordered scan of `playlists`
@@ -255,6 +259,7 @@ export const LEDGER_READERS = [
   "library_payload",
   "unique_song_count",
   "orphan_full_pass",
+  "orphan_purge_pass",
   "playlist_rewrite",
   "day_strip",
   "day_plays",

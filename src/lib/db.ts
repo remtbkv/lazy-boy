@@ -37,6 +37,7 @@ import {
   landedSyncTickRows,
   libraryPayloadRebuildRows,
   orphanFullPassRows,
+  orphanPurgePassRows,
   playlistRewriteRows,
   searchHistoryLikeRows,
   uniqueSongCountRows,
@@ -48,7 +49,7 @@ import {
   diffPositions,
   diffKeyed,
   diffPlaylistList,
-  needsFullOrphanPass,
+  identityChanges,
   type PlaylistListRow,
   type TrackFields,
 } from "@/lib/store-diff";
@@ -553,6 +554,7 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
   const newestExisting = existingRows.reduce((m, r) => (r.playedAt > m ? r.playedAt : m), "");
 
   const stmts: InStatement[] = tracksNeedingWrite(tracks, cached).map(trackUpsertStmt);
+  const renamed = identityChanges(tracks, cached);
   const insertResultIdx: number[] = [];
   const inserted: string[] = [];
   for (const r of newPlays(plays, existing)) {
@@ -584,6 +586,8 @@ export async function recordPlays(plays: PlayRecord[]): Promise<number> {
     args: { v: new Date().toISOString() },
   });
   const results = await client.batch(stmts, "write");
+  // A renamed song can move the verdict of older plays, from any playlist.
+  if (renamed.length > 0) await recomputeOrphanFlags({ identities: renamed });
   // A no-change tick (the steady-state cron every couple of minutes) wrote only last_sync —
   // nothing a cached read serves — so skip the orphan recompute (~0.2s UPDATE over zero rows)
   // it would otherwise pay each tick.
@@ -752,52 +756,100 @@ function sourceExpr(p: string, c: string): string {
 }
 
 // The membership verdict, as SQL over the play row `p`. This is the ONLY place the rule
-// lives; sourceExpr reads what this writes. Kept identical to the expression it replaced so
-// the stored flag and a live evaluation can be diffed against each other.
-const ORPHAN_PREDICATE = `
+// lives; sourceExpr reads what this writes (scripts/verify-derived.mjs keeps a literal copy).
+//
+// The member search starts from the SONG (multi-user PLAN §8.2): the play's own `tracks` row
+// `me`, the rows sharing its identity `tm` through idx_tracks_artist_name, then their
+// memberships `plm` through idx_pltracks_track, filtered to the playlist. `CROSS JOIN` pins
+// that loop order: left to itself SQLite walks the playlist's members and probes `tracks` for
+// each, which costs ~2 × the playlist's size per play judged (379.9 rows a play on the Oct 14
+// backup) against ~2.6 for this order. Same verdict as that member walk on every play
+// (STORE_MIGRATION §3; tests/orphan-scope.test.ts pins it case by case).
+export const ORPHAN_PREDICATE = `
   CASE WHEN p.context_type = 'playlist' AND p.context_uri IS NOT NULL
             AND EXISTS (SELECT 1 FROM playlist_tracks pl
                         WHERE pl.playlist_id = replace(p.context_uri, 'spotify:playlist:', ''))
             AND NOT EXISTS (
-              SELECT 1 FROM playlist_tracks plm JOIN tracks tm ON tm.id = plm.track_id
-              WHERE plm.playlist_id = replace(p.context_uri, 'spotify:playlist:', '')
-                AND lower(tm.artist) = (SELECT lower(artist) FROM tracks WHERE id = p.track_id)
-                AND lower(tm.name) = (SELECT lower(name) FROM tracks WHERE id = p.track_id))
+              SELECT 1 FROM tracks me CROSS JOIN tracks tm CROSS JOIN playlist_tracks plm
+              WHERE me.id = p.track_id
+                AND lower(tm.artist) = lower(me.artist) AND lower(tm.name) = lower(me.name)
+                AND plm.track_id = tm.id
+                AND plm.playlist_id = replace(p.context_uri, 'spotify:playlist:', ''))
        THEN 1 ELSE 0 END`;
+
+/** Ids per scoped orphan statement: bounds the bound-argument count of one UPDATE. */
+const ORPHAN_SCOPE_CHUNK = 100;
 
 /** Refresh the stored `ctx_orphan` verdict, and return how many rows changed.
  *
- *  Three scopes, matching the three ways the verdict can go stale — each does the least work
- *  that is still correct:
- *    `{ newOnly }`    plays we just recorded have no verdict yet; nobody else's changed.
- *    `{ playlistId }` that playlist's membership changed (tracks added/removed, cache
- *                     populated, playlist deleted), so only plays FROM it can flip.
- *    `{}`             full pass — the one-time backfill, and after a change that can touch
- *                     many playlists at once (the library list being rewritten).
+ *  A verdict reads two things: the play's playlist's memberships, and the identity (name,
+ *  artist) of the play's song and of those members. So it goes stale only when one of them is
+ *  written, and each scope covers one kind of write:
+ *    `{ newOnly }`     plays we just recorded have no verdict yet; nobody else's changed.
+ *    `{ playlistIds }` those playlists' memberships changed (tracks stored or removed, a
+ *                      playlist deleted, the library rewrite's purge), so only plays FROM them
+ *                      can flip. Served by idx_plays_context.
+ *    `{ identities }`  `tracks` rows were renamed (store-diff.ts identityChanges: each one's
+ *                      old and new name/artist), so only plays whose song has one of those
+ *                      identities can flip, from whichever playlist. Served by
+ *                      idx_tracks_artist_name and idx_plays_track.
+ *    `{}`              full pass: the one-time backfill and a manual repair. No write path
+ *                      calls it (L10, STORE_MIGRATION §3).
+ *  An EMPTY id or identity list means nothing changed and runs nothing; it never widens to
+ *  the full pass.
  *
  *  Only rows whose verdict actually flips are written, so a steady-state sync that re-stores
  *  an unchanged playlist writes zero rows — a no-op UPDATE is still a written row (which Turso
- *  billed). Measured on the live DB: 0 rows and ~0.2-0.4s for the two scoped modes. */
+ *  billed). Measured on the live DB: 0 rows and ~0.2-0.4s for the scoped modes. */
 async function recomputeOrphanFlags(
-  opts: { playlistId?: string; newOnly?: boolean } = {},
+  opts: {
+    playlistIds?: string[];
+    identities?: { name: string; artist: string }[];
+    newOnly?: boolean;
+  } = {},
 ): Promise<number> {
+  if (opts.playlistIds?.length === 0 || opts.identities?.length === 0) return 0;
   const client = await getClient();
+  const stale = `(p.ctx_orphan IS NULL OR p.ctx_orphan <> (${ORPHAN_PREDICATE}))`;
+  // One statement per chunk of the scope; the unscoped and newOnly forms are one statement.
   // newOnly deliberately does NOT evaluate the predicate in the WHERE clause: the point is to
   // avoid running it over every historical play just to learn nothing changed.
-  const where = opts.newOnly
-    ? "p.ctx_orphan IS NULL"
-    : `(p.ctx_orphan IS NULL OR p.ctx_orphan <> (${ORPHAN_PREDICATE}))${
-        opts.playlistId ? " AND p.context_uri = :uri" : ""
-      }`;
-  // Only the UNSCOPED pass is ledgered. The other two scopes are bounded by construction (a
-  // ≤50-row partial index, one playlist's plays) and would be noise; this one is the ~2.5M
-  // term that went unattributed for a month.
-  if (!opts.newOnly && !opts.playlistId) ledgerAddLinear("orphan_full_pass", orphanFullPassRows);
-  const res = await client.execute({
-    sql: `UPDATE plays AS p SET ctx_orphan = (${ORPHAN_PREDICATE}) WHERE ${where}`,
-    args: opts.playlistId && !opts.newOnly ? { uri: `spotify:playlist:${opts.playlistId}` } : {},
-  });
-  const changed = Number(res.rowsAffected);
+  const scoped: { where: string; args: string[] }[] = [];
+  if (opts.newOnly) {
+    scoped.push({ where: "p.ctx_orphan IS NULL", args: [] });
+  } else if (opts.playlistIds) {
+    for (let i = 0; i < opts.playlistIds.length; i += ORPHAN_SCOPE_CHUNK) {
+      const ids = opts.playlistIds.slice(i, i + ORPHAN_SCOPE_CHUNK);
+      scoped.push({
+        where: `${stale} AND p.context_uri IN (${ids.map(() => "?").join(", ")})`,
+        args: ids.map((id) => `spotify:playlist:${id}`),
+      });
+    }
+  } else if (opts.identities) {
+    for (let i = 0; i < opts.identities.length; i += ORPHAN_SCOPE_CHUNK) {
+      const ids = opts.identities.slice(i, i + ORPHAN_SCOPE_CHUNK);
+      scoped.push({
+        where: `${stale} AND p.track_id IN (SELECT x.id FROM tracks x WHERE ${ids
+          .map(() => "(lower(x.artist) = lower(?) AND lower(x.name) = lower(?))")
+          .join(" OR ")})`,
+        args: ids.flatMap((t) => [t.artist, t.name]),
+      });
+    }
+  } else {
+    // Only the UNSCOPED pass is ledgered here; the rewrite's purge pass is ledgered by its
+    // caller, and the rest are bounded by construction (a ≤50-row partial index, one
+    // playlist's plays, one renamed song's plays) and would be noise.
+    ledgerAddLinear("orphan_full_pass", orphanFullPassRows);
+    scoped.push({ where: stale, args: [] });
+  }
+  let changed = 0;
+  for (const { where, args } of scoped) {
+    const res = await client.execute({
+      sql: `UPDATE plays AS p SET ctx_orphan = (${ORPHAN_PREDICATE}) WHERE ${where}`,
+      args,
+    });
+    changed += Number(res.rowsAffected);
+  }
   // `plays` is served by cached reads and this ran AFTER its caller's batch already bumped,
   // so the flags need their own announcement or an entry cached in between holds rows whose
   // verdict is stale. Only when rows actually flipped: the common case is 0, and a bump there
@@ -1918,11 +1970,15 @@ export async function storePlaylists(rows: StoredPlaylist[], meId: string | null
   );
   // Drop cached tracks for playlists that no longer exist (deleted/unfollowed), so a
   // stale playlist can't keep feeding the library union. Runs after the re-insert
-  // above, so the subquery sees the fresh list. Its index in the batch is kept because its
-  // rowsAffected is what decides the orphan pass below.
+  // above, so the subquery sees the fresh list. Its index in the batch is kept because the
+  // playlist ids it RETURNs are the orphan pass's scope below. It also drops rows of a
+  // playlist that was in neither the cached nor the new list (cached by URL, Resume's cold
+  // fetch, a store racing the rewrite that removed it), which is why the scope is what it
+  // deleted and not the list diff (lane 1910's counterexample).
   const purgeAt = stmts.length;
   stmts.push({
-    sql: "DELETE FROM playlist_tracks WHERE playlist_id NOT IN (SELECT id FROM playlists)",
+    sql: `DELETE FROM playlist_tracks WHERE playlist_id NOT IN (SELECT id FROM playlists)
+          RETURNING playlist_id`,
     args: [],
   });
   // And their snapshot/staleness markers — a leftover plsnap could make a playlist that
@@ -1945,12 +2001,17 @@ export async function storePlaylists(rows: StoredPlaylist[], meId: string | null
   // ~640 rows_written and ~31K rows_read per rewrite; the ledger accounts reads, so that is
   // what the modeled figure carries (read-costs.ts states the write half).
   void ledgerAdd("playlist_rewrite", playlistRewriteRows());
-  // The full orphan pass costs ~2.5M billed reads at the current store, ~80× the rest of this
-  // branch put together, so it runs only when the purge above could actually have moved a
-  // membership. needsFullOrphanPass owns that rule and states why; a rename or a reorder
-  // rewrites the list and skips it.
-  const purged = Number(results[purgeAt]?.rowsAffected ?? 0);
-  if (needsFullOrphanPass(diff.idSetChanged, purged)) await recomputeOrphanFlags();
+  // The verdict reads memberships and never `playlists`, and the purge is the only membership
+  // write in this branch, so the plays that can flip are exactly those from a playlist it
+  // deleted rows of. Nothing purged (a rename, a reorder, an added playlist, a removed one that
+  // was never cached) → no pass. This replaced an unscoped pass that read 5,102,733 rows at
+  // 21,950 plays (STORE_MIGRATION §3). Count the RETURNING rows, never rowsAffected: the file
+  // client reports 0 for any statement that returns rows (@libsql/client sqlite3.js).
+  const purgedIds = [...new Set(results[purgeAt].rows.map((r) => String(r.playlist_id)))];
+  if (purgedIds.length > 0) {
+    ledgerAddLinear("orphan_purge_pass", (plays) => orphanPurgePassRows(purgedIds.length, plays));
+    await recomputeOrphanFlags({ playlistIds: purgedIds });
+  }
   // The write moved the marker; drop this request's copy so the read that follows re-keys.
   dropWriteSeqCache();
 }
@@ -2125,6 +2186,7 @@ export async function storePlaylistTracks(
   const cachedTracks = await readCachedTracks(client, [...new Set(incoming.map((t) => t.id))]);
 
   const stmts: InStatement[] = tracksNeedingWrite(incoming, cachedTracks).map(trackUpsertStmt);
+  const renamed = identityChanges(incoming, cachedTracks);
   const { changed, deleteFrom } = diffPositions(
     tracks.map((t) => ({ trackId: t.id, addedAt: t.addedAt ?? null })),
     cachedPos,
@@ -2161,8 +2223,10 @@ export async function storePlaylistTracks(
     });
   }
   await client.batch(stmts, "write");
-  // Membership for THIS playlist changed, so plays from it may flip orphan either way.
-  await recomputeOrphanFlags({ playlistId });
+  // Membership for THIS playlist changed, so plays from it may flip orphan either way; a
+  // renamed song can flip plays from any playlist.
+  await recomputeOrphanFlags({ playlistIds: [playlistId] });
+  if (renamed.length > 0) await recomputeOrphanFlags({ identities: renamed });
   // The write moved the marker; drop this request's copy so the read that follows re-keys.
   dropWriteSeqCache();
 }
@@ -2235,6 +2299,9 @@ export async function removeCachedPlaylistTrack(
     ],
     "write",
   );
+  // The removed song's plays from this playlist lose their match (or, with the cache now
+  // empty, the playlist becomes unverifiable): re-rule them now rather than at the next store.
+  await recomputeOrphanFlags({ playlistIds: [playlistId] });
   // The write moved the marker; drop this request's copy so the read that follows re-keys.
   dropWriteSeqCache();
 }
@@ -2255,7 +2322,7 @@ export async function deletePlaylistFromDb(playlistId: string): Promise<void> {
   );
   // Its cached tracks are gone, so plays from it are no longer verifiable and stop being
   // blanked — the same fallback an unsynced playlist gets.
-  await recomputeOrphanFlags({ playlistId });
+  await recomputeOrphanFlags({ playlistIds: [playlistId] });
   // The write moved the marker; drop this request's copy so the read that follows re-keys.
   dropWriteSeqCache();
 }
@@ -2287,6 +2354,7 @@ export async function storeSavedTracks(tracks: Track[]): Promise<void> {
   const cachedTracks = await readCachedTracks(client, [...new Set(incoming.map((t) => t.id))]);
 
   const stmts: InStatement[] = tracksNeedingWrite(incoming, cachedTracks).map(trackUpsertStmt);
+  const renamed = identityChanges(incoming, cachedTracks);
   const { upserts, deletes } = diffKeyed(
     tracks.map((t, i) => ({ trackId: t.id, addedAt: t.addedAt ?? null, position: i })),
     cachedSaved,
@@ -2313,6 +2381,8 @@ export async function storeSavedTracks(tracks: Track[]): Promise<void> {
   stmts.push(metaStmt("liked_top_added_at", tracks[0]?.addedAt ?? ""));
   stmts.push(metaStmt("saved_synced_at", new Date().toISOString()));
   await client.batch(stmts, "write");
+  // saved_tracks is not read by the orphan verdict, but a renamed song is.
+  if (renamed.length > 0) await recomputeOrphanFlags({ identities: renamed });
   // The write moved the marker; drop this request's copy so the read that follows re-keys.
   dropWriteSeqCache();
 }
