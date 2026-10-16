@@ -9,16 +9,16 @@ import { getAppMeta } from "@/lib/app-db";
 import { freshAppDb, seedUser } from "./harness";
 
 vi.mock("next/cache", async () => await import("../stubs/next-cache-faithful"));
-vi.mock("@/lib/db", async (orig) => {
-  const real = await orig<typeof import("@/lib/db")>();
-  return {
-    ...real,
-    forUser: (uid: Parameters<typeof real.forUser>[0]) => ({
-      ...real.forUser(uid),
-      getCaptureHealth: async () => ({ ok: true, staleForMs: 60_000, reason: null }),
-    }),
-  };
-});
+// The owner's capture is healthy (Phase 3 reads it from sync_state, capture-read.ts), the budget
+// normal and the meter fresh (lib/budget/), so the health check's only red is the probe's.
+vi.mock("@/lib/capture-read", () => ({
+  readCapture: async () => ({ health: { ok: true, staleForMs: 60_000, reason: null }, rpCooldownUntil: 0 }),
+}));
+vi.mock("@/lib/db", async (orig) => ({
+  ...(await orig<typeof import("@/lib/db")>()),
+  getBudgetMode: async () => "normal",
+  readMeter: async () => ({ cpuUs: 0, invocations: 1, bytes: 0, lastAt: Date.now() }),
+}));
 const { __cache } = await import("../stubs/next-cache-faithful");
 
 const REM = "aaaaaaaaaaaa";
@@ -42,6 +42,8 @@ beforeEach(async () => {
   __cache.clear();
   vi.stubEnv("CRON_SECRET", "zen-secret");
   vi.stubEnv("CRON_SECRET_EXT", "ext-secret");
+  // The admin the health check reads is OWNER_UID's users row (adminStore, multi-user Phase 2).
+  vi.stubEnv("OWNER_UID", REM);
   vi.spyOn(console, "error").mockImplementation(() => {});
   await seedUser(db.raw(), { uid: REM, status: "active", admin: true });
   await q("INSERT INTO app_meta (key, value) VALUES ('daily_at', :t)", { t: String(Date.now()) });

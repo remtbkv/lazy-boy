@@ -23,6 +23,10 @@ beforeEach(async () => {
   await seedRem();
   const c = app();
   await c.execute("DELETE FROM requests");
+  // seedRem leaves friend A connected (the authz harness's friends, lane 15); here A has not
+  // claimed yet, so their rows go and Rem's approval re-creates A as an invite.
+  await c.execute({ sql: "DELETE FROM user_tokens WHERE uid = ?", args: [A] });
+  await c.execute({ sql: "DELETE FROM users WHERE uid = ?", args: [A] });
   c.close();
   await become("anon");
 });

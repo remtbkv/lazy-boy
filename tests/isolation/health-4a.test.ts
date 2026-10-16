@@ -7,24 +7,21 @@ import { getAppMeta } from "@/lib/app-db";
 import { healthVerdict } from "@/lib/health";
 import { freshAppDb, seedUser } from "./harness";
 
-vi.mock("@/lib/db", async (orig) => {
-  const real = await orig<typeof import("@/lib/db")>();
-  return {
-    ...real,
-    // The owner's capture is healthy here, so every red below is the app database's.
-    forUser: (uid: Parameters<typeof real.forUser>[0]) => ({
-      ...real.forUser(uid),
-      getCaptureHealth: async () => ({ ok: true, staleForMs: 60_000, reason: null }),
-    }),
-    // Telemetry is down for every test in this file.
-    recordClientMetrics: async () => {
-      throw new Error("telemetry down");
-    },
-    isolationEventsAfter: async () => {
-      throw new Error("telemetry down");
-    },
-  };
-});
+vi.mock("@/lib/db", async (orig) => ({
+  ...(await orig<typeof import("@/lib/db")>()),
+  // Telemetry is down for every test in this file.
+  recordClientMetrics: async () => {
+    throw new Error("telemetry down");
+  },
+  // The budget is normal and the meter wrote a moment ago (the meter's inputs, lib/budget/), so
+  // every red below is the app database's.
+  getBudgetMode: async () => "normal",
+  readMeter: async () => ({ cpuUs: 0, invocations: 1, bytes: 0, lastAt: Date.now() }),
+}));
+// The owner's capture is healthy here (Phase 3 reads it from sync_state, capture-read.ts).
+vi.mock("@/lib/capture-read", () => ({
+  readCapture: async () => ({ health: { ok: true, staleForMs: 60_000, reason: null }, rpCooldownUntil: 0 }),
+}));
 
 const HOUR = 3_600_000;
 let db: ReturnType<typeof freshAppDb>;
@@ -39,6 +36,8 @@ beforeEach(async () => {
   db = freshAppDb();
   await getAppMeta("schema_version");
   vi.stubEnv("CRON_SECRET", "zen-secret");
+  // The admin the health check reads is OWNER_UID's users row (adminStore, multi-user Phase 2).
+  vi.stubEnv("OWNER_UID", "aaaaaaaaaaaa");
   vi.spyOn(console, "error").mockImplementation(() => {});
   await seedUser(db.raw(), { uid: "aaaaaaaaaaaa", status: "active", admin: true });
   await q("INSERT INTO app_meta (key, value) VALUES ('daily_at', :t)", { t: String(Date.now()) });
@@ -108,7 +107,14 @@ describe("Phase 4a's conditions", () => {
   });
 
   it("the verdict's known answers", () => {
-    const base = { isolationEvents: 0, ownerCapture: { ok: true, staleForMs: 0, reason: null }, dailyAgeMs: 0, quotaAhead: false } as const;
+    const base = {
+      isolationEvents: 0,
+      ownerCapture: { ok: true, staleForMs: 0, reason: null },
+      dailyAgeMs: 0,
+      quotaAhead: false,
+      budgetMode: "normal",
+      meterAgeMs: 0,
+    } as const;
     const app = { events: {}, stuckDeletions: 0, reconnect: 0, backoff: 0, removed: 0 };
     expect(healthVerdict({ ...base, app })).toEqual({ ok: true, reasons: [], unchecked: [] });
     expect(healthVerdict({ ...base, app: { ...app, events: { drift: 1 } } }).reasons).toEqual(["event"]);
