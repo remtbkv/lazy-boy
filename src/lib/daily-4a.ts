@@ -15,7 +15,7 @@
 import "server-only";
 import { dailyCandidates, dailySweeps, moveStatus } from "@/lib/app-db";
 import { ensureCronJobsEnabled } from "@/lib/cronjob-jobs";
-import { DELETED_ROW_TTL_MS, type DeletionOutcome } from "@/lib/deletion";
+import { DELETED_ROW_TTL_MS, LEASE_WINDOW_MS, type DeletionOutcome } from "@/lib/deletion";
 import { deleteAccount, withdrawExpiredInvite } from "@/lib/deletion-runtime";
 import { GRANT_WIDE_HOLD_MS, GRANT_WINDOW_MS, REVOKED_DELETE_AFTER_MS } from "@/lib/grant-policy";
 
@@ -26,6 +26,8 @@ export type DailyDeps = {
   deleteAccount: (uid: string) => Promise<DeletionOutcome>;
   withdrawInvite: (uid: string) => Promise<DeletionOutcome>;
   reenableJobs: () => Promise<unknown>;
+  /** Waits out the lease window before a deletion's last step (real time in the runtime). */
+  wait?: (ms: number) => Promise<void>;
 };
 
 const runtime: DailyDeps = {
@@ -33,15 +35,21 @@ const runtime: DailyDeps = {
   deleteAccount,
   withdrawInvite: withdrawExpiredInvite,
   reenableJobs: () => ensureCronJobsEnabled(),
+  wait: (ms) => new Promise((r) => setTimeout(r, ms)),
 };
 
-async function each(uids: string[], run: (uid: string) => Promise<DeletionOutcome>): Promise<string> {
+async function each(
+  uids: string[],
+  run: (uid: string) => Promise<DeletionOutcome>,
+  waiting: string[] = [],
+): Promise<string> {
   const out: string[] = [];
   for (const uid of uids) {
     const o = await run(uid).catch((e): DeletionOutcome | null => {
       console.error(`[daily] ${uid}: ${String(e)}`);
       return null;
     });
+    if (o?.kind === "pending" && o.step === "window") waiting.push(uid);
     out.push(o === null ? "error" : o.kind === "done" ? "done" : o.kind === "pending" ? `pending:${o.step}` : `refused:${o.reason}`);
   }
   // Outcome codes only: the uids are in the log line above when something failed, never in a reply.
@@ -55,11 +63,20 @@ export function phase4aChores(deps: DailyDeps = runtime): Chore[] {
       async () => {
         const now = deps.now();
         const c = await dailyCandidates(now, { revokedAfterMs: REVOKED_DELETE_AFTER_MS, grantWideHoldMs: GRANT_WIDE_HOLD_MS, grantWindowMs: GRANT_WINDOW_MS });
-        const retried = await each(c.deleting, deps.deleteAccount);
+        const waiting: string[] = [];
+        const retried = await each(c.deleting, deps.deleteAccount, waiting);
         for (const uid of c.revokedWide) await moveStatus(uid, "revoked", "needs_reconnect", now);
-        const day4 = c.grantWideRecent > 0 ? (c.revokedDue.length ? "held:grant-wide" : "none") : await each(c.revokedDue, deps.deleteAccount);
+        const day4 = c.grantWideRecent > 0 ? (c.revokedDue.length ? "held:grant-wide" : "none") : await each(c.revokedDue, deps.deleteAccount, waiting);
         const invites = await each(c.invitesExpired, deps.withdrawInvite);
-        return `retried ${retried}; day4 ${day4}${c.revokedWide.length ? " held:app-wide" : ""}; invites ${invites}`;
+        // A deletion this run started waits out the lease window before its last step; finish it
+        // in this run, once, rather than leave it `deleting` until tomorrow's, past the health
+        // check's one-day alarm.
+        let finished = "";
+        if (waiting.length && deps.wait) {
+          await deps.wait(LEASE_WINDOW_MS + 2_000);
+          finished = `; after the window ${await each(waiting, deps.deleteAccount)}`;
+        }
+        return `retried ${retried}; day4 ${day4}${c.revokedWide.length ? " held:app-wide" : ""}; invites ${invites}${finished}`;
       },
     ],
     ["sweeps", async () => JSON.stringify(await dailySweeps(deps.now(), DELETED_ROW_TTL_MS))],

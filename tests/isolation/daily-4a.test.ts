@@ -69,6 +69,25 @@ describe("the deletion chores", () => {
     expect(JSON.stringify(out)).not.toMatch(/[a-z2-7]{12}/);
   });
 
+  it("a deletion that must wait out the lease window is finished in the same run, after one wait", async () => {
+    const d = deps();
+    const calls: Record<string, number> = {};
+    const waits: number[] = [];
+    // The job's first call for a uid stops at the lease window (step 5); the next finishes.
+    d.deleteAccount = async (uid) => {
+      calls[uid] = (calls[uid] ?? 0) + 1;
+      d.deleted.push(uid);
+      return calls[uid] === 1 ? { kind: "pending", step: "window" } : { kind: "done" };
+    };
+    d.wait = async (ms) => {
+      waits.push(ms);
+    };
+    const out = await runPhase4aChores(d);
+    expect(waits).toEqual([52_000]);
+    expect(calls).toEqual({ bbbbbbbbbbbb: 2, dddddddddddd: 2 });
+    expect(out.deletions).toBe("retried pending:window; day4 pending:window; invites done; after the window done,done");
+  });
+
   it("holds every day-4 deletion while an app-wide invalid_grant event stands", async () => {
     // A day ago: outside bbbb's own 24-hour window (its first failure was three days ago), so this
     // is the four-day hold, not the per-user app-wide check.
