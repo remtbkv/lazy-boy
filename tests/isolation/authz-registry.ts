@@ -656,7 +656,7 @@ export const ENTRIES: Entry[] = [
     file: "src/app/(app)/history-actions.ts",
     kind: "action",
     gate: "const user = await requireActionUser();",
-    does: "harvests recently-played with Rem's grant, then re-reads the strip, all-time totals and the visible day",
+    does: "re-reads the strip, the all-time totals, the visible day and the plays the client's index is missing from Rem's store; no Spotify call (decision 15)",
     cells: userCells("gated(): requireActionUser refused → NO_REFRESH before any read"),
     invoke: async () => historyAction("refreshHistoryAction", "latest", 14, null),
   },
