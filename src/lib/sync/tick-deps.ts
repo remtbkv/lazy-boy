@@ -17,8 +17,9 @@ import { appQueue, PHASE3_TICK, type TickDeps } from "@/lib/sync/tick";
 const RESCAN_PACE_MS = 150;
 
 /** Phase 1's UserStore as the step's store: the probe in the user's `meta`, a harvest recorded
- *  as the single-user sync recorded it, the rescan as syncLibrary with the tick's deadline. */
-export function stepStoreOf(store: UserStore): StepStore {
+ *  as the single-user sync recorded it, the rescan as syncLibrary with the tick's deadline and
+ *  the Spotify id from the user's row, so it makes no `/me` call (§7.7). */
+export function stepStoreOf(store: UserStore, spotifyId: string): StepStore {
   return {
     readProbe: () => store.readProbe(),
     writeProbe: (p) => store.writeProbe(p),
@@ -29,7 +30,7 @@ export function stepStoreOf(store: UserStore): StepStore {
       void store.ledgerSyncCall(added > 0 ? "sync_tick_landed" : "sync_tick_steady", added);
       return { added };
     },
-    rescanLibrary: (sp, deadline) => syncLibrary(sp, store, undefined, { paceMs: RESCAN_PACE_MS, deadline }),
+    rescanLibrary: (sp, deadline) => syncLibrary(sp, store, undefined, { paceMs: RESCAN_PACE_MS, deadline, meId: spotifyId }),
   };
 }
 
@@ -40,7 +41,7 @@ export function liveTickDeps(dailyChores: TickDeps["dailyChores"] = async () => 
     now: Date.now,
     caller: cronCaller,
     queue: appQueue,
-    storeFor: (u) => stepStoreOf(forUserAt(u.uid, u.dbName)),
+    storeFor: (u) => stepStoreOf(forUserAt(u.uid, u.dbName), u.spotifyId),
     tokenFor: tokenForTick,
     after: (work) => after(work),
     dailyChores,

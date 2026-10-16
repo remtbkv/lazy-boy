@@ -38,6 +38,7 @@ import {
   type AllTimeStats,
 } from "@/lib/skip-rule";
 import type { ProbeState } from "@/lib/harvest-policy";
+import { likedDiff, type LikedRow } from "@/lib/liked-diff";
 import { makeStoreFetch } from "@/lib/store-fetch";
 import { HISTORY_INDEX_SHAPE, LIBRARY_INDEX_SHAPE } from "@/lib/search-shape";
 import { ALLTIME_GATE_MS, isMode, type Mode } from "@/lib/budget/modes";
@@ -63,7 +64,6 @@ import {
   playKey,
   newPlays,
   diffPositions,
-  diffKeyed,
   diffPlaylistList,
   identityChanges,
   type PlaylistListRow,
@@ -2617,6 +2617,15 @@ async function getPlaylistSnapshot(u: UserDb, playlistId: string): Promise<strin
   return getMeta(u, `plsnap:${playlistId}`);
 }
 
+/** Every playlist's stored snapshot_id, in one statement over the `plsnap:` keys: the rescan
+ *  reads them once instead of one getMeta per playlist (multi-user PLAN §7.7; ~110 serial
+ *  reads for Rem's library, about half of a day's `meta` reads). */
+async function getPlaylistSnapshots(u: UserDb): Promise<Map<string, string>> {
+  const client = await u.client();
+  const r = await client.execute("SELECT key, value FROM meta WHERE key LIKE 'plsnap:%'");
+  return new Map(r.rows.map((x) => [String(x.key).slice("plsnap:".length), String(x.value)]));
+}
+
 /** A playlist's cached tracks in playlist order (empty if never cached). */
 async function getPlaylistTracks(u: UserDb, playlistId: string): Promise<Track[]> {
   const client = await u.client();
@@ -2709,21 +2718,40 @@ async function deletePlaylistFromDb(u: UserDb, playlistId: string): Promise<void
 }
 
 // ---- saved tracks (Liked Songs index; the other half of "the library") ----
-/** Replace the stored Liked Songs with a fresh full list, in liked order, and stamp
- *  the cheap change-signals (count + newest added_at) used to skip future re-fetches. */
-async function storeSavedTracks(u: UserDb, tracks: Track[]): Promise<void> {
+/** The stored Liked Songs as (track, added_at) pairs: what the scan's head read compares the
+ *  newest page against (liked-diff.ts likedHead). */
+async function readSavedRows(u: UserDb): Promise<LikedRow[]> {
   const client = await u.client();
-  // Diff against the cache instead of delete-all + reinsert (same row-write-quota reasoning
-  // as storePlaylistTracks — this one re-ran in full at least daily via LIKED_FULL_MAX_AGE_MS).
-  const cachedRes = await client.execute(
-    "SELECT track_id AS trackId, added_at AS addedAt, position FROM saved_tracks",
+  const r = await client.execute("SELECT track_id AS trackId, added_at AS addedAt FROM saved_tracks");
+  return plainRows(r.rows) as unknown as LikedRow[];
+}
+
+/** Replace the stored Liked Songs with a fresh full list, newest first, and stamp the cheap
+ *  change-signals (count + newest added_at) used to skip future re-fetches. Keyed by track and
+ *  diffed without `position` (liked-diff.ts likedDiff): Spotify lists Liked newest first, so
+ *  one like used to move every row's position and rewrite all N of them, though nothing reads
+ *  `position` (multi-user PLAN §7.7, scale 3). Returns the saved_tracks rows written. */
+async function storeSavedTracks(u: UserDb, tracks: Track[]): Promise<number> {
+  const { upserts, deletes } = likedDiff(
+    tracks.map((t) => ({ trackId: t.id, addedAt: t.addedAt ?? null })),
+    await readSavedRows(u),
   );
-  const cachedSaved = plainRows(cachedRes.rows) as unknown as {
-    trackId: string;
-    addedAt: string | null;
-    position: number;
-  }[];
-  const incoming: TrackFields[] = tracks.map((t) => ({
+  const changed = new Set(upserts.map((r) => r.trackId));
+  return storeSavedDiff(u, tracks.filter((t) => changed.has(t.id)), deletes, tracks.length, tracks[0]?.addedAt ?? null);
+}
+
+/** Write a Liked Songs diff the scan already worked out: `upserts` (new likes, or a moved
+ *  added_at) and `deletes` (unliked track ids), with the list's count and newest added_at as
+ *  Spotify reported them. Returns the saved_tracks rows written. */
+async function storeSavedDiff(
+  u: UserDb,
+  upserts: Track[],
+  deletes: string[],
+  total: number,
+  topAddedAt: string | null,
+): Promise<number> {
+  const client = await u.client();
+  const incoming: TrackFields[] = upserts.map((t) => ({
     id: t.id,
     name: t.title,
     artist: t.artist,
@@ -2733,21 +2761,17 @@ async function storeSavedTracks(u: UserDb, tracks: Track[]): Promise<void> {
     durationMs: t.durationMs ?? null,
   }));
   const cachedTracks = await readCachedTracks(client, [...new Set(incoming.map((t) => t.id))]);
-
   const stmts: InStatement[] = tracksNeedingWrite(incoming, cachedTracks).map(trackUpsertStmt);
   const renamed = identityChanges(incoming, cachedTracks);
-  const { upserts, deletes } = diffKeyed(
-    tracks.map((t, i) => ({ trackId: t.id, addedAt: t.addedAt ?? null, position: i })),
-    cachedSaved,
-  );
-  for (const r of upserts) {
+  // `position` keeps its column (NOT NULL) and nothing reads it: a new row takes its place in
+  // what was read, an existing one keeps whatever it had.
+  upserts.forEach((t, i) => {
     stmts.push({
       sql: `INSERT INTO saved_tracks (track_id, added_at, position) VALUES (:tid, :added, :pos)
-            ON CONFLICT(track_id) DO UPDATE SET added_at = excluded.added_at,
-              position = excluded.position`,
-      args: { tid: r.trackId, added: r.addedAt, pos: r.position },
+            ON CONFLICT(track_id) DO UPDATE SET added_at = excluded.added_at`,
+      args: { tid: t.id, added: t.addedAt ?? null, pos: i },
     });
-  }
+  });
   for (let i = 0; i < deletes.length; i += 500) {
     const chunk = deletes.slice(i, i + 500);
     stmts.push({
@@ -2758,14 +2782,15 @@ async function storeSavedTracks(u: UserDb, tracks: Track[]): Promise<void> {
   // As in storePlaylistTracks: only the saved_tracks/tracks writes above feed a cached read,
   // so a diff that came back empty writes the three stamps below and announces nothing.
   if (stmts.length > 0) stmts.push(writeSeqStmt(), librarySeqStmt());
-  stmts.push(metaStmt("liked_total", String(tracks.length)));
-  stmts.push(metaStmt("liked_top_added_at", tracks[0]?.addedAt ?? ""));
+  stmts.push(metaStmt("liked_total", String(total)));
+  stmts.push(metaStmt("liked_top_added_at", topAddedAt ?? ""));
   stmts.push(metaStmt("saved_synced_at", new Date().toISOString()));
   await client.batch(stmts, "write");
   // saved_tracks is not read by the orphan verdict, but a renamed song is.
   if (renamed.length > 0) await recomputeOrphanFlags(u, { identities: renamed });
   // The write moved the marker; drop this request's copy so the read that follows re-keys.
   dropWriteSeqCache(u);
+  return upserts.length + deletes.length;
 }
 
 /** The cheap Liked-Songs change-signals (count + newest added_at). */
@@ -3926,6 +3951,7 @@ const USER_FNS = {
   getLikedSignals,
   getMeId,
   getPlaylistSnapshot,
+  getPlaylistSnapshots,
   getPlaylistsSyncedAt,
   getPlaylistTrackOrder,
   getPlaylistTracks,
@@ -3943,6 +3969,7 @@ const USER_FNS = {
   maybeRecomputeAllTimeStats,
   playedTracksInContext,
   readProbe,
+  readSavedRows,
   rebuildHomePayload,
   recomputeAllTimeStats,
   recomputeUniqueSongCount,
@@ -3959,6 +3986,7 @@ const USER_FNS = {
   setUserTzOffset,
   storePlaylists,
   storePlaylistTracks,
+  storeSavedDiff,
   storeSavedTracks,
   unresolvedContextUris,
   unseenContexts,

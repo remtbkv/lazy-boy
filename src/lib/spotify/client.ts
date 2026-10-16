@@ -2,7 +2,8 @@
 // Owns: auth header, JSON, pagination, 429/Retry-After backoff. No domain logic here.
 
 import type { Paging } from "./types";
-import { extendCooldown } from "@/lib/app-db";
+import { countRpCall, extendCooldown } from "@/lib/app-db";
+import { quotaDay } from "@/lib/brake";
 import { getApiLogSummary, logSpotifyRequest } from "@/lib/db";
 import { reportIsolation } from "@/lib/isolation";
 
@@ -138,6 +139,14 @@ export class HttpClient {
     body?: unknown,
   ): Promise<Response> {
     const url = path.startsWith("http") ? path : `${BASE}${path}`;
+    // The fair-share brake's counter (multi-user PLAN §7.5): every /me call increments its
+    // user's count for the quota day, awaited before the call, so a lost write cannot
+    // undercount (a re-sent one overcounts, the safe side). /me shares recently-played's
+    // bucket; the cron's step counts its own harvests the same way (sync/step.ts). A count
+    // that cannot be written (no queue row yet) is logged, never fatal.
+    if (this.owner && bucketOf(path) === "recently-played" && !path.includes("recently-played")) {
+      await countRpCall(this.owner, quotaDay(Date.now())).catch((e) => console.error(`[spotify] brake count: ${String(e)}`));
+    }
     let rateLimited = 0; // 429s get their own generous budget
     let transient = 0; // network errors / timeouts
     let forbidden = 0; // 403s — retried once (see FORBIDDEN_RETRIES)
@@ -316,30 +325,44 @@ export class HttpClient {
     return this.json<T>("DELETE", path, body);
   }
 
+  /** One page of a paginated endpoint: `cursor` is the first path or a `next` link Spotify
+   *  gave. The cursor to resume from is the page's `next` (null at the end), so a caller with a
+   *  budget can stop between pages and carry on later (multi-user PLAN §7.7). */
+  async page<T>(cursor: string): Promise<Paging<T>> {
+    const page = await this.get<Paging<T>>(cursor);
+    if (!page || !Array.isArray(page.items)) {
+      throw new SpotifyError(502, `malformed page from ${cursor}`);
+    }
+    return page;
+  }
+
   /**
-   * Follow `next` links to collect every item of a paginated endpoint.
-   * `onProgress` reports (collected, total) for long scans (clean playlist).
+   * Follow `next` links to collect every item of a paginated endpoint, page by page from its
+   * cursor. `onProgress` reports (collected, total) for long scans (clean playlist);
+   * `paceMs` waits between pages, for background reads (PLAN §6.6: a friend's 5,000 likes are
+   * 100 pages, and an unpaced burst trips the app-wide rate limit for everyone).
    */
   async getAll<T>(
     firstPath: string,
     onProgress?: (collected: number, total: number) => void,
+    opts: { paceMs?: number } = {},
   ): Promise<T[]> {
     const items: T[] = [];
-    let url: string | null = firstPath;
+    let cursor: string | null = firstPath;
     let total = 0;
-    // Termination was delegated entirely to Spotify's `next` — a self-referencing link
-    // would loop forever. 500 pages ≈ 25k items covers any real collection here.
-    let pages = 0;
-    while (url) {
-      if (++pages > 500) throw new SpotifyError(508, `pagination did not terminate: ${firstPath}`);
-      const page: Paging<T> = await this.get<Paging<T>>(url);
-      if (!page || !Array.isArray(page.items)) {
-        throw new SpotifyError(502, `malformed page from ${url}`);
-      }
+    // Termination was delegated entirely to Spotify's `next`, and a self-referencing link
+    // would loop forever; a cursor already read ends it. There is no page cap: the old one
+    // (500 pages, 25,000 items) failed every scan of a longer Liked list.
+    const seen = new Set<string>();
+    while (cursor) {
+      if (seen.has(cursor)) throw new SpotifyError(508, `pagination did not terminate: ${firstPath}`);
+      seen.add(cursor);
+      if (opts.paceMs && seen.size > 1) await sleep(opts.paceMs);
+      const page: Paging<T> = await this.page<T>(cursor);
       items.push(...page.items);
       total = page.total || total;
       onProgress?.(items.length, total);
-      url = page.next;
+      cursor = page.next;
     }
     return items;
   }
