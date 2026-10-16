@@ -121,8 +121,9 @@ Gates at the branch head: `tsc --noEmit` and lint clean; `npm run build` passes;
 vitest 922 of 924, the two failures being the date tests `mu/phase3` inherited (`store-plays` "daily stats
 agree…", `sync-history` "harvests, resolves…"), which pass with `ca44438`'s fix applied for one run and restored.
 Every new check was shown failing first: against the missing module or the old code, or against a mutant (one line
-changed, the suite run, the line restored; 40 in all). Three mutants survived at first (two of the claim's
-conditions, the approval's unconditional request link) and each got the case it lacked; none survives at the head.
+changed, the suite run, the line restored; 41 in all). Three survived at first (two of the claim's conditions,
+the approval's unconditional request link) and each got the case it lacked; all 41 fail the suite at the head
+(the first claim mutant re-run there to check).
 Four planted bugs stay in `planted-bugs.test.ts`.
 
 | file | proves | shown failing against |
