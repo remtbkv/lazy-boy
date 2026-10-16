@@ -18,7 +18,8 @@
 // statement handed named args it does not use; Turso refuses it (lane 23's production failure).
 //
 // Phase 4a adds: a claim without its compare-and-set; a Log out that leaves capture on; a deletion
-// with no admin refusal; a now-playing memo keyed by nobody.
+// with no admin refusal; a now-playing memo keyed by nobody. Its turn adds a /usage read that takes
+// the viewer for the admin (friends' telemetry only by page template).
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
@@ -48,6 +49,7 @@ import {
   expectLogOutStopsCapture,
   expectMemoPerUser,
   expectFreshIvPerWrite,
+  expectFriendTelemetryAggregated,
   expectRefreshLosesToSignIn,
   expectSignupsOwnerRefusesFriend,
   expectStoreAnswersOwnRow,
@@ -446,6 +448,17 @@ describe("planted: a deletion with no admin refusal", () => {
   it("and passes over the real job", async () => {
     const db = await admin();
     await expectDeletionRefusesAdmin(db.raw(), (uid) => runDeletion(uid, deps()));
+  });
+});
+
+describe("planted: a /usage read that takes the viewer's uid for the admin's (Phase 4a's turn)", () => {
+  it("the friends-aggregated check catches it: the friend's opens are listed, Rem's hidden", async () => {
+    const { getClientLoadSpeed } = await import("@/lib/db");
+    await expect(expectFriendTelemetryAggregated(A, B, () => getClientLoadSpeed(B))).rejects.toThrow();
+  });
+  it("and passes over the real read", async () => {
+    const { getClientLoadSpeed } = await import("@/lib/db");
+    await expectFriendTelemetryAggregated(A, B, getClientLoadSpeed);
   });
 });
 

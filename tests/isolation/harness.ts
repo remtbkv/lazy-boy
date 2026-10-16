@@ -314,6 +314,31 @@ export async function expectDeletionRefusesAdmin(raw: Client, run: (uid: string)
   expect(a).toEqual({ status: "active", session_epoch: 0 });
 }
 
+/** /usage, the admin's page (PLAN.md §6.2 layer 7): a friend's telemetry counts in the per-page
+ *  numbers, but none of their opens or error messages is listed; the admin's are. `admin` is the
+ *  admin's uid, `friend` another's; `read` is the page's client-timings read for the admin. */
+export async function expectFriendTelemetryAggregated(
+  admin: string,
+  friend: string,
+  read: (admin: string) => Promise<{ pages: { page: string; views: number }[]; opens: { page: string }[]; errors: { message: string }[] }>,
+): Promise<void> {
+  const { recordClientMetrics } = await import("@/lib/db");
+  const view = (session: string, page: string, pv: string) => [
+    { session, page, event: "pageview", value: null, meta: `pv:${pv}` },
+    { session, page, event: "fcp", value: 400, meta: `pv:${pv}` },
+  ];
+  await recordClientMetrics(view("s-admin", "/home", "a1"), admin);
+  await recordClientMetrics(
+    [...view("s-friend", "/playlists/[id]", "f1"), { session: "s-friend", page: "/playlists/[id]", event: "js-error", value: null, meta: "pv:f1|FRIEND-only error text" }],
+    friend,
+  );
+  const r = await read(admin);
+  expect(r.pages.find((p) => p.page === "/playlists/[id]")?.views).toBe(1);
+  expect(r.opens.filter((o) => o.page === "/playlists/[id]")).toEqual([]);
+  expect(JSON.stringify(r.errors)).not.toContain("FRIEND-only");
+  expect(r.opens.filter((o) => o.page === "/home").length).toBeGreaterThanOrEqual(1);
+}
+
 /** /api/now-playing's memo (PLAN.md §6.6): one user's answer is never another's. */
 export function expectMemoPerUser(get: (uid: Uid, now: number) => { playing: unknown } | null, set: (uid: Uid, now: number, p: unknown) => void): void {
   set(A, 1_000, "A-only-track");
