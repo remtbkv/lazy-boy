@@ -13,6 +13,8 @@
 export const EXPIRY_AGE_S = 170 * 86_400;
 /** Day 4 after the first failure (status_at): inside Spotify's five days even if one daily run is missed. */
 export const REVOKED_DELETE_AFTER_MS = 3 * 86_400_000;
+/** "Within 24 hours" (§5.4 step 3): failures of two users this close are one app-wide event. */
+export const GRANT_WINDOW_MS = 24 * 3_600_000;
 /** How long a `grant-wide` event stands against any automatic deletion. */
 export const GRANT_WIDE_HOLD_MS = 4 * 86_400_000;
 

@@ -7,6 +7,7 @@
 import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAppMeta, markGrantDead } from "@/lib/app-db";
+import { runPhase4aChores } from "@/lib/daily-4a";
 import { confirmedDeadGrant, EXPIRY_AGE_S } from "@/lib/grant-policy";
 import { mintUid, type Uid } from "@/lib/identity";
 import { runTick } from "@/lib/sync/tick";
@@ -21,6 +22,7 @@ const Y: Uid = mintUid("yyyyyyyyyyyy");
 const NOW = Date.UTC(2026, 9, 16, 18, 0);
 const NOW_S = Math.floor(NOW / 1000);
 const MIN = 60_000;
+const DAY = 86_400_000;
 
 let db: ReturnType<typeof freshAppDb>;
 const q = async (sql: string, args: Record<string, string | number | null> = {}) => (await db.raw().execute({ sql, args })).rows;
@@ -84,6 +86,51 @@ describe("T14 through the tick", () => {
     await ticks([R], [NOW, NOW + 11 * MIN, NOW + 13 * MIN]);
     expect((await status(R)).status).toBe("needs_reconnect");
     expect((await codes()).filter((x) => x.startsWith("revoked"))).toEqual([]);
+  });
+
+  // Lane 09's review: a friend already revoked when a second user's grant dies inside 24 hours is
+  // part of the same app-wide event (§5.4 step 3: everyone stays needs_reconnect, nothing is
+  // scheduled), whether the second failure comes through the request path, which records no
+  // `grant-wide` event, or through the tick, whose event holds deletions only four days.
+  const dayFour = (now: number) => {
+    const deleted: string[] = [];
+    const deps = {
+      now: () => now,
+      deleteAccount: async (uid: string) => (deleted.push(uid), { kind: "done" as const }),
+      withdrawInvite: async () => ({ kind: "done" as const }),
+      reenableJobs: async () => "skipped",
+    };
+    return { deleted, run: () => runPhase4aChores(deps) };
+  };
+
+  it("a revoked friend is not deleted when a second user's grant dies on the request path inside 24 hours", async () => {
+    await ticks([X], [NOW, NOW + 11 * MIN]);
+    expect((await status(X)).status).toBe("revoked");
+    await markGrantDead(Y, NOW + 300 * MIN);
+    const d = dayFour(NOW + 3 * DAY + 60 * MIN);
+    const out = await d.run();
+    expect(d.deleted).toEqual([]);
+    expect(out.deletions).toContain("held:app-wide");
+    expect((await status(X)).status).toBe("needs_reconnect");
+  });
+
+  it("a revoked friend is not deleted once the tick's grant-wide hold has lapsed", async () => {
+    await ticks([X], [NOW, NOW + 11 * MIN]);
+    await ticks([X, Y], [NOW + 300 * MIN, NOW + 311 * MIN]);
+    expect((await codes())).toContain("grant-wide:-");
+    expect((await status(Y)).status).toBe("needs_reconnect");
+    const d = dayFour(NOW + 4 * DAY + 360 * MIN);
+    await d.run();
+    expect(d.deleted).toEqual([]);
+    expect((await status(X)).status).toBe("needs_reconnect");
+  });
+
+  it("a revocation with no other failure within 24 hours either side is still deleted on day 4", async () => {
+    await ticks([X], [NOW, NOW + 11 * MIN]);
+    await markGrantDead(Y, NOW + 25 * 60 * MIN);
+    const d = dayFour(NOW + 3 * DAY + 60 * MIN);
+    await d.run();
+    expect(d.deleted).toEqual([X]);
   });
 
   it("an old grant (about 170 days) has expired: needs_reconnect, the data kept, nothing scheduled", async () => {

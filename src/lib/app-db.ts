@@ -400,14 +400,32 @@ export async function recordHealthRed(now: number, reasons: string[]): Promise<v
 // uids and times, never data, and each uid they name goes to the deletion job, which refuses the
 // admin itself.
 
-export type DailyCandidates = { deleting: string[]; revokedDue: string[]; invitesExpired: string[]; grantWideRecent: number };
+export type DailyCandidates = {
+  deleting: string[];
+  revokedDue: string[];
+  /** Due, but another user (or the admin) also got invalid_grant within the window of this one's
+   *  first failure, or a `grant-wide` event fell in it: the same app-wide event (§5.4 step 3),
+   *  however the failures were ordered, so these are unscheduled rather than deleted. */
+  revokedWide: string[];
+  invitesExpired: string[];
+  grantWideRecent: number;
+};
 
-export async function dailyCandidates(now: number, o: { revokedAfterMs: number; grantWideHoldMs: number }): Promise<DailyCandidates> {
-  const args = { revoked: now - o.revokedAfterMs, invites: now - INVITE_TTL_MS, wide: now - o.grantWideHoldMs };
+export async function dailyCandidates(
+  now: number,
+  o: { revokedAfterMs: number; grantWideHoldMs: number; grantWindowMs: number },
+): Promise<DailyCandidates> {
+  const args = { revoked: now - o.revokedAfterMs, invites: now - INVITE_TTL_MS, wide: now - o.grantWideHoldMs, window: o.grantWindowMs };
   const [del, rev, inv, wide] = await (await appClient()).batch(
     [
       "SELECT uid FROM users WHERE status = 'deleting' AND is_admin = 0 ORDER BY uid",
-      { sql: "SELECT uid FROM users WHERE status = 'revoked' AND is_admin = 0 AND status_at <= :revoked ORDER BY uid", args },
+      {
+        sql: `SELECT u.uid, EXISTS (SELECT 1 FROM events e
+                                    WHERE e.at BETWEEN u.status_at - :window AND u.status_at + :window
+                                      AND (e.code = 'grant-wide' OR (e.code = 'invalid-grant' AND e.uid <> u.uid))) AS wide
+              FROM users u WHERE u.status = 'revoked' AND u.is_admin = 0 AND u.status_at <= :revoked ORDER BY u.uid`,
+        args,
+      },
       {
         sql: `SELECT uid FROM users WHERE status IN ('provisioning', 'invited') AND account_id IS NULL AND is_admin = 0
                 AND invited_at <= :invites ORDER BY uid`,
@@ -418,7 +436,13 @@ export async function dailyCandidates(now: number, o: { revokedAfterMs: number; 
     "read",
   );
   const uids = (r: ResultSet) => r.rows.map((x) => String(x.uid));
-  return { deleting: uids(del), revokedDue: uids(rev), invitesExpired: uids(inv), grantWideRecent: Number(wide.rows[0].n) };
+  return {
+    deleting: uids(del),
+    revokedDue: rev.rows.filter((x) => Number(x.wide) === 0).map((x) => String(x.uid)),
+    revokedWide: rev.rows.filter((x) => Number(x.wide) !== 0).map((x) => String(x.uid)),
+    invitesExpired: uids(inv),
+    grantWideRecent: Number(wide.rows[0].n),
+  };
 }
 
 /** The sweeps, one write batch: `deleted` rows past five days; token and queue rows (and refresh

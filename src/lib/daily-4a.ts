@@ -5,17 +5,19 @@
 //   - deletion retries: every `deleting` user through the deletion job until it answers done;
 //   - day 4 of `revoked` (§5.4 step 5): a friend whose grant was confirmed revoked three days
 //     after the first failure is deleted, unless a `grant-wide` event stands (no automatic
-//     deletion during an app-wide event) or they signed in again (the job's compare-and-set);
+//     deletion during an app-wide event) or they signed in again (the job's compare-and-set); one
+//     whose first failure had another user's (or the admin's) within 24 hours either side was part
+//     of an app-wide event however the failures were ordered, and goes back to needs_reconnect;
 //   - the 14-day invite expiry: an unclaimed invite withdrawn, its empty database destroyed;
 //   - the sweeps: `deleted` rows past five days, orphan token, queue and lock rows, requests still
 //     pending after 14 days, health records past 30 days;
 //   - re-enabling the two cron-job.org jobs.
 import "server-only";
-import { dailyCandidates, dailySweeps } from "@/lib/app-db";
+import { dailyCandidates, dailySweeps, moveStatus } from "@/lib/app-db";
 import { ensureCronJobsEnabled } from "@/lib/cronjob-jobs";
 import { DELETED_ROW_TTL_MS, type DeletionOutcome } from "@/lib/deletion";
 import { deleteAccount, withdrawExpiredInvite } from "@/lib/deletion-runtime";
-import { GRANT_WIDE_HOLD_MS, REVOKED_DELETE_AFTER_MS } from "@/lib/grant-policy";
+import { GRANT_WIDE_HOLD_MS, GRANT_WINDOW_MS, REVOKED_DELETE_AFTER_MS } from "@/lib/grant-policy";
 
 export type Chore = [name: string, run: () => Promise<unknown>];
 
@@ -51,11 +53,13 @@ export function phase4aChores(deps: DailyDeps = runtime): Chore[] {
     [
       "deletions",
       async () => {
-        const c = await dailyCandidates(deps.now(), { revokedAfterMs: REVOKED_DELETE_AFTER_MS, grantWideHoldMs: GRANT_WIDE_HOLD_MS });
+        const now = deps.now();
+        const c = await dailyCandidates(now, { revokedAfterMs: REVOKED_DELETE_AFTER_MS, grantWideHoldMs: GRANT_WIDE_HOLD_MS, grantWindowMs: GRANT_WINDOW_MS });
         const retried = await each(c.deleting, deps.deleteAccount);
+        for (const uid of c.revokedWide) await moveStatus(uid, "revoked", "needs_reconnect", now);
         const day4 = c.grantWideRecent > 0 ? (c.revokedDue.length ? "held:grant-wide" : "none") : await each(c.revokedDue, deps.deleteAccount);
         const invites = await each(c.invitesExpired, deps.withdrawInvite);
-        return `retried ${retried}; day4 ${day4}; invites ${invites}`;
+        return `retried ${retried}; day4 ${day4}${c.revokedWide.length ? " held:app-wide" : ""}; invites ${invites}`;
       },
     ],
     ["sweeps", async () => JSON.stringify(await dailySweeps(deps.now(), DELETED_ROW_TTL_MS))],

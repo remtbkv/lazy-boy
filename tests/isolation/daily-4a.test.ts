@@ -70,11 +70,35 @@ describe("the deletion chores", () => {
   });
 
   it("holds every day-4 deletion while an app-wide invalid_grant event stands", async () => {
-    await q("INSERT INTO events (at, uid, code) VALUES (:t, NULL, 'grant-wide')", { t: NOW - 3 * DAY });
+    // A day ago: outside bbbb's own 24-hour window (its first failure was three days ago), so this
+    // is the four-day hold, not the per-user app-wide check.
+    await q("INSERT INTO events (at, uid, code) VALUES (:t, NULL, 'grant-wide')", { t: NOW - 1 * DAY });
     const d = deps();
     const out = await runPhase4aChores(d);
     expect(d.deleted).toEqual(["dddddddddddd"]);
     expect(out.deletions).toContain("day4 held:grant-wide");
+  });
+
+  it("unschedules a revocation whose first failure had another user's within 24 hours, either side", async () => {
+    // Lane 09's review: bbbb was revoked alone, then cccc's grant died 20 hours after bbbb's.
+    await q("INSERT INTO events (at, uid, code) VALUES (:t, 'cccccccccccc', 'invalid-grant')", { t: NOW - 3 * DAY + 20 * 3_600_000 });
+    const d = deps();
+    const out = await runPhase4aChores(d);
+    expect(d.deleted).toEqual(["dddddddddddd"]);
+    expect(out.deletions).toContain("held:app-wide");
+    expect((await q("SELECT status FROM users WHERE uid = 'bbbbbbbbbbbb'"))[0].status).toBe("needs_reconnect");
+    // The admin's failure counts too (§5.4 step 3), and its own earlier failures do not.
+    await q("UPDATE users SET status = 'revoked', status_at = :t WHERE uid = 'bbbbbbbbbbbb'", { t: NOW - 3 * DAY });
+    await q("DELETE FROM events");
+    await q("INSERT INTO events (at, uid, code) VALUES (:t, 'bbbbbbbbbbbb', 'invalid-grant')", { t: NOW - 3 * DAY - 3_600_000 });
+    const own = deps();
+    await runPhase4aChores(own);
+    expect(own.deleted.sort()).toEqual(["bbbbbbbbbbbb", "dddddddddddd"]);
+    await q("UPDATE users SET status = 'revoked', status_at = :t WHERE uid = 'bbbbbbbbbbbb'", { t: NOW - 3 * DAY });
+    await q("INSERT INTO events (at, uid, code) VALUES (:t, 'aaaaaaaaaaaa', 'invalid-grant')", { t: NOW - 3 * DAY - 23 * 3_600_000 });
+    const admin = deps();
+    await runPhase4aChores(admin);
+    expect(admin.deleted).toEqual(["dddddddddddd"]);
   });
 });
 
