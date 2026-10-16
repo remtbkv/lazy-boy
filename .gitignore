@@ -45,3 +45,4 @@ next-env.d.ts
 
 # Local SQLite listen-history DB
 data/
+__pycache__/
