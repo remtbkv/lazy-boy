@@ -645,7 +645,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### page /usage
 
-- File: `src/app/(app)/usage/page.tsx`. Gate today: `src/app/(app)/usage/page.tsx:252`.
+- File: `src/app/(app)/usage/page.tsx`. Gate today: `src/app/(app)/usage/page.tsx:254`.
 - Does, when allowed: renders the operator's page: per-page timings, the rows-read ledger, the Spotify call breakdown, capture health.
 - Calls (from the source): store `getCaptureHealth`; via `captureHealthMessage`, `tzOffsetMinutes`.
 - `anon`: D — auth() null → redirect('/login') before any read
