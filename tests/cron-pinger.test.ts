@@ -246,6 +246,41 @@ describe("/api/cron/sync, two pingers, Phase 3's tick", () => {
     expect(probes()).toBe(1);
   });
 
+  // Carried from the interim pinger's suite as s-p1 and s-p2 left it (lanes 33 and 34) and from
+  // lane 15's single-user "cron with no token" cases, onto the tick's alarm.
+  it("with no admin row the Zenbook hears 503 and cron-job.org still a bare {\"ok\":true}", async () => {
+    await raw.execute("DELETE FROM users");
+    const z = await zen();
+    expect({ status: z.status, body: await z.json() }).toEqual({ status: 503, body: { ok: false, error: "no-admin" } });
+    at(60_000);
+    const e = await ext();
+    expect({ status: e.status, body: await e.text() }).toEqual({ status: 200, body: '{"ok":true}' });
+    expect(probes()).toBe(0);
+  });
+
+  it("the owner alarm reads the token of record: a plaintext copy alone is no token, and none is no alarm", async () => {
+    // Log out removed the user_tokens row; the rollback week's plaintext copy is still there.
+    // Inside the window cron-job.org's tick opened, the Zenbook must still hear the alarm.
+    expect((await ext()).status).toBe(200);
+    expect(probes()).toBe(1);
+    await raw.execute({ sql: "DELETE FROM user_tokens WHERE uid = ?", args: [OWNER] });
+    await owner.setSpotifyTokens({ accessToken: "at-old", refreshToken: "rt-old", expiresAt: Math.floor(base / 1000) + 3_600 });
+    try {
+      at(30_000);
+      const alarm = await zen();
+      expect({ status: alarm.status, body: await alarm.json() }).toEqual({ status: 503, body: { ok: false, error: "no-token" } });
+    } finally {
+      await owner.clearSpotifyTokens();
+    }
+    // A week on (§11.4 step 6) the plaintext copy is gone and the token of record stays: no
+    // alarm, and the admin, due again, is probed.
+    await appTokenStore().set(OWNER, { accessToken: "at-rem", refreshToken: "rt-rem", expiresAt: Math.floor(base / 1000) + 3_600 });
+    at(200_000);
+    const z = await zen();
+    expect(z.status).toBe(200);
+    expect(probes()).toBe(2);
+  });
+
   it("a token that cannot be refreshed right now is no alarm: 200 to the Zenbook, the admin's step backs off", async () => {
     // Carried from tests/capture-health.test.ts's single-user pair ("signed out → 503" is the
     // case above): a token row whose refresh fails at Spotify, not a signed-out admin.
