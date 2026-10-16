@@ -147,7 +147,8 @@ file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
   the 2-minute cadence either pinger alone keeps, and a leaked secret in a loop gets one tick per
   90 s. The owner alarm (503 "no token", read before the stamp) and the outcome go to `CRON_SECRET`
   callers only; cron-job.org always gets a bare `{"ok":true}`, since it keeps reply bodies and
-  disables a job after a run of failures. `CRON_SECRET_EXT` opens `/api/cron/sync` and nothing else;
+  durations and disables a job after a run of failures. It gets that reply at once and its tick
+  runs in `after()`, so neither the reply's timing nor a 30 s timeout tells whether a harvest ran. `CRON_SECRET_EXT` opens `/api/cron/sync` and nothing else;
   `CRON_SECRET` opens every cron route.
   (A GitHub Actions cron drove this initially but was removed: GitHub schedules best-effort
   and stretched to multi-hour gaps, losing plays against the 50-play window.)

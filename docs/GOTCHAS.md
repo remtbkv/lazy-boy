@@ -225,8 +225,8 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   So calling the route twice to test it runs one tick, and a reply with `skipped` is health, not a
   fault. A failed stamp skips the tick too (`skipped: "store unavailable"`): nothing gets past the
   guard without it, or a leaked secret in a loop would reach Spotify. `CRON_SECRET_EXT`
-  (cron-job.org) opens `/api/cron/sync` only and always gets a bare `{"ok":true}`, even when capture
-  is broken: the owner alarm (503 "no token") answers `CRON_SECRET` alone, read before the stamp so
+  (cron-job.org) opens `/api/cron/sync` only and always gets a bare `{"ok":true}` at once, before its
+  tick runs in `after()`, even when capture is broken: the owner alarm (503 "no token") answers `CRON_SECRET` alone, read before the stamp so
   it does not depend on which pinger ticked. To see what ticks did, read the Zenbook's `ping.log`,
   never cron-job.org's execution history. Never fold `CRON_SECRET_EXT` into `cronAuthorized()`: that
   would open the daily chores, the store bench and the usage check to a third party (PLAN §5.5).

@@ -1,3 +1,4 @@
+import { after } from "next/server";
 import { getValidAccessToken } from "@/lib/auth";
 import { cronCaller, type CronCaller } from "@/lib/cron-auth";
 import { spotifyClient, SpotifyError } from "@/lib/spotify";
@@ -58,11 +59,16 @@ export async function GET(req: Request) {
   if (!caller) {
     return Response.json({ ok: false, error: "forbidden" }, { status: 401 });
   }
-  const res = await tick(caller);
-  // cron-job.org keeps every reply body in its execution history, where per-user outcomes
-  // would record when each person listens, and it disables a job after a run of failures: it
-  // gets neither the outcome nor the owner alarm (PLAN §7.2 step 0, security R14).
-  return caller === "ext" ? Response.json({ ok: true }) : res;
+  // cron-job.org keeps every reply's body and duration in its execution history, where per-user
+  // outcomes, or a reply that took longer because a harvest ran, would record when each person
+  // listens, and it disables a job after a run of failures, its 30 s timeout included: it gets a
+  // bare {"ok":true} at once, never the outcome or the owner alarm, and the tick runs after the
+  // reply (PLAN §7.2 step 0, security R14).
+  if (caller === "ext") {
+    after(() => tick(caller));
+    return Response.json({ ok: true });
+  }
+  return tick(caller);
 }
 
 async function tick(caller: CronCaller): Promise<Response> {

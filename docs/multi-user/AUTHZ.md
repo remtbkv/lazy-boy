@@ -200,7 +200,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/cron/sync
 
-- File: `src/app/api/cron/sync/route.ts`. Gate today: `src/app/api/cron/sync/route.ts:58`.
+- File: `src/app/api/cron/sync/route.ts`. Gate today: `src/app/api/cron/sync/route.ts:59`.
 - Does, when allowed: the tick, at most one per 90 s whoever calls (the stamp, acquireLock('tick')): currently-playing and recently-played with Rem's stored grant, harvest stamps, plays; a library rescan every 30 min.
 - Calls (from the source): store `acquireLock (w)`, `getHarvestGate`, `getLibraryScanAttemptAt`, `getLibrarySyncedAt`, `getSpotifyTokens`, `ledgerSyncCall (w)`, `setHarvestGate (w)`, `setLibraryScanAttemptAt (w)`; Spotify `currentlyPlaying`; via `getValidAccessToken`, `cronCaller`, `spotifyClient`, `syncRecentPlays`, `syncLibrary`, `shouldHarvest`.
 - `anon`: D — cronCaller() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET` (the Zenbook) or `Bearer $CRON_SECRET_EXT` (cron-job.org), timing-safe, an unset secret matching nobody; a cookie is not a secret; no header → 401

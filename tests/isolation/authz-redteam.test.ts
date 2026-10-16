@@ -56,7 +56,7 @@ import {
   spotifyCalls,
   tokenRow,
 } from "./authz-harness";
-import { ctx } from "./authz-context";
+import { ctx, flushAfter } from "./authz-context";
 import { expectPinned } from "./authz-cells";
 
 const COOKIE = "authjs.session-token";
@@ -315,6 +315,7 @@ describe("the cron and pinger secrets", () => {
     await seedOldMetric();
     await become("cronjobOrg");
     await cron({ "x-vercel-cron": "1" });
+    await flushAfter(); // cron-job.org's tick runs after its reply
     for (const path of ["/api/cron/daily", "/api/cron/store-bench", "/api/cron/usage-check"]) {
       expect((await cron({}, path)).status, path).toBe(401);
     }
@@ -326,6 +327,8 @@ describe("the cron and pinger secrets", () => {
     await become("cronjobOrg");
     const res = await cron();
     expect({ status: res.status, body: await res.text() }).toEqual({ status: 200, body: '{"ok":true}' });
+    await flushAfter(); // the tick runs after the reply, with Rem's grant
+    expect(spotifyCalls.some((c) => (c.bearer ?? "").startsWith("at-REM"))).toBe(true);
   });
 
   it("the Zenbook pinger still gets the 503 owner alarm when no token is stored", async () => {

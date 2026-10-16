@@ -11,7 +11,23 @@ const EXT = "ext-s3cret";
 process.env.CRON_SECRET = ZEN;
 process.env.CRON_SECRET_EXT = EXT;
 
-const spotify = vi.hoisted(() => ({ paths: [] as string[], playing: false, storeDown: false }));
+const spotify = vi.hoisted(() => ({
+  paths: [] as string[],
+  playing: false,
+  storeDown: false,
+  hold: null as Promise<void> | null,
+  after: [] as Promise<unknown>[],
+}));
+
+// after() outside a real request: run the task and let the test await it.
+vi.mock("next/server", () => ({
+  after: (task: () => unknown) => {
+    spotify.after.push(Promise.resolve().then(task));
+  },
+}));
+const flushAfter = async () => {
+  while (spotify.after.length) await Promise.all(spotify.after.splice(0));
+};
 
 // The real db.ts, except that the stamp can be made to fail like a store outage.
 vi.mock("@/lib/db", async (importOriginal) => {
@@ -42,6 +58,7 @@ vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
   const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
   if (url.origin !== "https://api.spotify.com") throw new Error(`unexpected fetch ${url}`);
   spotify.paths.push(url.pathname);
+  if (spotify.hold) await spotify.hold;
   if (url.pathname === "/v1/me/player/currently-playing") {
     if (!spotify.playing) return new Response(null, { status: 204 });
     return Response.json({ is_playing: true, progress_ms: 1000, item: TRACK, context: null, currently_playing_type: "track" });
@@ -63,7 +80,12 @@ const { GET } = await import("@/app/api/cron/sync/route");
 const call = (authorization?: string) =>
   GET(new Request("https://lazy-boy.example/api/cron/sync", { headers: authorization ? { authorization } : {} }));
 const zen = () => call(`Bearer ${ZEN}`);
-const ext = () => call(`Bearer ${EXT}`);
+// cron-job.org's call as it sees it, then the tick its call started.
+const ext = async () => {
+  const res = await call(`Bearer ${EXT}`);
+  await flushAfter();
+  return res;
+};
 const ticks = () => spotify.paths.filter((p) => p === "/v1/me/player/currently-playing").length;
 
 // Each test starts an hour after the last, so no stamp carries over; the clock moves only when
@@ -78,6 +100,7 @@ beforeEach(async () => {
   spotify.paths.length = 0;
   spotify.playing = false;
   spotify.storeDown = false;
+  spotify.hold = null;
   await db.setSpotifyTokens({ accessToken: "at-rem", refreshToken: "rt-rem", expiresAt: base + 3_600_000 });
   // An idle tick: nothing playing, harvested just now, library fresh. Its work is the
   // currently-playing check.
@@ -124,6 +147,29 @@ describe("/api/cron/sync, two pingers", () => {
     const signedOut = await ext();
     expect(signedOut.status).toBe(200);
     expect(await signedOut.text()).toBe('{"ok":true}');
+  });
+
+  it("cron-job.org's reply does not wait for the tick, so its timing says nothing about anyone's listening (security R14)", async () => {
+    spotify.playing = true;
+    let release = () => {};
+    spotify.hold = new Promise<void>((r) => (release = r));
+    try {
+      // The tick is stuck on Spotify; the reply must not be.
+      const reply = await Promise.race([
+        call(`Bearer ${EXT}`),
+        new Promise<string>((r) => setTimeout(() => r("waited for the tick"), 1_000)),
+      ]);
+      expect(reply).toBeInstanceOf(Response);
+      expect({ status: (reply as Response).status, body: await (reply as Response).text() }).toEqual({
+        status: 200,
+        body: '{"ok":true}',
+      });
+    } finally {
+      release();
+      await flushAfter();
+    }
+    // The tick still ran in full, after the reply: it harvested.
+    expect(spotify.paths).toContain("/v1/me/player/recently-played");
   });
 
   it("three calls within 90 s do one tick's work, a burst does one, and a call 91 s on does another", async () => {
