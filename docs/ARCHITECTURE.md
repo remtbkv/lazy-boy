@@ -136,9 +136,20 @@ file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
   timer `lazyboy-cron-sync.timer` (`~/lazyboy-cron/ping.sh`). A daily **Vercel Cron**
   (`vercel.json`, 07:00 UTC) is the backstop. All sync hits share `/api/cron/sync`
   (`CRON_SECRET`-guarded); the daily chores have their own route and cron entry,
-  `/api/cron/daily` at 09:00 UTC (Routes, below). Two retired callers still 401 there until Rem removes them: the
-  cron-job.org job (stale secret since the 2026-08-10 rotation) and the Zenbook's root-level
-  `lazyboy-sync.timer` (stale since 07-01) — burn lazyboy-review 2026-10-03, Z1/Z2.
+  `/api/cron/daily` at 09:00 UTC (Routes, below). One retired caller still 401s there until Rem removes it: the
+  Zenbook's root-level `lazyboy-sync.timer` (stale since 07-01) — burn lazyboy-review 2026-10-03, Z1/Z2.
+- **Two pingers, one tick per 90 s** (docs/multi-user/PLAN.md §7.9). The Zenbook's timer sends
+  `Bearer $CRON_SECRET`; a cron-job.org job, every 2 minutes, sends `Bearer $CRON_SECRET_EXT`, so
+  capture survives a Zenbook outage. `cronCaller()` (`src/lib/cron-auth.ts`) names the caller from
+  the secret. Before any work the tick takes a stamp, a compare-and-set on the `meta` row
+  `lock:tick` (`acquireLock("tick", 90_000)`): a call that finds a tick in the last 90 s answers 200
+  and does nothing. With the pingers on alternate minutes every second call ticks, so Spotify sees
+  the 2-minute cadence either pinger alone keeps, and a leaked secret in a loop gets one tick per
+  90 s. The owner alarm (503 "no token", read before the stamp) and the outcome go to `CRON_SECRET`
+  callers only; cron-job.org always gets a bare `{"ok":true}`, since it keeps reply bodies and
+  durations and disables a job after a run of failures. It gets that reply at once and its tick
+  runs in `after()`, so neither the reply's timing nor a 30 s timeout tells whether a harvest ran. `CRON_SECRET_EXT` opens `/api/cron/sync` and nothing else;
+  `CRON_SECRET` opens every cron route.
   (A GitHub Actions cron drove this initially but was removed: GitHub schedules best-effort
   and stretched to multi-hour gaps, losing plays against the 50-play window.)
 - Reads: Home's first paint is `getHomePayload()` — one indexed `meta` row holding the day
@@ -223,8 +234,9 @@ file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
 - `playlists/sync` (POST) — one full library scan → DB; client fires it when the store is stale.
 - `now-playing` — live "what's playing"; returns `{ playing: null }` when idle (never stale).
 - `sync` (POST) — on-load history sync; server debounces, skipping if synced <~60 s ago.
-- `cron/sync` (GET) — scheduled history sync. On-time trigger is the Zenbook's
-  `lazyboy-cron-sync.timer` (2 min); a daily Vercel Cron (07:00 UTC) is the backstop.
+- `cron/sync` (GET) — scheduled history sync. On-time triggers are the Zenbook's
+  `lazyboy-cron-sync.timer` (2 min) and the cron-job.org job (2 min, `CRON_SECRET_EXT`), at most
+  one tick per 90 s between them; a daily Vercel Cron (07:00 UTC) is the backstop.
   Session-less (uses the stored token).
 - `cron/daily` (GET) — the daily chores, Vercel Cron at 09:00 UTC (after the Zenbook's ~07:00
   UTC reboot, since the prunes and ledger rows go to the telemetry store on it): all-time heal,
@@ -239,7 +251,8 @@ file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
 
 All check `auth()` and 401 on no session, except the `cron/*` routes: those take
 `Authorization: Bearer $CRON_SECRET` (`src/lib/cron-auth.ts`, constant-time, fail-closed: an
-unset secret rejects all callers) and no session.
+unset secret rejects all callers) and no session; `cron/sync` alone also takes
+`Bearer $CRON_SECRET_EXT`.
 
 ## Player simulation
 

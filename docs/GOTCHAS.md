@@ -212,14 +212,24 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   if synced <60 s ago — so an open tab is effectively live, and the home history view also
   refreshes each minute); and the **app-closed coverage** path — an **external pinger**
   hitting `/api/cron/sync` with the stored token every 2 min (the Zenbook's user timer
-  `lazyboy-cron-sync.timer`; the cron-job.org job that preceded it has 401'd on a stale
-  secret since 2026-08-10), with a daily **Vercel Cron** (`vercel.json`) as the backstop. Every scheduled hit carries `Authorization: Bearer $CRON_SECRET`
-  (fail-closed: an unset secret rejects all callers; `src/lib/cron-auth.ts`). A GitHub Actions cron drove this at
+  `lazyboy-cron-sync.timer`, and the cron-job.org job with its own secret; next bullet), with a daily **Vercel Cron** (`vercel.json`) as the backstop. Every scheduled hit carries `Authorization: Bearer $CRON_SECRET`
+  or, from cron-job.org, `Bearer $CRON_SECRET_EXT` (fail-closed: an unset secret rejects all callers; `src/lib/cron-auth.ts`). A GitHub Actions cron drove this at
   first but was removed — GitHub schedules best-effort and real spacing stretched to hours,
   which loses plays against the 50-play window; a dedicated pinger holds a tight cadence.
   A rotation of `CRON_SECRET` must update every copy listed in `docs/SECURITY.md`; a pinger
   left holding the old one fails with a 401 that nothing reports (both the cron-job.org job
   and the Zenbook's root `lazyboy-sync.timer` sat failing that way for months).
+- **Two pingers share one tick per 90 s, so most of their calls do nothing, and cron-job.org's
+  history says nothing.** `/api/cron/sync` stamps the `meta` row `lock:tick` before any work
+  (`acquireLock("tick", 90_000)`); a call inside the window answers 200 `skipped: "recent tick"`.
+  So calling the route twice to test it runs one tick, and a reply with `skipped` is health, not a
+  fault. A failed stamp skips the tick too (`skipped: "store unavailable"`): nothing gets past the
+  guard without it, or a leaked secret in a loop would reach Spotify. `CRON_SECRET_EXT`
+  (cron-job.org) opens `/api/cron/sync` only and always gets a bare `{"ok":true}` at once, before its
+  tick runs in `after()`, even when capture is broken: the owner alarm (503 "no token") answers `CRON_SECRET` alone, read before the stamp so
+  it does not depend on which pinger ticked. To see what ticks did, read the Zenbook's `ping.log`,
+  never cron-job.org's execution history. Never fold `CRON_SECRET_EXT` into `cronAuthorized()`: that
+  would open the daily chores, the store bench and the usage check to a third party (PLAN §5.5).
 - **Day buckets use the user's timezone, sent from the browser — never `'localtime'`.**
   Turso runs in UTC, so `date(played_at, 'localtime')` would bucket by UTC and plays after
   UTC-midnight show up on "tomorrow." Spotify's API has no user timezone, so `TimezoneCookie`

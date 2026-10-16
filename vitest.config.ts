@@ -11,6 +11,9 @@ export default defineConfig({
       // Order matters: specific module ids before the `@/` prefix.
       { find: "server-only", replacement: path.resolve(__dirname, "tests/stubs/empty.ts") },
       { find: "next/cache", replacement: path.resolve(__dirname, "tests/stubs/next-cache.ts") },
+      // next-auth imports the extensionless "next/server", which Node's ESM resolver refuses;
+      // with next-auth inlined below, this lets the REAL Auth.js run in tests (the authz suite).
+      { find: /^next\/server$/, replacement: "next/server.js" },
       { find: "@", replacement: path.resolve(__dirname, "src") },
     ],
   },
@@ -23,6 +26,7 @@ export default defineConfig({
     // modules carry deliberate module-scoped state (cooldowns, counters) that must not
     // leak between files.
     pool: "forks",
+    server: { deps: { inline: ["next-auth", "@auth/core"] } },
     testTimeout: 15000,
   },
 });
