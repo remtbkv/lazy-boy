@@ -153,8 +153,9 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   libSQL (`playlists` table in `src/lib/db.ts`, native order). `/home` and
   `/playlists` read it **on render — no Spotify call**, so pages are
   instant and never block/rate-limit on a library scan. Freshness is the **cron
-  tick's** job: `/api/cron/sync` (every 2 min, no session) re-runs the full scan
-  whenever the store is >30 min old — that is the authoritative refresh.
+  tick's** job: `/api/cron/sync` (no session) rescans one user a tick, each user every
+  30 min while they listen and 150 min idle (`sync_state.next_rescan_at`) — that is the
+  authoritative refresh.
   `playlists-sync.tsx` (client) is only the fallback: it fires
   `POST /api/playlists/sync` when the store is empty or >2 h stale, which in
   practice means a cold start or a dead cron. That POST returns a task id
@@ -208,34 +209,55 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   listening). A heavy user can do hundreds of plays/day, so a once-a-day poll loses
   most of them — don't "optimize" the sync down to infrequent.
 - **History sync runs without `setInterval`** (serverless has no long-running process),
-  and there is **no manual sync button** — it's fully automatic. One shared core
-  (`syncRecentPlays`), triggered by: **in-app polling** while the site is open
-  (`SyncOnLoad` → `POST /api/sync` on load, every 2 min, and on tab-focus; server skips
-  if synced <60 s ago — so an open tab is effectively live, and the home history view also
-  refreshes each minute); and the **app-closed coverage** path — an **external pinger**
-  hitting `/api/cron/sync` with the stored token every 2 min (the Zenbook's user timer
-  `lazyboy-cron-sync.timer`, and the cron-job.org job with its own secret; next bullet), with a daily **Vercel Cron** (`vercel.json`) as the backstop. Every scheduled hit carries `Authorization: Bearer $CRON_SECRET`
+  and there is **no manual sync button** — it's fully automatic. One shared step per user
+  (`sync/step.ts`, run by the tick in `sync/tick.ts`), triggered by: the **two pingers** on
+  `/api/cron/sync` (the Zenbook's user timer `lazyboy-cron-sync.timer` on even minutes, and
+  cron-job.org with its own secret on odd ones; next bullet), with a daily **Vercel Cron**
+  (`vercel.json`) as the backstop; and the **open app** (`SyncOnLoad` → `POST /api/sync`: a
+  load or a return to the tab runs the step at once, the 2-minute timer only when no tick has
+  run in 5 minutes). Every scheduled hit carries `Authorization: Bearer $CRON_SECRET`
   or, from cron-job.org, `Bearer $CRON_SECRET_EXT` (fail-closed: an unset secret rejects all callers; `src/lib/cron-auth.ts`). A GitHub Actions cron drove this at
   first but was removed — GitHub schedules best-effort and real spacing stretched to hours,
   which loses plays against the 50-play window; a dedicated pinger holds a tight cadence.
   A rotation of `CRON_SECRET` must update every copy listed in `docs/SECURITY.md`; a pinger
   left holding the old one fails with a 401 that nothing reports (both the cron-job.org job
   and the Zenbook's root `lazyboy-sync.timer` sat failing that way for months).
-- **Two pingers share one tick per 90 s, so most of their calls do nothing, and cron-job.org's
-  history says nothing.** `/api/cron/sync` stamps the `meta` row `lock:tick` before any work
-  (`acquireLock("tick", 90_000)`); a call inside the window answers 200 `skipped: "recent tick"`.
-  So calling the route twice to test it runs one tick, and a reply with `skipped` is health, not a
-  fault. A failed stamp skips the tick too (`skipped: "store unavailable"`): nothing gets past the
-  guard without it, or a leaked secret in a loop would reach Spotify. `CRON_SECRET_EXT`
-  (cron-job.org) opens `/api/cron/sync` only and always gets a bare `{"ok":true}` at once, before its
-  tick runs in `after()`, even when capture is broken: the owner alarm (503 "no token") answers `CRON_SECRET` alone, read before the stamp so
-  it does not depend on which pinger ticked. To see what ticks did, read the Zenbook's `ping.log`,
-  never cron-job.org's execution history. Never fold `CRON_SECRET_EXT` into `cronAuthorized()`: that
+- **Two pingers share one tick per 45 s, so with both alive the app ticks every minute and
+  each user is still probed every 2 minutes.** `/api/cron/sync` stamps `app_meta.tick_at`
+  before any work (a compare-and-set, `stampTick`); a call inside the window answers 200
+  `skipped: "recent tick"`. So calling the route twice to test it runs one tick, and a reply
+  with `skipped` is health, not a fault. A failed stamp or claim ends the tick (`skipped:
+  "store"`): nothing gets past the guard without it. Users are due on a 2-minute lattice offset
+  by their uid (`nextDue`), so the even minute's tick serves some and the odd minute's the
+  rest; a user's next due time moves only when their step is released. The Zenbook's timer
+  must fire near the top of its minute (`OnCalendar=*:0/2`, `AccuracySec=1s`): systemd's
+  default accuracy places it anywhere in the minute, and past :15 every cron-job.org tick lands
+  inside the 45-s window and is skipped (capture is fine, the cadence halves). `CRON_SECRET_EXT`
+  (cron-job.org) opens `/api/cron/sync` only and always gets a bare `{"ok":true}` at once, before
+  its tick runs in `after()`, even when capture is broken: the owner alarm (503 `no-token`,
+  `admin-status`, `decrypt`) answers `CRON_SECRET` alone, read from the app database before the
+  stamp so it does not depend on which pinger ticked. The Zenbook's body names the admin's step
+  with its trigger and count and a friend's by its code alone, so `ping.log` never records when
+  a friend listens (RULES 11). To see what ticks did, read the Zenbook's `ping.log`, never
+  cron-job.org's execution history. Never fold `CRON_SECRET_EXT` into `cronAuthorized()`: that
   would open the daily chores, the store bench and the usage check to a third party (PLAN §5.5).
+- **The tick's probe is `/me/player` alone, and most ticks harvest nothing.** It reports the
+  active device's track (and 204 only when no device is active), which is all the harvest
+  policy needs (`harvest-policy.ts`). What it saw lives in the user's `meta.probe`, written only
+  when the track or the play state changes. A harvest (one recently-played call, the scarce
+  bucket) runs on a track change, the session's tail and one retry ~5 minutes after it, 25
+  changes, the hourly backstop, or the open app's catch-up; each is tagged `harvest:<trigger>`
+  in `api_log.source`, which is how Phase 3's soak counts them (~150 a day for Rem against 280
+  before). A probe that changes nothing writes nothing and harvests nothing: a quiet tick is
+  one Spotify call per user and a few app-database statements (the stamp, the claim, each
+  user's token read and release), none in the users' own databases.
 - **Day buckets use the user's timezone, sent from the browser — never `'localtime'`.**
   Turso runs in UTC, so `date(played_at, 'localtime')` would bucket by UTC and plays after
   UTC-midnight show up on "tomorrow." Spotify's API has no user timezone, so `TimezoneCookie`
-  writes the browser's UTC offset to a `tzoffset` cookie; `tzOffsetMinutes()` reads it.
+  writes the browser's UTC offset to a `tzoffset` cookie; `tzOffsetMinutes()` reads it. It also
+  writes the IANA zone (`tzname`), which `/api/sync` stores as the user's `user_tz` when it
+  changes: the Home payload is built on the write path, with no cookie, and buckets in that zone
+  (New York until a browser has published one), its DST check against it (design C §3.3).
   `getDailyStats` shifts each play by that offset in JS to bucket by local day; `getPlaysByDay`
   applies it in SQL via `date(played_at, '±N minutes')` (`localDay()` in `db.ts`). Caveat: one
   current offset is applied to all rows, so plays within ~1h of a
