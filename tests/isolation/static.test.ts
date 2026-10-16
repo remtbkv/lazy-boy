@@ -251,6 +251,11 @@ describe("S3: app-db.ts's exports match the reviewed snapshot", () => {
     "execDeletionStatements (function)",
     // Log out: one user's epoch and token row, by the gate's uid (logout-disconnect.test.ts).
     "endSessionsAndCapture (function)",
+    // invalid_grant (§5.4): the request path's stop-and-keep, steps 3-5's read, the revocation;
+    // each takes one uid (t14-invalid-grant.test.ts).
+    "markGrantDead (function)",
+    "markRevoked (function)",
+    "readGrantCase (function)",
   ];
 
   it("lists every export", () => {

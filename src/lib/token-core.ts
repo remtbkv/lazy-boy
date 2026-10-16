@@ -126,7 +126,15 @@ export async function refreshAccessToken(refreshToken: string): Promise<SpotifyT
 
 export const isFresh = (t: SpotifyTokens) => Date.now() / 1000 < t.expiresAt - 60;
 
-export function createTokenCore(store: TokenStore) {
+export type TokenCoreOptions = {
+  /** Phase 4a (PLAN.md §5.4 step 1): a dead grant on the request path stops and keeps instead of
+   *  clearing the row, so the tick's confirming refresh 10 minutes later can ask again. Called once
+   *  the row is shown to still hold the refresh token that died. Without it, the row is cleared
+   *  (the single-user rule). */
+  onDeadGrant?: (uid: Uid) => Promise<void>;
+};
+
+export function createTokenCore(store: TokenStore, opts: TokenCoreOptions = {}) {
   const own = (uid: Uid, t: SpotifyTokens): UserTokens => ({
     uid,
     accessToken: t.accessToken,
@@ -155,6 +163,28 @@ export function createTokenCore(store: TokenStore) {
   async function setTokens(uid: Uid, t: UserTokens): Promise<void> {
     await assertTokenOwner(t, uid);
     await store.set(uid, t);
+    knownDead.delete(uid);
+  }
+
+  // The refresh token that last died for each user on the request path, so an open tab polling a
+  // dead grant does not send it to Spotify's token endpoint at every request. Keyed by uid; the
+  // tick's confirmation (tokenForTick) never reads it, so the question still reaches Spotify.
+  const knownDead = new Map<Uid, string>();
+
+  /** A terminal refresh failure on the request path: stop and keep (opts.onDeadGrant), or clear. */
+  async function deadGrant(uid: Uid, attemptedRefreshToken: string): Promise<void> {
+    if (!opts.onDeadGrant) return clearTokensIfStale(uid, attemptedRefreshToken);
+    const current = await readRow(uid);
+    if (!current || isFresh(current.t) || current.t.refreshToken !== attemptedRefreshToken) return;
+    if (knownDead.get(uid) === attemptedRefreshToken) return;
+    knownDead.set(uid, attemptedRefreshToken);
+    await opts.onDeadGrant(uid);
+  }
+
+  /** The request path's refresh: refreshShared, unless this refresh token is already known dead. */
+  function refreshForRequest(uid: Uid, refreshToken: string): Promise<UserTokens> {
+    if (knownDead.get(uid) === refreshToken) return Promise.reject(new RefreshError(true, "invalid_grant (known)"));
+    return refreshShared(uid);
   }
 
   // A refresh's write lands only over the row it read. If that row moved on (a sign-in wrote a
@@ -266,11 +296,11 @@ export function createTokenCore(store: TokenStore) {
     if (!stored) return null;
     if (isFresh(stored)) return stored;
     try {
-      const fresh = await refreshShared(uid);
+      const fresh = await refreshForRequest(uid, stored.refreshToken);
       await assertTokenOwner(fresh, uid);
       return fresh;
     } catch (e) {
-      if (e instanceof RefreshError && e.terminal) await clearTokensIfStale(uid, stored.refreshToken);
+      if (e instanceof RefreshError && e.terminal) await deadGrant(uid, stored.refreshToken);
       return null;
     }
   }
@@ -293,7 +323,9 @@ export function createTokenCore(store: TokenStore) {
     getStored,
     setTokens,
     clearTokensIfStale,
+    deadGrant,
     refreshShared,
+    refreshForRequest,
     getValidAccessToken,
     tokenForTick,
     assertTokenOwner,

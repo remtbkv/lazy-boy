@@ -6,6 +6,7 @@ import Spotify from "next-auth/providers/spotify";
 import { cookies } from "next/headers";
 import { cache } from "react";
 import { mintUid, ownerUid, type IdentityVerdict, type Uid } from "@/lib/identity";
+import { markGrantDead } from "@/lib/app-db";
 import { readIdentity, resolveSignIn, signedInUser, signInRedirect } from "@/lib/identity-read";
 import { isOwnerSignIn } from "@/lib/owner";
 import { REQUEST_COOKIE, verifyRequestCookie } from "@/lib/request-cookie";
@@ -59,7 +60,7 @@ type SpotifyToken = {
 // all keyed by uid), over Phase 2's encrypted `user_tokens` (token-store-app.ts). The admin's
 // first read in a process copies his plaintext `meta` row in once ever, or, with
 // LB_TOKEN_ROLLBACK=1, writes it back (token-move.ts, PLAN.md §11.4).
-const core = createTokenCore(withAdminTokenMove(appTokenStore(), ownerUid));
+const core = createTokenCore(withAdminTokenMove(appTokenStore(), ownerUid), { onDeadGrant: (uid) => markGrantDead(uid, Date.now()) });
 
 // ── Request-scoped reads ───────────────────────────────────────────────────────────────
 // One tokens read per request instead of one per callback. /home calls auth() twice (the
@@ -252,21 +253,23 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         // refreshShared resolves to the tokens now in the DB (ours, or a winner's) — publish
         // them so the session callback hands out the fresh access token rather than the
         // expired one this request started with.
-        publishTokens(uid, await core.refreshShared(uid));
+        publishTokens(uid, await core.refreshForRequest(uid, stored.refreshToken));
         delete t.error;
       } catch (e) {
         if (e instanceof RefreshError && e.terminal) {
           // Refresh token is genuinely dead → real re-login required, unless another
           // process already rotated to a fresh one (then this failure is a stale race).
-          // Guarded so a DB error while checking doesn't itself crash the callback.
+          // Phase 4a: the user stops with the row kept (needs_reconnect, PLAN.md §5.4 step 1),
+          // so the tick's confirmation can ask Spotify again. Guarded so a DB error while
+          // checking doesn't itself crash the callback.
           try {
-            await core.clearTokensIfStale(uid, stored.refreshToken);
-            // DIRECT read: it has to see the post-clear state, which the request box can't
+            await core.deadGrant(uid, stored.refreshToken);
+            // DIRECT read: it has to see the post-check state, which the request box can't
             // (it still holds the token we just failed with). Publishing the result is what
             // keeps the session callback from handing out that dead token.
             const after = await core.getStored(uid);
             publishTokens(uid, after);
-            if (after) delete t.error;
+            if (after && (isFresh(after) || after.refreshToken !== stored.refreshToken)) delete t.error;
             else t.error = "RefreshAccessTokenError";
           } catch {
             /* DB unreachable — keep the session and retry next request */

@@ -867,6 +867,71 @@ export async function finishGrantConfirm(uid: Uid | string, outcome: "ok" | "dea
   });
 }
 
+/** §5.4 step 1 on the request path (Phase 4a): a refresh answered invalid_grant during a page or
+ *  route, so the user stops, keeping their data and blob, exactly as the tick does: active →
+ *  needs_reconnect by compare-and-set, and only if that landed, the queue row's error (what the
+ *  confirmation looks for) and an `invalid-grant` event. */
+export async function markGrantDead(uid: Uid | string, now: number): Promise<void> {
+  // changes() is the previous statement's count on this connection: each later statement runs only
+  // when the compare-and-set before it moved the row, so a second failure writes nothing.
+  await (await appClient()).batch(
+    [
+      { sql: "UPDATE users SET status = 'needs_reconnect', status_at = :now WHERE uid = :uid AND status = 'active'", args: { uid, now } },
+      { sql: "INSERT INTO events (at, uid, code) SELECT :now, :uid, 'invalid-grant' WHERE changes() = 1", args: { uid, now } },
+      {
+        sql: `INSERT INTO sync_state (uid, state, next_probe_at, last_error) SELECT :uid, 'idle', :now, 'invalid_grant' WHERE changes() = 1
+              ON CONFLICT(uid) DO UPDATE SET last_error = 'invalid_grant'`,
+        args: { uid, now },
+      },
+    ],
+    "write",
+  );
+}
+
+/** What §5.4 steps 3-5 decide a confirmed dead grant from: whether it is the admin's, when the
+ *  stored refresh token was granted (epoch s), and the app-wide picture: users hit by invalid_grant
+ *  in the last 24 hours, and `grant-wide` events since `wideSince`. */
+export async function readGrantCase(
+  uid: Uid | string,
+  now: number,
+  wideSince: number,
+): Promise<{ isAdmin: boolean; grantedAt: number | null; users24h: number; admin24h: boolean; grantWide: number }> {
+  const r = await one({
+    sql: `SELECT (SELECT is_admin FROM users WHERE uid = :uid) AS is_admin,
+                 (SELECT granted_at FROM user_tokens WHERE uid = :uid) AS granted_at,
+                 (SELECT count(DISTINCT e.uid) FROM events e WHERE e.code = 'invalid-grant' AND e.at >= :day) AS users24h,
+                 (SELECT count(*) FROM events e JOIN users u ON u.uid = e.uid
+                    WHERE u.is_admin = 1 AND e.code = 'invalid-grant' AND e.at >= :day) AS admin24h,
+                 (SELECT count(*) FROM events WHERE code = 'grant-wide' AND at >= :wide) AS wide`,
+    args: { uid, day: now - 24 * 3_600_000, wide: wideSince },
+  });
+  const x = r.rows[0];
+  return {
+    isAdmin: Number(x.is_admin) === 1,
+    grantedAt: x.granted_at == null ? null : Number(x.granted_at),
+    users24h: Number(x.users24h),
+    admin24h: Number(x.admin24h) > 0,
+    grantWide: Number(x.wide),
+  };
+}
+
+/** §5.4 step 5: a friend's confirmed revocation. `revoked` keeps the status_at needs_reconnect
+ *  stamped at the first failure, so status_at is the day-4 clock; never the admin. An alarm
+ *  (`revoked` event) goes to Rem. True when it landed. */
+export async function markRevoked(uid: Uid | string, now: number): Promise<boolean> {
+  const [r] = await (await appClient()).batch(
+    [
+      { sql: "UPDATE users SET status = 'revoked' WHERE uid = :uid AND status = 'needs_reconnect' AND is_admin = 0", args: { uid } },
+      {
+        sql: "INSERT INTO events (at, uid, code) SELECT :now, :uid, 'revoked' WHERE EXISTS (SELECT 1 FROM users WHERE uid = :uid AND status = 'revoked')",
+        args: { uid, now },
+      },
+    ],
+    "write",
+  );
+  return r.rowsAffected === 1;
+}
+
 /** §5.4 step 3: how many users got invalid_grant since `since`, and whether the admin did. */
 export async function grantFailuresSince(since: number): Promise<{ users: number; admin: boolean }> {
   const r = await one({

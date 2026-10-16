@@ -58,6 +58,7 @@ const REGISTRY: Record<string, Status> = {
   "src/app/api/join/link/route.ts": { exempt: "the join link: a token whose hash opens one approved invite; reads no user data (join-routes.test.ts)" },
   "src/app/(auth)/signed-out/page.tsx": { exempt: "the page after Log out: static text, no session or reads (logout-disconnect.test.ts)" },
   "src/app/(auth)/disconnected/page.tsx": { exempt: "the page after Disconnect: static text, no session or reads" },
+  "src/app/(auth)/reconnect/page.tsx": { exempt: "decision 20's page for a dead grant: static text and the sign-in, no session or reads" },
   "src/app/kbtest/page.tsx": { exempt: "dev-only keyboard test page; notFound() in production" },
   "src/app/api/build/route.ts": { exempt: "build id, no auth and no store by design (GOTCHAS)" },
   "src/app/api/auth/[...nextauth]/route.ts": { exempt: "Auth.js" },

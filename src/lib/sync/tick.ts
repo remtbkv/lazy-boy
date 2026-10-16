@@ -29,6 +29,7 @@ import type { Claim, ClaimedUser, OwnerAlarmRow, Release } from "@/lib/app-db";
 import { BRAKE_ON } from "@/lib/brake";
 import { LIBRARY_RESCAN_MS, type Mode } from "@/lib/budget/modes";
 import type { CronCaller } from "@/lib/cron-auth";
+import { confirmedDeadGrant, GRANT_WIDE_HOLD_MS } from "@/lib/grant-policy";
 import { DAILY_STALE_MS } from "@/lib/health";
 import { EARLY_MS, backoffMs, nextDue, syncStateFor, type HarvestTrigger } from "@/lib/harvest-policy";
 import type { Uid } from "@/lib/identity";
@@ -57,6 +58,8 @@ export type TickQueue = Pick<
   | "releaseAppLock"
   | "setAppMeta"
   | "getAppMeta"
+  | "readGrantCase"
+  | "markRevoked"
 >;
 export const appQueue: TickQueue = appDb;
 
@@ -304,6 +307,12 @@ async function confirmGrant(deps: TickDeps, uid: Uid, now: number): Promise<void
   }
   if (result === "ok") await deps.queue.moveStatus(uid, "needs_reconnect", "active", now);
   await deps.queue.finishGrantConfirm(uid, result, now);
+  // Steps 3-5 (Phase 4a): app-wide, expired or the admin's stays needs_reconnect; a friend's young
+  // grant is a revocation, deleted on day 4 by the daily chores unless they sign in first.
+  if (result === "dead") {
+    const c = await deps.queue.readGrantCase(uid, now, now - GRANT_WIDE_HOLD_MS);
+    if (confirmedDeadGrant({ ...c, nowMs: now }) === "revoked") await deps.queue.markRevoked(uid, now);
+  }
 }
 
 /** At most one library rescan (§7.7), for the most overdue user whose step succeeded, and none
