@@ -274,6 +274,17 @@ export class Resources {
     };
   }
 
+  /** The cron's probe (multi-user PLAN.md §7.3): `/me/player` alone, one call. It reports the
+   *  active device's track even where currently-playing answers 204 mid-playback, and 204 (null
+   *  here) only when no device is active. An item that is not a track (an episode) has no id. */
+  async playerState(): Promise<{ trackId: string | null; isPlaying: boolean; progressMs: number } | null> {
+    const data = await this.http.get<
+      { is_playing?: boolean; progress_ms?: number | null; item?: { id?: string | null } | null } | undefined
+    >("/me/player");
+    if (!data) return null;
+    return { trackId: data.item?.id ?? null, isPlaying: Boolean(data.is_playing), progressMs: data.progress_ms ?? 0 };
+  }
+
   /** Add a track to the active device's playback queue. 404 if no active device. */
   async addToQueue(uri: string): Promise<void> {
     await this.http.post(`/me/player/queue?uri=${encodeURIComponent(uri)}`);

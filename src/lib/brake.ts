@@ -28,6 +28,11 @@ export function quotaDay(now: number): string {
   return new Date(QUOTA_ANCHOR_MS + idx * DAY_MS).toISOString().slice(0, 10);
 }
 
+/** When the quota day that `now` falls in ends: the observed reset a QUOTA_EXCEEDED waits for. */
+export function nextQuotaReset(now: number): number {
+  return QUOTA_ANCHOR_MS + (Math.floor((now - QUOTA_ANCHOR_MS) / DAY_MS) + 1) * DAY_MS;
+}
+
 /** One user's share: the budget over the users the claim can lease. */
 export function shareOf(users: number): number {
   return APP_DAILY_BUDGET / users;
