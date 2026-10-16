@@ -1,6 +1,7 @@
 import "server-only";
 import { after } from "next/server";
 import { tokenForTick } from "@/lib/auth";
+import { currentMode } from "@/lib/budget/mode";
 import { cronCaller } from "@/lib/cron-auth";
 import { forUserAt, type UserStore } from "@/lib/db";
 import { signupsMode } from "@/lib/identity";
@@ -45,6 +46,7 @@ export function liveTickDeps(dailyChores: TickDeps["dailyChores"] = async () => 
     tokenFor: tokenForTick,
     after: (work) => after(work),
     dailyChores,
+    budgetMode: currentMode,
     config: { ...PHASE3_TICK, signups: signupsMode() },
   };
 }

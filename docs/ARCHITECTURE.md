@@ -323,8 +323,9 @@ itself and backs off before a limit (docs/multi-user/CAPACITY.md §6).
   `minPollMs` (0, 30 s, 60 s), a floor under every scheduled poll (`planNextPoll`); `/api/sync`
   replies carry `intervalMs` (2, 5, 5 minutes), which SyncOnLoad's loop and Home's open-tab
   refresh follow (`sync-interval.ts`), and in freeze it syncs nothing; the cron tick's library
-  rescan runs every 30 minutes, 2 hours, never; the all-time recompute's gate is 10, 30, 30
-  minutes.
+  rescans keep the tick's own cadence in normal (30 minutes active, 2.5 hours idle), come at
+  least 2 hours apart in economy and not at all in freeze (`maybeRescan`, `TickDeps.budgetMode`);
+  the all-time recompute's gate is 10, 30, 30 minutes.
 - **Reporting.** `/usage` shows each dimension's month-to-date, projection, share and mode. The
   hourly health check answers 500 (`budget`) while the stored mode is economy or freeze, and
   (`meter`) when `cpu_meter` has not been written for six hours or ever.
