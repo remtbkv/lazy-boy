@@ -355,6 +355,34 @@ describe("T4: the lease and the brake's counter, through the tick", () => {
     expect(await row(A)).toMatchObject({ lease_owner: null, last_ok_at: NOW + 51_000 });
   });
 
+  it("a dead grant met by a slow store still gets its confirmation 10 minutes on (§5.4 step 2)", async () => {
+    install({ [`at-${A}`]: healthy(A), [`at-${B}`]: healthy(B) });
+    let grant: "dead" | "alive" = "dead";
+    const tokenFor = tokenSource({
+      [A]: () => {
+        if (grant === "dead") throw new RefreshError(true, "invalid_grant");
+        return { uid: A, accessToken: `at-${A}`, refreshToken: "rt", expiresAt: 4_000_000_000 };
+      },
+    });
+    // The status write takes longer than what is left of the 50-s lease.
+    const first = tickDeps({ now: () => NOW, stores, tokenFor });
+    const moveStatus = first.deps.queue.moveStatus;
+    first.deps.queue = {
+      ...first.deps.queue,
+      moveStatus: async (...args) => {
+        const real = Date.now.bind(Date);
+        vi.spyOn(Date, "now").mockImplementation(() => real() + 60_000);
+        return moveStatus(...args);
+      },
+    };
+    await runTick(first.deps, ZEN);
+    vi.mocked(Date.now).mockRestore();
+    expect((await q("SELECT status FROM users WHERE uid = :u", { u: A }))[0].status).toBe("needs_reconnect");
+    grant = "alive";
+    await runTick(tickDeps({ now: () => NOW + 11 * MIN, stores, tokenFor }).deps, ZEN);
+    expect((await q("SELECT status FROM users WHERE uid = :u", { u: A }))[0].status).toBe("active");
+  });
+
   it("the brake counts a harvest before it is made, and counts one Spotify refuses (§7.5 item 1)", async () => {
     const spotify = install({ [`at-${A}`]: { player: playing(`${A}-now`), recent: 502 }, [`at-${B}`]: healthy(B) });
     const harvestsBefore: number[] = [];
