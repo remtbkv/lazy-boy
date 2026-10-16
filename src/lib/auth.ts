@@ -10,9 +10,10 @@ import { markGrantDead } from "@/lib/app-db";
 import { readIdentity, resolveSignIn, signedInUser, signInRedirect } from "@/lib/identity-read";
 import { isOwnerSignIn } from "@/lib/owner";
 import { REQUEST_COOKIE, verifyRequestCookie } from "@/lib/request-cookie";
+import { spotifyScopes } from "@/lib/scopes";
 import { gateJwt, sessionFields, signInClaims } from "@/lib/session-gate";
 import type { OwnedToken } from "@/lib/spotify";
-import { SPOTIFY_NOT_REGISTERED, spotifyUserinfo } from "@/lib/spotify/userinfo";
+import { SPOTIFY_NOT_REGISTERED, SPOTIFY_UNAVAILABLE, spotifyUserinfo } from "@/lib/spotify/userinfo";
 import { createTokenCore, isFresh, RefreshError, type UserTokens } from "@/lib/token-core";
 import { withAdminTokenMove } from "@/lib/token-move";
 import { appTokenStore } from "@/lib/token-store-app";
@@ -30,22 +31,9 @@ const ORIGIN = (process.env.AUTH_URL ?? "http://127.0.0.1:3000")
   .replace("localhost", "127.0.0.1");
 const CALLBACK_URL = `${ORIGIN}/api/auth/callback/spotify`;
 
-// Scopes ported from PlaylistManager.py (read/modify library, playlists, playback).
-const SCOPES = [
-  "user-read-private",
-  "user-read-email",
-  "user-library-read",
-  "user-library-modify",
-  "playlist-read-private",
-  "playlist-read-collaborative",
-  "playlist-modify-private",
-  "playlist-modify-public",
-  "user-read-playback-state",
-  "user-read-currently-playing",
-  "user-modify-playback-state",
-  "user-read-recently-played",
-  "user-read-playback-position",
-].join(" ");
+// Scopes ported from PlaylistManager.py (read/modify library, playlists, playback); the two
+// profile scopes go when scopes.ts's DROP_PROFILE_SCOPES says so (PLAN.md §12.1).
+const SCOPES = spotifyScopes();
 
 // Custom fields we stash on the JWT (kept local so the callbacks don't depend on
 // module-augmentation resolution).
@@ -187,6 +175,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     // account_id (identity-read.ts): a refusal is AccessDenied or a named case on /login.
     async signIn({ profile }) {
       if (profile?.id === SPOTIFY_NOT_REGISTERED) return "/login?error=SpotifyNotRegistered";
+      if (profile?.id === SPOTIFY_UNAVAILABLE) return "/login?error=SpotifyUnavailable";
       if (!(await isOwnerSignIn(profile?.id ?? undefined))) return false;
       // Phase 4a: the request this sign-in may claim, from the signed cookie /join left.
       const rid = verifyRequestCookie((await cookies()).get(REQUEST_COOKIE)?.value, Date.now());

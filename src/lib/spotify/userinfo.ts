@@ -12,6 +12,9 @@
 // It runs once per sign-in, inside Auth.js's own OAuth step, never from app code.
 
 export const SPOTIFY_NOT_REGISTERED = "spotify-not-registered";
+// Any other failure (a 429, a 5xx, a network error) says nothing about the account: the signIn
+// callback answers it "try again", never "not registered" (multi-user PLAN.md §5.1, Phase 4a).
+export const SPOTIFY_UNAVAILABLE = "spotify-unavailable";
 
 type SpotifyProfile = {
   id: string;
@@ -35,7 +38,7 @@ export async function spotifyUserinfo({
   const body = await res.text();
   if (!res.ok) {
     console.warn(`[auth] spotify /v1/me answered ${res.status}: ${body.slice(0, 200)}`);
-    return { id: SPOTIFY_NOT_REGISTERED, display_name: null, email: null, images: [] };
+    return { id: res.status === 403 ? SPOTIFY_NOT_REGISTERED : SPOTIFY_UNAVAILABLE, display_name: null, email: null, images: [] };
   }
   return JSON.parse(body) as SpotifyProfile;
 }
