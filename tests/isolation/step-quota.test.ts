@@ -15,6 +15,12 @@ const NOW = Date.UTC(2026, 9, 16, 18, 0);
 let db: ReturnType<typeof freshAppDb>;
 const q = async (sql: string, args: Record<string, string | number | null> = {}) => (await db.raw().execute({ sql, args })).rows;
 let stores: { [k: string]: ReturnType<typeof memoryStepStore> };
+const next1800Utc = (ms: number) => {
+  const d = new Date(ms);
+  d.setUTCHours(18, 0, 0, 0);
+  if (d.getTime() <= ms) d.setUTCDate(d.getUTCDate() + 1);
+  return d.getTime();
+};
 
 beforeEach(async () => {
   db = freshAppDb();
@@ -27,6 +33,7 @@ beforeEach(async () => {
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 afterEach(() => {
+  vi.useRealTimers();
   db.close();
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
@@ -63,17 +70,25 @@ describe("429s by kind", () => {
       [`at-${R}`]: { player: { trackId: "r-now", isPlaying: true, progressMs: 1 }, recent: { status: 429, body: quota } },
     });
     vi.stubGlobal("fetch", spotify.fetch);
-    let t = NOW;
+    // client.ts stamps its cooldown from the wall clock, the step from the tick's clock, and the
+    // row keeps the later: hold both on one instant, an 18:00 UTC (far from the 14:51 reset, so
+    // the cap is what applies) after the first case's one-second rate limit. With the wall clock
+    // free, this case passed only while the suite ran before NOW.
+    const T = next1800Utc(Date.now() + 60_000);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T);
+    let t = T;
     const { deps } = tickDeps({ now: () => t, stores, config: { signups: "owner" } });
     const r = await runTick(deps, ZEN);
     expect(r.body.steps).toEqual([{ uid: R, outcome: "quota", trigger: "backstop" }]);
     // Until the observed reset (14:51 UTC tomorrow) but no longer than the client's 30-minute cap.
-    expect(await getAppMeta("cooldown:recently-played")).toBe(String(NOW + 30 * 60_000));
+    expect(await getAppMeta("cooldown:recently-played")).toBe(String(T + 30 * 60_000));
     expect((await q("SELECT state, failures, last_error FROM sync_state"))[0]).toEqual({ state: "active", failures: 0, last_error: "quota" });
     // The next tick inside the cooldown does not ask recently-played again.
     const recentCalls = () => spotify.calls.filter((c) => c.path === "/v1/me/player/recently-played").length;
     const before = recentCalls();
-    t = NOW + 2 * 60_000;
+    t = T + 2 * 60_000;
+    vi.setSystemTime(t);
     await runTick(deps, ZEN);
     expect(recentCalls()).toBe(before);
   }, 30_000);
