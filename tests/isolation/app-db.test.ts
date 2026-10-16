@@ -67,7 +67,7 @@ describe("the client rides the store fetch (PLAN.md §4.2)", () => {
 describe("the schema, versioned (PLAN.md §4.5)", () => {
   it("the first open creates every table at the code's version", async () => {
     const tables = (await q("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")).map((r) => r.name);
-    expect(tables).toEqual(["app_meta", "events", "sync_state", "user_tokens", "users"]);
+    expect(tables).toEqual(["app_meta", "events", "requests", "sync_state", "user_tokens", "users"]);
     const meta = Object.fromEntries(
       (await q("SELECT key, value FROM app_meta")).map((r) => [String(r.key), String(r.value)]),
     );
@@ -81,8 +81,21 @@ describe("the schema, versioned (PLAN.md §4.5)", () => {
     const empty = createClient({ url: `${db.url}.other` });
     await expect(app.ensureAppSchema(empty, false)).rejects.toThrow(/production deploy/);
     await app.ensureAppSchema(empty, true);
-    expect((await empty.execute("SELECT value FROM app_meta WHERE key = 'schema_version'")).rows[0].value).toBe("1");
+    expect((await empty.execute("SELECT value FROM app_meta WHERE key = 'schema_version'")).rows[0].value).toBe(String(app.APP_SCHEMA_VERSION));
     empty.close();
+  });
+  it("Phase 4a's requests table is additive: a version-1 database steps up and min_reader stays 1", async () => {
+    const v1 = createClient({ url: `${db.url}.v1` });
+    for (const stmt of app.APP_SCHEMA[0].statements) await v1.execute(stmt);
+    await v1.execute("CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT)");
+    await v1.execute("INSERT INTO app_meta VALUES ('schema_version', '1'), ('min_reader', '1')");
+    await v1.execute("INSERT INTO users (uid, spotify_id, db_name, status, status_at, invited_at) VALUES ('aaaaaaaaaaaa', 'rem', 'lazyboy', 'active', 0, 0)");
+    await app.ensureAppSchema(v1, true);
+    const meta = Object.fromEntries((await v1.execute("SELECT key, value FROM app_meta")).rows.map((r) => [r.key, r.value]));
+    expect(meta).toEqual({ schema_version: "2", min_reader: "1" });
+    expect((await v1.execute("SELECT count(*) AS n FROM users")).rows[0].n).toBe(1);
+    expect((await v1.execute("SELECT count(*) AS n FROM requests")).rows[0].n).toBe(0);
+    v1.close();
   });
 });
 

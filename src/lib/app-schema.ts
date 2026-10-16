@@ -79,6 +79,32 @@ export const APP_SCHEMA: readonly SchemaStep[] = [
       `CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT)`,
     ],
   },
+  {
+    // Phase 4a: sign-up is a request form (RULINGS Oct 15 12:46 PM). A request holds what the form
+    // took (the e-mail on the person's Spotify account, a name or a filler, the terms version they
+    // accepted, when); `invite.mjs --approve` links it to the `invited` users row it provisions
+    // (`uid`) and to the join link's token by its hash (`join_hash`); the claim marks it
+    // `claimed`. Statuses: pending | approved | claimed. A declined or expired request is deleted,
+    // and so is a claimed one with its account (§12.3 step 1), since it holds the e-mail.
+    version: 2,
+    kind: "additive",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS requests (
+        id            TEXT PRIMARY KEY,
+        email         TEXT NOT NULL,
+        name          TEXT NOT NULL,
+        status        TEXT NOT NULL,
+        created_at    INTEGER NOT NULL,
+        status_at     INTEGER NOT NULL,
+        terms_version TEXT NOT NULL,
+        uid           TEXT UNIQUE,
+        join_hash     TEXT UNIQUE
+      )`,
+      // One open request per address, so a resubmission cannot hand out a second cookie for it.
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_requests_open_email ON requests (email) WHERE status IN ('pending', 'approved')`,
+      `CREATE INDEX IF NOT EXISTS idx_requests_created ON requests (created_at)`,
+    ],
+  },
 ];
 
 export const APP_SCHEMA_VERSION = APP_SCHEMA[APP_SCHEMA.length - 1].version;

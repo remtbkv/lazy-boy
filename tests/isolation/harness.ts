@@ -142,6 +142,23 @@ export async function seedUser(
   });
 }
 
+/** What `invite.mjs --approve` leaves (Phase 4a): an `invited` users row with no account_id and a
+ *  placeholder Spotify id, and its request `approved` and linked to it. Seeded raw, for tests of
+ *  the claim; the script's own path is tested in tests/invite-script.test.ts. */
+export async function seedApprovedInvite(raw: Client, o: { rid: string; uid: string; invitedAt: number }): Promise<void> {
+  await raw.batch(
+    [
+      {
+        sql: `INSERT INTO users (uid, account_id, spotify_id, db_name, status, status_at, is_admin, session_epoch, invited_at)
+              VALUES (:uid, NULL, :sid, :db, 'invited', :at, 0, 0, :at)`,
+        args: { uid: o.uid, sid: `invite:${o.rid}`, db: `lb-u-${o.uid}`, at: o.invitedAt },
+      },
+      { sql: "UPDATE requests SET status = 'approved', status_at = :at, uid = :uid WHERE id = :rid", args: { ...o, at: o.invitedAt } },
+    ],
+    "write",
+  );
+}
+
 type Pair = { accessToken: string; refreshToken: string };
 export type Cipher = {
   encrypt: (keys: TokenKey[], uid: string, t: Pair) => string;

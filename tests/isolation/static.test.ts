@@ -233,6 +233,20 @@ describe("S3: app-db.ts's exports match the reviewed snapshot", () => {
     "scheduleRescan (function)",
     "stampTick (function)",
     "startGrantConfirm (function)",
+    // Phase 4a, sign-up. Cross-user by design: createJoinRequest (no uid: a stranger's insert,
+    // bounded in SQL), requestForJoinToken (the join link), claimInvite (binds the signing-in
+    // account to the invite its request cookie names, once); join-request.test.ts, t9-claim.test.ts.
+    "INVITE_TTL_MS (const)",
+    "JOIN_PENDING_CAP (const)",
+    "JOIN_PER_HOUR (const)",
+    "SEATS (const)",
+    "JoinRefusal (type)",
+    "JoinResult (type)",
+    "RequestState (type)",
+    "claimInvite (function)",
+    "createJoinRequest (function)",
+    "requestForJoinToken (function)",
+    "requestState (function)",
   ];
 
   it("lists every export", () => {

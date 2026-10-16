@@ -14,6 +14,7 @@
 import "server-only";
 import {
   bindAdminAccount,
+  claimInvite,
   findUserByAccountId,
   moveStatus,
   readIdentityRow,
@@ -69,8 +70,11 @@ export type SignInOutcome =
 const accountIdOf = (p: SignInProfile) => (typeof p.account_id === "string" && p.account_id ? p.account_id : null);
 
 /** The signIn callback's decision. Writes only the sign-in's own row: the admin's first
- *  binding, a dead grant's return to `active` (by compare-and-set), and `last_sign_in`. */
-export async function resolveSignIn(profile: SignInProfile, now = Date.now()): Promise<SignInOutcome> {
+ *  binding, the claim of the invite its request cookie names (Phase 4a; `requestId` is what
+ *  request-cookie.ts verified, never a raw cookie), a dead grant's return to `active` (by
+ *  compare-and-set), and `last_sign_in`. An account that already has a row signs in as that row
+ *  whatever cookie it carries, so an existing user can never claim someone else's invite. */
+export async function resolveSignIn(profile: SignInProfile, now = Date.now(), requestId: string | null = null): Promise<SignInOutcome> {
   const aid = accountIdOf(profile);
   const sid = typeof profile.id === "string" ? profile.id : "";
   if (!aid || !sid) {
@@ -78,6 +82,8 @@ export async function resolveSignIn(profile: SignInProfile, now = Date.now()): P
     return { kind: "refused", code: "NoAccountId" };
   }
   let user = (await findUserByAccountId(aid)) ?? (await bindAdminAccount(aid, sid, now));
+  // SIGNUPS=owner refuses a claim before it is attempted, so nothing is written.
+  if (!user && requestId && signupsMode() === "invite") user = await claimInvite(requestId, aid, sid, now);
   // Every refusal comes before any write. A fresh consent is what needs_reconnect and revoked
   // were waiting for; if someone else moved the row first (the deletion job), decide again on
   // what it says now.

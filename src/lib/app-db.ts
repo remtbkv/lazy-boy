@@ -17,8 +17,9 @@ import path from "node:path";
 import { createClient, type Client, type InStatement, type ResultSet } from "@libsql/client";
 import { APP_SCHEMA, APP_SCHEMA_VERSION, appSchemaBatches, USER_STATUSES, type UserStatus } from "@/lib/app-schema";
 import { quotaDay } from "@/lib/brake";
-import { mintUid, type IdentityRow, type Uid } from "@/lib/identity";
+import { mintUid, newUid, signupsMode, type IdentityRow, type Uid } from "@/lib/identity";
 import { makeStoreFetch, type FetchLike } from "@/lib/store-fetch";
+import { TERMS_VERSION } from "@/lib/terms";
 
 export { APP_SCHEMA, APP_SCHEMA_VERSION, USER_STATUSES, type UserStatus };
 
@@ -213,6 +214,119 @@ export async function moveStatus(uid: string, from: UserStatus, to: UserStatus, 
     args: { uid, from, to, now },
   });
   return r.rowsAffected === 1;
+}
+
+// ── requests and invites (Phase 4a; RULINGS Oct 15 12:46 PM, PLAN.md §12.1) ────────────────
+// The form's insert is the one statement a stranger can reach, so it is bounded in SQL: shut
+// under SIGNUPS=owner, at most JOIN_PER_HOUR new requests an hour app-wide, at most
+// JOIN_PENDING_CAP waiting, none once SEATS people hold places, one open request per address.
+// It never creates a database; `invite.mjs --approve` provisions on the Mac (§12.1).
+
+export const JOIN_PER_HOUR = 5;
+export const JOIN_PENDING_CAP = 8;
+/** Spotify's User Management allows five accounts, Rem's included: four friends at most. */
+export const SEATS = 5;
+export const INVITE_TTL_MS = 14 * 86_400_000;
+const NAME_MAX = 80;
+const NAME_FILLER = "A friend";
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export type JoinRefusal = "closed" | "terms" | "email" | "name" | "duplicate" | "busy" | "full";
+export type JoinResult = { ok: true; id: string } | { ok: false; reason: JoinRefusal };
+
+export async function createJoinRequest(o: { email: string; name: string; agreed: boolean; now: number }): Promise<JoinResult> {
+  if (signupsMode() !== "invite") return { ok: false, reason: "closed" };
+  if (!o.agreed) return { ok: false, reason: "terms" };
+  const email = o.email.trim().toLowerCase();
+  if (email.length > 254 || !EMAIL_RE.test(email)) return { ok: false, reason: "email" };
+  const name = o.name.replace(/[\u0000-\u001f\u007f]/g, "").trim();
+  if (name.length > NAME_MAX) return { ok: false, reason: "name" };
+  const args = {
+    id: newUid(),
+    email,
+    name: name || NAME_FILLER,
+    now: o.now,
+    tv: TERMS_VERSION,
+    hour: o.now - 3_600_000,
+    perHour: JOIN_PER_HOUR,
+    cap: JOIN_PENDING_CAP,
+    seats: SEATS,
+  };
+  const [state, ins] = await (await appClient()).batch(
+    [
+      {
+        sql: `SELECT (SELECT count(*) FROM users WHERE status <> 'deleted') AS held,
+                     (SELECT count(*) FROM requests WHERE status = 'pending') AS pending,
+                     (SELECT count(*) FROM requests WHERE created_at > :hour) AS recent,
+                     (SELECT count(*) FROM requests WHERE email = :email AND status IN ('pending', 'approved')) AS dup`,
+        args,
+      },
+      {
+        sql: `INSERT INTO requests (id, email, name, status, created_at, status_at, terms_version)
+              SELECT :id, :email, :name, 'pending', :now, :now, :tv
+              WHERE (SELECT count(*) FROM users WHERE status <> 'deleted') < :seats
+                AND (SELECT count(*) FROM requests WHERE status = 'pending') < :cap
+                AND (SELECT count(*) FROM requests WHERE created_at > :hour) < :perHour
+              ON CONFLICT DO NOTHING`,
+        args,
+      },
+    ],
+    "write",
+  );
+  if (ins.rowsAffected === 1) return { ok: true, id: args.id };
+  const s = state.rows[0];
+  if (Number(s.dup) > 0) return { ok: false, reason: "duplicate" };
+  if (Number(s.held) >= SEATS || Number(s.pending) >= JOIN_PENDING_CAP) return { ok: false, reason: "full" };
+  return { ok: false, reason: "busy" };
+}
+
+export type RequestState = "pending" | "approved" | "claimed" | null;
+
+/** What /join shows the holder of a request cookie: where their request stands, nothing else. */
+export async function requestState(id: string): Promise<RequestState> {
+  const r = await one({ sql: "SELECT status FROM requests WHERE id = :id", args: { id } });
+  const s = r.rows[0]?.status;
+  return s === "pending" || s === "approved" || s === "claimed" ? s : null;
+}
+
+/** The join link (`/api/join/link?t=…`): the request whose approved invite its token opens, while
+ *  the invite is unclaimed and under 14 days old. The database holds only the token's hash. */
+export async function requestForJoinToken(tokenHash: string, now: number): Promise<string | null> {
+  const r = await one({
+    sql: `SELECT r.id FROM requests r JOIN users u ON u.uid = r.uid
+          WHERE r.join_hash = :h AND r.status = 'approved' AND u.status = 'invited' AND u.invited_at > :expiry`,
+    args: { h: tokenHash, expiry: now - INVITE_TTL_MS },
+  });
+  return r.rows[0] ? String(r.rows[0].id) : null;
+}
+
+/** The claim (PLAN.md §5.1's compare-and-set, keyed on the request the cookie names): binds this
+ *  account_id to that request's `invited` row, once, while it is unclaimed and under 14 days old,
+ *  copying the terms the request accepted; and marks the request claimed. Cross-user by design (no
+ *  uid yet). Null when there is nothing to claim. */
+export async function claimInvite(requestId: string, accountId: string, spotifyId: string, now: number): Promise<UserRow | null> {
+  const args = { rid: requestId, aid: accountId, sid: spotifyId, now, expiry: now - INVITE_TTL_MS };
+  const [claimed] = await (await appClient()).batch(
+    [
+      {
+        sql: `UPDATE users SET account_id = :aid, spotify_id = :sid, status = 'active', status_at = :now,
+                     claimed_at = :now, last_sign_in = :now,
+                     terms_version = (SELECT terms_version FROM requests WHERE id = :rid),
+                     terms_accepted_at = (SELECT created_at FROM requests WHERE id = :rid)
+              WHERE status = 'invited' AND account_id IS NULL AND is_admin = 0 AND invited_at > :expiry
+                AND uid = (SELECT uid FROM requests WHERE id = :rid AND status = 'approved')
+              RETURNING ${USER_COLS}`,
+        args,
+      },
+      {
+        sql: `UPDATE requests SET status = 'claimed', status_at = :now, join_hash = NULL
+              WHERE id = :rid AND status = 'approved' AND uid IN (SELECT uid FROM users WHERE account_id = :aid)`,
+        args,
+      },
+    ],
+    "write",
+  );
+  return claimed.rows[0] ? toUser(claimed.rows[0]) : null;
 }
 
 // ── user_tokens ─────────────────────────────────────────────────────────────────────────

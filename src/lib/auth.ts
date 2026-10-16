@@ -3,10 +3,12 @@
 
 import NextAuth, { customFetch } from "next-auth";
 import Spotify from "next-auth/providers/spotify";
+import { cookies } from "next/headers";
 import { cache } from "react";
 import { mintUid, ownerUid, type IdentityVerdict, type Uid } from "@/lib/identity";
 import { readIdentity, resolveSignIn, signedInUser, signInRedirect } from "@/lib/identity-read";
 import { isOwnerSignIn } from "@/lib/owner";
+import { REQUEST_COOKIE, verifyRequestCookie } from "@/lib/request-cookie";
 import { gateJwt, sessionFields, signInClaims } from "@/lib/session-gate";
 import type { OwnedToken } from "@/lib/spotify";
 import { SPOTIFY_NOT_REGISTERED, spotifyUserinfo } from "@/lib/spotify/userinfo";
@@ -193,7 +195,9 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     async signIn({ profile }) {
       if (profile?.id === SPOTIFY_NOT_REGISTERED) return "/login?error=SpotifyNotRegistered";
       if (!(await isOwnerSignIn(profile?.id ?? undefined))) return false;
-      const o = await resolveSignIn(profile ?? {});
+      // Phase 4a: the request this sign-in may claim, from the signed cookie /join left.
+      const rid = verifyRequestCookie((await cookies()).get(REQUEST_COOKIE)?.value, Date.now());
+      const o = await resolveSignIn(profile ?? {}, Date.now(), rid);
       return o.kind === "allowed" ? true : signInRedirect(o);
     },
     async jwt({ token, account, profile }) {
