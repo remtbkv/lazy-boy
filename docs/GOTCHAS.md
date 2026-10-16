@@ -608,6 +608,44 @@ turns that redirect into a literal `"NEXT_REDIRECT"` error toast. Every catch th
 `unstable_rethrow(e)` from `next/navigation` — see `fail()` in `(app)/actions.ts`. Keep
 that line first in any new action's catch.
 
+## The budget meter and its modes (`src/lib/budget/`)
+
+ARCHITECTURE.md "The budget" has the design. What bites:
+
+- **The health check turns red (500, e-mail through cron-job.org) for two budget reasons.**
+  `budget`: `meta.budget_mode` is economy or freeze, i.e. some dimension's projected month is
+  past 60% of its hard limit (or was, and has not fallen to 50%); `/usage`'s budget table says
+  which. `meter`: `cpu_meter` has not been written for six hours, or ever. Every cron tick is
+  metered, so a quiet meter means the meter is broken (or the telemetry store refuses it), not
+  that nothing ran.
+- **The meter reads Next's request scope through a Next-internal module**
+  (`next/dist/server/app-render/work-async-storage.external`, the store `after()` itself uses).
+  A Next upgrade that moves it leaves the meter recording nothing, never failing a request; the
+  `meter` reason above is how that shows. Checked on a local `next start` of Next 16.2.6:
+  routes and pages land with their app paths (`/api/now-playing`, `/home`).
+- **Module state in request-meter.ts lives on `globalThis`.** Next loads one copy of a module
+  per server bundle (route handlers and pages apart). With module-level state, the first page
+  after a route recorded a second `(boot)` row holding all the process's CPU so far (seen on
+  `next start`, Oct 16). `tests/budget-meter.test.ts` re-imports the module to hold this.
+- **The meter errs high on purpose.** Overlapping requests on one Fluid instance each count the
+  CPU they shared; bytes are the uncompressed body; a flush whose answer was lost after the
+  store committed is counted again. It errs low in two places: work before the gate, and the
+  routes that pass no choke point (`/api/build`, Auth.js's own routes, `/login`, the legal pages).
+  The calibration factor in `budget.ts` is where lane 05's dashboard reading corrects both.
+- **The month is the UTC calendar month.** Turso resets on it. Whether Vercel Hobby counts a
+  calendar month or a rolling 30 days is not settled here; lane 05 reads it off the dashboard.
+- **Economy and freeze do not touch track changes.** The now-playing floor holds scheduled polls
+  (the track-end poll, bursts, backoffs) but a kick (the tab coming back, an in-app player
+  action) polls at once; Home's forced refresh on a track change also still runs. Only the
+  ambient timers and focus returns follow `/api/sync`'s interval.
+- **Freeze stops the cron's library rescans, including a never-scanned library.** A new user's
+  first scan then comes from the playlists page's own kick (`/api/playlists/sync`), which the
+  modes do not gate.
+- **Adding a telemetry table** means adding it to `TELEMETRY` in
+  `ops/zenbook-meter/meter-proxy.test.mjs` (its oracle) and to `resetStore`'s list in
+  `tests/adversarial/helpers.ts`. Neither table name may end in a core table's name after a
+  keyword (`meta` is core; `cpu_meter` is not).
+
 ## The meter's core fence (`ops/zenbook-meter/meter-proxy.mjs`)
 
 Once the app's data lives on Turso, the Zenbook's sqld keeps the telemetry tables and a frozen

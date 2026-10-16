@@ -286,6 +286,53 @@ All check `auth()` and 401 on no session, except the `cron/*` routes: those take
 unset secret rejects all callers) and no session; `cron/sync` alone also takes
 `Bearer $CRON_SECRET_EXT`.
 
+## The budget: the CPU meter and the modes (`src/lib/budget/`)
+
+The team is on Vercel Hobby and Turso's free plan, where passing a monthly limit stops every
+project on the team for up to 30 days, or every query until the 1st. Active CPU, the Hobby limit
+five users are most likely to pass, is not readable by any API on Hobby, so the app measures
+itself and backs off before a limit (docs/multi-user/CAPACITY.md §6).
+
+- **The meter** (`request-meter.ts`, `meter.ts`). Each invocation's process CPU
+  (`process.cpuUsage()`), wall time and, where the route reports them (`meteredBody`: now-playing
+  and the two search payloads), response bytes, keyed by (UTC day, route, uid or `-`). The hooks
+  are at the two choke points: `requireUser()` (pages, gated routes, actions) and the cron secret
+  check (`cronAuthorized`, `cronCaller`). The route name and one-record-per-request come from
+  Next's request scope (`workAsyncStorage`), so the layout's and the page's gates count once. The
+  process's CPU before its first metered request is its own `(boot)` row. Counts collect in
+  process (on `globalThis`: Next loads a copy of the module per bundle) and flush in `after()`,
+  at most once a minute or every 200 invocations, as one batch of upserts into the telemetry
+  store's `cpu_meter`; a failed flush keeps its counts for the next.
+- **The guard** (`budget.ts`, pure). Six dimensions: Vercel Active CPU (4 h), invocations (1M),
+  Fast Origin Transfer (10 GB), CDN requests (1M); Turso rows read (500M) and written (10M). Each
+  is projected to the end of the UTC month from month-to-date, with the meter's CPU calibration
+  (1.0 until lane 05) and a fixed allowance for the team's other projects, and its share of the
+  hard limit sets its mode: normal at or under 50%, economy past 60%, freeze past 80%; between
+  50% and 60% a dimension keeps its mode, and freeze steps down to economy at 80%. The app's mode
+  is the worst dimension's. A dimension whose source did not answer keeps its last mode.
+- **The daily record** (`daily.ts`). The daily chores (`/api/cron/daily`, `runBudgetChore`) read
+  the meter's month-to-date and Turso's (`fetchOrgUsage`, the usage check's platform read), write
+  one `budget_days` row per dimension (telemetry; `/usage` shows the latest day) and the app-wide
+  mode to `meta.budget_mode` in the admin's database, which the hot paths read through a
+  10-minute per-process memo (`getBudgetMode`, `currentMode`).
+- **The modes** (`modes.ts`, CAPACITY §6's app-wide column). Now-playing replies carry
+  `minPollMs` (0, 30 s, 60 s), a floor under every scheduled poll (`planNextPoll`); `/api/sync`
+  replies carry `intervalMs` (2, 5, 5 minutes), which SyncOnLoad's loop and Home's open-tab
+  refresh follow (`sync-interval.ts`), and in freeze it syncs nothing; the cron tick's library
+  rescan runs every 30 minutes, 2 hours, never; the all-time recompute's gate is 10, 30, 30
+  minutes.
+- **Reporting.** `/usage` shows each dimension's month-to-date, projection, share and mode. The
+  hourly health check answers 500 (`budget`) while the stored mode is economy or freeze, and
+  (`meter`) when `cpu_meter` has not been written for six hours or ever.
+
+Where this differs from CAPACITY §6 (CAPACITY.md is not on this branch's base; fold these in
+when it is): the thresholds are read as shares of the hard limit (so normal = the room rule); a
+`(boot)` row meters cold starts, which §1 estimated at 0.13-1.25 h a month; the other projects'
+allowance is also given for CDN requests (105,000, §2.2's "~3,500 others" a day) and origin
+transfer (0.6 GB, their Fast Data Transfer in §2.1), and CDN requests are metered invocations ×
+1.1 (§2.2); the per-user half of economy (1.5× a fair share) is lane 03's; the search payloads'
+hour-old cache and the probe cadences in §6's table are not built here (Phase 3 and lane 03).
+
 ## Player simulation
 
 - **Now-playing bar** (`components/now-playing.tsx`, mounted in the `(app)` layout): the
