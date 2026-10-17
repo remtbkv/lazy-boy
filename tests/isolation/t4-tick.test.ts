@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { countRpCall as appQueueCount, getAppMeta } from "@/lib/app-db";
 import { mintUid, type Uid } from "@/lib/identity";
-import { runOpenApp, runTick } from "@/lib/sync/tick";
+import { PHASE3_TICK, runOpenApp, runTick } from "@/lib/sync/tick";
 import { RefreshError } from "@/lib/token-core";
 import { DecryptError } from "@/lib/token-crypto";
 import { freshAppDb, seedUser } from "./harness";
@@ -185,7 +185,7 @@ describe("T4: two users, one tick", () => {
     expect(await row(B)).toMatchObject({ state: "active", failures: 0 });
   });
 
-  it("A's probe keeps failing with a 5xx for 4 hours of listening: A backs off, and A is still harvested at least hourly (§7.4's backstop)", async () => {
+  it("A's probe keeps failing with a 5xx for 4 hours of listening: A backs off, and A is still harvested once a backstop (§7.4)", async () => {
     // Today's route swallowed a failed player check and harvested on the hourly backstop. A
     // friend has no recorder: a probe that stops every harvest loses each play past the last 50.
     const spotify = install({ [`at-${A}`]: { player: 502, recent: recent(A) }, [`at-${B}`]: healthy(B) });
@@ -197,7 +197,8 @@ describe("T4: two users, one tick", () => {
     }
     expect(at[0]).toBe(0);
     const gaps = at.slice(1).map((m, i) => m - at[i]);
-    expect(Math.max(240 - at[at.length - 1], ...gaps)).toBeLessThanOrEqual(62);
+    // The backstop's period, plus a tick: an hour in Phase 3, two hours from Phase 4a (ac73d2b).
+    expect(Math.max(240 - at[at.length - 1], ...gaps)).toBeLessThanOrEqual(PHASE3_TICK.backstopMs / MIN + 2);
     expect(await row(A)).toMatchObject({ state: "backoff", last_error: "spotify-error" });
     expect(stores[A].plays.size).toBe(2);
   }, 60_000);
@@ -420,13 +421,18 @@ describe("T4: the lease and the brake's counter, through the tick", () => {
     ]);
   });
 
-  it("the brake is inert in Phase 3: a user past the app's whole budget still has each change harvested at once (BRAKE_ON)", async () => {
+  it("the brake is on from Phase 4a: a user past the app's whole budget has a change held back (BRAKE_ON)", async () => {
     install({ [`at-${A}`]: { player: playing(`${A}-a`), recent: recent(A) }, [`at-${B}`]: healthy(B) });
     await runTick(tickDeps({ now: () => NOW, stores }).deps, ZEN);
     await q("UPDATE sync_state SET rp_calls = 500, quota_day = '2026-10-16' WHERE uid = :u", { u: A });
-    install({ [`at-${A}`]: { player: playing(`${A}-b`), recent: recent(A) }, [`at-${B}`]: healthy(B) });
+    const spotify = install({ [`at-${A}`]: { player: playing(`${A}-b`), recent: recent(A) }, [`at-${B}`]: healthy(B) });
     const r = await runTick(tickDeps({ now: () => NOW + 2 * MIN, stores }).deps, ZEN);
-    expect(r.detail!.steps.find((s) => s.uid === A)).toMatchObject({ outcome: "ok", trigger: "change" });
+    // Phase 3 shipped the brake off and this case pinned it inert (lane 18's d0f0371). Phase 4a turns it
+    // on (ac73d2b): the change waits (30 minutes, or the open app), so the step harvests nothing.
+    const step = r.detail!.steps.find((s) => s.uid === A);
+    expect(step).toMatchObject({ outcome: "ok" });
+    expect(step?.trigger).toBeUndefined();
+    expect(spotify.calls.filter((c) => c.bearer === `at-${A}` && c.path.endsWith("/recently-played"))).toEqual([]);
   });
 
   it("a harvest the client re-sends is counted before each send: a 403 retried once is two calls, two counts (§7.5 item 1)", async () => {
