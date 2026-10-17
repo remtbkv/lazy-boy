@@ -8,7 +8,7 @@ import { A, B } from "./harness";
 
 vi.mock("next/cache", async () => await import("../stubs/next-cache-faithful"));
 const { __cache } = await import("../stubs/next-cache-faithful");
-const { userCache } = await import("@/lib/user-cache");
+const { expireUserCache, userCache, userCacheTag } = await import("@/lib/user-cache");
 
 const EPOCH = "e1";
 /** The isolation events the server recorded (Phase 1: telemetry rows, PLAN.md §6.5). */
@@ -82,6 +82,17 @@ describe("userCache", () => {
     } finally {
       env.NODE_ENV = was;
     }
+  });
+
+  it("every entry carries its user's tag, and expiring a departed user's leaves another's", async () => {
+    const read = userCache("tagged", async (uid) => data[uid], ["s"], { revalidate: 60 });
+    await read(A, EPOCH);
+    await read(B, EPOCH);
+    expect(__cache.keys().map((k) => __cache.tagsOf(k))).toEqual([[userCacheTag(A)], [userCacheTag(B)]]);
+    expireUserCache(B);
+    const left = __cache.keys();
+    expect(left).toHaveLength(1);
+    expect(left[0]).toContain(A);
   });
 
   it("a wrapper's callback captured in a closure is still told apart by its name", async () => {

@@ -9,6 +9,9 @@
 //     whose first failure had another user's (or the admin's) within 24 hours either side was part
 //     of an app-wide event however the failures were ordered, and goes back to needs_reconnect;
 //   - the 14-day invite expiry: an unclaimed invite withdrawn, its empty database destroyed;
+//   - what a deletion leaves behind it, for every friend whose `deleted` row is still kept: the
+//     telemetry rows a request or task in flight wrote after the job's telemetry step, and the
+//     user's entries in Vercel's Data Cache (deletion-runtime.ts purgeDeparted);
 //   - the sweeps: `deleted` rows past five days, orphan token, queue and lock rows, requests still
 //     pending after 14 days, health records past 30 days;
 //   - re-enabling the two cron-job.org jobs.
@@ -16,7 +19,7 @@ import "server-only";
 import { dailyCandidates, dailySweeps, moveStatus } from "@/lib/app-db";
 import { ensureCronJobsEnabled } from "@/lib/cronjob-jobs";
 import { DELETED_ROW_TTL_MS, LEASE_WINDOW_MS, type DeletionOutcome } from "@/lib/deletion";
-import { deleteAccount, withdrawExpiredInvite } from "@/lib/deletion-runtime";
+import { deleteAccount, purgeDeparted, withdrawExpiredInvite } from "@/lib/deletion-runtime";
 import { GRANT_WIDE_HOLD_MS, GRANT_WINDOW_MS, REVOKED_DELETE_AFTER_MS } from "@/lib/grant-policy";
 
 export type Chore = [name: string, run: () => Promise<unknown>];
@@ -25,6 +28,8 @@ export type DailyDeps = {
   now: () => number;
   deleteAccount: (uid: string) => Promise<DeletionOutcome>;
   withdrawInvite: (uid: string) => Promise<DeletionOutcome>;
+  /** A departed friend's late telemetry rows and Data Cache entries (deletion-runtime.ts). */
+  purgeDeparted: (uid: string) => Promise<void>;
   reenableJobs: () => Promise<unknown>;
   /** Waits out the lease window before a deletion's last step (real time in the runtime). */
   wait?: (ms: number) => Promise<void>;
@@ -34,6 +39,7 @@ const runtime: DailyDeps = {
   now: Date.now,
   deleteAccount,
   withdrawInvite: withdrawExpiredInvite,
+  purgeDeparted,
   reenableJobs: () => ensureCronJobsEnabled(),
   wait: (ms) => new Promise((r) => setTimeout(r, ms)),
 };
@@ -76,7 +82,10 @@ export function phase4aChores(deps: DailyDeps = runtime): Chore[] {
           await deps.wait(LEASE_WINDOW_MS + 2_000);
           finished = `; after the window ${await each(waiting, deps.deleteAccount)}`;
         }
-        return `retried ${retried}; day4 ${day4}${c.revokedWide.length ? " held:app-wide" : ""}; invites ${invites}${finished}`;
+        const departed = await each(c.departed, async (uid) => (await deps.purgeDeparted(uid), { kind: "done" }));
+        return `retried ${retried}; day4 ${day4}${c.revokedWide.length ? " held:app-wide" : ""}; invites ${invites}${finished}${
+          c.departed.length ? `; departed ${departed}` : ""
+        }`;
       },
     ],
     ["sweeps", async () => JSON.stringify(await dailySweeps(deps.now(), DELETED_ROW_TTL_MS))],

@@ -12,15 +12,18 @@ const DAY = 86_400_000;
 let db: ReturnType<typeof freshAppDb>;
 const q = async (sql: string, args: Record<string, string | number | null> = {}) => (await db.raw().execute({ sql, args })).rows;
 
-function deps(): DailyDeps & { deleted: string[]; withdrawn: string[] } {
+function deps(): DailyDeps & { deleted: string[]; withdrawn: string[]; purged: string[] } {
   const deleted: string[] = [];
   const withdrawn: string[] = [];
+  const purged: string[] = [];
   return {
     deleted,
     withdrawn,
+    purged,
     now: () => NOW,
     deleteAccount: async (uid) => (deleted.push(uid), { kind: "done" }),
     withdrawInvite: async (uid) => (withdrawn.push(uid), { kind: "done" }),
+    purgeDeparted: async (uid) => void purged.push(uid),
     reenableJobs: async () => "skipped",
   };
 }
@@ -118,6 +121,38 @@ describe("the deletion chores", () => {
     const admin = deps();
     await runPhase4aChores(admin);
     expect(admin.deleted).toEqual(["dddddddddddd"]);
+  });
+});
+
+describe("what a deletion leaves behind it", () => {
+  // Lane 21's review: a request or a task in flight when the job ran writes telemetry after its
+  // step 3 (the meter's flush runs in after(), a library scan logs every call), and the user's
+  // cached payloads stay in Vercel's Data Cache under their uid. The `deleted` row is kept five
+  // days, and every daily run purges what each one left, so a late copy lasts at most a day.
+  it("purges every departed friend each day the deleted row is kept, and nobody else", async () => {
+    await seedUser(db.raw(), { uid: "aaaaaaaaaaaa", status: "active", admin: true });
+    await seedUser(db.raw(), { uid: "bbbbbbbbbbbb", status: "deleted", statusAt: NOW - 1 * DAY });
+    await seedUser(db.raw(), { uid: "cccccccccccc", status: "deleted", statusAt: NOW - 3 * DAY });
+    await seedUser(db.raw(), { uid: "dddddddddddd", status: "active" });
+    await seedUser(db.raw(), { uid: "eeeeeeeeeeee", status: "deleting", statusAt: NOW - 1 * DAY });
+    const d = deps();
+    const out = await runPhase4aChores(d);
+    expect(d.purged.sort()).toEqual(["bbbbbbbbbbbb", "cccccccccccc"]);
+    expect(out.deletions).toContain("departed done,done");
+    expect(JSON.stringify(out)).not.toMatch(/[a-z2-7]{12}/);
+  });
+
+  it("one purge failing keeps the rest going and says so", async () => {
+    await seedUser(db.raw(), { uid: "bbbbbbbbbbbb", status: "deleted", statusAt: NOW - 1 * DAY });
+    await seedUser(db.raw(), { uid: "cccccccccccc", status: "deleted", statusAt: NOW - 1 * DAY });
+    const d = deps();
+    d.purgeDeparted = async (uid) => {
+      if (uid === "bbbbbbbbbbbb") throw new Error("telemetry down");
+      d.purged.push(uid);
+    };
+    const out = await runPhase4aChores(d);
+    expect(d.purged).toEqual(["cccccccccccc"]);
+    expect(out.deletions).toContain("departed error,done");
   });
 });
 

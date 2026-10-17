@@ -88,9 +88,9 @@ export default function PrivacyPage() {
           The app runs on Vercel, which sees each request (including your IP address) as any web
           host does. Vercel also keeps cached copies of some of what your pages show, labelled
           with your account&apos;s random ID, so pages open faster, and its logs hold the errors
-          and warnings the server prints. Lazy Boy stops using a copy within a day; once your
-          account is deleted nothing reads those copies again, and Vercel discards them on its own
-          schedule.
+          and warnings the server prints. Within a day of your account&apos;s deletion, and every
+          day for five days after it, Lazy Boy tells Vercel to purge every copy labelled with your
+          ID.
         </li>
         <li>
           Your history, library and timezone are kept in a database of your own on Turso, a hosted

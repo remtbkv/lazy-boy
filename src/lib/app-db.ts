@@ -412,6 +412,9 @@ export type DailyCandidates = {
   revokedWide: string[];
   invitesExpired: string[];
   grantWideRecent: number;
+  /** Friends whose deletion finished; their `deleted` row is kept five days, and each daily run
+   *  purges what a request or task in flight left behind them (daily-4a.ts). */
+  departed: string[];
 };
 
 export async function dailyCandidates(
@@ -419,7 +422,7 @@ export async function dailyCandidates(
   o: { revokedAfterMs: number; grantWideHoldMs: number; grantWindowMs: number },
 ): Promise<DailyCandidates> {
   const args = { revoked: now - o.revokedAfterMs, invites: now - INVITE_TTL_MS, wide: now - o.grantWideHoldMs, window: o.grantWindowMs };
-  const [del, rev, inv, wide] = await (await appClient()).batch(
+  const [del, rev, inv, wide, gone] = await (await appClient()).batch(
     [
       "SELECT uid FROM users WHERE status = 'deleting' AND is_admin = 0 ORDER BY uid",
       {
@@ -435,6 +438,7 @@ export async function dailyCandidates(
         args,
       },
       { sql: "SELECT count(*) AS n FROM events WHERE code = 'grant-wide' AND at >= :wide", args },
+      "SELECT uid FROM users WHERE status = 'deleted' AND is_admin = 0 ORDER BY uid",
     ],
     "read",
   );
@@ -445,6 +449,7 @@ export async function dailyCandidates(
     revokedWide: rev.rows.filter((x) => Number(x.wide) !== 0).map((x) => String(x.uid)),
     invitesExpired: uids(inv),
     grantWideRecent: Number(wide.rows[0].n),
+    departed: uids(gone),
   };
 }
 

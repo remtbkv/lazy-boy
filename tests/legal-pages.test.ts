@@ -76,6 +76,9 @@ describe("/privacy and /terms", () => {
       "and error messages), with a random ID for the browser tab",
       "the Spotify IDs of that song and the one before it",
       "Errors the server runs into are logged by page and message, with no account's ID.",
+      // Lane 21: the daily chores expire a departed user's Data Cache entries by their uid's tag
+      // for the five days the deleted row is kept (daily-4a.ts, user-cache.ts expireUserCache).
+      "Lazy Boy tells Vercel to purge every copy labelled with your ID",
     ]) {
       expect(p, s).toContain(s);
     }

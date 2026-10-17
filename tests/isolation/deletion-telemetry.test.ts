@@ -6,8 +6,12 @@
 // runtime's (deletion-runtime.ts) and the Mac's (`user.mjs --remove`, scripts/turso-mac.mjs).
 import { createClient } from "@libsql/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { getAppMeta } from "@/lib/app-db";
+import { runPhase4aChores } from "@/lib/daily-4a";
 import { logSpotifyRequest, meterFlush, recordClientMetrics } from "@/lib/db";
+import { purgeDeparted } from "@/lib/deletion-runtime";
 import { deleteUserTelemetry } from "@/lib/telemetry-lifecycle";
+import { freshAppDb, seedUser } from "./harness";
 // @ts-expect-error -- plain-Node script with no type declarations
 import { macDeletionDeps } from "../../scripts/turso-mac.mjs";
 
@@ -70,6 +74,28 @@ describe("the deletion's telemetry step reaches every table that names a user", 
     }
     expect(await rowsOf(B)).toEqual({ api_log: 0, client_metrics: 0, cpu_meter: 0 });
     expect(await rowsOf(A)).toEqual({ api_log: 1, client_metrics: 1, cpu_meter: 1 });
+  });
+
+  it("a row written after the job's telemetry step (the meter's flush, a task in flight) is gone at the next daily run", async () => {
+    const app = freshAppDb();
+    try {
+      await getAppMeta("schema_version"); // the production open creates the app database's tables
+      await seedUser(app.raw(), { uid: A, status: "active", admin: true });
+      // B's deletion finished a day ago; the rows the beforeEach wrote stand for the late ones.
+      await seedUser(app.raw(), { uid: B, status: "deleted", statusAt: Date.now() - 86_400_000 });
+      const out = await runPhase4aChores({
+        now: Date.now,
+        deleteAccount: async () => ({ kind: "done" }),
+        withdrawInvite: async () => ({ kind: "done" }),
+        purgeDeparted,
+        reenableJobs: async () => "skipped",
+      });
+      expect(out.deletions).toContain("departed done");
+      expect(await rowsOf(B)).toEqual({ api_log: 0, client_metrics: 0, cpu_meter: 0 });
+      expect(await rowsOf(A)).toEqual({ api_log: 1, client_metrics: 1, cpu_meter: 1 });
+    } finally {
+      app.close();
+    }
   });
 
   it("a table a later lane adds with a user_id column is covered without a list to update", async () => {

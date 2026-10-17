@@ -14,8 +14,15 @@
 //     mistake costs a slow request instead of a leak.
 // The store epoch (PLAN.md §4.5) is the caller's: a restored database writes a new one, so
 // versions it re-issues cannot meet entries cached before the restore.
+//
+// Every entry also carries its user's tag, `u:<uid>`, outside the key. Vercel's Data Cache keeps
+// an entry until it is revalidated or evicted: `revalidate` only marks it stale, and
+// unstable_cache serves a stale entry while it rebuilds, so a departed friend's payloads (their
+// whole history among them) would outlive the deletion that promised them gone within five days
+// (RULINGS Oct 15 12:26 PM). The daily chores expire the tag of every user deleted in the last
+// five days (daily-4a.ts, expireUserCache below).
 import "server-only";
-import { unstable_cache } from "next/cache";
+import { revalidateTag, unstable_cache } from "next/cache";
 import { mintUid, type Uid } from "@/lib/identity";
 import { reportIsolation } from "@/lib/isolation";
 
@@ -32,6 +39,15 @@ function stamped<A extends unknown[], R>(fn: (uid: Uid, ...args: A) => Promise<R
 }
 const self = (u: Uid) => u;
 
+/** The tag every one of a user's entries carries. */
+export const userCacheTag = (uid: string) => `u:${uid}`;
+
+/** Expire every entry of a departed user at once (the deletion's Data Cache step). Needs a request
+ *  or its after(), where Next runs the revalidation when the work ends. */
+export function expireUserCache(uid: string): void {
+  revalidateTag(userCacheTag(uid), { expire: 0 });
+}
+
 export function userCache<A extends unknown[], R>(
   name: string,
   fn: (uid: Uid, ...args: A) => Promise<R>,
@@ -45,7 +61,10 @@ export function userCache<A extends unknown[], R>(
   }
   names.add(name);
   return async (uid, storeEpoch, ...args) => {
-    const cached = unstable_cache(stamped(fn, self), ["u", name, uid, storeEpoch, ...keyParts], opts);
+    const cached = unstable_cache(stamped(fn, self), ["u", name, uid, storeEpoch, ...keyParts], {
+      ...opts,
+      tags: [userCacheTag(uid)],
+    });
     const got = await cached(uid, ...args);
     if (got?.o === uid) return got.v;
     await reportIsolation("cache-stamp", uid);
