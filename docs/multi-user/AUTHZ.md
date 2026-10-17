@@ -111,9 +111,9 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### POST /api/sync
 
-- File: `src/app/api/sync/route.ts`. Gate today: `src/app/api/sync/route.ts:19`.
+- File: `src/app/api/sync/route.ts`. Gate today: `src/app/api/sync/route.ts:21`.
 - Does, when allowed: the cron's step for the session's user under the cron's lease (PLAN §7.6): /me/player with their grant, a recently-played harvest into their plays when the policy says so; meta user_tz_offset and user_tz from the cookies, only when they change.
-- Calls (from the source): store `forUser`; via `requireRouteUser`, `runOpenApp`, `liveTickDeps`.
+- Calls (from the source): store `forUser`; via `currentMode`, `requireRouteUser`, `runOpenApp`, `liveTickDeps`.
 - `anon`: D — requireRouteUser: no session → 401 with the signed-out marker before any read
 - `rem`: A — the owner's session: the identity check allows OWNER_UID, Phase 1's one user (src/lib/identity.ts)
 - `friendA`, `friendB`: I — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
@@ -202,7 +202,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/cron/sync
 
-- File: `src/app/api/cron/sync/route.ts`. Gate today: `src/lib/sync/tick.ts:351`.
+- File: `src/app/api/cron/sync/route.ts`. Gate today: `src/lib/sync/tick.ts:357`.
 - Does, when allowed: the tick, at most one per 45 s whoever calls (app_meta.tick_at): the claim of every due user, each one's /me/player probe and, when the policy says so, a recently-played harvest with that user's own grant into their own plays; one library rescan; the daily chores when daily_at is over 26 h old.
 - Calls (from the source): via `runDailyChores`, `adminStore`, `runTick`, `liveTickDeps`.
 - `anon`: D — cronCaller() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET` (the Zenbook) or `Bearer $CRON_SECRET_EXT` (cron-job.org), timing-safe, an unset secret matching nobody; a cookie is not a secret; no header → 401

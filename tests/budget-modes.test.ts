@@ -146,20 +146,22 @@ describe("SyncOnLoad's loop and Home's open-tab refresh read /api/sync's interva
 
   function run(mode: Mode) {
     const at: number[] = [];
+    const kinds: string[] = [];
     const t0 = Date.now();
     const loop = new SyncLoop(
-      async () => {
+      async (kind) => {
         at.push(Date.now() - t0);
+        kinds.push(kind);
         return { ok: true, intervalMs: SYNC_INTERVAL_MS[mode] };
       },
       () => true,
     );
-    return { at, loop };
+    return { at, kinds, loop };
   }
 
   it("normal: on load, every 2 minutes after the last sync, and on every return to the tab", async () => {
     vi.useFakeTimers();
-    const { at, loop } = run("normal");
+    const { at, kinds, loop } = run("normal");
     loop.start();
     await vi.advanceTimersByTimeAsync(2 * MIN);
     expect(at).toEqual([0, 2 * MIN]);
@@ -169,6 +171,8 @@ describe("SyncOnLoad's loop and Home's open-tab refresh read /api/sync's interva
     expect(at).toEqual([0, 2 * MIN, 2 * MIN + 10_000]);
     await vi.advanceTimersByTimeAsync(2 * MIN);
     expect(at).toEqual([0, 2 * MIN, 2 * MIN + 10_000, 4 * MIN + 10_000]);
+    // Phase 3's /api/sync: the load and a return to the tab say `load`, the timer `timer`.
+    expect(kinds).toEqual(["load", "timer", "load", "timer"]);
     loop.stop();
     expect(syncIntervalMs()).toBe(2 * MIN);
     expect(ambientGapMs(45_000)).toBe(45_000);
