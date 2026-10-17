@@ -121,9 +121,9 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### POST /api/sync
 
-- File: `src/app/api/sync/route.ts`. Gate today: `src/app/api/sync/route.ts:21`.
+- File: `src/app/api/sync/route.ts`. Gate today: `src/app/api/sync/route.ts:22`.
 - Does, when allowed: the cron's step for the session's user under the cron's lease (PLAN §7.6): /me/player with their grant, a recently-played harvest into their plays when the policy says so; meta user_tz_offset and user_tz from the cookies, only when they change.
-- Calls (from the source): store `forUser`; via `currentMode`, `requireRouteUser`, `runOpenApp`, `liveTickDeps`.
+- Calls (from the source): store `forUser`; via `currentMode`, `requireRouteUser`, `runOpenApp`, `liveTickDeps`, `allowUserCall`.
 - `anon`: D — requireRouteUser: no session → 401 with the signed-out marker before any read
 - `rem`: A — the owner's session: the identity check allows OWNER_UID, Phase 1's one user (src/lib/identity.ts)
 - `friendA`, `friendB`: I — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
