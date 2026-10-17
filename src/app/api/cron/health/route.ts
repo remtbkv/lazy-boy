@@ -1,12 +1,12 @@
 // The hourly health check (docs/multi-user/PLAN.md §7.10): a cron-job.org job with failure
 // e-mail calls this; a 500 is the e-mail. The reply carries reasons and the names of checks
 // not yet measurable, never anything about anyone's listening (cron-job.org keeps bodies).
-import { forUser, getBudgetMode, isolationEventsAfter, readBudgetDay, readMeter } from "@/lib/db";
+import { getBudgetMode, isolationEventsAfter, readBudgetDay, readMeter } from "@/lib/db";
 import { worstMode } from "@/lib/budget/budget";
 import { isMode } from "@/lib/budget/modes";
 import { cronCaller } from "@/lib/cron-auth";
 import { DAILY_STALE_MS, healthVerdict } from "@/lib/health";
-import { phase1Owner } from "@/lib/identity";
+import { adminStore } from "@/lib/identity-read";
 
 export const dynamic = "force-dynamic";
 
@@ -18,9 +18,9 @@ export async function GET(req: Request) {
   if (!cronCaller(req.headers.get("authorization"))) {
     return Response.json({ ok: false, error: "forbidden" }, { status: 401 });
   }
-  const owner = phase1Owner();
-  if (!owner) return Response.json({ ok: false, reasons: ["store"] }, { status: 500 });
-  const store = forUser(owner);
+  // The admin's database, as his users row names it; none, or the read failing, is a reason.
+  const store = await adminStore().catch(() => null);
+  if (!store) return Response.json({ ok: false, reasons: ["store"] }, { status: 500 });
   let ownerCapture = null;
   let marks;
   try {

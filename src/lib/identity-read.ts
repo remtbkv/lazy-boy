@@ -4,24 +4,60 @@
 //   read of §5.1, after the token-key check, so a deploy with a wrong key answers every request
 //   "unavailable" instead of serving (§5.3). `readIdentity` runs it through `checkIdentity`
 //   under the deployment's SIGNUPS, which from Phase 2 refuses every non-admin row
-//   (`SIGNUPS=owner`, the one-variable freeze, §12.1).
+//   (`SIGNUPS=owner`, the one-variable freeze, §12.1). An allowed read names the user's
+//   database for forUser (db.ts) from the same row; `adminStore` does the same for the paths
+//   that act for the admin with no session.
 // - `resolveSignIn` is the signIn callback's decision. Spotify's `account_id` is the link; its
 //   mutable `id` is never keyed on (01e §5.5). The invite claim waits for Phase 4a, which
 //   RULINGS Oct 15 12:46 PM turned into a request form; until then the only row a new sign-in
 //   can bind is the admin's, once (§11.4 step 1).
 import "server-only";
-import { bindAdminAccount, findUserByAccountId, moveStatus, readIdentityRow, recordSignIn, type UserRow } from "@/lib/app-db";
-import { checkIdentity, signupsMode, type IdentityLookup, type IdentityVerdict, type SessionClaims } from "@/lib/identity";
+import {
+  bindAdminAccount,
+  findUserByAccountId,
+  moveStatus,
+  readIdentityRow,
+  recordSignIn,
+  type AppIdentityRow,
+  type UserRow,
+} from "@/lib/app-db";
+import { forUserAt, type UserStore } from "@/lib/db";
+import {
+  checkIdentity,
+  phase1Owner,
+  signupsMode,
+  type IdentityLookup,
+  type IdentityVerdict,
+  type SessionClaims,
+} from "@/lib/identity";
 import { tokenKeysReady } from "@/lib/token-keys";
 
-export const appIdentityLookup: IdentityLookup = async (uid) => {
+export const appIdentityLookup = async (uid: string): Promise<AppIdentityRow | null> => {
   await tokenKeysReady();
   return readIdentityRow(uid);
 };
 
-/** The identity read every later request makes, with its three outcomes (§5.1). */
-export function readIdentity(claims: SessionClaims, now = Date.now()): Promise<IdentityVerdict> {
-  return checkIdentity(claims, appIdentityLookup, { now, signups: signupsMode() });
+/** The identity read every later request makes, with its three outcomes (§5.1). An allowed
+ *  read also names the user's database for forUser (db.ts): the row's db_name, read again on
+ *  every request, so a restore that moved the user reaches this process at their next one
+ *  (§4.2, §12.5). */
+export async function readIdentity(claims: SessionClaims, now = Date.now()): Promise<IdentityVerdict> {
+  const read: { row?: AppIdentityRow | null } = {};
+  const lookup: IdentityLookup = async (uid) => (read.row = await appIdentityLookup(uid));
+  const v = await checkIdentity(claims, lookup, { now, signups: signupsMode() });
+  if (v.kind === "allowed" && read.row) forUserAt(v.uid, read.row.dbName);
+  return v;
+}
+
+/** The admin's data, for the paths that act for him with no session until Phase 3's claim
+ *  (the cron, the daily chores, the health check, the store bench, the sign-in's owner
+ *  guard): OWNER_UID's `users` row names his database, as a request's identity read would.
+ *  Null when OWNER_UID is unset or no admin row carries it. Throws when the read does. */
+export async function adminStore(): Promise<UserStore | null> {
+  const uid = phase1Owner();
+  if (!uid) return null;
+  const row = await readIdentityRow(uid);
+  return row?.isAdmin ? forUserAt(uid, row.dbName) : null;
 }
 
 export type SignInProfile = { id?: unknown; account_id?: unknown };

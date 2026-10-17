@@ -82,24 +82,19 @@ describe("S2: a Uid is minted in one place", () => {
   });
 
   // phase1Owner() mints Rem's uid from OWNER_UID for the paths that act for him with no
-  // session: the cron and the daily chores until Phase 3's claim, the health check, the
-  // sign-in's owner guard, and db.ts's app-wide rows (the cooldown) until Phase 2's app database.
-  const OWNER_PATHS = new Set([
-    "src/lib/db.ts",
-    "src/lib/owner.ts",
-    "src/app/api/cron/sync/route.ts",
-    "src/app/api/cron/daily/route.ts",
-    "src/app/api/cron/health/route.ts",
-    "src/app/api/cron/store-bench/route.ts",
-  ]);
+  // session: identity-read.ts's adminStore (the cron, the daily chores, the health check, the
+  // store bench and the sign-in's owner guard, until Phase 3's claim), which reads his users row
+  // for his database; and db.ts's app-wide row (the cooldown) until it moves to app_meta.
+  const OWNER_PATHS = new Set(["src/lib/db.ts", "src/lib/identity-read.ts"]);
   it("phase1Owner is imported only by the paths that act for the owner without a session", () => {
     expect(importersOf("phase1Owner").filter((f) => !OWNER_PATHS.has(f))).toEqual([]);
   });
 
-  // forUserAt names the database as well as the user: only Phase 2's identity read (with the
-  // db_name it returns) may call it. Nothing in src does in Phase 1; the tests do.
-  it("forUserAt is imported by nothing in src", () => {
-    expect(importersOf("forUserAt")).toEqual([]);
+  // forUserAt names the database as well as the user: only what read the users row may call it,
+  // with the db_name it read: the identity read and adminStore (identity-read.ts), and Phase 3's
+  // claim. The tests do too.
+  it("forUserAt is imported only by the identity read", () => {
+    expect(importersOf("forUserAt")).toEqual(["src/lib/identity-read.ts"]);
   });
 });
 

@@ -1,7 +1,9 @@
 // T8 and the versioned open (PLAN.md §4.5, §6.2 layer 3): a database names its owner, and the
 // first open of each (uid, db_name) in a process checks it before any read result is used or
-// any write is sent. Known answers over per-user files, and the decision itself as a pure
-// function for the cases a local file cannot stand in for (a remote database).
+// any write is sent. Which database a uid opens is its users row's db_name, handed to forUser by
+// the identity read (§4.2). Known answers over the harness's app.db and per-user files, and the
+// decision itself as a pure function for the cases a local file cannot stand in for (a remote
+// database).
 import { copyFileSync } from "node:fs";
 import path from "node:path";
 import { createClient } from "@libsql/client";
@@ -30,8 +32,10 @@ vi.mock("@libsql/client", async (orig) => {
   };
 });
 
-import { forUserAt, mayApplySchema, openVerdict, StoreRefusedError, USER_SCHEMA_VERSION } from "@/lib/db";
-import { A, B, dumpDb, seedUser, useUserFiles } from "./user-dbs";
+import { forUser, forUserAt, mayApplySchema, openVerdict, StoreRefusedError, USER_SCHEMA_VERSION } from "@/lib/db";
+import { mintUid } from "@/lib/identity";
+import { adminStore } from "@/lib/identity-read";
+import { A, B, dumpDb, nameDb, seedUser, signedIn, useUserFiles } from "./user-dbs";
 
 let dir = "";
 beforeAll(() => {
@@ -81,19 +85,74 @@ describe("provisioning a local file", () => {
   });
 });
 
+async function appEvents(): Promise<string[]> {
+  const c = createClient({ url: process.env.APP_DATABASE_URL as string });
+  const r = await c.execute("SELECT uid, code FROM events ORDER BY id");
+  c.close();
+  return r.rows.map((x) => `${x.code}|${x.uid}`);
+}
+
 describe("T8: a users row pointing B at A's database", () => {
-  it("B's open refuses before any read result or write, records an event, and leaves A's database as it was", async () => {
-    const a = forUserAt(A, "t8");
+  it("A opened in this process; a restore moves A to a new database and B's row names A's old one: B's open refuses before any read result or write, the event lands in app.db, A's old database is as it was, A reaches its new one", async () => {
+    await nameDb(A, "t8");
+    const a = await signedIn(A);
+    expect(a.dbName).toBe("t8");
     await seedUser(a, "A");
+    // The restore (§12.5): a copy under a new name with a new store_epoch; the users row moves.
+    copyAs("t8", "t8-restored");
+    await setKey("t8-restored", "store_epoch", "rrrrrrrrrrrr");
     const before = await dumpDb("t8");
-    const asB = forUserAt(B, "t8");
+    await nameDb(A, "t8-restored");
+    await nameDb(B, "t8");
+    const asB = await signedIn(B);
+    expect(asB.dbName).toBe("t8");
     await expect(asB.searchHistory("")).rejects.toBeInstanceOf(StoreRefusedError);
     await expect(asB.setUserTzOffset(60)).rejects.toMatchObject({ code: "owner-mismatch" });
     await expect(asB.recordPlays([])).resolves.toBe(0); // no statement at all: nothing to refuse
     expect(await dumpDb("t8")).toBe(before);
+    expect(await appEvents()).toContain(`owner-mismatch|${B}`);
     expect(await isolationEvents()).toContain(`owner-mismatch|${B}/${B}`);
-    // A, already open in this process, is unaffected.
-    expect((await a.searchHistory("")).length).toBeGreaterThan(0);
+    // A's next request reaches the restored database: the entry was rebuilt under the new
+    // name, and the new database's own epoch is what the open read.
+    const a2 = await signedIn(A);
+    expect(a2.dbName).toBe("t8-restored");
+    expect(await a2.storeEpoch()).toBe("rrrrrrrrrrrr");
+    expect((await a2.searchHistory("")).length).toBeGreaterThan(0);
+  });
+});
+
+describe("the identity read names the database (PLAN §4.2)", () => {
+  it("forUser reaches the database the users row names, and nothing for a uid no read has named", async () => {
+    await nameDb(A, "named-a");
+    expect((await signedIn(A)).dbName).toBe("named-a");
+    expect(forUser(A).dbName).toBe("named-a");
+    expect(() => forUser(mintUid("cccccccccccc"))).toThrow(/no database is named/);
+  });
+
+  it("a name that changed is rebuilt: the old entry's open verdict goes, so a name met again is checked again", async () => {
+    await nameDb(A, "move-1");
+    await seedUser(await signedIn(A), "A"); // (A, move-1) opened and cached
+    copyAs("move-1", "move-2");
+    await nameDb(A, "move-2");
+    await expect((await signedIn(A)).getLastSync()).resolves.not.toBeUndefined();
+    // move-1 is now someone else's database (its owner_uid says so). Named again, it is
+    // opened and refused, never served on the verdict this process cached before the move.
+    await setKey("move-1", "owner_uid", B);
+    await nameDb(A, "move-1");
+    await expect((await signedIn(A)).getLastSync()).rejects.toMatchObject({ code: "owner-mismatch" });
+  });
+
+  it("the session-less paths reach the admin's database through his users row: none without it, none for a non-admin row", async () => {
+    const owner = mintUid(process.env.OWNER_UID as string);
+    expect(await adminStore()).toBeNull();
+    await nameDb(owner, "admin-db");
+    expect(await adminStore()).toBeNull(); // the row is not an admin's
+    const c = createClient({ url: process.env.APP_DATABASE_URL as string });
+    await c.execute({ sql: "UPDATE users SET is_admin = 1 WHERE uid = ?", args: [owner] });
+    c.close();
+    const s = await adminStore();
+    expect([s?.uid, s?.dbName]).toEqual([owner, "admin-db"]);
+    expect(forUser(owner).dbName).toBe("admin-db");
   });
 });
 

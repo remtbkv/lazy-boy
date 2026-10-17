@@ -1,11 +1,27 @@
-// T1 (PLAN.md §6.4): every method of UserStore, as A then as B, against two users' own database
-// files. Each must leave the other user's database byte for byte (an ordered dump of every
-// table) and return no other-user marker; its positive control is that a write changes its own
-// user's database and a marker read returns its own user's marker. The fixture registry has one
-// entry per method: a method with no fixture fails the suite.
+// T1 (PLAN.md §6.4): every method of UserStore, as A then as B, over the harness's three files:
+// app.db, whose users rows name A's and B's files, and those two files. Each store is the one a
+// request gets: the identity read names the user's file, then forUser(uid). Each method must
+// leave the other user's database and app.db byte for byte (an ordered dump of every table) and
+// return no other-user marker; its positive control is that a write changes its own user's
+// database and a marker read returns its own user's marker. The fixture registry has one entry
+// per method: a method with no fixture fails the suite.
 import { beforeAll, describe, expect, it } from "vitest";
 import { forUserAt, type UserStore } from "@/lib/db";
-import { A, B, PLAY_DAY, dumpDb, playOf, playlistOf, seedUser, tagOf, trackOf, useUserFiles, type Tag } from "./user-dbs";
+import {
+  A,
+  B,
+  PLAY_DAY,
+  dumpDb,
+  nameDb,
+  playOf,
+  playlistOf,
+  seedUser,
+  signedIn,
+  tagOf,
+  trackOf,
+  useUserFiles,
+  type Tag,
+} from "./user-dbs";
 
 type Kind = "write" | "marker" | "read";
 type Fixture = { kind: Kind; call: (s: UserStore, tag: Tag) => Promise<unknown>; why?: string };
@@ -87,13 +103,17 @@ beforeAll(() => {
   useUserFiles();
 });
 
-/** A fresh pair of seeded databases, one per user. */
+/** A fresh pair of seeded databases, one per user, each named by its user's users row and
+ *  reached through that user's identity read. */
 async function pair(): Promise<{ a: UserStore; b: UserStore; aDb: string; bDb: string }> {
   n++;
   const aDb = `u1-${n}`;
   const bDb = `u2-${n}`;
-  const a = forUserAt(A, aDb);
-  const b = forUserAt(B, bDb);
+  await nameDb(A, aDb);
+  await nameDb(B, bDb);
+  const a = await signedIn(A);
+  const b = await signedIn(B);
+  expect([a.dbName, b.dbName]).toEqual([aDb, bDb]);
   await seedUser(a, "A");
   await seedUser(b, "B");
   return { a, b, aDb, bDb };
@@ -114,8 +134,10 @@ describe("T1: every UserStore method touches only its own user's database", () =
         const [mine, mineDb, theirsDb] = actor === A ? [a, aDb, bDb] : [b, bDb, aDb];
         const theirsBefore = await dumpDb(theirsDb);
         const mineBefore = await dumpDb(mineDb);
+        const appBefore = await dumpDb("app");
         const out = JSON.stringify((await fx.call(mine, me)) ?? null);
         expect(await dumpDb(theirsDb), `${name} as ${me} changed ${other}'s database`).toBe(theirsBefore);
+        expect(await dumpDb("app"), `${name} as ${me} changed the app database`).toBe(appBefore);
         expect(out.includes(`${other}-only`), `${name} as ${me} returned ${other}'s data: ${out.slice(0, 200)}`).toBe(false);
         if (fx.kind === "write") {
           expect(await dumpDb(mineDb), `${name} as ${me} wrote nothing of its own (positive control)`).not.toBe(mineBefore);

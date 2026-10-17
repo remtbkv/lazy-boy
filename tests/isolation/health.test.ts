@@ -6,7 +6,7 @@ import { GET } from "@/app/api/cron/health/route";
 import { meterFlush, recordBudgetDay, setBudgetMode } from "@/lib/db";
 import { rawClient, resetStore } from "../adversarial/helpers";
 import { reportIsolation } from "@/lib/isolation";
-import { ownerStore, ownerUid } from "../owner-store";
+import { ownerStore, ownerUid, seedOwnerApp } from "../owner-store";
 import { FAR } from "./harness";
 
 const healthy = { ok: true, staleForMs: 60_000, reason: null } as const;
@@ -64,6 +64,7 @@ describe("/api/cron/health", () => {
     process.env.CRON_SECRET = "zen-secret";
     process.env.CRON_SECRET_EXT = "ext-secret";
     await resetStore();
+    await seedOwnerApp(); // his users row (multi-user Phase 2)
   });
 
   it("refuses no secret and a wrong one; accepts either pinger's", async () => {
@@ -121,6 +122,19 @@ describe("/api/cron/health", () => {
     expect((await red.json()).reasons).toEqual(["isolation"]);
     const after = await call("Bearer ext-secret");
     expect(after.status).toBe(200);
+  });
+
+  it("no admin row (or no OWNER_UID) is a store failure: red", async () => {
+    await healthy();
+    const owner = process.env.OWNER_UID;
+    process.env.OWNER_UID = "";
+    try {
+      const res = await call("Bearer ext-secret");
+      expect(res.status).toBe(500);
+      expect((await res.json()).reasons).toEqual(["store"]);
+    } finally {
+      process.env.OWNER_UID = owner;
+    }
   });
 
   it("a daily stamp over 26 hours old is red; none yet is unchecked", async () => {

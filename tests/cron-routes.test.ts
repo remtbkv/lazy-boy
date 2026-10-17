@@ -20,8 +20,12 @@ const spy = vi.hoisted(() => {
 vi.mock("@/lib/db", () => ({
   pruneApiLog: spy.chore("pruneApiLog"),
   pruneClientMetrics: spy.chore("pruneClientMetrics"),
-  // The owner's store (multi-user Phase 1: the cron and the chores run for OWNER_UID).
-  forUser: () => ({
+}));
+// The admin's store (multi-user Phase 2: the cron and the chores run for the admin, at the
+// database his users row names).
+vi.mock("@/lib/identity-read", () => ({
+  adminStore: async () => ({
+    uid: "ownerownerow",
     recomputeAllTimeStats: spy.chore("recomputeAllTimeStats"),
     rebuildHomePayload: spy.chore("rebuildHomePayload"),
     checkPlayedAtConvention: spy.chore("checkPlayedAtConvention"),

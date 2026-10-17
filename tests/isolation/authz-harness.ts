@@ -303,11 +303,12 @@ export const FAR = 4_000_000_000;
 export const REM_PLAYLIST = "rem-pl-1";
 export const REM_DAY = new Date(Date.now() - 3_600_000).toISOString().slice(0, 10);
 
-/** Rem's store: forUser over OWNER_UID, his database the throwaway file (multi-user Phase 1). */
+/** Rem's store: OWNER_UID at `lazyboy`, the database his `users` row names, which is the
+ *  throwaway file (the seed writes it before any identity read has named it). */
 async function remStore() {
   const db = await import("@/lib/db");
   const { mintUid } = await import("@/lib/identity");
-  return db.forUser(mintUid(OWNER_UID as string));
+  return db.forUserAt(mintUid(OWNER_UID as string), "lazyboy");
 }
 
 let rawClient: Client | null = null;
@@ -347,6 +348,19 @@ async function seedApp(tokens: { accessToken: string; refreshToken: string; expi
   const { mintUid } = await import("@/lib/identity");
   await appTokenStore().set(mintUid(OWNER_UID as string), tokens);
   await a.execute({ sql: "INSERT INTO app_meta (key, value) VALUES (?, ?)", args: [`token_copy:${OWNER_UID}`, `copied:${Date.now()}`] });
+  // The friends as Phase 4a's invites leave them: their own rows, databases and token rows,
+  // none of it Rem's. The revoked friend connected once, then Rem disabled them (user.mjs
+  // --disable), which also moved their session epoch: their cookie stays validly signed and is
+  // refused by the row (status, then epoch), not for being unknown.
+  for (const [uid, tag] of [["aaaaaaaaaaaa", "A"], ["bbbbbbbbbbbb", "B"], ["rrrrrrrrrrrr", "R"]] as const) {
+    await a.execute({
+      sql: `INSERT INTO users (uid, account_id, spotify_id, db_name, status, status_at, is_admin, session_epoch, invited_at)
+            VALUES (?, ?, ?, ?, 'active', 0, 0, 0, 0)`,
+      args: [uid, `${tag}-account`, `${tag}-spotify`, `lb-u-${uid}`],
+    });
+    await appTokenStore().set(mintUid(uid), { accessToken: `at-${tag}-friend`, refreshToken: `rt-${tag}-friend`, expiresAt: FAR });
+  }
+  await a.execute("UPDATE users SET status = 'disabled', session_epoch = 1 WHERE uid = 'rrrrrrrrrrrr'");
 }
 
 async function tables(): Promise<string[]> {

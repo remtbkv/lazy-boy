@@ -2,7 +2,7 @@
 // /api/cron/sync takes CRON_SECRET (the Zenbook's timer) and CRON_SECRET_EXT (cron-job.org);
 // the owner alarm answers the Zenbook's caller only; cron-job.org always gets a bare
 // {"ok":true}; and a 90-second stamp lets one tick's work through per window, whoever calls.
-// Real db.ts on the throwaway store (the owner's, through forUser), the real Spotify client
+// Real db.ts on the throwaway store (the owner's, named by his users row), the real Spotify client
 // against a scripted fetch; one tick's work is one player-state call.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -30,19 +30,19 @@ const flushAfter = async () => {
 };
 
 // The real db.ts, except that the stamp on the user's store can be made to fail like a store
-// outage.
+// outage. Both ways to a store are wrapped: the route reaches the admin's through adminStore()
+// (forUserAt, multi-user Phase 2), the test's own reads through forUser.
 vi.mock("@/lib/db", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/lib/db")>();
+  const flaky = (store: ReturnType<typeof real.forUser>) => ({
+    ...store,
+    acquireLock: (name: string, ttlMs: number) =>
+      spotify.storeDown ? Promise.reject(new Error("store unavailable")) : store.acquireLock(name, ttlMs),
+  });
   return {
     ...real,
-    forUser: (uid: Parameters<typeof real.forUser>[0]) => {
-      const store = real.forUser(uid);
-      return {
-        ...store,
-        acquireLock: (name: string, ttlMs: number) =>
-          spotify.storeDown ? Promise.reject(new Error("store unavailable")) : store.acquireLock(name, ttlMs),
-      };
-    },
+    forUser: (uid: Parameters<typeof real.forUser>[0]) => flaky(real.forUser(uid)),
+    forUserAt: (uid: Parameters<typeof real.forUserAt>[0], dbName: string) => flaky(real.forUserAt(uid, dbName)),
   };
 });
 
@@ -83,8 +83,10 @@ vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
   throw new Error(`unexpected Spotify call ${url.pathname}`);
 });
 
-const { ownerStore } = await import("./owner-store");
+const { ownerStore, seedOwnerRow } = await import("./owner-store");
 const db = ownerStore();
+// The admin's users row, which the route's adminStore() reads (multi-user Phase 2).
+await seedOwnerRow();
 const { GET } = await import("@/app/api/cron/sync/route");
 
 const call = (authorization?: string) =>
@@ -226,8 +228,9 @@ describe("/api/cron/sync, two pingers", () => {
   });
 
   it("with no owner configured the Zenbook hears 503 and cron-job.org still a bare {\"ok\":true}", async () => {
-    // The tick resolves its user first (phase1Owner, forUser); that answer is the tick's, so it
-    // reaches the Zenbook's caller and never cron-job.org's (lane 33's stitch of lanes 08 and 12).
+    // The tick resolves its user first (adminStore: OWNER_UID's users row); that answer is the
+    // tick's, so it reaches the Zenbook's caller and never cron-job.org's (lane 33's stitch of
+    // lanes 08 and 12; lane 34's of lane 15).
     const owner = process.env.OWNER_UID;
     delete process.env.OWNER_UID;
     try {

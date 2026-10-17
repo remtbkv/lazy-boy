@@ -153,8 +153,7 @@ export type DayStats = {
 // Rem's database, `lazyboy`, is TURSO_DATABASE_URL (the local file in dev and tests); every
 // other name comes from STORE_URL_TEMPLATE with `{db}` replaced. No template, no URL: the
 // open throws, and nothing ever falls back to Rem's URL. Which `db_name` a uid has is not
-// decided here: Phase 1's only mapping is OWNER_UID → `lazyboy` (forUser below); Phase 2
-// reads it from the identity read.
+// decided here: the users row says, read by the identity read and the claim (forUser below).
 //
 // The first use of a database for a uid in this process reads its four `meta` keys in ONE
 // statement, sent in the same batch as the request's first read (whose result is used only
@@ -214,6 +213,7 @@ function makeStoreClient(u: string, token: string | undefined, f: typeof fetch):
 type Opened = { epoch: string };
 type StoreGlobals = {
   __lbUserClients?: Map<string, Client>;
+  __lbUserDbNames?: Map<string, string>;
   __lbOpened?: Map<string, Opened>;
   __lbSchemaRuns?: Map<string, Promise<void>>;
   __lbTelemetry?: Map<"telemetry", Promise<Client>>;
@@ -221,6 +221,8 @@ type StoreGlobals = {
 };
 const g = globalThis as unknown as StoreGlobals;
 const userClients = (): Map<string, Client> => (g.__lbUserClients ??= new Map());
+// uid → db_name, as the last identity read or claim in this process named it (forUser below).
+const userDbNames = (): Map<string, string> => (g.__lbUserDbNames ??= new Map());
 const openedDbs = (): Map<string, Opened> => (g.__lbOpened ??= new Map());
 // One schema run (steps or provisioning) per database at a time in a process: two first
 // requests racing the same ALTER would fail the second ("duplicate column").
@@ -3910,9 +3912,12 @@ async function benchStore(u: UserDb, store: "core" | "telemetry"): Promise<Bench
 // exported: a caller gets them from forUser(uid), bound to that user's database, so a call
 // that forgets the user does not compile, and nothing at module level can run against "the"
 // database (static check S3 holds the module's exports to the list in
-// tests/isolation/static.test.ts). Phase 1 knows one mapping, OWNER_UID → `lazyboy`; any
-// other uid throws. Phase 2's identity read returns each user's db_name and calls
-// forUserAt with it.
+// tests/isolation/static.test.ts). Which database a uid has is its `users` row's db_name
+// (PLAN §4.2), never a constant: the identity read every request makes, and the claim, call
+// forUserAt with the db_name they read, and forUser(uid) resolves to the last name named in
+// this process. A name that changed (a restore moved the user) is rebuilt before use: the old
+// client and the old open verdict are dropped, so the next statement opens the new database
+// and checks its owner. A uid nothing has named in this process throws.
 const USER_FNS = {
   acquireLock,
   benchStore,
@@ -3987,21 +3992,28 @@ export type UserStore = {
   storeEpoch(): Promise<string>;
 } & { readonly [K in keyof typeof USER_FNS]: Bound<(typeof USER_FNS)[K]> };
 
-/** Phase 1's directory: the owner's uid names Rem's database; any other uid has none. */
-function phase1DbName(uid: Uid): string {
-  if (uid !== phase1Owner()) throw new Error(`no database is mapped to user ${uid}`);
-  return PRIMARY_DB;
-}
-
-/** A user's data, bound to their database. Throws for a uid with no database. */
+/** A user's data, bound to the database their `users` row names, as this request's identity
+ *  read (or the claim) read it. Throws for a uid nothing has named in this process. */
 export function forUser(uid: Uid): UserStore {
-  return forUserAt(uid, phase1DbName(uid));
+  const dbName = userDbNames().get(uid);
+  if (!dbName) throw new Error(`no database is named for user ${uid}: the identity read or the claim names it`);
+  return forUserAt(uid, dbName);
 }
 
-/** The same, at a named database: what forUser resolves to, what Phase 2's identity read
- *  calls with the user's db_name, and what the tests use for their per-user files. The open's
- *  owner check is what stands between a wrong name and someone else's data. */
+/** The same, at a named database: what the identity read and the claim call with the user's
+ *  db_name, and what the tests use for their per-user files. It records the name for forUser,
+ *  rebuilding the entry when the name changed. The open's owner check is what stands between a
+ *  wrong name and someone else's data. */
 export function forUserAt(uid: Uid, dbName: string): UserStore {
+  const names = userDbNames();
+  const was = names.get(uid);
+  if (was !== dbName) {
+    if (was !== undefined) {
+      openedDbs().delete(openKey(uid, was));
+      userClients().delete(was);
+    }
+    names.set(uid, dbName);
+  }
   const u = userDb(uid, dbName);
   const store: Record<string, unknown> = { uid, dbName, storeEpoch: () => u.epoch() };
   for (const [name, fn] of Object.entries(USER_FNS)) {

@@ -16,9 +16,11 @@ const state = vi.hoisted(() => ({
 vi.mock("next/server", () => ({ after: () => {} }));
 vi.mock("next/navigation", () => ({ unstable_rethrow: () => {} }));
 vi.mock("@/lib/auth", () => ({}));
-// The gate as the owner's session would pass it (multi-user Phase 1).
+// The gate as the owner's session would pass it, after his identity read named his database
+// (ownerStore(), multi-user Phase 2).
 vi.mock("@/lib/require-user", async () => {
-  const { ownerUid } = await import("./owner-store");
+  const { ownerStore, ownerUid } = await import("./owner-store");
+  ownerStore();
   return { requireActionUser: async () => ({ uid: ownerUid(), admin: true }) };
 });
 vi.mock("@/lib/session", () => ({

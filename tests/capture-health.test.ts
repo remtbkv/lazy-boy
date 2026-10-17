@@ -96,6 +96,8 @@ vi.mock("@/lib/auth", () => ({ getValidAccessTokenFor: async () => null }));
 describe("cron with no token", () => {
   const call = async () => {
     process.env.CRON_SECRET = "s3cret";
+    // The admin's users row names his database (multi-user Phase 2).
+    await (await import("./owner-store")).seedOwnerApp();
     const { GET } = await import("@/app/api/cron/sync/route");
     return GET(new Request("http://x/api/cron/sync", { headers: { authorization: "Bearer s3cret" } }));
   };
@@ -111,5 +113,17 @@ describe("cron with no token", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, skipped: "no token" });
     await db.clearSpotifyTokens();
+  });
+  it("no admin row: no owner, 503", async () => {
+    const { appDatabaseUrl } = await import("@/lib/app-db");
+    const { createClient } = await import("@libsql/client");
+    const { GET } = await import("@/app/api/cron/sync/route");
+    await call();
+    const c = createClient({ url: appDatabaseUrl() });
+    await c.execute("DELETE FROM users");
+    c.close();
+    const res = await GET(new Request("http://x/api/cron/sync", { headers: { authorization: "Bearer s3cret" } }));
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ ok: false, error: "no owner" });
   });
 });

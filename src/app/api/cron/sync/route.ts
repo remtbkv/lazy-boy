@@ -1,8 +1,8 @@
 import { after } from "next/server";
 import { getValidAccessTokenFor } from "@/lib/auth";
 import { cronCaller, type CronCaller } from "@/lib/cron-auth";
-import { forUser, type UserStore } from "@/lib/db";
-import { phase1Owner } from "@/lib/identity";
+import type { UserStore } from "@/lib/db";
+import { adminStore } from "@/lib/identity-read";
 import { spotifyClient, SpotifyError, type OwnedToken } from "@/lib/spotify";
 import { syncRecentPlays } from "@/lib/sync/history";
 import { syncLibrary } from "@/lib/sync/library";
@@ -67,11 +67,13 @@ export async function GET(req: Request) {
 }
 
 async function tick(caller: CronCaller): Promise<Response> {
-  // Phase 1 has one user, the owner (OWNER_UID); Phase 3's claim hands this tick each due user
-  // instead (multi-user PLAN §7.2). No owner configured: capture cannot run, and says so.
-  const uid = phase1Owner();
-  if (!uid) return Response.json({ ok: false, error: "no owner" }, { status: 503 });
-  const store = forUser(uid);
+  // One user until Phase 3's claim hands this tick each due user (multi-user PLAN §7.2): the
+  // admin, at the database his `users` row names. No admin row: capture cannot run, and says
+  // so. The app database not answering is a store hiccup (200, below).
+  const store = await adminStore().catch((e) => (console.error("[cron] admin row unread", e), undefined));
+  if (store === null) return Response.json({ ok: false, error: "no owner" }, { status: 503 });
+  if (!store) return Response.json({ ok: true, skipped: "store" });
+  const uid = store.uid;
   // The owner alarm, read before the stamp so the Zenbook sees it whichever pinger's tick ran
   // this window (PLAN §7.2 step 0). A store error here is no verdict: the stamp decides.
   if (caller === "zenbook" && (await store.getSpotifyTokens().catch(() => undefined)) === null) {
