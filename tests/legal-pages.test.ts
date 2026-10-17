@@ -68,6 +68,14 @@ describe("/privacy and /terms", () => {
       "those copies hold none of yours, diagnostic logs included",
       "only as totals by page",
       "cached copies of some of what your pages show",
+      // Lane 20's review: what the browser files besides timings (error.tsx's js-error rows, the
+      // handoff beacon's track id) and the server's own error rows, which carry no uid and the
+      // route's template, not the raw path (instrumentation.ts).
+      // Main's line (np/followups 9b6192f) says the same in its own words: the browser's error
+      // messages, and the handoff record's song IDs (handoffBeaconMeta: `id=`, `pred=`).
+      "and error messages), with a random ID for the browser tab",
+      "the Spotify IDs of that song and the one before it",
+      "Errors the server runs into are logged by page and message, with no account's ID.",
     ]) {
       expect(p, s).toContain(s);
     }
