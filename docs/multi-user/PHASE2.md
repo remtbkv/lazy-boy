@@ -426,3 +426,45 @@ What the meter needs from this phase stays as the meter built it: `getBudgetMode
 `adminDb()`, which this phase keeps for the cooldown. Gates at the slice head: `tsc`, lint, `npm test`, build
 green; `AUTHZ_TARGET=1 … authz-` fails only the three P4a pins. Lane 34's NOTES (`lb_34/NOTES.md`) and OUTCOMES
 entry have the full range-diff.
+
+## 9. The review of the stitched slice: `mu/rv-p2` (lane 1945_lb_mu_16_p2_turn_review, Oct 16-17, 2026)
+
+A fresh-context adversarial review of `mu/s-meter..mu/s-p2` (`3c99bca`): the replay (lane 31), the wiring (lane
+15) and the stitch (lane 34), against PLAN §4.2, §5, §6.2, §11.4 and §13.5 and lane 22's runbook. Two defects, each
+fixed on `mu/rv-p2` with a test shown failing first; lane 35 folds them into this slice.
+
+- **The first Zenbook tick after the deploy answered 503 "no token" and never ran the copy** (`8fa72fe`). At the
+  deploy the admin has no `user_tokens` row until the runtime copies his plaintext row at his first read through
+  the token store. The stitch's owner alarm (`c8db174`) read `user_tokens` raw, before the stamp and before
+  `getValidAccessTokenFor`, the only tick path that runs the copy, so every Zenbook tick stopped there until Rem
+  opened a page or a cron-job.org tick ran, and lane 22's "three ticks answer 200" could not pass. The alarm now
+  asks the token store (`hasStoredTokens` in auth.ts), which runs the copy first; after it, a missing row still
+  alarms. The pinger suite builds its token functions over the core auth.ts runs, so T12's copy is now also
+  proven through the route.
+- **The rollback flag's mirror threw on a cold instance** (`dc79165`). token-move.ts reached the plaintext row
+  through `forUser(uid)`, which throws until something in the process has named the uid; the jwt callback's
+  sign-in branch names nothing, so under `LB_TOKEN_ROLLBACK=1` a sign-in on a fresh instance wrote its
+  `user_tokens` row and then failed. The plaintext row is now reached through the admin's `users` row
+  (`adminStore`), and a uid that is not the admin row's reaches none.
+
+What held, with the evidence in lane 16's notes: each replay and stitch resolution keeps the identity read's three
+outcomes, the owner check per `(uid, db_name)`, the per-uid refresh map, the token-owner assertion and the meter's
+two choke points (`require-user.ts` and `cronCaller`, untouched by the slice); `forUserAt` is imported by
+identity-read.ts alone, which calls it only with a `users` row's `db_name`; T12 re-run on the 09:44 backup of
+Oct 16 at `mu/rv-p2` (7/7 with lane 1903's skip-rule migration applied to the copy); ten real-source mutants each
+turned tests red; `AUTHZ_TARGET=1` fails only the three P4a pins at `mu/s-p2` and at `mu/rv-p2`. No P2 cell or
+check was ever pinned; F1's Phase 2 half (status and epoch) is met by the revoked friend's red-team check.
+
+For lane 22, from running the runbook's scripts against a local copy:
+
+- `turso db tokens invalidate lazyboy` asks for confirmation; a headless lane passes `--yes`.
+- `verify-derived.mjs` is red on production in `skipped` (781 plays) and `alltime_stats` until Rem runs
+  `scripts/migrate-skip-rule.mjs --apply` (lane 1911's NEEDS_REM line). Step 0 should record it and step 7 compare
+  against it, or the check fails for a reason that is not Phase 2's.
+- `phase2-app-db.mjs --snapshot-out` (step 0, before the invalidation) and `--verify --snapshot` (step 7) are the
+  script's own forms of those two steps.
+- Until the first Zenbook tick runs the copy (within one tick of the deploy), `getCaptureHealth` reads no token
+  row; an hourly health check landing in that window reports it once.
+
+Left for Phase 3 (PHASE2 §4 item 10): a wrong or missing `TOKEN_KEYS` makes the tick answer 200 "skipped" rather
+than 503; pages answer "unavailable" and the runtime logs the refusal.
