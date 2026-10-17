@@ -273,7 +273,8 @@ describe("S4: module-scope state is on a reviewed list", () => {
     "src/lib/search-perf.ts: enabled": BROWSER,
     // Set by the sign-out form for the rest of that page load; signing in again is a navigation.
     "src/lib/search-cache.ts: ended": BROWSER,
-    "src/lib/db.ts: g": "clients by db_name, owner verdicts and schema runs by (uid, db_name), the telemetry client, the app-wide budget mode's memo",
+    "src/lib/db.ts: g":
+      "clients by db_name, each uid's db_name as its users row last said, owner verdicts and schema runs by (uid, db_name), the telemetry client, the app-wide budget mode's memo",
     "src/lib/budget/request-meter.ts: g": "the process's meter: counts by (day, route, uid), the in-flight requests by Next's request scope and as a set, the cold-start flag, the process CPU already in a row",
     "src/lib/budget/request-meter.ts: open": "WeakMap keyed by Next's per-request scope: one in-flight request's counts, gone with it",
     "src/lib/budget/request-meter.ts: shared": "the process's meter (see g): its cold-start flag, CPU booked and in-flight set",
