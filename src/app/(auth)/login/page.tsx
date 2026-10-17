@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { login } from "@/app/(app)/actions";
 import { Button } from "@/components/ui/button";
+import { ClearUserStorage } from "@/components/clear-user-storage";
 import { loginErrorMessage } from "@/lib/login-error";
 
 export default async function LoginPage({
@@ -18,6 +19,10 @@ export default async function LoginPage({
 
   return (
     <main className="flex flex-1 items-center justify-center p-6">
+      {/* No signed-in user reaches here (a live session is sent to /home above): a browser whose
+          session ended elsewhere (Log out on another browser, a Disconnect, a deletion) forgets
+          every user's stored data on this visit, as PLAN §6.2 layer 6 promises at the next request. */}
+      <ClearUserStorage />
       <div className="w-full max-w-sm space-y-8 text-center">
         <div className="space-y-3">
           <img

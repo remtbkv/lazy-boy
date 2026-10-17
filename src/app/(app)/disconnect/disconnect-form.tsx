@@ -3,6 +3,9 @@
 import { useActionState, useState } from "react";
 import { disconnectAction } from "@/app/(app)/actions";
 import { Button } from "@/components/ui/button";
+import { useUid } from "@/components/user-context";
+import { clearStored, idbKV } from "@/lib/search-cache";
+import { clearThisBrowser } from "@/lib/user-storage";
 
 // Step 0 of the deletion job (PLAN.md §12.3): the export, built in the browser from the two
 // payloads Home already loads (every play, and the library), offered before anything is deleted.
@@ -40,12 +43,22 @@ export function ExportButton() {
 }
 
 export function DisconnectForm() {
+  const uid = useUid();
   const [state, run, pending] = useActionState(
     async (_prev: { error?: string } | null, data: FormData) => (await disconnectAction(data)) ?? null,
     null,
   );
+  // As the Log out form does (chrome.tsx): this browser's copy of the user's data, the IndexedDB
+  // history and library among it, goes before the action runs, which ends in a redirect.
   return (
-    <form action={run} className="space-y-3">
+    <form
+      action={run}
+      onSubmit={() => {
+        clearThisBrowser(uid);
+        void clearStored(idbKV(uid));
+      }}
+      className="space-y-3"
+    >
       <label className="block text-sm">
         Type <strong>disconnect</strong> to confirm
         <input name="confirm" autoComplete="off" className="mt-1 w-full rounded-md border px-3 py-2" />
