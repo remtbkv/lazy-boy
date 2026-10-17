@@ -97,9 +97,9 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/now-playing
 
-- File: `src/app/api/now-playing/route.ts`. Gate today: `src/app/api/now-playing/route.ts:24`.
+- File: `src/app/api/now-playing/route.ts`. Gate today: `src/app/api/now-playing/route.ts:32`.
 - Does, when allowed: reads Spotify's player state (/me/player) with Rem's grant; reads and writes the context-name cache (contexts).
-- Calls (from the source): store `forUser`; Spotify `currentlyPlaying`, `contextName`; via `spotifyAccessTokenFor`, `requireUser`, `spotifyClient`, `spotifyCooldownMs`.
+- Calls (from the source): store `forUser`; Spotify `currentlyPlaying`, `contextName`; via `spotifyAccessTokenFor`, `requireUser`, `spotifyClient`, `spotifyCooldownMs`, `currentMode`, `meteredBody`.
 - `anon`: D — requireUser refused → 200 {playing:null} with no store read (deliberately not 401: polled every 6 s)
 - `rem`: A — the owner's session: the identity check allows OWNER_UID, Phase 1's one user (src/lib/identity.ts)
 - `friendA`, `friendB`: I — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
@@ -110,9 +110,9 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### POST /api/sync
 
-- File: `src/app/api/sync/route.ts`. Gate today: `src/app/api/sync/route.ts:17`.
+- File: `src/app/api/sync/route.ts`. Gate today: `src/app/api/sync/route.ts:19`.
 - Does, when allowed: harvests recently-played with Rem's grant into plays/tracks; writes meta user_tz from the tzoffset cookie and the sync stamps.
-- Calls (from the source): store `forUser`; via `spotifyAccessTokenFor`, `requireRouteUser`, `spotifyClient`, `syncRecentPlays`.
+- Calls (from the source): store `forUser`; via `spotifyAccessTokenFor`, `requireRouteUser`, `spotifyClient`, `syncRecentPlays`, `currentMode`.
 - `anon`: D — requireRouteUser: no session → 401 with the signed-out marker before any read
 - `rem`: A — the owner's session: the identity check allows OWNER_UID, Phase 1's one user (src/lib/identity.ts)
 - `friendA`, `friendB`: I — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
@@ -136,9 +136,9 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/search/library
 
-- File: `src/app/api/search/library/route.ts`. Gate today: `src/app/api/search/library/route.ts:24`.
+- File: `src/app/api/search/library/route.ts`. Gate today: `src/app/api/search/library/route.ts:25`.
 - Does, when allowed: returns every track in a playlist or Liked Songs (the library index), ETag'd with the uid, private, no-store.
-- Calls (from the source): store `forUser`; via `requireRouteUser`.
+- Calls (from the source): store `forUser`; via `requireRouteUser`, `meteredBody`.
 - `anon`: D — requireRouteUser: no session → 401 with the signed-out marker before any read
 - `rem`: A — the owner's session: the identity check allows OWNER_UID, Phase 1's one user (src/lib/identity.ts)
 - `friendA`, `friendB`: I — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
@@ -149,9 +149,9 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/search/history
 
-- File: `src/app/api/search/history/route.ts`. Gate today: `src/app/api/search/history/route.ts:15`.
+- File: `src/app/api/search/history/route.ts`. Gate today: `src/app/api/search/history/route.ts:16`.
 - Does, when allowed: returns every played track and every play (the history index), ETag'd with the uid, private, no-store.
-- Calls (from the source): store `forUser`; via `requireRouteUser`.
+- Calls (from the source): store `forUser`; via `requireRouteUser`, `meteredBody`.
 - `anon`: D — requireRouteUser: no session → 401 with the signed-out marker before any read
 - `rem`: A — the owner's session: the identity check allows OWNER_UID, Phase 1's one user (src/lib/identity.ts)
 - `friendA`, `friendB`: I — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
@@ -201,9 +201,9 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/cron/sync
 
-- File: `src/app/api/cron/sync/route.ts`. Gate today: `src/app/api/cron/sync/route.ts:51`.
+- File: `src/app/api/cron/sync/route.ts`. Gate today: `src/app/api/cron/sync/route.ts:54`.
 - Does, when allowed: the tick, at most one per 90 s whoever calls (the stamp, acquireLock('tick')): currently-playing and recently-played with Rem's stored grant, harvest stamps, plays; a library rescan every 30 min.
-- Calls (from the source): store `forUser`; Spotify `currentlyPlaying`; via `getValidAccessTokenFor`, `cronCaller`, `phase1Owner`, `spotifyClient`, `syncRecentPlays`, `syncLibrary`, `shouldHarvest`.
+- Calls (from the source): store `forUser`; Spotify `currentlyPlaying`; via `getValidAccessTokenFor`, `cronCaller`, `phase1Owner`, `spotifyClient`, `syncRecentPlays`, `syncLibrary`, `shouldHarvest`, `currentMode`.
 - `anon`: D — cronCaller() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET` (the Zenbook) or `Bearer $CRON_SECRET_EXT` (cron-job.org), timing-safe, an unset secret matching nobody; a cookie is not a secret; no header → 401
 - `rem`: D — cronCaller() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET` (the Zenbook) or `Bearer $CRON_SECRET_EXT` (cron-job.org), timing-safe, an unset secret matching nobody; a cookie is not a secret; Rem's cookie → 401
 - `friendA`, `friendB`, `revoked`, `staleSecret`, `staleLogout`, `forged`: D — cronCaller() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET` (the Zenbook) or `Bearer $CRON_SECRET_EXT` (cron-job.org), timing-safe, an unset secret matching nobody; a cookie is not a secret; a cookie → 401
@@ -226,9 +226,9 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/cron/daily
 
-- File: `src/app/api/cron/daily/route.ts`. Gate today: `src/app/api/cron/daily/route.ts:57`.
+- File: `src/app/api/cron/daily/route.ts`. Gate today: `src/app/api/cron/daily/route.ts:61`.
 - Does, when allowed: the daily chores: recompute all-time totals, rebuild the Home payload, prune api_log and client_metrics, the played_at check, the usage check.
-- Calls (from the source): store `forUser`; via `cronAuthorized`, `phase1Owner`, `runUsageCheck`.
+- Calls (from the source): store `forUser`; via `cronAuthorized`, `phase1Owner`, `runUsageCheck`, `runBudgetChore`.
 - `anon`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; no header → 401
 - `rem`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; Rem's cookie → 401
 - `friendA`, `friendB`, `revoked`, `staleSecret`, `staleLogout`, `forged`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; a cookie → 401

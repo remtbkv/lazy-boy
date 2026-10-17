@@ -4,6 +4,8 @@ import { forUser } from "@/lib/db";
 import { requireRouteUser } from "@/lib/require-user";
 import { spotifyClient, SpotifyError } from "@/lib/spotify";
 import { syncRecentPlays } from "@/lib/sync/history";
+import { currentMode } from "@/lib/budget/mode";
+import { SYNC_INTERVAL_MS, SYNC_ON_LOAD } from "@/lib/budget/modes";
 
 // In-app history sync. SyncOnLoad pings this on load, every 2 min while open, and on
 // tab-focus; this server-side debounce coalesces those (and multiple tabs / quick
@@ -16,6 +18,11 @@ export async function POST() {
   // The gate first, so an unauthenticated POST costs no tokens read.
   const user = await requireRouteUser();
   if (user instanceof Response) return user;
+  // Every 200 carries the tab's next interval (CAPACITY §6; lib/budget/sync-interval.ts); in
+  // freeze the route syncs nothing and the cron tick alone captures.
+  const mode = await currentMode();
+  const intervalMs = SYNC_INTERVAL_MS[mode];
+  if (!SYNC_ON_LOAD[mode]) return Response.json({ ok: true, skipped: "freeze", intervalMs });
   const accessToken = await spotifyAccessTokenFor(user.uid);
   if (!accessToken) {
     return Response.json({ ok: false, error: "unauthorized" }, { status: 401 });
@@ -30,7 +37,7 @@ export async function POST() {
   }
   const last = await store.getLastSync();
   if (last && Date.now() - new Date(last).getTime() < STALE_MS) {
-    return Response.json({ ok: true, skipped: true });
+    return Response.json({ ok: true, skipped: true, intervalMs });
   }
   try {
     const { added, skipped } = await syncRecentPlays(
@@ -40,11 +47,11 @@ export async function POST() {
     // The open tab's share of the burn, kept separate from the cron's: the debounce above
     // already returned for the calls that did no work, so what reaches here really synced.
     if (!skipped) void store.ledgerSyncCall("sync_onload", added);
-    return Response.json({ ok: true, added, skipped });
+    return Response.json({ ok: true, added, skipped, intervalMs });
   } catch (e) {
     // A rate-limit self-heals; don't 500 the open app's background poll over it.
     if (e instanceof SpotifyError && e.status === 429) {
-      return Response.json({ ok: true, skipped: "rate-limited" });
+      return Response.json({ ok: true, skipped: "rate-limited", intervalMs });
     }
     return Response.json(
       { ok: false, error: e instanceof Error ? e.message : "sync failed" },

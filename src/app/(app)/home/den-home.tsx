@@ -41,6 +41,7 @@ import { IdentityTrackMenu } from "@/components/identity-track-menu";
 import { useNowPlaying } from "@/components/now-playing-context";
 import { useUid } from "@/components/user-context";
 import { bodyIsFor, clearIfSignedOut, userStorageName } from "@/lib/user-storage";
+import { ambientGapMs, syncIntervalMs } from "@/lib/budget/sync-interval";
 import { usePhone, useSearchMode } from "../use-search-mode";
 import {
   allTimePlaysAction,
@@ -846,7 +847,8 @@ export function DenHome({
   const lastRefreshAt = useRef(0);
   useEffect(() => {
     doRefresh.current = async (force = false) => {
-      if (!force && Date.now() - lastRefreshAt.current < 45_000) return;
+      // 45 s normally; under the budget's economy and freeze, /api/sync's interval (sync-interval.ts).
+      if (!force && Date.now() - lastRefreshAt.current < ambientGapMs(45_000)) return;
       lastRefreshAt.current = Date.now();
       const run = ++refreshRun.current;
       const at = selected;
@@ -1054,15 +1056,19 @@ export function DenHome({
   }, [playing]);
 
   useEffect(() => {
-    const id = setInterval(() => {
+    // Every 2 minutes, or the longer interval /api/sync last set (the budget's economy, freeze).
+    let id: ReturnType<typeof setTimeout>;
+    const tick = () => {
       if (document.visibilityState === "visible") void doRefresh.current();
-    }, 120_000);
+      id = setTimeout(tick, syncIntervalMs());
+    };
+    id = setTimeout(tick, syncIntervalMs());
     const onVisible = () => {
       if (document.visibilityState === "visible") void doRefresh.current();
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
-      clearInterval(id);
+      clearTimeout(id);
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);

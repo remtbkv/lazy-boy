@@ -38,7 +38,9 @@ export type PolledPlaying = {
 } | null;
 
 export type PollOutcome =
-  | { kind: "ok"; playing: PolledPlaying }
+  /** `minPollMs`: the server's floor under every scheduled poll (the budget's economy and
+   *  freeze, src/lib/budget/modes.ts); absent = keep the last one, 0 = none. */
+  | { kind: "ok"; playing: PolledPlaying; minPollMs?: number }
   /** Non-200. `retryAfterMs` is set on a 429. */
   | { kind: "error"; retryAfterMs?: number }
   /** The poll was not sent (an optimistic action is suppressing polls); try again after this. */
@@ -49,14 +51,32 @@ export type PollState = {
   /** The track the pending poll was timed to catch the end of, or null. */
   boundaryOf: string | null;
   burstLeft: number;
+  /** The last floor the server set (PollOutcome's minPollMs). */
+  floorMs?: number;
 };
 
 export const INITIAL_POLL_STATE: PollState = { failures: 0, boundaryOf: null, burstLeft: 0 };
 
 /** The delay before the next poll (null = none until something kicks the loop) and the new
- *  state. Hidden tabs only follow track boundaries — the old behaviour, which keeps a hidden
- *  Home tab's play handoff working at ~1 call per track. */
+ *  state, never under the server's floor: in economy and freeze that holds the track-end poll,
+ *  the burst and the backoffs too. A kick (the tab coming back, an in-app player action) is not
+ *  scheduled, so it still polls at once. */
 export function planNextPoll(
+  state: PollState,
+  outcome: PollOutcome,
+  visible: boolean,
+): { delay: number | null; state: PollState } {
+  const floorMs = (outcome.kind === "ok" ? outcome.minPollMs : undefined) ?? state.floorMs ?? 0;
+  const next = planCadence(state, outcome, visible);
+  return {
+    delay: next.delay === null ? null : Math.max(next.delay, floorMs),
+    state: floorMs ? { ...next.state, floorMs } : next.state,
+  };
+}
+
+/** The cadence before the floor. Hidden tabs only follow track boundaries — the old
+ *  behaviour, which keeps a hidden Home tab's play handoff working at ~1 call per track. */
+function planCadence(
   state: PollState,
   outcome: PollOutcome,
   visible: boolean,

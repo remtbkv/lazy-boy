@@ -7,17 +7,20 @@ import { spotifyClient, SpotifyError, type OwnedToken } from "@/lib/spotify";
 import { syncRecentPlays } from "@/lib/sync/history";
 import { syncLibrary } from "@/lib/sync/library";
 import { shouldHarvest } from "@/lib/harvest-gate";
+import { currentMode } from "@/lib/budget/mode";
+import { LIBRARY_RESCAN_MS } from "@/lib/budget/modes";
 
 // Rebuild the library index at most every 30 min (snapshot-diffing makes a run cheap, but no
 // need to do it every 2-minute tick). This tick is the AUTHORITATIVE refresh for the stored
 // library: the playlists page renders from the store and only kicks its own scan when the
 // store is empty or this tick has clearly stopped running. Takes a token getter — a cold full
-// scan can outlive the ~1h access token.
-const LIBRARY_MAX_AGE_MS = 30 * 60 * 1000;
-
+// scan can outlive the ~1h access token. The 30 min is the budget's normal mode: 2 hours in
+// economy, no rescans in freeze (lib/budget/modes.ts).
 async function maybeSyncLibrary(store: UserStore, token: () => Promise<OwnedToken>): Promise<string> {
+  const maxAge = LIBRARY_RESCAN_MS[await currentMode()];
+  if (maxAge === null) return "frozen";
   const at = await store.getLibrarySyncedAt();
-  if (at && Date.now() - Date.parse(at) < LIBRARY_MAX_AGE_MS) return "fresh";
+  if (at && Date.now() - Date.parse(at) < maxAge) return "fresh";
   // Attempt stamp, checked as well as the completion stamp: the completion stamp only
   // lands at the END of a successful scan, so a scan that kept throwing was retried on
   // every 2-minute tick — an unpaced failure storm (audit 2026-08-19, T2.9). One attempt

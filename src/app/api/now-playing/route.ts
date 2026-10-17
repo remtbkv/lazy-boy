@@ -2,6 +2,9 @@ import { spotifyAccessTokenFor } from "@/lib/auth";
 import { requireUser } from "@/lib/require-user";
 import { SpotifyError, spotifyClient, spotifyCooldownMs } from "@/lib/spotify";
 import { forUser } from "@/lib/db";
+import { currentMode } from "@/lib/budget/mode";
+import { NOW_PLAYING_MIN_POLL_MS } from "@/lib/budget/modes";
+import { meteredBody } from "@/lib/budget/request-meter";
 
 // Live "what's playing right now". Returns { playing: null } when nothing is
 // actively playing or there's no active device — never stale/last-played data —
@@ -17,8 +20,13 @@ import { forUser } from "@/lib/db";
 // rendered for one user learns that the browser's cookie now names another (a sign-in in
 // another tab) instead of showing, caching and relaying that user's player under the first
 // one's names (multi-user PLAN §6.2 layer 6; user-storage.ts namesAnotherUser).
-const reply = (playing: unknown, u?: string) =>
-  Response.json({ playing, build: process.env.NEXT_PUBLIC_BUILD_ID, ...(u ? { u } : {}) });
+// `minPollMs` is the budget's floor under the poller's cadence (0 = its own; CAPACITY §6,
+// src/lib/budget/modes.ts). The body is metered toward Fast Origin Transfer.
+const reply = (playing: unknown, u?: string, minPollMs = 0) =>
+  new Response(
+    meteredBody(JSON.stringify({ playing, build: process.env.NEXT_PUBLIC_BUILD_ID, minPollMs, ...(u ? { u } : {}) })),
+    { headers: { "Content-Type": "application/json" } },
+  );
 
 export async function GET() {
   const user = await requireUser();
@@ -37,10 +45,12 @@ export async function GET() {
   const uid = user.gate.uid;
   if (!accessToken) return reply(null, uid);
   const store = forUser(uid);
+  // Read beside the Spotify call, not before it: the mode's cache misses once per 10 minutes.
+  const floor = currentMode().then((m) => NOW_PLAYING_MIN_POLL_MS[m]);
   try {
     const sp = spotifyClient(uid, accessToken, false, "now-playing");
     const playing = await sp.currentlyPlaying();
-    if (!playing) return reply(null, uid);
+    if (!playing) return reply(null, uid, await floor);
 
     let context: { name: string; type: string } | null = null;
     if (playing.context) {
@@ -69,7 +79,7 @@ export async function GET() {
 
     // Spread first, then overwrite the raw {type,uri} context with the resolved
     // {name,type} one (later keys win).
-    return reply({ ...playing, context }, uid);
+    return reply({ ...playing, context }, uid, await floor);
   } catch (e) {
     // Rate-limited: say so, with how long to wait, so the poller backs off for that long
     // instead of asking again on its steady cadence (src/lib/now-playing-poll.ts).

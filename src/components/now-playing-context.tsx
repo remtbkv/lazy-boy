@@ -339,7 +339,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
           ? { kind: "error", retryAfterMs: retryAfterS * 1000 }
           : { kind: "error" };
       }
-      const data = (await res.json()) as { playing: Playing; build?: string; u?: string };
+      const data = (await res.json()) as { playing: Playing; build?: string; u?: string; minPollMs?: number };
       const receivedAt = Date.now();
       // The browser's cookie names someone else now (a sign-in in another tab): this answer is
       // theirs, so it is neither shown, cached nor relayed, and the page reloads as theirs.
@@ -359,7 +359,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
         const screened = screenAnswer(playingRef.current, data.playing, Date.now(), screenRef.current);
         screenRef.current = screened.mem;
         if (screened.action === "hold") return { kind: "skipped", retryInMs: screened.retryInMs };
-        if (screened.action === "ignore") return { kind: "ok", playing: playingRef.current };
+        if (screened.action === "ignore") return { kind: "ok", playing: playingRef.current, minPollMs: data.minPollMs };
         const shown = playingRef.current;
         const shownAt = lastAppliedAt.current;
         const at = Date.now();
@@ -383,7 +383,8 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
           authAt: authBuildAtRef.current,
         });
       }
-      return { kind: "ok", playing: data.playing };
+      // The server's floor under the cadence (the budget's economy and freeze): PollLoop holds it.
+      return { kind: "ok", playing: data.playing, minPollMs: data.minPollMs };
     } catch {
       /* transient — keep the last known state rather than flicker */
       return { kind: "error" };
