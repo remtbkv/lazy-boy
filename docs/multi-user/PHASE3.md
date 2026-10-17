@@ -558,3 +558,49 @@ New commits:
 
 Gates at the slice head: `tsc`, lint, `npm test`, build green; `AUTHZ_TARGET=1 … authz-` fails only the three P4a
 pins. Lane 34's NOTES and OUTCOMES entry have the full range-diff.
+
+## 13. Lane 18's review of the stitched slice: `mu/rv-p3` (lane 1945_lb_mu_18_p3_turn_review, Oct 16-17, 2026)
+
+An adversarial review, in a fresh context, of `git diff mu/s-p2...mu/s-p3` (`3c99bca..f7f09ee`), the slice as it
+will deploy. The branch `mu/rv-p3` is cut from `f7f09ee`; lane 35 folds it in. Each commit's message says how its
+test was shown failing first; lb_18/NOTES.md has the evidence for every point of the brief.
+
+| commit | what was wrong | what it does now |
+|---|---|---|
+| `55df834` | A `/me/player` probe that failed on its own (a 5xx, a network error, a bare 403) ended the step before the harvest decision. The user backed off to hourly steps, each failing the same way, so for as long as the player endpoint failed nothing was harvested: a friend listening past 50 plays lost them. The single-user route swallowed a failed player check and kept its hourly backstop. | Such a probe leaves the policy blind, as a player refusal already did: the backstop and §7.8's 30-minute rule still harvest. The outcome keeps the probe's code, so the user still backs off; the release records the harvest. |
+| `fc15ff8` | Only `open-app` had PLAN §7.6's 60-s gap. With the brake off, a change seen by a load's probe fires as `change` first, so a load seconds after the cron's harvest harvested again, and the cron's step right after a load's harvest did too. Both were tagged `change`, where V4's "only catch-up harvests from the open app" cannot see them. | `decideHarvest` returns nothing within 60 s of the last harvest, whatever fired; the change or the tail stays pending and the next step takes it, at most two minutes on. |
+| `a58b2ac` | The brake counted one send per request, but the client re-sends a 403 once, a rate limit up to three times and a network error up to three times. Each re-send may reach Spotify, and the 426 budget is measured in sends (§7.5 item 1). | Every `/me` send, and every re-send of a harvest, is counted before it goes; the step still counts a harvest's first send. |
+| `5364b85`, `4de334d` | The rescan checked its deadline between playlists and before Liked Songs, but the Liked read itself (the head's pages, and the full refetch an unlike forces) ran on regardless. In the 60-s invocation, a long refetch is killed; the kill skips `scheduleRescan`, so `claimRescan`'s 10-minute retry starts it again from the top, indefinitely. | The head read stops between pages at the deadline, and the refetch carries the deadline into `getAll` (`DeadlineError`). Nothing of Liked is written, the scan is not stamped, and the next rescan is due at its normal distance. |
+| `d0f0371` | A test gap: setting `PHASE3_TICK.brakeOn` to true by hand survived every Phase 3 test. | T4 runs the tick's own numbers with a user past the app's budget, and a new track is still harvested at once. |
+
+What this leaves for later:
+
+- **A resumable Liked refetch** (PLAN §7.7's "`getAll` takes a resumable cursor"). `getAll` no longer throws at
+  page 501, but nothing carries a read across ticks. A refetch that does not fit what is left of the tick's 20 s
+  (estimate: roughly a thousand likes or more) now waits for the client's own scan (`/api/playlists/sync`, no
+  deadline, 300 s), which runs when a stale library is opened. Rem's 48 likes fit one page. Phase 4a must decide
+  this before a friend with thousands of likes: a cursor and the rows seen so far kept between ticks, or the
+  refetch left to the 300-s path.
+- **A probe that hangs** past the step's 15-s deadline (a 10-s fetch timeout, four attempts) still gets no
+  harvest: the abandoned step reaches the decision after its deadline. A 5xx is the common failure, and it is
+  fixed; the hang needs a budget for the probe inside the deadline.
+- **A single playlist read** is not bounded by the rescan's deadline either. Rem's playlists are known; bounding
+  it would stop the tick from syncing a playlist it can sync today inside the 60 s, so it is left alone.
+- **An already-liked song's rename** no longer reaches `tracks` through the Liked path: `likedDiff` writes new
+  and moved likes only, where the old full refetch rewrote every row. It still arrives with a play or a playlist
+  write, and the orphan flags still equal a full pass over what is stored.
+- **`harvest:<trigger>` tags context lookups too**: `recordRecentPlays` resolves context names with the step's
+  client. V4's harvest count must filter `api_log` by path (`/me/player/recently-played`), not by source alone.
+- **A return to the tab probes every time** in normal mode (the ambient gap is 0). It costs one player call per
+  focus and nothing scarce, since the 60-s floor holds the harvest.
+
+Mutants: 16, each one exact replacement in the source, run against the 11 Phase 3 test files, restored after
+(lb_18/mutants.py, mutants.log). They covered the brief's five (a release without its owner check, the tail
+retry dropped, completeness at 50, the open app harvesting on every load, the count after the call), the 45-s
+stamp ignored, cron-job.org answered like the Zenbook, a claim that ignores a live lease, a 500-s lease, no 20-s
+reply, the brake on in Phase 3, and each of this review's fixes reverted. Two survived (the brake on in Phase 3,
+the head read's deadline check), and each now has a test that catches it. `AUTHZ_TARGET=1 npx vitest run
+tests/isolation/authz-` fails only the three P4a pins, both at `mu/s-p3` and at this branch's head (718 of 721).
+
+Gates at `d0f0371`, the last code commit (this section is the commit after it), Oct 17, 12:09 AM: `tsc --noEmit`, lint,
+`npm test` (vitest 91 files, 1,902 tests; the node suites pass) and `npm run build` all green.

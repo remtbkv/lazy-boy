@@ -155,8 +155,9 @@ file (`data/listens.db`, gitignored). Tables: `tracks`, `plays` (deduped on
   due user (`sync_state` in the app database, a 50-s lease), and runs each one's step under a
   15-s deadline: their token, a `/me/player` probe (what it saw lives in their `meta.probe`,
   written only on change), and a harvest only when the policy says so (`harvest-policy.ts`: a
-  track change, the session tail and one retry ~5 min later, 25 changes, the hourly backstop,
-  the open app's catch-up; each tagged `harvest:<trigger>` in `api_log.source`), each harvest
+  track change, the session tail and one retry ~5 min later, 25 changes, the hourly backstop
+  (which still fires when the probe itself fails), the open app's catch-up; never within a
+  minute of the last harvest; each tagged `harvest:<trigger>` in `api_log.source`), each send
   counted for the brake first (`brake.ts`, inert until Phase 4a). Then at most one library
   rescan, the daily chores when `daily_at` is over 26 h old, and the reply within 20 s; the
   rest finishes in `after()`. The Zenbook hears each step's code (the admin's with its trigger
