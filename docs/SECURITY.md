@@ -142,6 +142,19 @@ and the app follows `users.db_name` on every request, so a new name is safe.
   recorded since the copy in the telemetry store's lifecycle log, bump every `session_epoch`
   (sessions ended since the copy stay ended), then resume. Point `APP_DATABASE_URL` at the new
   name and redeploy. Its `user_tokens` blobs need the same `TOKEN_KEYS`.
+- **Restore `lazyboy-app` from Turso's point-in-time history** (one day on the free plan): it
+  holds every user's rows. The nightly copies on the Zenbook and OneDrive hold the admin's rows
+  alone (RULINGS Oct 15 6:21 PM; `ops/zenbook-backup/backup.py` `keep_admin_app_rows`), so a
+  restore from one brings back no friend: every `lb-u-<uid>` in `turso db list` is then a database
+  no `users` row names, which no session, tick, Disconnect or daily chore reaches, and nothing
+  ever removes. A friend's data is kept only while they stay connected and goes within five days
+  of leaving, so after such a restore, the same day: list those databases, tell each friend their
+  account was lost, and for each insert a stub row (`INSERT INTO users (uid, spotify_id, db_name,
+  status, status_at, is_admin, session_epoch, invited_at) VALUES ('<uid>', 'orphan:<uid>',
+  'lb-u-<uid>', 'disabled', <now ms>, 0, 1, 0)`; `disabled`, so no tick or session takes it) and
+  run `node scripts/user.mjs --remove <uid>`, which destroys the database, deletes the uid's
+  telemetry and logs it (`tests/isolation/t11-deletion.test.ts` runs this stub through the job).
+  A friend who wants back is invited again, with a new uid and an empty history.
 - **Rehearsed** before the first friend: restore a throwaway user's database under a new name,
   see the app serve from it, destroy it.
 

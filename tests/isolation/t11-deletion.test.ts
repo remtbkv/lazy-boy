@@ -208,6 +208,28 @@ describe("T11: deleting B", () => {
   });
 });
 
+describe("T11: a friend database a restore left with no users row (docs/SECURITY.md, Restores)", () => {
+  // A nightly copy of lazyboy-app holds the admin's rows alone, so restoring from one leaves every
+  // lb-u-<uid> unnamed. The runbook's stub row hands such a database to the deletion job.
+  it("the runbook's stub row lets the job destroy the database and the uid's telemetry", async () => {
+    const D = "dddddddddddd";
+    await userFile(`lb-u-${D}`, D);
+    await tele.execute({ sql: "INSERT INTO api_log (ts, path, user_id) VALUES (1, '/v1/me/player', ?)", args: [D] });
+    await q(
+      `INSERT INTO users (uid, spotify_id, db_name, status, status_at, is_admin, session_epoch, invited_at)
+       VALUES (:u, 'orphan:' || :u, 'lb-u-' || :u, 'disabled', :now, 0, 1, 0)`,
+      { u: D, now: T0 },
+    );
+    expect(await runDeletion(D, deps())).toEqual({ kind: "pending", step: "window" });
+    clock = T0 + LEASE_WINDOW_MS;
+    expect(await runDeletion(D, deps())).toEqual({ kind: "done" });
+    expect(destroyed).toEqual([`lb-u-${D}`]);
+    expect(await teleRows(D)).toBe(0);
+    expect(await dump("lazyboy")).toHaveLength(2);
+    expect(await appRows(B)).toEqual({ tokens: 1, queue: 1, lock: 1, request: 1 });
+  });
+});
+
 describe("T11: the refusals, each changing nothing", () => {
   it("never the admin", async () => {
     const before = await dump("lazyboy");
