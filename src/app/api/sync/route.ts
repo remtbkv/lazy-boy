@@ -1,4 +1,6 @@
 import { cookies, headers } from "next/headers";
+import { currentMode } from "@/lib/budget/mode";
+import { SYNC_INTERVAL_MS, SYNC_ON_LOAD } from "@/lib/budget/modes";
 import { forUser } from "@/lib/db";
 import { requireRouteUser } from "@/lib/require-user";
 import { runOpenApp } from "@/lib/sync/tick";
@@ -18,6 +20,11 @@ export async function POST() {
   // The gate first, so an unauthenticated POST costs no tokens read.
   const user = await requireRouteUser();
   if (user instanceof Response) return user;
+  // Every 200 carries the tab's next interval (CAPACITY §6; lib/budget/sync-interval.ts); in
+  // freeze the route does nothing and the cron tick alone captures.
+  const mode = await currentMode();
+  const intervalMs = SYNC_INTERVAL_MS[mode];
+  if (!SYNC_ON_LOAD[mode]) return Response.json({ ok: true, skipped: "freeze", intervalMs });
   // The browser's offset and IANA zone, written only when they change (PLAN §4.3): the Home
   // payload buckets days in them on the write path, where there is no cookie.
   const store = forUser(user.uid);
@@ -31,7 +38,7 @@ export async function POST() {
   const load = (await headers()).get("x-sync") === "load";
   try {
     const r = await runOpenApp(liveTickDeps(), { uid: user.uid, load });
-    return Response.json({ ok: true, ...r });
+    return Response.json({ ok: true, ...r, intervalMs });
   } catch (e) {
     console.error("[sync] open-app step failed", e);
     return Response.json({ ok: false, error: "sync failed" }, { status: 500 });
