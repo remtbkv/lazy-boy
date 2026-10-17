@@ -1,7 +1,12 @@
-import { notFound } from "next/navigation";
+import { redirect } from "next/navigation";
+import { auth } from "@/lib/auth";
 import { captureHealthMessage } from "@/lib/capture-health";
-import { forUser, type ClientMetricsPage, type MetricStat, type PageOpen } from "@/lib/db";
-import { requirePageUser } from "@/lib/require-user";
+import {
+  getCaptureHealth,
+  type ClientMetricsPage,
+  type MetricStat,
+  type PageOpen,
+} from "@/lib/db";
 import { tzOffsetMinutes } from "@/lib/tz";
 import { LedgerDays } from "./ledger-days";
 import { loadUsageTelemetry } from "./telemetry";
@@ -25,8 +30,7 @@ import { loadUsageTelemetry } from "./telemetry";
 //
 // Auth is gated HERE, not left to the (app) layout: Next renders layout and page in
 // parallel, so the layout's redirect alone still flushes the page's data into the 307
-// body (docs/SECURITY.md). The page is the admin's: it reads the telemetry of every user,
-// so anyone else gets a 404 before any read (multi-user PLAN §6.2 layer 7).
+// body (docs/SECURITY.md).
 export const dynamic = "force-dynamic";
 
 const DAYS = 14;
@@ -246,16 +250,15 @@ function Unavailable() {
 }
 
 export default async function UsagePage() {
-  const user = await requirePageUser();
-  if (!user.admin) notFound();
-  const store = forUser(user.uid);
+  const session = await auth();
+  if (!session || session.error) redirect("/login");
   // The log sections read the telemetry store and never reject (telemetry.ts): a dead one
   // empties its own section, not the page.
   const [telemetry, counters, tz, capture] = await Promise.all([
     loadUsageTelemetry(DAYS),
     liveCounters(),
-    tzOffsetMinutes(store),
-    store.getCaptureHealth().catch(() => null),
+    tzOffsetMinutes(),
+    getCaptureHealth().catch(() => null),
   ]);
   const { ledger, client, spotifyCalls, quotaWindows, down } = telemetry;
   const summaryByPage = new Map(client.pages.map((p) => [p.page, p]));

@@ -14,17 +14,9 @@ import type { Track } from "@/lib/spotify";
 vi.mock("next/server", () => ({ after: () => {} }));
 vi.mock("next/navigation", () => ({ unstable_rethrow: () => {}, redirect: () => {} }));
 vi.mock("@/lib/auth", () => ({}));
-// The gate as the owner's session would pass it (multi-user Phase 1).
-vi.mock("@/lib/require-user", async () => {
-  const { ownerUid } = await import("./owner-store");
-  return { requireActionUser: async () => ({ uid: ownerUid(), admin: true }) };
-});
 vi.mock("@/lib/session", async () => {
   const { spotifyClient } = await import("@/lib/spotify");
-  const { ownerUid } = await import("./owner-store");
-  return {
-    getSpotify: async () => spotifyClient(ownerUid(), { uid: ownerUid(), accessToken: "test-token" }, false, "sim"),
-  };
+  return { getSpotify: async () => spotifyClient("test-token", false, "sim") };
 });
 
 const uri = (id: string) => `spotify:track:${id}`;
@@ -94,7 +86,7 @@ function scriptSpotify(items: string[], snapshot: string, localFiles = 0) {
   return { pl, calls };
 }
 
-const db = (await import("./owner-store")).ownerStore();
+const db = await import("@/lib/db");
 const actions = await import("@/app/(app)/actions");
 const domain = await import("@/lib/spotify/domain");
 

@@ -1,8 +1,7 @@
 import { cookies } from "next/headers";
-import { spotifyAccessTokenFor } from "@/lib/auth";
-import { forUser } from "@/lib/db";
-import { requireRouteUser } from "@/lib/require-user";
+import { auth, spotifyAccessToken } from "@/lib/auth";
 import { spotifyClient, SpotifyError } from "@/lib/spotify";
+import { getLastSync, ledgerSyncCall, setUserTzOffset } from "@/lib/db";
 import { syncRecentPlays } from "@/lib/sync/history";
 
 // In-app history sync. SyncOnLoad pings this on load, every 2 min while open, and on
@@ -13,33 +12,28 @@ import { syncRecentPlays } from "@/lib/sync/history";
 const STALE_MS = 60 * 1000;
 
 export async function POST() {
-  // The gate first, so an unauthenticated POST costs no tokens read.
-  const user = await requireRouteUser();
-  if (user instanceof Response) return user;
-  const accessToken = await spotifyAccessTokenFor(user.uid);
+  const session = await auth();
+  // Short-circuited so an unauthenticated POST costs no tokens read.
+  const accessToken = session && !session.error ? await spotifyAccessToken() : undefined;
   if (!accessToken) {
     return Response.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  const store = forUser(user.uid);
   // Publish the browser's tz offset so write-path day bucketing (the home payload) and
   // cookie-less requests use the reader's zone instead of a hardcoded one. Once per load,
   // fire-and-forget.
   const tzRaw = Number((await cookies()).get("tzoffset")?.value);
   if (Number.isFinite(tzRaw)) {
-    void store.setUserTzOffset(Math.max(-720, Math.min(840, Math.round(tzRaw)))).catch(() => {});
+    void setUserTzOffset(Math.max(-720, Math.min(840, Math.round(tzRaw)))).catch(() => {});
   }
-  const last = await store.getLastSync();
+  const last = await getLastSync();
   if (last && Date.now() - new Date(last).getTime() < STALE_MS) {
     return Response.json({ ok: true, skipped: true });
   }
   try {
-    const { added, skipped } = await syncRecentPlays(
-      spotifyClient(user.uid, accessToken, false, "onload-sync"),
-      store,
-    );
+    const { added, skipped } = await syncRecentPlays(spotifyClient(accessToken, false, "onload-sync"));
     // The open tab's share of the burn, kept separate from the cron's: the debounce above
     // already returned for the calls that did no work, so what reaches here really synced.
-    if (!skipped) void store.ledgerSyncCall("sync_onload", added);
+    if (!skipped) void ledgerSyncCall("sync_onload", added);
     return Response.json({ ok: true, added, skipped });
   } catch (e) {
     // A rate-limit self-heals; don't 500 the open app's background poll over it.

@@ -1,15 +1,11 @@
 import { after } from "next/server";
+import { auth } from "@/lib/auth";
 import { recordClientMetrics, type ClientMetricInput } from "@/lib/db";
-import { SERVER_ONLY_EVENTS } from "@/lib/isolation";
-import { requireRouteUser } from "@/lib/require-user";
 
 // Where the browser files what it measured (src/lib/metrics-client.ts sends it, db.ts's
 // "Client performance metrics" stores it). Body: { session, events: [{page, event, value?,
-// meta?}] }, delivered by navigator.sendBeacon — which carries the session cookie, so the
-// gate works the same as on any other route here. The rows are filed under the session's uid,
-// never one from the body, and an event name the server reserves for itself (`isolation`,
-// which turns the health check red) is dropped: a client cannot raise, or fake, an alarm
-// (multi-user PLAN §6.2 layer 7, T15).
+// meta?}] }, delivered by navigator.sendBeacon — which carries the session cookie, so auth()
+// works the same as on any other route here.
 //
 // THIS ENDPOINT MUST NEVER BREAK THE APP IT MEASURES: everything past the auth check is
 // wrapped, and a failed insert answers 204 like a successful one. The beacon has nowhere to
@@ -21,8 +17,7 @@ const MAX_EVENTS = 50;
 const MAX_BODY_BYTES = 16 * 1024;
 
 export async function POST(req: Request) {
-  const user = await requireRouteUser();
-  if (user instanceof Response) return user;
+  if (!(await auth())) return new Response("Unauthorized", { status: 401 });
 
   try {
     const raw = await req.text();
@@ -41,7 +36,6 @@ export async function POST(req: Request) {
       if (!e || typeof e !== "object") continue;
       const { page, event, value, meta, at } = e as Record<string, unknown>;
       if (typeof page !== "string" || typeof event !== "string") continue;
-      if (SERVER_ONLY_EVENTS.has(event)) continue;
       rows.push({
         session,
         page: page.slice(0, 200),
@@ -54,7 +48,7 @@ export async function POST(req: Request) {
     }
     if (rows.length > 0) {
       after(() =>
-        recordClientMetrics(rows, user.uid).catch(() => {
+        recordClientMetrics(rows).catch(() => {
           /* same contract as above: a lost timing never becomes an error */
         }),
       );

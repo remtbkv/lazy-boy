@@ -85,7 +85,7 @@ async function cron(headers: Record<string, string> = {}, path = "/api/cron/sync
 }
 
 describe("cache keys and ETags across users", () => {
-  it("a friend sending Rem's library ETag gets no 304 onto Rem's body (P1: the uid in the ETag, the friend refused)", async () => {
+  it("pinned P1: the library ETag a friend gets equals Rem's (no uid in it), so a shared browser would 304 onto Rem's body", async () => {
     await seedRem();
     await become("rem");
     const remTag = (await library()).headers.get("etag");
@@ -93,32 +93,34 @@ describe("cache keys and ETags across users", () => {
     const res = await (await import("@/app/api/search/library/route")).GET(
       request("/api/search/library", { headers: { "if-none-match": remTag ?? "" } }),
     );
-    // PLAN T7: B's ETag carries B's uid, so B never 304s onto A's body (in Phase 1 B is refused
-    // outright; tests/isolation/search-payloads.test.ts runs two users through the routes).
-    expect(res.status, "a friend sending Rem's library ETag").not.toBe(304);
+    // Target (PLAN T7): B's ETag carries B's uid, so B gets 200 and B's own body.
+    expectPinned("P1", res.status, (s) => s === 304, (s) => s !== 304, "a friend sending Rem's library ETag");
   });
 
-  it("both search ETags carry the uid (P1)", async () => {
+  it("pinned P1: neither search ETag carries the uid", async () => {
     await seedRem();
     await become("rem");
     const tags = [(await library()).headers.get("etag"), (await history()).headers.get("etag")];
-    expect(tags.every((x) => !!x && x.includes(OWNER_UID)), `the uid in both search ETags: ${JSON.stringify(tags)}`).toBe(true);
+    expectPinned("P1", tags, (t) => t.every((x) => !!x && !x.includes(OWNER_UID)), (t) => t.every((x) => !!x && x.includes(OWNER_UID)), "the uid in both search ETags");
   });
 
-  it("search bodies are `private, no-store` and stamped with the uid as `u` (P1)", async () => {
+  it("pinned P1: search bodies are revalidated from the HTTP cache instead of `private, no-store`, and carry no `u`", async () => {
     await seedRem();
     await become("rem");
     for (const res of [await library(), await history()]) {
       const body = (await res.json()) as { u?: unknown };
       const seen = { cacheControl: res.headers.get("cache-control"), u: body.u ?? null };
-      expect(
-        /private/.test(seen.cacheControl ?? "") && /no-store/.test(seen.cacheControl ?? "") && seen.u === OWNER_UID,
-        `search bodies \`private, no-store\` and stamped with u: ${JSON.stringify(seen)}`,
-      ).toBe(true);
+      expectPinned(
+        "P1",
+        seen,
+        (x) => x.cacheControl === "private, max-age=0, must-revalidate" && x.u === null,
+        (x) => /private/.test(x.cacheControl ?? "") && /no-store/.test(x.cacheControl ?? "") && x.u === OWNER_UID,
+        "search bodies `private, no-store` and stamped with u",
+      );
     }
   });
 
-  it("every cached read behind the search payloads and Home keys on the user (P1: userCache)", async () => {
+  it("pinned P1: the cached reads behind the search payloads and Home key on version and shape, never the user", async () => {
     await seedRem();
     await become("rem");
     await library();
@@ -129,17 +131,17 @@ describe("cache keys and ETags across users", () => {
     await dayTracksAction(new Date(Date.now() - 3_600_000).toISOString().slice(0, 10));
     expect(keyLog.calls.length).toBeGreaterThan(0);
     const keyed = keyLog.calls.map((c) => JSON.stringify([c.keys, c.args]).includes(OWNER_UID));
-    expect(keyed.every((x) => x), "the uid in every cached read's key").toBe(true);
+    expectPinned("P1", keyed, (k) => k.every((x) => !x), (k) => k.every((x) => x), "the uid in every cached read's key");
   });
 
-  it("a friend's cookie with Rem's token expired refreshes nothing of Rem's (P1: the identity check first)", async () => {
+  it("pinned P1: a friend's cookie with Rem's token expired makes the session read refresh Rem's grant", async () => {
     const obs = await observe("friendA", async () => {
       const { GET } = await import("@/app/api/auth/[...nextauth]/route");
       const { NextRequest } = await import("next/server");
       return GET(new NextRequest(request("/api/auth/session")));
     }, { seed: { tokenExpiresAt: 1_000 } });
-    // The identity check refuses the cookie before any token is read.
-    expect(obs.observed, "a friend's session read refreshing Rem's grant").not.toBe("allow");
+    // Target: the identity check refuses the cookie before any token is read.
+    expectPinned("P1", obs.observed, (o) => o === "allow", (o) => o !== "allow", "a friend's session read refreshing Rem's grant");
   });
 });
 
@@ -152,12 +154,12 @@ describe("cookie and token reuse", () => {
     expectPinned("P4a", obs.observed, (o) => o === "allow", (o) => o === "deny", "a cookie copied before Log out, after Rem signs in elsewhere");
   });
 
-  it("a 31-day-old sign-in (auth_time) is refused (P1, F9)", async () => {
+  it("pinned P1: a 31-day-old sign-in (auth_time) still reads the library (F9)", async () => {
     await seedRem();
     await become("anon");
     ctx.cookies.set(COOKIE, await sessionCookie("rem", SECRETS.auth, { auth_time: Math.floor(Date.now() / 1000) - 31 * 86_400 }));
     const res = await library();
-    expect(res.status, "a 31-day-old sign-in reading the library").toBe(401);
+    expectPinned("P1", res.status, (s) => s === 200, (s) => s === 401, "a 31-day-old sign-in reading the library");
   });
 
   it("GET /api/auth/session re-issues a replayed cookie with a fresh expiry (F3)", async () => {
@@ -359,7 +361,7 @@ describe("the search payloads and their bounds", () => {
 });
 
 describe("reads before the gate", () => {
-  it("an anonymous /home sends no store statement before its redirect (P1, F8)", async () => {
+  it("pinned P1: an anonymous /home sends store statements before its redirect (F8)", async () => {
     await seedRem();
     await become("anon");
     stmtLog.count = 0;
@@ -371,7 +373,7 @@ describe("reads before the gate", () => {
       redirected = String((e as { digest?: string }).digest ?? "").includes("/login");
     }
     expect(redirected).toBe(true);
-    expect(stmtLog.count, "store statements before /home's redirect").toBe(0);
+    expectPinned("P1", stmtLog.count, (n) => n > 0, (n) => n === 0, "store statements before /home's redirect");
   });
 
   it("every other gated page and route sends no statement for an anonymous caller", async () => {

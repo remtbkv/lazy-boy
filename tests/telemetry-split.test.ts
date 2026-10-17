@@ -18,15 +18,16 @@ const telemetryUrl = await vi.hoisted(async () => {
 import {
   getApiLogSummary,
   getClientLoadSpeed,
+  getHomePayload,
   ledgerAdd,
   ledgerSet,
   logSpotifyRequest,
   readLedger,
   recordClientMetrics,
+  recordPlays,
+  rebuildHomePayload,
+  setUserTzOffset,
 } from "@/lib/db";
-import { ownerStore } from "./owner-store";
-
-const store = ownerStore();
 
 const CORE_TABLES = ["tracks", "plays", "contexts", "meta", "playlists", "playlist_tracks", "saved_tracks"];
 const TELEMETRY_TABLES = ["api_log", "client_metrics", "usage_ledger"];
@@ -45,7 +46,7 @@ describe("two stores: core and telemetry", () => {
     const coreUrl = process.env.TURSO_DATABASE_URL!;
     expect(coreUrl).not.toBe(telemetryUrl);
 
-    await store.recordPlays([
+    await recordPlays([
       {
         trackId: "t1",
         name: "One",
@@ -59,8 +60,8 @@ describe("two stores: core and telemetry", () => {
         contextUri: null,
       },
     ]);
-    await store.setUserTzOffset(0);
-    await store.rebuildHomePayload();
+    await setUserTzOffset(0);
+    await rebuildHomePayload();
     await logSpotifyRequest({ method: "GET", path: "/me/player", status: 200, retryAfter: null, source: "test" });
     await ledgerAdd("day_strip", 12);
     await ledgerSet("2026-10-01", "_platform_total", 99);
@@ -83,7 +84,7 @@ describe("two stores: core and telemetry", () => {
     expect((await getApiLogSummary()).windows.find((w) => w.seconds === 60)!.calls).toBe(1);
     expect((await readLedger(30)).some((r) => r.reader === "_platform_total")).toBe(true);
     expect((await getClientLoadSpeed()).pages.find((p) => p.page === "/home")?.views).toBe(1);
-    expect((await store.getHomePayload())?.allTime).toBeTruthy();
+    expect((await getHomePayload())?.allTime).toBeTruthy();
   });
 
   it("the telemetry store gets the api_log.source column", async () => {

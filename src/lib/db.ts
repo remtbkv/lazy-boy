@@ -1,32 +1,19 @@
 // Listen-history store. A personal record of which tracks were played, how often,
 // when, and from where. Data comes from Spotify /me/player/recently-played, synced
 // on demand. Backed by libSQL so it persists on Vercel's serverless runtime, and falls back to
-// a local SQLite file in dev when TURSO_DATABASE_URL is unset.
-//
-// A DATABASE PER USER (multi-user PLAN §4, §6.2 layer 3). A user's data is reached only through
-// forUser(uid) (bottom of this file): every per-user function here takes that user's database
-// as its first argument and none is exported, so nothing at module level can run against "the"
-// database. Each user database is opened by one factory and one URL rule, and its first open in
-// a process checks the database's `owner_uid` and schema version ("Clients" below). Rem's
-// database, `lazyboy`, is TURSO_DATABASE_URL. The telemetry client (TELEMETRY_DATABASE_URL)
-// carries the three log tables — api_log, client_metrics, usage_ledger — for everyone, rows
-// tagged with their user; a user path never awaits it. With TELEMETRY_DATABASE_URL unset, or
-// equal to Rem's URL, the log tables sit in Rem's database (docs/STORE_MIGRATION.md).
+// a local SQLite file in dev when TURSO_DATABASE_URL is unset. TWO CLIENTS (docs/
+// STORE_MIGRATION.md): core (getClient(), TURSO_DATABASE_URL) for the app's data, telemetry
+// (getTelemetryClient(), TELEMETRY_DATABASE_URL) for the three log tables — api_log,
+// client_metrics, usage_ledger. A core path never awaits telemetry. With TELEMETRY_DATABASE_URL
+// unset, or equal to the core URL, the two are one store. Until that migration's cutover the
+// core store is the self-hosted `sqld` on the Zenbook, reached over a Tailscale Funnel
+// (docs/quota-forensic/BRIDGE.md); after it, Turso, with telemetry staying on the Zenbook.
 import "server-only";
 import { cache } from "react";
+import { unstable_cache } from "next/cache";
 import path from "node:path";
 import fs from "node:fs";
-import {
-  createClient,
-  type Client,
-  type InStatement,
-  type ResultSet,
-  type Row,
-  type TransactionMode,
-} from "@libsql/client";
-import { newUid, phase1Owner, type Uid } from "@/lib/identity";
-import { reportIsolation } from "@/lib/isolation";
-import { userCache } from "@/lib/user-cache";
+import { createClient, type Client, type InStatement, type Row } from "@libsql/client";
 import type { Track } from "@/lib/spotify/types";
 import { BACKUP_PREFIX, cleanedName } from "@/lib/clean/names";
 import {
@@ -68,8 +55,8 @@ import {
 } from "@/lib/store-diff";
 
 // ── Query conventions (remote stores — round trips and plan choice both matter) ──
-// Every read and every write of a user's data goes through that user's database (u.client());
-// the three log tables go through getTelemetryClient(), and no statement or batch mixes the two (the meter's core
+// Every read and every write of the app's data goes through getClient(); the three log tables
+// go through getTelemetryClient(), and no statement or batch mixes the two (the meter's core
 // fence, ops/zenbook-meter, and its test hold the telemetry side to that). There is no second
 // reader of the core data: the libSQL
 // embedded replica that used to serve scanning reads was switched off in production on
@@ -143,53 +130,46 @@ export type DayStats = {
   durationMs: number;
 };
 
-// ── Clients: one factory, a database per user, the telemetry store ──────────────────────────
-// Multi-user PLAN §4.2, §4.5, §6.2 layer 3. Every client is built by makeStoreClient, so each
-// one rides makeStoreFetch (the gzip pin and the retry ladder two production incidents bought).
-//
-// A user's database is named by its `db_name` and reached through ONE rule, storeUrlFor():
-// Rem's database, `lazyboy`, is TURSO_DATABASE_URL (the local file in dev and tests); every
-// other name comes from STORE_URL_TEMPLATE with `{db}` replaced. No template, no URL: the
-// open throws, and nothing ever falls back to Rem's URL. Which `db_name` a uid has is not
-// decided here: Phase 1's only mapping is OWNER_UID → `lazyboy` (forUser below); Phase 2
-// reads it from the identity read.
-//
-// The first use of a database for a uid in this process reads its four `meta` keys in ONE
-// statement, sent in the same batch as the request's first read (whose result is used only
-// once the owner matches), or ahead of a first write. The verdict is cached per
-// (uid, db_name), so a second uid mapped to a database already open is checked again:
-//   - `owner_uid` not the uid → refused, and an isolation event recorded;
-//   - `min_reader` above this code's schema version → refused ("updating"): a rebuild ran
-//     that this build cannot read;
-//   - `schema_version` behind by additive steps → applied, but only by production code
-//     (VERCEL_ENV=production) or on a local file; a dev server, a test or a script pointed
-//     at a remote database refuses, so a branch's schema never reaches Rem's database first;
-//   - a local file with none of the keys (dev's data/listens.db, a test's throwaway file) is
-//     provisioned for the uid that opens it; a remote database without them is refused
-//     (scripts/phase1-meta-keys.mjs writes them into Rem's).
-// `store_epoch` is a random value written at provisioning (and by a restore); it goes into
-// every user cache key and both search ETags, so a restored database cannot meet entries
-// cached under the versions it re-issues.
-const PRIMARY_DB = "lazyboy";
-// Local-file fallback for dev; production points at the store via env.
+// Local-file fallback for dev; production points at the self-hosted store via env.
 const FILE_URL = `file:${path.join(process.cwd(), "data", "listens.db")}`;
 const url = process.env.TURSO_DATABASE_URL || FILE_URL;
 const authToken = process.env.TURSO_AUTH_TOKEN;
 // The telemetry store: api_log, client_metrics, usage_ledger (docs/STORE_MIGRATION.md §5).
-// Unset, or the same URL as Rem's database, means ONE store: the log tables sit beside Rem's
-// data, as they did before the split (tests, dev).
+// Unset, or the same URL as the core store, means ONE store: getTelemetryClient() returns
+// getClient() and everything behaves as it did before the split (tests, dev).
 const telemetryUrl = process.env.TELEMETRY_DATABASE_URL;
 const telemetryAuthToken = process.env.TELEMETRY_AUTH_TOKEN;
 const separateTelemetry = !!telemetryUrl && telemetryUrl !== url;
 
-/** db_name → URL, the one rule (see the section note). */
-function storeUrlFor(dbName: string): string {
-  if (dbName === PRIMARY_DB) return url;
-  const template = process.env.STORE_URL_TEMPLATE;
-  if (!template || !template.includes("{db}")) {
-    throw new Error(`no URL for database ${dbName}: STORE_URL_TEMPLATE is unset or has no {db}`);
-  }
-  return template.replaceAll("{db}", dbName);
+// One client + one-time schema init per store per server process, shared via a promise so
+// concurrent callers don't race the CREATE TABLEs.
+type ReadyKey = "__listenDbReady" | "__telemetryDbReady";
+const g = globalThis as unknown as { [K in ReadyKey]?: Promise<Client> };
+
+function ready(key: ReadyKey, start: () => Promise<Client>): Promise<Client> {
+  const cached = g[key];
+  if (cached) return cached;
+  const p = start();
+  g[key] = p;
+  // If init fails (a transient network blip on first use), drop the cached
+  // rejection so the next call retries — otherwise every DB call in this process
+  // fails forever until a restart.
+  p.catch(() => {
+    if (g[key] === p) g[key] = undefined;
+  });
+  return p;
+}
+
+/** The app's data: tracks, plays, contexts, meta, playlists, playlist_tracks, saved_tracks. */
+function getClient(): Promise<Client> {
+  return ready("__listenDbReady", init);
+}
+
+/** The three log tables, and nothing else. A user path never awaits this client: its calls
+ *  are fired with `void` (or after the response, /api/metrics), and its fetch gives up after
+ *  one 4 s attempt, so a frozen telemetry host costs a log row, never a page. */
+function getTelemetryClient(): Promise<Client> {
+  return separateTelemetry ? ready("__telemetryDbReady", initTelemetry) : getClient();
 }
 
 // Every store query rides this fetch: it forces gzip (brotli on the Zenbook's CPU cost the
@@ -200,303 +180,28 @@ const retryingFetch = makeStoreFetch();
 // for 45 s against a frozen host, and a log row is not worth a retry.
 const telemetryFetch = makeStoreFetch(fetch, { attempts: 1, attemptTimeoutMs: 4_000 });
 
-function makeStoreClient(u: string, token: string | undefined, f: typeof fetch): Client {
-  if (u.startsWith("file:")) {
-    fs.mkdirSync(path.dirname(u.slice("file:".length)), { recursive: true });
+async function init(): Promise<Client> {
+  if (url.startsWith("file:")) {
+    fs.mkdirSync(path.join(process.cwd(), "data"), { recursive: true });
   }
-  return createClient({ url: u, authToken: token, intMode: "number", fetch: f });
-}
-
-// Per process, kept on globalThis so a dev server's module reloads share them: one client per
-// db_name, the owner verdict per (uid, db_name), and the telemetry client.
-type Opened = { epoch: string };
-type StoreGlobals = {
-  __lbUserClients?: Map<string, Client>;
-  __lbOpened?: Map<string, Opened>;
-  __lbSchemaRuns?: Map<string, Promise<void>>;
-  __lbTelemetry?: Map<"telemetry", Promise<Client>>;
-};
-const g = globalThis as unknown as StoreGlobals;
-const userClients = (): Map<string, Client> => (g.__lbUserClients ??= new Map());
-const openedDbs = (): Map<string, Opened> => (g.__lbOpened ??= new Map());
-// One schema run (steps or provisioning) per database at a time in a process: two first
-// requests racing the same ALTER would fail the second ("duplicate column").
-const schemaRuns = (): Map<string, Promise<void>> => (g.__lbSchemaRuns ??= new Map());
-const openKey = (uid: Uid, dbName: string) => `${uid} ${dbName}`;
-
-function rawUserClient(dbName: string): Client {
-  const clients = userClients();
-  let c = clients.get(dbName);
-  if (!c) {
-    c = makeStoreClient(storeUrlFor(dbName), authToken, retryingFetch);
-    clients.set(dbName, c);
-  }
-  return c;
-}
-
-/** The three log tables, and nothing else. A user path never awaits this client: its calls
- *  are fired with `void` (or after the response, /api/metrics), and its fetch gives up after
- *  one 4 s attempt, so a frozen telemetry host costs a log row, never a page. */
-function getTelemetryClient(): Promise<Client> {
-  const m = (g.__lbTelemetry ??= new Map());
-  const cached = m.get("telemetry");
-  if (cached) return cached;
-  const p = initTelemetry();
-  m.set("telemetry", p);
-  // If init fails (a transient network blip on first use), drop the cached rejection so the
-  // next call retries — otherwise every log write in this process fails until a restart.
-  p.catch(() => {
-    if (m.get("telemetry") === p) m.delete("telemetry");
-  });
-  return p;
-}
-
-async function initTelemetry(): Promise<Client> {
-  const client = separateTelemetry
-    ? makeStoreClient(telemetryUrl!, telemetryAuthToken, telemetryFetch)
-    : makeStoreClient(url, authToken, retryingFetch);
-  // Sharing Rem's database, the log tables' DDL is a schema step on it, and only production code
-  // or a local file may apply one (the versioned open's rule, mayApplySchema).
-  if (separateTelemetry || mayApplySchema(url)) {
-    await client.executeMultiple(TELEMETRY_SCHEMA);
-    await migrateTelemetry(client);
-  }
+  const client = createClient({ url, authToken, intMode: "number", fetch: retryingFetch });
+  // One store: its init creates both halves, exactly as before the split.
+  await client.executeMultiple(separateTelemetry ? CORE_SCHEMA : CORE_SCHEMA + TELEMETRY_SCHEMA);
+  await migrateCore(client);
+  if (!separateTelemetry) await migrateTelemetry(client);
   return client;
 }
 
-/** What the per-user functions below are handed: whose database, and its two accessors. */
-type UserDb = {
-  readonly uid: Uid;
-  readonly dbName: string;
-  client(): Promise<StoreClient>;
-  /** The database's `store_epoch`, from the open's verdict. */
-  epoch(): Promise<string>;
-};
-
-/** The statements a per-user function may run: the open's guard sits in front of both. */
-export type StoreClient = {
-  execute(stmt: InStatement): Promise<ResultSet>;
-  batch(stmts: InStatement[], mode?: TransactionMode): Promise<ResultSet[]>;
-};
-
-/** Refused at open: the database belongs to someone else, needs a newer build, is behind a
- *  schema step this process may not apply, or was never provisioned. */
-export class StoreRefusedError extends Error {
-  constructor(
-    readonly code: "owner-mismatch" | "too-new" | "schema-behind" | "unprovisioned",
-    message: string,
-  ) {
-    super(message);
-    this.name = "StoreRefusedError";
-  }
-}
-
-/** This code's user-database schema, as additive or rebuild steps. Version 1 is the schema
- *  every database had before versions existed: CORE_SCHEMA and migrateCore, all idempotent
- *  and additive. A new additive step appends here with the next version; a rebuild also
- *  raises MIN_READER_WRITTEN, so the previous build refuses the database instead of
- *  misreading it (PLAN §4.5 item 6). */
-export const USER_SCHEMA_VERSION = 1;
-const MIN_READER_WRITTEN = 1;
-const USER_SCHEMA: { version: number; kind: "additive" | "rebuild"; apply(c: Client): Promise<void> }[] = [
-  {
-    version: 1,
-    kind: "additive",
-    apply: async (c) => {
-      await c.executeMultiple(CORE_SCHEMA);
-      await migrateCore(c);
-    },
-  },
-];
-
-const OPEN_KEYS = ["owner_uid", "schema_version", "min_reader", "store_epoch"] as const;
-type OpenKeys = Partial<Record<(typeof OPEN_KEYS)[number], string>>;
-const OPEN_READ: InStatement = {
-  sql: `SELECT key, value FROM meta
-        WHERE key IN ('owner_uid', 'schema_version', 'min_reader', 'store_epoch')`,
-  args: [],
-};
-
-/** Who may apply an additive step: production code, or anyone on a local file (dev's own
- *  databases, the tests'). Everything else waits for the production deploy. */
-export function mayApplySchema(dbUrl: string, env: Record<string, string | undefined> = process.env): boolean {
-  return env.VERCEL_ENV === "production" || dbUrl.startsWith("file:");
-}
-
-export type OpenVerdict =
-  | { kind: "open"; epoch: string }
-  | { kind: "apply"; from: number }
-  | { kind: "provision" }
-  | { kind: "refuse"; code: StoreRefusedError["code"]; message: string };
-
-/** The open's decision over a database's four keys (pure; the rules in the section note). */
-export function openVerdict(
-  keys: OpenKeys,
-  uid: string,
-  opts: { local: boolean; mayApply: boolean; codeVersion?: number },
-): OpenVerdict {
-  const code = opts.codeVersion ?? USER_SCHEMA_VERSION;
-  if (keys.owner_uid !== undefined && keys.owner_uid !== uid) {
-    return { kind: "refuse", code: "owner-mismatch", message: "this database belongs to another user" };
-  }
-  if (keys.owner_uid === undefined || keys.store_epoch === undefined) {
-    return opts.local
-      ? { kind: "provision" }
-      : { kind: "refuse", code: "unprovisioned", message: "the database has no owner_uid or store_epoch" };
-  }
-  const minReader = Number(keys.min_reader ?? "0") || 0;
-  if (minReader > code) {
-    return { kind: "refuse", code: "too-new", message: `updating: the database needs schema ${minReader}` };
-  }
-  const version = Number(keys.schema_version ?? "0") || 0;
-  if (version < code) {
-    return opts.mayApply
-      ? { kind: "apply", from: version }
-      : {
-          kind: "refuse",
-          code: "schema-behind",
-          message: `the database is at schema ${version}; it waits for the production deploy`,
-        };
-  }
-  return { kind: "open", epoch: keys.store_epoch };
-}
-
-function openKeysOf(rs: ResultSet): OpenKeys {
-  const out: OpenKeys = {};
-  for (const r of rs.rows) {
-    const k = String(r.key) as (typeof OPEN_KEYS)[number];
-    if ((OPEN_KEYS as readonly string[]).includes(k)) out[k] = String(r.value);
-  }
-  return out;
-}
-
-const metaUpsert = (key: string, value: string): InStatement => ({
-  sql: `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-  args: [key, value],
-});
-
-/** A random store epoch: 12 base32 characters, like a uid. */
-function newStoreEpoch(): string {
-  return newUid();
-}
-
-/** Act on the verdict for (uid, db_name). Returns whether a schema step or provisioning ran,
- *  so a read sent with the open is re-run against the new schema. Throws StoreRefusedError. */
-async function settleOpen(uid: Uid, dbName: string, c: Client, keys: OpenKeys | null): Promise<boolean> {
-  const dbUrl = storeUrlFor(dbName);
-  const local = dbUrl.startsWith("file:");
-  const verdict: OpenVerdict = keys
-    ? openVerdict(keys, uid, { local, mayApply: mayApplySchema(dbUrl) })
-    : local
-      ? { kind: "provision" }
-      : { kind: "refuse", code: "unprovisioned", message: "the database has no meta table" };
-  if (verdict.kind === "open") {
-    openedDbs().set(openKey(uid, dbName), { epoch: verdict.epoch });
-    return false;
-  }
-  if (verdict.kind === "refuse") {
-    if (verdict.code === "owner-mismatch") await reportIsolation("owner-mismatch", uid);
-    console.error(`[store] refused ${dbName} for ${uid}: ${verdict.message}`);
-    throw new StoreRefusedError(verdict.code, verdict.message);
-  }
-  const from = verdict.kind === "apply" ? verdict.from : Number(keys?.schema_version ?? "0") || 0;
-  const runs = schemaRuns();
-  let run = runs.get(dbName);
-  if (!run) {
-    run = (async () => {
-      for (const step of USER_SCHEMA) if (step.version > from) await step.apply(c);
-      if (verdict.kind === "provision") {
-        // A local file: claim it for this uid unless someone already has, then fill what is
-        // missing.
-        await c.batch(
-          [
-            { sql: `INSERT INTO meta (key, value) VALUES ('owner_uid', ?) ON CONFLICT(key) DO NOTHING`, args: [uid] },
-            { sql: `INSERT INTO meta (key, value) VALUES ('store_epoch', ?) ON CONFLICT(key) DO NOTHING`, args: [newStoreEpoch()] },
-            { sql: `INSERT INTO meta (key, value) VALUES ('min_reader', ?) ON CONFLICT(key) DO NOTHING`, args: [String(MIN_READER_WRITTEN)] },
-          ],
-          "write",
-        );
-      }
-      await c.execute(metaUpsert("schema_version", String(USER_SCHEMA_VERSION)));
-    })().finally(() => runs.delete(dbName));
-    runs.set(dbName, run);
-  }
-  await run;
-  // Decide again from what the database now says, with no second chance to provision.
-  const after = openVerdict(openKeysOf(await c.execute(OPEN_READ)), uid, { local: false, mayApply: false });
-  if (after.kind !== "open") {
-    if (after.kind === "refuse" && after.code === "owner-mismatch") await reportIsolation("owner-mismatch", uid);
-    throw new StoreRefusedError(after.kind === "refuse" ? after.code : "schema-behind", "the open did not settle");
-  }
-  openedDbs().set(openKey(uid, dbName), { epoch: after.epoch });
-  return true;
-}
-
-const isNoMetaTable = (e: unknown) => /no such table:?\s*meta/i.test(String((e as Error)?.message ?? e));
-
-/** The open on its own round trip: before a first write, or when an epoch is needed first. */
-async function openAlone(uid: Uid, dbName: string, c: Client): Promise<void> {
-  let keys: OpenKeys | null;
-  try {
-    keys = openKeysOf(await c.execute(OPEN_READ));
-  } catch (e) {
-    if (!isNoMetaTable(e)) throw e;
-    keys = null;
-  }
-  await settleOpen(uid, dbName, c, keys);
-}
-
-// A statement that can only read: the open rides in front of it in one read batch. Anything
-// else (a write, a CTE in front of a write) gets the open on its own round trip first.
-const isPlainRead = (s: InStatement) => /^\s*SELECT\b/i.test(typeof s === "string" ? s : s.sql);
-
-function guardedClient(uid: Uid, dbName: string): StoreClient {
-  const key = openKey(uid, dbName);
-  async function firstRead(c: Client, stmts: InStatement[]): Promise<ResultSet[]> {
-    let results: ResultSet[];
-    try {
-      results = await c.batch([OPEN_READ, ...stmts], "read");
-    } catch {
-      // The batch failed as a whole: no meta table yet, a read of a column a pending schema
-      // step adds, or the read itself. The open on its own settles the database (or throws),
-      // and the read then runs again (and fails again, if the fault was the read's).
-      await openAlone(uid, dbName, c);
-      return c.batch(stmts, "read");
-    }
-    const changed = await settleOpen(uid, dbName, c, openKeysOf(results[0]));
-    return changed ? c.batch(stmts, "read") : results.slice(1);
-  }
-  return {
-    async execute(stmt) {
-      const c = rawUserClient(dbName);
-      if (openedDbs().has(key)) return c.execute(stmt);
-      if (isPlainRead(stmt)) return (await firstRead(c, [stmt]))[0];
-      await openAlone(uid, dbName, c);
-      return c.execute(stmt);
-    },
-    async batch(stmts, mode) {
-      const c = rawUserClient(dbName);
-      if (openedDbs().has(key)) return c.batch(stmts, mode);
-      if (mode === "read" && stmts.every(isPlainRead)) return firstRead(c, stmts);
-      await openAlone(uid, dbName, c);
-      return c.batch(stmts, mode);
-    },
-  };
-}
-
-function userDb(uid: Uid, dbName: string): UserDb {
-  const client = guardedClient(uid, dbName);
-  return {
-    uid,
-    dbName,
-    client: async () => client,
-    async epoch() {
-      const hit = openedDbs().get(openKey(uid, dbName));
-      if (hit) return hit.epoch;
-      await openAlone(uid, dbName, rawUserClient(dbName));
-      return openedDbs().get(openKey(uid, dbName))!.epoch;
-    },
-  };
+async function initTelemetry(): Promise<Client> {
+  const client = createClient({
+    url: telemetryUrl!,
+    authToken: telemetryAuthToken,
+    intMode: "number",
+    fetch: telemetryFetch,
+  });
+  await client.executeMultiple(TELEMETRY_SCHEMA);
+  await migrateTelemetry(client);
+  return client;
 }
 
 const CORE_SCHEMA = `
@@ -628,7 +333,7 @@ async function migrateCore(client: Client): Promise<void> {
   await client.execute(
     "CREATE INDEX IF NOT EXISTS idx_plays_context ON plays (context_uri)",
   );
-  // recomputeOrphanFlags(u, {newOnly}) filters on `ctx_orphan IS NULL`. Without this partial
+  // recomputeOrphanFlags({newOnly}) filters on `ctx_orphan IS NULL`. Without this partial
   // index that is a full plays scan on every sync tick that lands a play — ~7.2K rows
   // scanned to find the handful of new ones. The index holds only the unverdicted rows
   // (normally ≈0), so the same UPDATE scans just those.
@@ -645,16 +350,6 @@ async function migrateTelemetry(client: Client): Promise<void> {
   if (!apiLogCols.has("source")) {
     await client.execute("ALTER TABLE api_log ADD COLUMN source TEXT");
   }
-  // The user each row belongs to (multi-user PLAN §4.3): whose Spotify call, whose page
-  // timing. Account deletion deletes by it (§12.3). Null for rows with no user (server
-  // errors, rows written before Phase 1).
-  if (!apiLogCols.has("user_id")) {
-    await client.execute("ALTER TABLE api_log ADD COLUMN user_id TEXT");
-  }
-  const metricsInfo = await client.execute("PRAGMA table_info(client_metrics)");
-  if (!metricsInfo.rows.some((r) => String(r.name) === "user_id")) {
-    await client.execute("ALTER TABLE client_metrics ADD COLUMN user_id TEXT");
-  }
 }
 
 // ── One client, no replica ──────────────────────────────────────────────────────────────
@@ -668,9 +363,9 @@ async function migrateTelemetry(client: Client): Promise<void> {
 // replication rotation, which made the normal cold start 2-3× SLOWER) are in git history and
 // summarised in docs/GOTCHAS.md.
 //
-// So a user's database is the whole story for that user's data: every read, every write, all
-// of its `meta`. getTelemetryClient() carries only the log tables, and only off the awaited path
-// of a user request (fired with `void`, or in after() at /api/metrics), on one 4 s attempt.
+// So getClient() is the whole story for the app's data: every read, every write, all of
+// `meta`. getTelemetryClient() carries only the log tables, and only off the awaited path of a
+// user request (fired with `void`, or in after() at /api/metrics), on one 4 s attempt.
 
 // ── The write marker (`meta.write_seq`) ─────────────────────────────────────────────────
 // A counter bumped by every write that changes what a CACHED read serves. It is a content
@@ -717,8 +412,8 @@ function writeSeqStmt(): InStatement {
 }
 
 /** Bump the marker on its own, for a write that isn't already batched. */
-async function bumpWriteSeq(u: UserDb): Promise<void> {
-  const client = await u.client();
+async function bumpWriteSeq(): Promise<void> {
+  const client = await getClient();
   await client.execute(writeSeqStmt());
 }
 
@@ -748,7 +443,7 @@ function librarySeqStmt(): InStatement {
 /** The marker as stored (a TEXT column, so compare as strings), or null before the first
  *  bump. Cheap: an indexed single-key lookup — ~20-30ms against Turso (a round trip; the same
  *  cost as `SELECT 1`), and one round trip against the store it runs on now. */
-async function readWriteSeq(client: StoreClient): Promise<string | null> {
+async function readWriteSeq(client: Client): Promise<string | null> {
   const res = await client.execute({
     sql: "SELECT value FROM meta WHERE key = ?",
     args: [WRITE_SEQ_KEY],
@@ -761,13 +456,11 @@ async function readWriteSeq(client: StoreClient): Promise<string | null> {
 // one (the round-trip note at the top of the file). Same per-request box as orderedRealPlays
 // below and the token box in auth.ts — React cache() gives a per-request box; outside a
 // request (the cron path) cache() has no dispatcher and is a pass-through, so each call reads
-// again instead, which is correct, just not deduped. Keyed by (uid, db_name): two users'
-// markers are small integers that collide, so a shared box would key one user's cache
-// entries off the other's marker (multi-user PLAN §6.2 layer 4).
-const seqBox = cache((_uid: Uid, _dbName: string) => ({ p: null as Promise<string | null> | null }));
-function primaryWriteSeq(u: UserDb): Promise<string | null> {
-  const box = seqBox(u.uid, u.dbName);
-  box.p ??= u.client().then(readWriteSeq);
+// again instead, which is correct, just not deduped.
+const seqBox = cache(() => ({ p: null as Promise<string | null> | null }));
+function primaryWriteSeq(): Promise<string | null> {
+  const box = seqBox();
+  box.p ??= getClient().then(readWriteSeq);
   return box.p;
 }
 
@@ -776,8 +469,8 @@ function primaryWriteSeq(u: UserDb): Promise<string | null> {
  *  PRE-write entry to the read that follows the write — exactly what refreshHistoryAction does
  *  (sync, then re-read the day). Same shape as publishTokens() in auth.ts: a write republishes
  *  what it just made true instead of leaving the request's snapshot stale. */
-function dropWriteSeqCache(u: UserDb): void {
-  seqBox(u.uid, u.dbName).p = null;
+function dropWriteSeqCache(): void {
+  seqBox().p = null;
 }
 
 // libSQL Row objects aren't plain objects (they carry a prototype + indexed access), so
@@ -788,7 +481,7 @@ function plainRows(rows: readonly unknown[]): unknown[] {
 }
 
 // Cached track rows for a set of ids, chunked to stay under SQLite's bound-variable cap.
-async function readCachedTracks(client: StoreClient, ids: string[]): Promise<Map<string, TrackFields>> {
+async function readCachedTracks(client: Client, ids: string[]): Promise<Map<string, TrackFields>> {
   const cached = new Map<string, TrackFields>();
   for (let i = 0; i < ids.length; i += 500) {
     const chunk = ids.slice(i, i + 500);
@@ -826,9 +519,9 @@ function trackUpsertStmt(t: TrackFields): InStatement {
 }
 
 /** Insert plays, deduped on (track, played_at). Returns how many were new. */
-async function recordPlays(u: UserDb, plays: PlayRecord[]): Promise<number> {
+export async function recordPlays(plays: PlayRecord[]): Promise<number> {
   if (plays.length === 0) return 0;
-  const client = await u.client();
+  const client = await getClient();
   // Diff before writing: the sync hands us the same ~50 recently-played rows every couple
   // of minutes, and blindly upserting them burned ~50 billed row writes per tick on
   // identical data. Two small indexed reads find what actually changed; a no-change tick
@@ -894,13 +587,13 @@ async function recordPlays(u: UserDb, plays: PlayRecord[]): Promise<number> {
   });
   const results = await client.batch(stmts, "write");
   // A renamed song can move the verdict of older plays, from any playlist.
-  if (renamed.length > 0) await recomputeOrphanFlags(u, { identities: renamed });
+  if (renamed.length > 0) await recomputeOrphanFlags({ identities: renamed });
   // A no-change tick (the steady-state cron every couple of minutes) wrote only last_sync —
   // nothing a cached read serves — so skip the orphan recompute (~0.2s UPDATE over zero rows)
   // it would otherwise pay each tick.
   if (insertResultIdx.length > 0) {
     // Give the plays we just inserted their membership verdict before anything reads them.
-    await recomputeOrphanFlags(u, { newOnly: true });
+    await recomputeOrphanFlags({ newOnly: true });
     // An out-of-order insert (a gap-fill landing BETWEEN existing plays) makes the row
     // immediately AFTER it wrong: a verdict is measured from the previous play's end
     // (played_at is an END stamp, C1), and that row's previous play just changed. Re-open
@@ -926,10 +619,10 @@ async function recordPlays(u: UserDb, plays: PlayRecord[]): Promise<number> {
     }
     // …and rule on skips: every pending play — the new ones and the re-opened successors —
     // has its predecessor in the store now.
-    await recomputeSkipFlags(u);
+    await recomputeSkipFlags();
   }
   // The write moved the marker; drop this request's copy so the read that follows re-keys.
-  if (changed) dropWriteSeqCache(u);
+  if (changed) dropWriteSeqCache();
   let added = 0;
   for (const i of insertResultIdx) added += Number(results[i].rowsAffected);
   // New plays landed → refresh the cached all-time totals so Home reads them instantly
@@ -938,22 +631,22 @@ async function recordPlays(u: UserDb, plays: PlayRecord[]): Promise<number> {
   // and during a listening session plays land on many consecutive ticks. The card can lag
   // the newest plays by ≤10 min mid-session; the end-of-session tail is healed by the
   // daily cron's unconditional recompute (cron/sync route).
-  if (added > 0) await maybeRecomputeAllTimeStats(u);
+  if (added > 0) await maybeRecomputeAllTimeStats();
   return added;
 }
 
 const ALLTIME_RECOMPUTE_MIN_MS = 10 * 60 * 1000;
 
-async function maybeRecomputeAllTimeStats(u: UserDb): Promise<void> {
-  const v = await getMeta(u, "alltime_at");
+export async function maybeRecomputeAllTimeStats(): Promise<void> {
+  const v = await getMeta("alltime_at");
   if (v && Date.now() - (Number(v) || 0) < ALLTIME_RECOMPUTE_MIN_MS) return;
-  await recomputeAllTimeStats(u);
+  await recomputeAllTimeStats();
 }
 
 /** Cache resolved context (playlist/album/artist) names so "From" shows a name. */
-async function recordContexts(u: UserDb, contexts: ContextRecord[]): Promise<void> {
+export async function recordContexts(contexts: ContextRecord[]): Promise<void> {
   if (contexts.length === 0) return;
-  const client = await u.client();
+  const client = await getClient();
   const now = new Date().toISOString();
   await client.batch(
     [
@@ -968,7 +661,7 @@ async function recordContexts(u: UserDb, contexts: ContextRecord[]): Promise<voi
     "write",
   );
   // The write moved the marker; drop this request's copy so the read that follows re-keys.
-  dropWriteSeqCache(u);
+  dropWriteSeqCache();
 }
 
 // Negative-cached (name IS NULL) contexts get re-checked this often. Keeps the cache
@@ -984,11 +677,11 @@ const NEGATIVE_RECHECK_MS = 30 * 24 * 60 * 60 * 1000;
  *  times a day across the cron tick and the open-tab refresh. The negative-cache
  *  re-check that the full query also covers is not lost: the sync runs the full pass
  *  once a day (see syncRecentPlays). */
-async function unseenContexts(u: UserDb, 
+export async function unseenContexts(
   cands: { uri: string; type: string }[],
 ): Promise<{ uri: string; type: string }[]> {
   if (cands.length === 0) return [];
-  const client = await u.client();
+  const client = await getClient();
   const uris = [...new Set(cands.map((c) => c.uri))];
   const res = await client.execute({
     sql: `SELECT uri FROM contexts WHERE uri IN (${uris.map(() => "?").join(",")})`,
@@ -1011,8 +704,8 @@ async function unseenContexts(u: UserDb,
  *
  *  A full plays scan (~14K rows) — the once-a-day pass only.
  *  Per-sync resolution goes through unseenContexts() above. */
-async function unresolvedContextUris(u: UserDb): Promise<{ uri: string; type: string }[]> {
-  const client = await u.client();
+export async function unresolvedContextUris(): Promise<{ uri: string; type: string }[]> {
+  const client = await getClient();
   const cutoff = new Date(Date.now() - NEGATIVE_RECHECK_MS).toISOString();
   const res = await client.execute({
     sql: `SELECT DISTINCT p.context_uri AS uri, p.context_type AS type,
@@ -1026,7 +719,7 @@ async function unresolvedContextUris(u: UserDb): Promise<{ uri: string; type: st
   });
   // Ledgered here, not at the call site: this is the once-a-day pass, and the sync route
   // cannot see whether the gate opened on this tick.
-  ledgerAddLinear(u, "contexts_full_pass", (plays) =>
+  ledgerAddLinear("contexts_full_pass", (plays) =>
     contextsFullPassRows(plays, Math.round(plays * CONTEXTED_PLAY_FRACTION)),
   );
   return (plainRows(res.rows) as unknown as { uri: string; type: string }[]).map(
@@ -1109,7 +802,6 @@ const ORPHAN_SCOPE_CHUNK = 100;
  *  an unchanged playlist writes zero rows — a no-op UPDATE is still a written row (which Turso
  *  billed). Measured on the live DB: 0 rows and ~0.2-0.4s for the scoped modes. */
 async function recomputeOrphanFlags(
-  u: UserDb,
   opts: {
     playlistIds?: string[];
     identities?: { name: string; artist: string }[];
@@ -1117,7 +809,7 @@ async function recomputeOrphanFlags(
   } = {},
 ): Promise<number> {
   if (opts.playlistIds?.length === 0 || opts.identities?.length === 0) return 0;
-  const client = await u.client();
+  const client = await getClient();
   const stale = `(p.ctx_orphan IS NULL OR p.ctx_orphan <> (${ORPHAN_PREDICATE}))`;
   // One statement per chunk of the scope; the unscoped and newOnly forms are one statement.
   // newOnly deliberately does NOT evaluate the predicate in the WHERE clause: the point is to
@@ -1147,7 +839,7 @@ async function recomputeOrphanFlags(
     // Only the UNSCOPED pass is ledgered here; the rewrite's purge pass is ledgered by its
     // caller, and the rest are bounded by construction (a ≤50-row partial index, one
     // playlist's plays, one renamed song's plays) and would be noise.
-    ledgerAddLinear(u, "orphan_full_pass", orphanFullPassRows);
+    ledgerAddLinear("orphan_full_pass", orphanFullPassRows);
     scoped.push({ where: stale, args: [] });
   }
   let changed = 0;
@@ -1163,7 +855,7 @@ async function recomputeOrphanFlags(
   // verdict is stale. Only when rows actually flipped: the common case is 0, and a bump there
   // would discard every cached read on every sync tick for nothing. The extra round trip is
   // paid only on a real change, and this is a background write path either way.
-  if (changed > 0) await bumpWriteSeq(u);
+  if (changed > 0) await bumpWriteSeq();
   return changed;
 }
 
@@ -1194,8 +886,8 @@ const NOT_SKIPPED = `(p.skipped IS NULL OR p.skipped = 0)`;
  *  ordered — a verdict is a fact about the TIMELINE, and the rowid tie-break made it an
  *  arrival artifact: which of the pair got skipped depended on delivery order (wave-3
  *  independent adversarial suite, F1-F3). */
-async function recomputeSkipFlags(u: UserDb): Promise<void> {
-  const client = await u.client();
+async function recomputeSkipFlags(): Promise<void> {
+  const client = await getClient();
   // The window starts at the last real play BEFORE the oldest pending one, so that pending
   // play has its predecessor in hand (all its tie-mates come along; they're skipped below).
   const res = await client.execute(`
@@ -1233,8 +925,8 @@ async function recomputeSkipFlags(u: UserDb): Promise<void> {
     // bumped, and skipped is filtered by cached reads (day lists, counters, the history
     // payload) — without its own announcement, an entry cached between the insert-bump and
     // this write serves pre-verdict rows for its whole TTL (audit 2026-08-19, T1.4).
-    await bumpWriteSeq(u);
-    dropWriteSeqCache(u);
+    await bumpWriteSeq();
+    dropWriteSeqCache();
   }
 }
 
@@ -1268,9 +960,8 @@ const SELECT_TRACK = `
 // Wrapped in React cache(): getDailyStats and getAllTimeStats both need this, and they run
 // together (Home's history boundary, the history refresh action) — cache() dedupes the
 // fetch to once per request instead of paying the plays scan twice.
-// Keyed by (uid, db_name), so two users in one request can never share the scan.
-const orderedRealPlaysFor = cache(async (uid: Uid, dbName: string) => {
-  const client = await userDb(uid, dbName).client();
+const orderedRealPlays = cache(async () => {
+  const client = await getClient();
   const res = await client.execute(
     `SELECT p.played_at AS playedAt, p.track_id AS trackId, t.duration_ms AS durationMs,
             p.skipped AS skipped
@@ -1285,9 +976,6 @@ const orderedRealPlaysFor = cache(async (uid: Uid, dbName: string) => {
     skipped: number | null;
   }[];
 });
-function orderedRealPlays(u: UserDb) {
-  return orderedRealPlaysFor(u.uid, u.dbName);
-}
 
 // One row per individual play (no GROUP BY): each listen keeps its own timestamp and the
 // context it was played from. `lastPlayed` carries that single play's time; `plays` is 1.
@@ -1302,8 +990,8 @@ const SELECT_PLAY = `
 /** Search history by track name or artist; "" returns most recently played. Returns each
  *  play as its own row (not collapsed into a per-song count), newest first, so you see the
  *  actual time of every listen. */
-async function searchHistory(u: UserDb, query: string, limit = 300): Promise<TrackStats[]> {
-  const client = await u.client();
+export async function searchHistory(query: string, limit = 300): Promise<TrackStats[]> {
+  const client = await getClient();
   const q = query.trim();
   if (!q) {
     const res = await client.execute({
@@ -1383,9 +1071,9 @@ const FROZEN_AFTER_DAYS = 2;
 
 /** The cache-key component for a LIVE read: the primary's write marker, or null when it can't
  *  be read (→ the caller must skip the cache rather than guess). */
-async function liveKey(u: UserDb): Promise<string | null> {
+async function liveKey(): Promise<string | null> {
   try {
-    return (await primaryWriteSeq(u)) ?? "0";
+    return (await primaryWriteSeq()) ?? "0";
   } catch {
     return null;
   }
@@ -1401,24 +1089,21 @@ function isFrozenDay(day: string, offsetMin: number): boolean {
 
 /** Most-played tracks all-time, capped so the list never balloons to thousands.
  *  Feeds the history table when the "All time" card is selected. `plays` is all-time. */
-const allTimePlaysCached = userCache(
-  "all-time-plays",
-  (uid: Uid, dbName: string, limit: number, _seq: string) => readAllTimePlays(userDb(uid, dbName), limit),
-  [],
+const allTimePlaysCached = unstable_cache(
+  (limit: number, _seq: string) => readAllTimePlays(limit),
+  ["all-time-plays"],
   { revalidate: LIVE_TTL_S },
 );
-async function getAllTimePlays(u: UserDb, limit: number): Promise<TrackStats[]> {
+export async function getAllTimePlays(limit: number): Promise<TrackStats[]> {
   // Slow marker, not the live one: this read costs ~25K billed rows per rebuild (full
   // scan + a per-track source subquery), and per-play freshness on the all-time ranking
   // is not worth ~2M/hour of listening (see the slow-marker note).
-  const seq = await slowSeq(u);
-  return seq === null
-    ? readAllTimePlays(u, limit)
-    : allTimePlaysCached(u.uid, await u.epoch(), u.dbName, limit, seq);
+  const seq = await slowSeq();
+  return seq === null ? readAllTimePlays(limit) : allTimePlaysCached(limit, seq);
 }
 
-async function readAllTimePlays(u: UserDb, limit: number): Promise<TrackStats[]> {
-  const client = await u.client();
+async function readAllTimePlays(limit: number): Promise<TrackStats[]> {
+  const client = await getClient();
   const res = await client.execute({
     sql: `${SELECT_TRACK} WHERE ${NOT_SKIPPED} GROUP BY t.id
           ORDER BY plays DESC, lastPlayed DESC, t.name ASC LIMIT ?`,
@@ -1426,12 +1111,12 @@ async function readAllTimePlays(u: UserDb, limit: number): Promise<TrackStats[]>
   });
   // Inside the read, not in getAllTimePlays: a cache hit costs nothing and must not be
   // charged as a rebuild. Same rule for every instrumented read below.
-  ledgerAddLinear(u, "alltime_list", allTimeListRebuildRows);
+  ledgerAddLinear("alltime_list", allTimeListRebuildRows);
   return plainRows(res.rows) as unknown as TrackStats[];
 }
 
 /** All-time totals across every recorded play (for the history "All time" card). */
-async function getAllTimeStats(u: UserDb): Promise<{
+export async function getAllTimeStats(): Promise<{
   plays: number;
   uniqueTracks: number;
   durationMs: number;
@@ -1440,7 +1125,7 @@ async function getAllTimeStats(u: UserDb): Promise<{
   // Read the cached value: the all-time listened total needs a gap scan over EVERY play,
   // which is multi-second against a remote store and shouldn't run on render. It's refreshed on write
   // (recordPlays, when new plays land). Cold (never cached) → compute once and cache.
-  const v = await getMeta(u, "alltime_stats");
+  const v = await getMeta("alltime_stats");
   if (v) {
     try {
       return JSON.parse(v) as AllTimeStats;
@@ -1448,25 +1133,25 @@ async function getAllTimeStats(u: UserDb): Promise<{
       /* fall through and recompute */
     }
   }
-  return recomputeAllTimeStats(u);
+  return recomputeAllTimeStats();
 }
 
 /** Recompute and cache the all-time totals (the expensive gap scan over every play). Called
  *  on write when new plays are recorded, not on render. */
-async function recomputeAllTimeStats(u: UserDb): Promise<AllTimeStats> {
-  const stats = allTimeStats(await orderedRealPlays(u));
-  await setMeta(u, "alltime_stats", JSON.stringify(stats));
+export async function recomputeAllTimeStats(): Promise<AllTimeStats> {
+  const stats = allTimeStats(await orderedRealPlays());
+  await setMeta("alltime_stats", JSON.stringify(stats));
   // The throttle stamp for maybeRecomputeAllTimeStats — set here so every compute path
   // (write-triggered, cold-cache, daily heal) resets the window.
-  await setMeta(u, "alltime_at", String(Date.now()));
+  await setMeta("alltime_at", String(Date.now()));
   return stats;
 }
 
 /** Daily self-check that Spotify still stamps played_at at the END of a play (skip-rule.ts
  *  playedAtConvention). If it flipped, every skip verdict is inverted, so log loudly and keep
  *  the last result in `meta.played_at_convention` for a capture-health surface to read. */
-async function checkPlayedAtConvention(u: UserDb): Promise<ReturnType<typeof playedAtConvention>> {
-  const client = await u.client();
+export async function checkPlayedAtConvention(): Promise<ReturnType<typeof playedAtConvention>> {
+  const client = await getClient();
   const since = new Date(Date.now() - 7 * 86_400_000).toISOString();
   const res = await client.execute({
     sql: `SELECT p.played_at AS playedAt, t.duration_ms AS durationMs
@@ -1484,7 +1169,7 @@ async function checkPlayedAtConvention(u: UserDb): Promise<ReturnType<typeof pla
       result,
     );
   }
-  await setMeta(u, "played_at_convention", JSON.stringify({ ...result, at: new Date().toISOString() }));
+  await setMeta("played_at_convention", JSON.stringify({ ...result, at: new Date().toISOString() }));
   return result;
 }
 
@@ -1503,22 +1188,18 @@ function localDay(col: string, offsetMin: number): string {
   return `date(${col}, '${m >= 0 ? "+" : ""}${m} minutes')`;
 }
 
-const dailyStatsCached = userCache(
-  "daily-stats",
-  (uid: Uid, dbName: string, offsetMin: number, days: number, _seq: string) =>
-    readDailyStats(userDb(uid, dbName), offsetMin, days),
-  [],
+const dailyStatsCached = unstable_cache(
+  (offsetMin: number, days: number, _seq: string) => readDailyStats(offsetMin, days),
+  ["daily-stats"],
   { revalidate: LIVE_TTL_S },
 );
-async function getDailyStats(u: UserDb, offsetMin = 0, days = 14): Promise<DayStats[]> {
-  const seq = await liveKey(u);
-  return seq === null
-    ? readDailyStats(u, offsetMin, days)
-    : dailyStatsCached(u.uid, await u.epoch(), u.dbName, offsetMin, days, seq);
+export async function getDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
+  const seq = await liveKey();
+  return seq === null ? readDailyStats(offsetMin, days) : dailyStatsCached(offsetMin, days, seq);
 }
 
-async function readDailyStats(u: UserDb, offsetMin = 0, days = 14): Promise<DayStats[]> {
-  const client = await u.client();
+async function readDailyStats(offsetMin = 0, days = 14): Promise<DayStats[]> {
+  const client = await getClient();
   // Only fetch the recent window we actually display (a couple extra days of buffer for the
   // tz day-edge), so this stays cheap as total history grows — not a full-table scan. Uses
   // idx_plays_played_at. Listened ms = the run from the previous play, capped at song length,
@@ -1577,8 +1258,8 @@ async function readDailyStats(u: UserDb, offsetMin = 0, days = 14): Promise<DayS
 
 /** Whether any play exists strictly before the start of the given local day — lets the day
  *  strip decide if it can expand to show older days. Cheap existence check (idx_plays_played_at). */
-async function hasPlaysBeforeDay(u: UserDb, day: string, offsetMin = 0): Promise<boolean> {
-  const client = await u.client();
+export async function hasPlaysBeforeDay(day: string, offsetMin = 0): Promise<boolean> {
+  const client = await getClient();
   const offMs = Math.max(-720, Math.min(840, Math.round(offsetMin) || 0)) * 60000;
   // Start of `day` in the user's local zone, as a UTC instant.
   const cutoff = new Date(Date.parse(day + "T00:00:00.000Z") - offMs).toISOString();
@@ -1601,30 +1282,25 @@ async function hasPlaysBeforeDay(u: UserDb, day: string, offsetMin = 0): Promise
 // (audit 2026-08-19, T1.7). The store is self-hosted — a re-read after a bump costs ~90
 // unmetered rows — so the longer TTL is the only remaining difference: a superseded
 // frozen key lingers a day, a live one an hour.
-const playsByDayFrozen = userCache(
-  "plays-by-day-frozen",
-  (uid: Uid, dbName: string, day: string, offsetMin: number, _seq: string) =>
-    readPlaysByDay(userDb(uid, dbName), day, offsetMin),
-  [],
+const playsByDayFrozen = unstable_cache(
+  (day: string, offsetMin: number, _seq: string) => readPlaysByDay(day, offsetMin),
+  ["plays-by-day-frozen"],
   { revalidate: FROZEN_TTL_S },
 );
-const playsByDayLive = userCache(
-  "plays-by-day-live",
-  (uid: Uid, dbName: string, day: string, offsetMin: number, _seq: string) =>
-    readPlaysByDay(userDb(uid, dbName), day, offsetMin),
-  [],
+const playsByDayLive = unstable_cache(
+  (day: string, offsetMin: number, _seq: string) => readPlaysByDay(day, offsetMin),
+  ["plays-by-day-live"],
   { revalidate: LIVE_TTL_S },
 );
-async function getPlaysByDay(u: UserDb, day: string, offsetMin = 0): Promise<TrackStats[]> {
-  const seq = await liveKey(u);
-  if (seq === null) return readPlaysByDay(u, day, offsetMin);
-  const epoch = await u.epoch();
-  if (isFrozenDay(day, offsetMin)) return playsByDayFrozen(u.uid, epoch, u.dbName, day, offsetMin, seq);
-  return playsByDayLive(u.uid, epoch, u.dbName, day, offsetMin, seq);
+export async function getPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]> {
+  const seq = await liveKey();
+  if (seq === null) return readPlaysByDay(day, offsetMin);
+  if (isFrozenDay(day, offsetMin)) return playsByDayFrozen(day, offsetMin, seq);
+  return playsByDayLive(day, offsetMin, seq);
 }
 
-async function readPlaysByDay(u: UserDb, day: string, offsetMin = 0): Promise<TrackStats[]> {
-  const client = await u.client();
+async function readPlaysByDay(day: string, offsetMin = 0): Promise<TrackStats[]> {
+  const client = await getClient();
   // The date() equality is the AUTHORITY on which local day a play belongs to — it stays.
   // What it can't do is drive an index (a function of the column), so on its own this read
   // SCANNED THE WHOLE plays TABLE for the ~90 rows of one day: `SCAN p USING COVERING INDEX
@@ -1745,23 +1421,23 @@ export function payloadTzOffset(stored: number | null, zoneOffset: number): numb
 
 /** Recompute Home's whole first paint and store it. Called from the sync (see
  *  `syncRecentPlays`) whenever plays land, and by Home itself when the row is missing. */
-async function rebuildHomePayload(u: UserDb): Promise<HomePayload> {
+export async function rebuildHomePayload(): Promise<HomePayload> {
   // The browser's last-published offset when we have it (written through by /api/sync from
   // the tz cookie), the fixed home zone otherwise. The hardcoded zone alone meant the
   // payload's buckets and every cookie-driven read on the same page could disagree the
   // moment the user wasn't in NY (audit 2026-08-19, T2.20).
-  const tzOffsetMinutes = payloadTzOffset(await getUserTzOffset(u), zoneOffsetMinutes(HOME_TZ));
+  const tzOffsetMinutes = payloadTzOffset(await getUserTzOffset(), zoneOffsetMinutes(HOME_TZ));
   const [daily, allTime] = await Promise.all([
-    readDailyStats(u, tzOffsetMinutes, HOME_DAILY_DAYS),
+    readDailyStats(tzOffsetMinutes, HOME_DAILY_DAYS),
     // Already a single meta read off the primary, refreshed on write by recordPlays.
-    getAllTimeStats(u),
+    getAllTimeStats(),
   ]);
   // Write-path time, not a render — the day the payload's `initialDay` falls back to.
   const todayLocal = new Date(Date.now() + tzOffsetMinutes * 60_000).toISOString().slice(0, 10);
   // Serial by necessity: which day Home opens on depends on which days have plays. It costs
   // one extra round trip HERE, once per sync that landed something, instead of on every load.
   const initialDay = daily[0]?.day ?? todayLocal;
-  const initialTracks = await readPlaysByDay(u, initialDay, tzOffsetMinutes);
+  const initialTracks = await readPlaysByDay(initialDay, tzOffsetMinutes);
   const payload: HomePayload = {
     shape: HOME_PAYLOAD_SHAPE,
     builtAt: new Date().toISOString(),
@@ -1771,15 +1447,15 @@ async function rebuildHomePayload(u: UserDb): Promise<HomePayload> {
     initialDay,
     initialTracks,
   };
-  await setMeta(u, HOME_PAYLOAD_KEY, JSON.stringify(payload));
+  await setMeta(HOME_PAYLOAD_KEY, JSON.stringify(payload));
   return payload;
 }
 
 /** The stored payload, or null when there is none to serve — absent (nothing has synced into
  *  this store yet), unparseable, or written by a deploy with a different shape. Null is the
  *  caller's cue to compute inline and trigger a rebuild, never to render nothing. */
-async function getHomePayload(u: UserDb): Promise<HomePayload | null> {
-  const v = await getMeta(u, HOME_PAYLOAD_KEY);
+export async function getHomePayload(): Promise<HomePayload | null> {
+  const v = await getMeta(HOME_PAYLOAD_KEY);
   if (!v) return null;
   try {
     const p = JSON.parse(v) as HomePayload;
@@ -1792,8 +1468,8 @@ async function getHomePayload(u: UserDb): Promise<HomePayload | null> {
 /** Whether a payload of the current shape exists. Separate from getHomePayload() because the
  *  steady-state sync tick asks this every ~2 minutes and has no use for the body (~20KB over
  *  the funnel); json_extract answers it with the same one indexed meta row and a few bytes. */
-async function hasHomePayload(u: UserDb): Promise<boolean> {
-  const client = await u.client();
+export async function hasHomePayload(): Promise<boolean> {
+  const client = await getClient();
   const res = await client.execute({
     sql: `SELECT json_extract(value, '$.shape') AS shape FROM meta WHERE key = ?`,
     args: [HOME_PAYLOAD_KEY],
@@ -1957,9 +1633,9 @@ export { LIBRARY_INDEX_SHAPE, HISTORY_INDEX_SHAPE };
  *  Returns null when the store can't be read — the caller must serve uncached rather than
  *  mint cache entries under a guessed version (audit 2026-08-19, T2.4: a transient failure
  *  used to read as "0" and poison the "0"-keyed entry for a day). */
-async function getLibraryIndexVersion(u: UserDb): Promise<string | null> {
+export async function getLibraryIndexVersion(): Promise<string | null> {
   try {
-    return (await getMeta(u, LIBRARY_SEQ_KEY)) ?? "0";
+    return (await getMeta(LIBRARY_SEQ_KEY)) ?? "0";
   } catch {
     return null;
   }
@@ -1981,11 +1657,11 @@ async function getLibraryIndexVersion(u: UserDb): Promise<string | null> {
 // like liveKey() — the caller runs uncached rather than guessing.
 const SLOW_SEQ_MIN_MS = 10 * 60 * 1000;
 
-async function slowSeq(u: UserDb): Promise<string | null> {
-  const seq = await liveKey(u);
+async function slowSeq(): Promise<string | null> {
+  const seq = await liveKey();
   if (seq === null) return null;
   try {
-    return await slowSeqInner(u, seq);
+    return await slowSeqInner(seq);
   } catch {
     // Any store failure past the liveKey read must ALSO resolve to null (serve uncached),
     // or the null-version contract's failure branch is unreachable on the very failures it
@@ -1994,8 +1670,8 @@ async function slowSeq(u: UserDb): Promise<string | null> {
   }
 }
 
-async function slowSeqInner(u: UserDb, seq: string): Promise<string | null> {
-  const raw = await getMeta(u, "slow_seq_pub");
+async function slowSeqInner(seq: string): Promise<string | null> {
+  const raw = await getMeta("slow_seq_pub");
   if (raw) {
     try {
       const pub = JSON.parse(raw) as { seq: string; at: number };
@@ -2007,7 +1683,7 @@ async function slowSeqInner(u: UserDb, seq: string): Promise<string | null> {
   // Re-read just before publishing: two instances racing here used to let the LOSER land a
   // lower seq with a newer stamp, which then served the superseded key for the whole window
   // (audit 2026-08-19, T2.18). A newer published seq wins; never publish backwards.
-  const raced = await getMeta(u, "slow_seq_pub").catch(() => null);
+  const raced = await getMeta("slow_seq_pub").catch(() => null);
   if (raced) {
     try {
       const pub = JSON.parse(raced) as { seq: string; at: number };
@@ -2016,52 +1692,46 @@ async function slowSeqInner(u: UserDb, seq: string): Promise<string | null> {
       /* fall through to publish */
     }
   }
-  await setMeta(u, "slow_seq_pub", JSON.stringify({ seq, at: Date.now() }));
+  await setMeta("slow_seq_pub", JSON.stringify({ seq, at: Date.now() }));
   return seq;
 }
 
 /** The history payload's version: the slow marker (write_seq, published at most every
  *  10 min) — the rebuild is a full plays scan, so it must not run once per play. Null when
  *  the store can't be read: serve uncached, never mint entries under a guessed version. */
-async function getHistoryIndexVersion(u: UserDb): Promise<string | null> {
-  return slowSeq(u);
+export async function getHistoryIndexVersion(): Promise<string | null> {
+  return slowSeq();
 }
 
 // LIVE-shaped cache (the section above): keyed on a content version, with the daily TTL as a
 // garbage bound. So the scan below runs once per real change and every other request is free.
-const libraryIndexCached = userCache(
-  "library-index",
-  (uid: Uid, dbName: string, _version: string, _shape: string) => readLibraryIndex(userDb(uid, dbName)),
-  [LIBRARY_INDEX_SHAPE],
+const libraryIndexCached = unstable_cache(
+  (_version: string, _shape: string) => readLibraryIndex(),
+  ["library-index", LIBRARY_INDEX_SHAPE],
   { revalidate: FROZEN_TTL_S },
 );
-async function getLibraryIndex(u: UserDb, version: string | null): Promise<LibraryIndex> {
+export async function getLibraryIndex(version: string | null): Promise<LibraryIndex> {
   // The shape token goes in BOTH the key parts and the arguments: key parts are the documented
   // cache key, and passing it as an argument as well means the identity holds even if a Next
   // version ever treats key parts as a namespace rather than as key material.
   // Null version = the store couldn't say what's current. Read fresh and DON'T cache:
   // an entry minted under a guessed key would be served to every later request that also
   // fails the version read (audit 2026-08-19, T2.4).
-  return version === null
-    ? readLibraryIndex(u)
-    : libraryIndexCached(u.uid, await u.epoch(), u.dbName, version, LIBRARY_INDEX_SHAPE);
+  return version === null ? readLibraryIndex() : libraryIndexCached(version, LIBRARY_INDEX_SHAPE);
 }
 
-const historyIndexCached = userCache(
-  "history-index",
-  (uid: Uid, dbName: string, _version: string, _shape: string) => readHistoryIndex(userDb(uid, dbName)),
-  [HISTORY_INDEX_SHAPE],
+const historyIndexCached = unstable_cache(
+  (_version: string, _shape: string) => readHistoryIndex(),
+  ["history-index", HISTORY_INDEX_SHAPE],
   { revalidate: FROZEN_TTL_S },
 );
-async function getHistoryIndex(u: UserDb, version: string | null): Promise<HistoryIndex> {
+export async function getHistoryIndex(version: string | null): Promise<HistoryIndex> {
   // Same null contract as getLibraryIndex: fresh and uncached when the version is unknown.
-  return version === null
-    ? readHistoryIndex(u)
-    : historyIndexCached(u.uid, await u.epoch(), u.dbName, version, HISTORY_INDEX_SHAPE);
+  return version === null ? readHistoryIndex() : historyIndexCached(version, HISTORY_INDEX_SHAPE);
 }
 
-async function readLibraryIndex(u: UserDb): Promise<LibraryIndex> {
-  const client = await u.client();
+async function readLibraryIndex(): Promise<LibraryIndex> {
+  const client = await getClient();
   // Driven from playlist_tracks (15k index entries, one seek per member) rather than from
   // `tracks` with an EXISTS filter, which makes the planner scan all 15,000 track rows and
   // then probe membership per row. Rows scanned is the cost — and was what Turso billed.
@@ -2121,8 +1791,8 @@ async function readLibraryIndex(u: UserDb): Promise<LibraryIndex> {
   };
 }
 
-async function readHistoryIndex(u: UserDb): Promise<HistoryIndex> {
-  const client = await u.client();
+async function readHistoryIndex(): Promise<HistoryIndex> {
+  const client = await getClient();
   // A full plays scan, so it is deliberately off every render path: it runs once per version
   // of the history payload and the browser filters that payload from then on.
   const res = await client.execute(
@@ -2167,43 +1837,25 @@ async function readHistoryIndex(u: UserDb): Promise<HistoryIndex> {
   };
 }
 
-async function getLastSync(u: UserDb): Promise<string | null> {
-  return getMeta(u, "last_sync");
+export async function getLastSync(): Promise<string | null> {
+  return getMeta("last_sync");
 }
 
 /** Whether history is still being captured (capture-health.ts): the last harvest's age and
  *  whether a Spotify token is stored at all. Two meta reads. */
-async function getCaptureHealth(u: UserDb): Promise<CaptureHealth> {
-  const [lastSync, tokens] = await Promise.all([getLastSync(u), getMeta(u, SPOTIFY_TOKENS_KEY)]);
+export async function getCaptureHealth(): Promise<CaptureHealth> {
+  const [lastSync, tokens] = await Promise.all([getLastSync(), getMeta(SPOTIFY_TOKENS_KEY)]);
   return captureHealth(Date.now(), lastSync, tokens !== null);
-}
-
-// The hourly health check's own marks (multi-user PLAN §7.10), in the admin's database until
-// Phase 2's app_meta: when the daily chores last finished (`daily_at`, epoch ms), the last
-// Turso pace verdict they recorded (`quota_pace`, {at, ahead}), and the newest isolation
-// event a check has already reported (`isolation_seen`, the row's ts), so each event e-mails
-// once. Meta only: no marker bump.
-export type HealthMark = "daily_at" | "quota_pace" | "isolation_seen";
-async function getHealthMarks(u: UserDb): Promise<Record<HealthMark, string | null>> {
-  const [daily, pace, seen] = await Promise.all([
-    getMeta(u, "daily_at"),
-    getMeta(u, "quota_pace"),
-    getMeta(u, "isolation_seen"),
-  ]);
-  return { daily_at: daily, quota_pace: pace, isolation_seen: seen };
-}
-async function setHealthMark(u: UserDb, key: HealthMark, value: string): Promise<void> {
-  await setMeta(u, key, value);
 }
 
 // The once-a-day full context pass (unresolvedContextUris) is gated on this stamp;
 // every other sync call uses the batch-bounded unseenContexts(). Epoch ms, 0 = never.
-async function getContextsFullCheckAt(u: UserDb): Promise<number> {
-  const v = await getMeta(u, "contexts_full_check_at");
+export async function getContextsFullCheckAt(): Promise<number> {
+  const v = await getMeta("contexts_full_check_at");
   return v ? Number(v) || 0 : 0;
 }
-async function setContextsFullCheckAt(u: UserDb): Promise<void> {
-  await setMeta(u, "contexts_full_check_at", String(Date.now()));
+export async function setContextsFullCheckAt(): Promise<void> {
+  await setMeta("contexts_full_check_at", String(Date.now()));
 }
 
 // ---- playlists (persistent library cache; avoids re-scanning Spotify per load) ----
@@ -2216,8 +1868,8 @@ export type StoredPlaylist = {
 };
 
 /** Replace the stored library with a fresh full scan (kept in native order). */
-async function storePlaylists(u: UserDb, rows: StoredPlaylist[], meId: string | null): Promise<void> {
-  const client = await u.client();
+export async function storePlaylists(rows: StoredPlaylist[], meId: string | null): Promise<void> {
+  const client = await getClient();
   const now = new Date().toISOString();
 
   // Cheap change-probe (a read, never on a render path — this only runs in the background
@@ -2256,8 +1908,8 @@ async function storePlaylists(u: UserDb, rows: StoredPlaylist[], meId: string | 
 
   if (diff.tier === "unchanged") {
     // Meta only, so no marker bump: nothing a cached read serves moved.
-    await setMeta(u, "playlists_synced_at", now);
-    if (meId) await setMeta(u, "me_id", meId);
+    await setMeta("playlists_synced_at", now);
+    if (meId) await setMeta("me_id", meId);
     return;
   }
 
@@ -2297,7 +1949,7 @@ async function storePlaylists(u: UserDb, rows: StoredPlaylist[], meId: string | 
     stmts.push(...stampStmts, writeSeqStmt());
     await client.batch(stmts, "write");
     // The write moved the marker; drop this request's copy so the read that follows re-keys.
-    dropWriteSeqCache(u);
+    dropWriteSeqCache();
     return;
   }
 
@@ -2357,34 +2009,29 @@ async function storePlaylists(u: UserDb, rows: StoredPlaylist[], meId: string | 
   // client reports 0 for any statement that returns rows (@libsql/client sqlite3.js).
   const purgedIds = [...new Set(results[purgeAt].rows.map((r) => String(r.playlist_id)))];
   if (purgedIds.length > 0) {
-    // Priced at this user's store: their plays (ledgerAddLinear) over their playlists before the
-    // rewrite, never fewer than it purged, so the model stays at or under the full pass. The
-    // calibration's playlist count is one store's (Rem's), not every user's.
-    const playlists = Math.max(cached.length, purgedIds.length);
-    ledgerAddLinear(u, "orphan_purge_pass", (plays) => orphanPurgePassRows(purgedIds.length, plays, playlists));
-    await recomputeOrphanFlags(u, { playlistIds: purgedIds });
+    ledgerAddLinear("orphan_purge_pass", (plays) => orphanPurgePassRows(purgedIds.length, plays));
+    await recomputeOrphanFlags({ playlistIds: purgedIds });
   }
   // The write moved the marker; drop this request's copy so the read that follows re-keys.
-  dropWriteSeqCache(u);
+  dropWriteSeqCache();
 }
 
 // LIVE-keyed (see "Read caching"): the grid and the dock's panels both read this on every
 // visit, and the list only moves when storePlaylists writes to `playlists` — its rewrite
 // branch or its image-only branch, both of which bump the marker, so the next read is a
 // different cache key. Its unchanged tier writes meta and nothing else, and bumps nothing.
-const storedPlaylistsCached = userCache(
-  "stored-playlists",
-  (uid: Uid, dbName: string, _seq: string) => readStoredPlaylists(userDb(uid, dbName)),
-  [],
+const storedPlaylistsCached = unstable_cache(
+  (_seq: string) => readStoredPlaylists(),
+  ["stored-playlists"],
   { revalidate: LIVE_TTL_S },
 );
-async function getStoredPlaylists(u: UserDb): Promise<StoredPlaylist[]> {
-  const seq = await liveKey(u);
-  return seq === null ? readStoredPlaylists(u) : storedPlaylistsCached(u.uid, await u.epoch(), u.dbName, seq);
+export async function getStoredPlaylists(): Promise<StoredPlaylist[]> {
+  const seq = await liveKey();
+  return seq === null ? readStoredPlaylists() : storedPlaylistsCached(seq);
 }
 
-async function readStoredPlaylists(u: UserDb): Promise<StoredPlaylist[]> {
-  const client = await u.client();
+async function readStoredPlaylists(): Promise<StoredPlaylist[]> {
+  const client = await getClient();
   const res = await client.execute(
     `SELECT id, name, owner_id AS ownerId, image, track_count AS trackCount
      FROM playlists ORDER BY position`,
@@ -2400,8 +2047,8 @@ async function readStoredPlaylists(u: UserDb): Promise<StoredPlaylist[]> {
  *  playlist_tracks against the remote store, and it was blocking every Home render. It's refreshed
  *  by recomputeUniqueSongCount() at the end of each library sync (when the underlying data
  *  actually changes). 0 until first cached — Home falls back to the raw track-count sum. */
-async function getUniqueSongCount(u: UserDb): Promise<number> {
-  const v = await getMeta(u, "unique_song_count");
+export async function getUniqueSongCount(): Promise<number> {
+  const v = await getMeta("unique_song_count");
   if (!v) return 0;
   // Stored as {n, seq} where seq is library_seq at compute time. The old trigger — "end of
   // each library sync" — missed every other writer of playlist_tracks (playlist deletes,
@@ -2411,12 +2058,12 @@ async function getUniqueSongCount(u: UserDb): Promise<number> {
   // render is right. Never blocks a render.
   try {
     const parsed = JSON.parse(v) as { n: number; seq: string | null };
-    const cur = await getMeta(u, LIBRARY_SEQ_KEY).catch(() => null);
-    if (parsed.seq !== cur) kickUniqueRecompute(u);
+    const cur = await getMeta(LIBRARY_SEQ_KEY).catch(() => null);
+    if (parsed.seq !== cur) kickUniqueRecompute();
     return Number(parsed.n) || 0;
   } catch {
     // Legacy plain-number value: adopt it and refresh in the background.
-    kickUniqueRecompute(u);
+    kickUniqueRecompute();
     return Number(v) || 0;
   }
 }
@@ -2426,26 +2073,25 @@ async function getUniqueSongCount(u: UserDb): Promise<number> {
 // fresh full DISTINCT scan (wave-2 adversarial review, finding C). A TIMESTAMP, not a
 // boolean — a boolean frozen `true` by that same platform freeze would have silenced this
 // path for the instance's whole lifetime (wave-3 adversarial review, M5); a timestamp
-// self-heals after the window. Per (uid, db_name): one user's kick must not silence another's.
-const uniqueRecomputeKickedAt = new Map<string, number>();
-function kickUniqueRecompute(u: UserDb): void {
-  const key = openKey(u.uid, u.dbName);
-  if (Date.now() - (uniqueRecomputeKickedAt.get(key) ?? 0) < 60_000) return;
-  uniqueRecomputeKickedAt.set(key, Date.now());
-  void recomputeUniqueSongCount(u).catch(() => {});
+// self-heals after the window.
+let uniqueRecomputeKickedAt = 0;
+function kickUniqueRecompute(): void {
+  if (Date.now() - uniqueRecomputeKickedAt < 60_000) return;
+  uniqueRecomputeKickedAt = Date.now();
+  void recomputeUniqueSongCount().catch(() => {});
 }
 
 /** Run the expensive distinct-song scan once and cache it in meta. Called at the end of a
  *  library sync, not on render. Returns the fresh count. */
-async function recomputeUniqueSongCount(u: UserDb): Promise<number> {
+export async function recomputeUniqueSongCount(): Promise<number> {
   // The library sync that calls this has just written, so this request's copy of the marker is
   // stale before the scan below even runs.
-  dropWriteSeqCache(u);
-  const client = await u.client();
+  dropWriteSeqCache();
+  const client = await getClient();
   // Marker BEFORE the scan: if a write lands mid-scan, the stored seq is older than the
   // data and the next read re-kicks — the safe direction. Read after, a mid-scan bump
   // would label a pre-bump count as current.
-  const seq = await getMeta(u, LIBRARY_SEQ_KEY).catch(() => null);
+  const seq = await getMeta(LIBRARY_SEQ_KEY).catch(() => null);
   const res = await client.execute(
     `SELECT COUNT(*) AS n FROM (
        SELECT DISTINCT lower(t.artist) AS a, lower(t.name) AS m
@@ -2456,14 +2102,14 @@ async function recomputeUniqueSongCount(u: UserDb): Promise<number> {
   // The DISTINCT count returns one row, so the scan is modeled from the library's size, not
   // from what came back.
   void ledgerAdd("unique_song_count", uniqueSongCountRows());
-  await setMeta(u, "unique_song_count", JSON.stringify({ n, seq }));
+  await setMeta("unique_song_count", JSON.stringify({ n, seq }));
   return n;
 }
 
 /** One playlist's cached header row (name/owner/image/count) — used by the detail page so
  *  it doesn't load the entire library just to read a single row. */
-async function getStoredPlaylist(u: UserDb, id: string): Promise<StoredPlaylist | null> {
-  const client = await u.client();
+export async function getStoredPlaylist(id: string): Promise<StoredPlaylist | null> {
+  const client = await getClient();
   const res = await client.execute({
     sql: `SELECT id, name, owner_id AS ownerId, image, track_count AS trackCount
           FROM playlists WHERE id = :id`,
@@ -2477,8 +2123,8 @@ async function getStoredPlaylist(u: UserDb, id: string): Promise<StoredPlaylist 
  *  immediately instead of waiting for the next full library sync. position -1 sorts it
  *  first (Spotify also puts new playlists on top); the next full scan replaces the row
  *  with real data (mosaic image, true position). */
-async function upsertStoredPlaylist(u: UserDb, p: StoredPlaylist): Promise<void> {
-  const client = await u.client();
+export async function upsertStoredPlaylist(p: StoredPlaylist): Promise<void> {
+  const client = await getClient();
   // Batched with the marker bump so the row and its announcement land together.
   await client.batch(
     [
@@ -2495,26 +2141,26 @@ async function upsertStoredPlaylist(u: UserDb, p: StoredPlaylist): Promise<void>
     "write",
   );
   // The write moved the marker; drop this request's copy so the read that follows re-keys.
-  dropWriteSeqCache(u);
+  dropWriteSeqCache();
 }
 
-async function getPlaylistsSyncedAt(u: UserDb): Promise<string | null> {
-  return getMeta(u, "playlists_synced_at");
+export async function getPlaylistsSyncedAt(): Promise<string | null> {
+  return getMeta("playlists_synced_at");
 }
 
-async function getMeId(u: UserDb): Promise<string | null> {
-  return getMeta(u, "me_id");
+export async function getMeId(): Promise<string | null> {
+  return getMeta("me_id");
 }
 
 // ---- playlist tracks (cached per playlist so detail pages load instantly) ----
 /** Replace a playlist's cached track list (kept in playlist order). `snapshot` is the
  *  playlist's Spotify snapshot_id, stored so we can skip re-fetching when unchanged. */
-async function storePlaylistTracks(u: UserDb, 
+export async function storePlaylistTracks(
   playlistId: string,
   tracks: Track[],
   snapshot?: string,
 ): Promise<void> {
-  const client = await u.client();
+  const client = await getClient();
   // Diff against the cache instead of delete-all + reinsert: the old full rewrite billed
   // ~3N row writes (N deletes + N track upserts + N inserts) every time a snapshot
   // changed, even for a one-song edit to a large playlist. Now an append writes only the
@@ -2579,20 +2225,20 @@ async function storePlaylistTracks(u: UserDb,
   await client.batch(stmts, "write");
   // Membership for THIS playlist changed, so plays from it may flip orphan either way; a
   // renamed song can flip plays from any playlist.
-  await recomputeOrphanFlags(u, { playlistIds: [playlistId] });
-  if (renamed.length > 0) await recomputeOrphanFlags(u, { identities: renamed });
+  await recomputeOrphanFlags({ playlistIds: [playlistId] });
+  if (renamed.length > 0) await recomputeOrphanFlags({ identities: renamed });
   // The write moved the marker; drop this request's copy so the read that follows re-keys.
-  dropWriteSeqCache(u);
+  dropWriteSeqCache();
 }
 
 /** The Spotify snapshot_id of the cached tracks, if known. */
-async function getPlaylistSnapshot(u: UserDb, playlistId: string): Promise<string | null> {
-  return getMeta(u, `plsnap:${playlistId}`);
+export async function getPlaylistSnapshot(playlistId: string): Promise<string | null> {
+  return getMeta(`plsnap:${playlistId}`);
 }
 
 /** A playlist's cached tracks in playlist order (empty if never cached). */
-async function getPlaylistTracks(u: UserDb, playlistId: string): Promise<Track[]> {
-  const client = await u.client();
+export async function getPlaylistTracks(playlistId: string): Promise<Track[]> {
+  const client = await getClient();
   const res = await client.execute({
     sql: `SELECT t.id, t.name AS title, t.artist, t.uri, t.album,
             t.album_image AS albumImage, t.duration_ms AS durationMs, pt.added_at AS addedAt
@@ -2608,8 +2254,8 @@ async function getPlaylistTracks(u: UserDb, playlistId: string): Promise<Track[]
 // carries, which roughly halves the payload on large playlists (the read sits on Resume's
 // critical path, right before the play command).
 export type PlaylistTrackRef = { id: string; uri: string; title: string; artist: string };
-async function getPlaylistTrackOrder(u: UserDb, playlistId: string): Promise<PlaylistTrackRef[]> {
-  const client = await u.client();
+export async function getPlaylistTrackOrder(playlistId: string): Promise<PlaylistTrackRef[]> {
+  const client = await getClient();
   const res = await client.execute({
     sql: `SELECT t.id, t.uri, t.name AS title, t.artist
           FROM playlist_tracks pt LEFT JOIN tracks t ON t.id = pt.track_id
@@ -2622,12 +2268,12 @@ async function getPlaylistTrackOrder(u: UserDb, playlistId: string): Promise<Pla
 /** Drop one track from a playlist's cache (after a remove) so it doesn't reappear on
  *  the next render before the background refresh. With `position`, only that row goes
  *  (one copy of a repeated track); without it, every row of the uri. */
-async function removeCachedPlaylistTrack(u: UserDb, 
+export async function removeCachedPlaylistTrack(
   playlistId: string,
   uri: string,
   position?: number,
 ): Promise<void> {
-  const client = await u.client();
+  const client = await getClient();
   await client.batch(
     [
       {
@@ -2655,15 +2301,15 @@ async function removeCachedPlaylistTrack(u: UserDb,
   );
   // The removed song's plays from this playlist lose their match (or, with the cache now
   // empty, the playlist becomes unverifiable): re-rule them now rather than at the next store.
-  await recomputeOrphanFlags(u, { playlistIds: [playlistId] });
+  await recomputeOrphanFlags({ playlistIds: [playlistId] });
   // The write moved the marker; drop this request's copy so the read that follows re-keys.
-  dropWriteSeqCache(u);
+  dropWriteSeqCache();
 }
 
 /** Remove a playlist and all its cached tracks/snapshot from the store (after the
  *  user deletes/unfollows it on Spotify). */
-async function deletePlaylistFromDb(u: UserDb, playlistId: string): Promise<void> {
-  const client = await u.client();
+export async function deletePlaylistFromDb(playlistId: string): Promise<void> {
+  const client = await getClient();
   await client.batch(
     [
       { sql: "DELETE FROM playlists WHERE id = :id", args: { id: playlistId } },
@@ -2676,16 +2322,16 @@ async function deletePlaylistFromDb(u: UserDb, playlistId: string): Promise<void
   );
   // Its cached tracks are gone, so plays from it are no longer verifiable and stop being
   // blanked — the same fallback an unsynced playlist gets.
-  await recomputeOrphanFlags(u, { playlistIds: [playlistId] });
+  await recomputeOrphanFlags({ playlistIds: [playlistId] });
   // The write moved the marker; drop this request's copy so the read that follows re-keys.
-  dropWriteSeqCache(u);
+  dropWriteSeqCache();
 }
 
 // ---- saved tracks (Liked Songs index; the other half of "the library") ----
 /** Replace the stored Liked Songs with a fresh full list, in liked order, and stamp
  *  the cheap change-signals (count + newest added_at) used to skip future re-fetches. */
-async function storeSavedTracks(u: UserDb, tracks: Track[]): Promise<void> {
-  const client = await u.client();
+export async function storeSavedTracks(tracks: Track[]): Promise<void> {
+  const client = await getClient();
   // Diff against the cache instead of delete-all + reinsert (same row-write-quota reasoning
   // as storePlaylistTracks — this one re-ran in full at least daily via LIKED_FULL_MAX_AGE_MS).
   const cachedRes = await client.execute(
@@ -2736,20 +2382,20 @@ async function storeSavedTracks(u: UserDb, tracks: Track[]): Promise<void> {
   stmts.push(metaStmt("saved_synced_at", new Date().toISOString()));
   await client.batch(stmts, "write");
   // saved_tracks is not read by the orphan verdict, but a renamed song is.
-  if (renamed.length > 0) await recomputeOrphanFlags(u, { identities: renamed });
+  if (renamed.length > 0) await recomputeOrphanFlags({ identities: renamed });
   // The write moved the marker; drop this request's copy so the read that follows re-keys.
-  dropWriteSeqCache(u);
+  dropWriteSeqCache();
 }
 
 /** The cheap Liked-Songs change-signals (count + newest added_at). */
-async function getLikedSignals(u: UserDb): Promise<{ total: number; topAddedAt: string | null }> {
-  const total = await getMeta(u, "liked_total");
-  const top = await getMeta(u, "liked_top_added_at");
+export async function getLikedSignals(): Promise<{ total: number; topAddedAt: string | null }> {
+  const total = await getMeta("liked_total");
+  const top = await getMeta("liked_top_added_at");
   return { total: total ? Number(total) : 0, topAddedAt: top || null };
 }
 
-async function getSavedSyncedAt(u: UserDb): Promise<string | null> {
-  return getMeta(u, "saved_synced_at");
+export async function getSavedSyncedAt(): Promise<string | null> {
+  return getMeta("saved_synced_at");
 }
 
 // ---- the library union (for clean): Liked Songs + every OWNED playlist's tracks ----
@@ -2763,7 +2409,7 @@ async function getSavedSyncedAt(u: UserDb): Promise<string | null> {
  *  exactly the songs this clean keeps, so counting it would make the reconcile pass treat
  *  those as "saved elsewhere" and empty the playlist it just made. Backups (`Dupes removed
  *  from: …`) are discard piles and never count. Reads entirely from the store. */
-async function getLibraryTracks(u: UserDb, 
+export async function getLibraryTracks(
   exceptPlaylistId?: string,
   exceptName?: string,
   /** The target's own cleaned/backup playlist IDS, when the caller knows them (Phase 2).
@@ -2773,8 +2419,8 @@ async function getLibraryTracks(u: UserDb,
    *  and empties the playlist it just made (audit 2026-08-19 wave 2, A1/A2). */
   exceptIds: string[] = [],
 ): Promise<Track[]> {
-  const client = await u.client();
-  const meId = await getMeId(u);
+  const client = await getClient();
+  const meId = await getMeId();
   const ex = [exceptPlaylistId ?? "", ...exceptIds.filter(Boolean)];
   const res = await client.execute({
     sql: `
@@ -2804,32 +2450,32 @@ async function getLibraryTracks(u: UserDb,
   return plainRows(res.rows) as unknown as Track[];
 }
 
-async function getLibrarySyncedAt(u: UserDb): Promise<string | null> {
-  return getMeta(u, "library_synced_at");
+export async function getLibrarySyncedAt(): Promise<string | null> {
+  return getMeta("library_synced_at");
 }
-async function setLibrarySyncedAt(u: UserDb): Promise<void> {
-  await setMeta(u, "library_synced_at", new Date().toISOString());
+export async function setLibrarySyncedAt(): Promise<void> {
+  await setMeta("library_synced_at", new Date().toISOString());
 }
 /** The browser's last-published tz offset (minutes to add to UTC), written through from the
  *  tzoffset cookie by /api/sync. Read by tzOffsetMinutes() as the no-cookie fallback and by
  *  rebuildHomePayload so write-path day buckets match the reader's. */
-async function getUserTzOffset(u: UserDb): Promise<number | null> {
-  const v = await getMeta(u, "user_tz_offset").catch(() => null);
+export async function getUserTzOffset(): Promise<number | null> {
+  const v = await getMeta("user_tz_offset").catch(() => null);
   const n = v === null ? NaN : Number(v);
   return Number.isFinite(n) ? Math.max(-720, Math.min(840, Math.round(n))) : null;
 }
-async function setUserTzOffset(u: UserDb, offsetMin: number): Promise<void> {
-  await setMeta(u, "user_tz_offset", String(Math.round(offsetMin)));
+export async function setUserTzOffset(offsetMin: number): Promise<void> {
+  await setMeta("user_tz_offset", String(Math.round(offsetMin)));
 }
 
 /** When a library scan was last STARTED (the completion stamp above only lands on success —
  *  gating on it alone retried a failing scan every cron tick). Epoch ms. */
-async function getLibraryScanAttemptAt(u: UserDb): Promise<number | null> {
-  const v = await getMeta(u, "library_scan_attempt_at");
+export async function getLibraryScanAttemptAt(): Promise<number | null> {
+  const v = await getMeta("library_scan_attempt_at");
   return v ? Number(v) || null : null;
 }
-async function setLibraryScanAttemptAt(u: UserDb): Promise<void> {
-  await setMeta(u, "library_scan_attempt_at", String(Date.now()));
+export async function setLibraryScanAttemptAt(): Promise<void> {
+  await setMeta("library_scan_attempt_at", String(Date.now()));
 }
 
 // Spotify rate-limit backoff, persisted so it survives across serverless invocations
@@ -2841,31 +2487,27 @@ async function setLibraryScanAttemptAt(u: UserDb): Promise<void> {
 // on that endpoint in two days — Spotify has this app on a tight quota, so the dominant
 // call must stop running around the clock). currently-playing sits in its own quota
 // bucket and is what the tick checks instead.
-async function getHarvestGate(u: UserDb): Promise<{ lastActive: number; lastHarvest: number }> {
-  const [a, h] = await Promise.all([getMeta(u, "player_last_active"), getMeta(u, "rp_last_harvest")]);
+export async function getHarvestGate(): Promise<{ lastActive: number; lastHarvest: number }> {
+  const [a, h] = await Promise.all([getMeta("player_last_active"), getMeta("rp_last_harvest")]);
   return { lastActive: Number(a) || 0, lastHarvest: Number(h) || 0 };
 }
-async function setHarvestGate(u: UserDb, v: {
+export async function setHarvestGate(v: {
   lastActive?: number;
   lastHarvest?: number;
 }): Promise<void> {
-  if (v.lastActive !== undefined) await setMeta(u, "player_last_active", String(v.lastActive));
-  if (v.lastHarvest !== undefined) await setMeta(u, "rp_last_harvest", String(v.lastHarvest));
+  if (v.lastActive !== undefined) await setMeta("player_last_active", String(v.lastActive));
+  if (v.lastHarvest !== undefined) await setMeta("rp_last_harvest", String(v.lastHarvest));
 }
 
-// App-wide by meaning: Spotify's rate limit is per app, so one user's 429 holds everyone off
-// (multi-user PLAN §4.3). Phase 1 has no app database, so the row stays where it always was,
-// in the admin's database; Phase 2 moves it to `app_meta` (`cooldown:<bucket>`) and these two
-// keep their signatures.
 export async function getSpotifyCooldownUntil(): Promise<number> {
-  const v = await getMeta(adminDb(), "spotify_cooldown_until");
+  const v = await getMeta("spotify_cooldown_until");
   return v ? Number(v) || 0 : 0;
 }
 export async function setSpotifyCooldownUntil(untilMs: number): Promise<void> {
   // MAX, not overwrite: a later, shorter ban must never SHORTEN a persisted longer one
   // (audit 2026-08-19, T1.10 — the module-scoped copy in spotify/client.ts already maxes;
   // the persisted copy silently didn't).
-  const client = await adminDb().client();
+  const client = await getClient();
   await client.execute({
     sql: `INSERT INTO meta (key, value) VALUES ('spotify_cooldown_until', :v)
           ON CONFLICT(key) DO UPDATE SET
@@ -2878,18 +2520,18 @@ export async function setSpotifyCooldownUntil(untilMs: number): Promise<void> {
 // ---- preferences / background-job bookkeeping (meta-backed) ----
 /** Whether "Clean" backs removed songs up to a separate playlist. Persisted globally
  *  (DB, so it follows the user across devices), defaulting to on. */
-async function getCleanBackupPref(u: UserDb): Promise<boolean> {
-  const v = await getMeta(u, "clean_backup_pref");
+export async function getCleanBackupPref(): Promise<boolean> {
+  const v = await getMeta("clean_backup_pref");
   return v === null ? true : v === "1";
 }
 /** Every play from a given playback context (e.g. a playlist URI), with its timestamp,
  *  oldest→newest. Resume uses the timestamps to scope to the most recent listening
  *  session, so an older/deeper run can't push the resume point past where you actually
  *  stopped this time. */
-async function playedTracksInContext(u: UserDb, 
+export async function playedTracksInContext(
   contextUri: string,
 ): Promise<{ trackId: string; name: string | null; artist: string | null; playedAt: string }[]> {
-  const client = await u.client();
+  const client = await getClient();
   // Also return name/artist so callers can fall back to a name+artist match when the play's
   // track id doesn't line up with the playlist's stored id — Spotify hands the same song
   // different ids across a playlist vs. recently-played (track relinking / duplicate
@@ -2913,7 +2555,7 @@ async function playedTracksInContext(u: UserDb,
  *  id-variant of the song sits in (Spotify hands the same song different ids across
  *  contexts). Feeds the search-row context menu, which has name+artist but no uri.
  *  All indexed: idx_tracks_artist_name for the row, idx_pltracks_track per id. */
-async function findTrackWithPlaylists(u: UserDb, 
+export async function findTrackWithPlaylists(
   name: string,
   artist: string,
 ): Promise<{
@@ -2928,7 +2570,7 @@ async function findTrackWithPlaylists(u: UserDb,
   } | null;
   playlists: { id: string; name: string }[];
 }> {
-  const client = await u.client();
+  const client = await getClient();
   // INNER JOIN convention from the file header: equality on the identity index.
   const trackRes = await client.execute({
     sql: `SELECT id, name AS title, artist, uri, album, album_image AS albumImage,
@@ -2967,8 +2609,8 @@ async function findTrackWithPlaylists(u: UserDb,
  *  resolving), `null` = negative-cached (known-unresolvable — don't re-hit Spotify), string =
  *  the name. The distinction matters: collapsing NULL rows into a string made this return the
  *  literal "null" (String(null)), which the now-playing chip then displayed as a name. */
-async function getContextName(u: UserDb, uri: string): Promise<string | null | undefined> {
-  const client = await u.client();
+export async function getContextName(uri: string): Promise<string | null | undefined> {
+  const client = await getClient();
   const res = await client.execute({
     sql: "SELECT name FROM contexts WHERE uri = ?",
     args: [uri],
@@ -2995,12 +2637,12 @@ export type SpotifyTokens = { accessToken: string; refreshToken: string; expires
 const SPOTIFY_TOKENS_KEY =
   process.env.NODE_ENV === "production" ? "spotify_tokens" : "spotify_tokens_dev";
 
-async function setSpotifyTokens(u: UserDb, t: SpotifyTokens): Promise<void> {
-  await setMeta(u, SPOTIFY_TOKENS_KEY, JSON.stringify(t));
+export async function setSpotifyTokens(t: SpotifyTokens): Promise<void> {
+  await setMeta(SPOTIFY_TOKENS_KEY, JSON.stringify(t));
 }
 
-async function getSpotifyTokens(u: UserDb): Promise<SpotifyTokens | null> {
-  const raw = await getMeta(u, SPOTIFY_TOKENS_KEY);
+export async function getSpotifyTokens(): Promise<SpotifyTokens | null> {
+  const raw = await getMeta(SPOTIFY_TOKENS_KEY);
   if (!raw) return null;
   try {
     return JSON.parse(raw) as SpotifyTokens;
@@ -3009,8 +2651,8 @@ async function getSpotifyTokens(u: UserDb): Promise<SpotifyTokens | null> {
   }
 }
 
-async function clearSpotifyTokens(u: UserDb): Promise<void> {
-  const client = await u.client();
+export async function clearSpotifyTokens(): Promise<void> {
+  const client = await getClient();
   await client.execute({ sql: "DELETE FROM meta WHERE key = ?", args: [SPOTIFY_TOKENS_KEY] });
 }
 
@@ -3022,8 +2664,8 @@ async function clearSpotifyTokens(u: UserDb): Promise<void> {
 /** Try to take a short-lived cross-instance lock. Returns an owner token (pass it to
  *  releaseLock) on success, null if the lock is held. The owner check stops a holder
  *  that overran its TTL from releasing the lock someone else has since acquired. */
-async function acquireLock(u: UserDb, name: string, ttlMs: number): Promise<string | null> {
-  const client = await u.client();
+export async function acquireLock(name: string, ttlMs: number): Promise<string | null> {
+  const client = await getClient();
   const now = Date.now();
   // Owner token = expiry + a nonce. A pure-expiry token is a function of (now, ttl), so
   // two acquisitions in the same millisecond minted the SAME token and one holder's
@@ -3040,8 +2682,8 @@ async function acquireLock(u: UserDb, name: string, ttlMs: number): Promise<stri
   return res.rowsAffected > 0 ? owner : null;
 }
 
-async function releaseLock(u: UserDb, name: string, owner: string): Promise<void> {
-  const client = await u.client();
+export async function releaseLock(name: string, owner: string): Promise<void> {
+  const client = await getClient();
   await client.execute({
     sql: "DELETE FROM meta WHERE key = ? AND value = ?",
     args: [`lock:${name}`, owner],
@@ -3058,16 +2700,16 @@ function metaStmt(key: string, value: string): InStatement {
 }
 
 // No write marker here: nothing cached is derived from `meta` (write-marker note).
-async function setMeta(u: UserDb, key: string, value: string): Promise<void> {
-  const client = await u.client();
+async function setMeta(key: string, value: string): Promise<void> {
+  const client = await getClient();
   await client.execute({
     sql: `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     args: [key, value],
   });
 }
 
-async function getMeta(u: UserDb, key: string): Promise<string | null> {
-  const client = await u.client();
+async function getMeta(key: string): Promise<string | null> {
+  const client = await getClient();
   const res = await client.execute({ sql: "SELECT value FROM meta WHERE key = ?", args: [key] });
   return res.rows[0] ? String(res.rows[0].value) : null;
 }
@@ -3090,8 +2732,6 @@ export async function logSpotifyRequest(entry: {
   status: number;
   retryAfter: number | null;
   source?: string;
-  /** The user whose token made the call (the Spotify client's owner). */
-  uid?: string | null;
 }): Promise<void> {
   const client = await getTelemetryClient();
   // Store just the endpoint path (no host, no query string) — enough to see which calls
@@ -3107,9 +2747,8 @@ export async function logSpotifyRequest(entry: {
   // that can't see the dominant source is blind (Rem, 2026-08-16). Self-hosted store —
   // the writes cost nothing.
   await client.execute({
-    sql: `INSERT INTO api_log (ts, method, path, status, retry_after, source, user_id)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    args: [Date.now(), entry.method, p, entry.status, entry.retryAfter, entry.source ?? null, entry.uid ?? null],
+    sql: `INSERT INTO api_log (ts, method, path, status, retry_after, source) VALUES (?, ?, ?, ?, ?, ?)`,
+    args: [Date.now(), entry.method, p, entry.status, entry.retryAfter, entry.source ?? null],
   });
   // Prune occasionally rather than on every write.
   if (++apiLogWrites % 256 === 0) await pruneApiLog();
@@ -3231,21 +2870,6 @@ export async function pruneApiLog(): Promise<void> {
 /** client_metrics had NO prune at all — unbounded growth with only the last 7 days ever
  *  read (audit 2026-08-19, T2.16). 30 days kept for post-hoc digging; the daily cron tick
  *  calls this alongside pruneApiLog. ISO-TEXT ts, so the cutoff is the same format. */
-/** Isolation events (isolation.ts) newer than `afterTs` (an ISO ts, exclusive; null = the
- *  whole retention window): how many, and the newest one's ts. Read by the health check. */
-export async function isolationEventsAfter(
-  afterTs: string | null,
-): Promise<{ count: number; newest: string | null }> {
-  const client = await getTelemetryClient();
-  const res = await client.execute({
-    sql: `SELECT COUNT(*) AS n, MAX(ts) AS newest FROM client_metrics
-          WHERE event = 'isolation' AND ts > ?`,
-    args: [afterTs ?? ""],
-  });
-  const r = res.rows[0];
-  return { count: r ? Number(r.n) || 0 : 0, newest: r?.newest == null ? null : String(r.newest) };
-}
-
 export async function pruneClientMetrics(): Promise<void> {
   const client = await getTelemetryClient();
   await client.execute({
@@ -3386,18 +3010,15 @@ export async function ledgerDayModeledTotal(day: string): Promise<number> {
 // trip to every instrumented call, and falling back to read-costs.ts's calibration size when
 // the cache is cold — a modeled cost must never block on a scan to learn how big a table is.
 const STORE_SIZE_MEMO_MS = 60_000;
-// Per (uid, db_name): each user's history has its own size.
-const storeSizeMemo = new Map<string, { at: number; plays: number }>();
+let storeSizeMemo: { at: number; plays: number } | null = null;
 
-async function modeledPlaysCount(u: UserDb): Promise<number> {
-  const key = openKey(u.uid, u.dbName);
-  const memo = storeSizeMemo.get(key);
-  if (memo && Date.now() - memo.at < STORE_SIZE_MEMO_MS) {
-    return memo.plays;
+async function modeledPlaysCount(): Promise<number> {
+  if (storeSizeMemo && Date.now() - storeSizeMemo.at < STORE_SIZE_MEMO_MS) {
+    return storeSizeMemo.plays;
   }
   let plays: number = CALIBRATION.plays;
   try {
-    const v = await getMeta(u, "alltime_stats");
+    const v = await getMeta("alltime_stats");
     if (v) {
       const n = Number((JSON.parse(v) as AllTimeStats).plays);
       if (n > 0) plays = n;
@@ -3405,7 +3026,7 @@ async function modeledPlaysCount(u: UserDb): Promise<number> {
   } catch {
     /* keep the calibration default */
   }
-  storeSizeMemo.set(key, { at: Date.now(), plays });
+  storeSizeMemo = { at: Date.now(), plays };
   return plays;
 }
 
@@ -3416,8 +3037,8 @@ const CONTEXTED_PLAY_FRACTION = CALIBRATION.contextedPlays / CALIBRATION.plays;
 /** Ledger a cost that is LINEAR in history size, resolving the size off the awaited path so
  *  the caller pays nothing for it. Not async on purpose: the whole chain, including the
  *  size lookup, hangs off the returned-and-discarded promise. */
-function ledgerAddLinear(u: UserDb, reader: string, cost: (plays: number) => number): void {
-  void modeledPlaysCount(u)
+function ledgerAddLinear(reader: string, cost: (plays: number) => number): void {
+  void modeledPlaysCount()
     .then((plays) => ledgerAdd(reader, cost(plays)))
     .catch(() => {
       /* attribution must never break its caller */
@@ -3431,14 +3052,14 @@ function ledgerAddLinear(u: UserDb, reader: string, cost: (plays: number) => num
  *  `extraRows` is for a caller that does bounded reads of its own on top of the sync
  *  (refreshHistoryAction's head/delta check). Reads that have their OWN reader — the strip,
  *  a day, the all-time list — must not be passed here; they are already counted. */
-async function ledgerSyncCall(u: UserDb, 
+export async function ledgerSyncCall(
   reader: string,
   added: number,
   extraRows = 0,
 ): Promise<void> {
   try {
     const rows =
-      added > 0 ? landedSyncTickRows(await modeledPlaysCount(u)) : STEADY_SYNC_TICK_ROWS;
+      added > 0 ? landedSyncTickRows(await modeledPlaysCount()) : STEADY_SYNC_TICK_ROWS;
     await ledgerAdd(reader, rows + extraRows);
   } catch {
     /* attribution must never break its caller */
@@ -3555,7 +3176,7 @@ function splitMeta(raw: string | null): { pv: string; meta: string | null } {
  *  T1.8). The client clock is clamped to [now - 7d, now]: a skewed tab can neither file rows
  *  into next week nor before the read window. Events with no `at` keep the arrival stamp.
  *  No write_seq bump (see the section note). */
-export async function recordClientMetrics(rows: ClientMetricInput[], uid: string | null = null): Promise<void> {
+export async function recordClientMetrics(rows: ClientMetricInput[]): Promise<void> {
   if (rows.length === 0) return;
   const client = await getTelemetryClient();
   const now = Date.now();
@@ -3566,9 +3187,9 @@ export async function recordClientMetrics(rows: ClientMetricInput[], uid: string
   };
   await client.batch(
     rows.map((r) => ({
-      sql: `INSERT INTO client_metrics (ts, session, page, event, value, meta, user_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      args: [stamp(r.at), r.session, r.page, r.event, r.value ?? null, r.meta ?? null, uid],
+      sql: `INSERT INTO client_metrics (ts, session, page, event, value, meta)
+            VALUES (?, ?, ?, ?, ?, ?)`,
+      args: [stamp(r.at), r.session, r.page, r.event, r.value ?? null, r.meta ?? null],
     })),
     "write",
   );
@@ -3747,7 +3368,7 @@ function storeHost(u: string): string {
   return u.startsWith("file:") ? "file" : new URL(u).host;
 }
 
-async function benchStore(u: UserDb, store: "core" | "telemetry"): Promise<BenchResult> {
+export async function benchStore(store: "core" | "telemetry"): Promise<BenchResult> {
   if (store === "telemetry") {
     return {
       store,
@@ -3762,123 +3383,10 @@ async function benchStore(u: UserDb, store: "core" | "telemetry"): Promise<Bench
     store,
     host: storeHost(url),
     probes: {
-      select1: await benchProbe(30, async () => (await u.client()).execute("SELECT 1")),
-      metaRead: await benchProbe(10, () => getMeta(u, WRITE_SEQ_KEY)),
+      select1: await benchProbe(30, async () => (await getClient()).execute("SELECT 1")),
+      metaRead: await benchProbe(10, () => getMeta(WRITE_SEQ_KEY)),
       // Null version = read fresh, never from the data cache.
-      historyIndex: await benchProbe(2, () => getHistoryIndex(u, null)),
+      historyIndex: await benchProbe(2, () => getHistoryIndex(null)),
     },
   };
-}
-
-// ── forUser: the only way to a user's data (multi-user PLAN §6.2 layer 3) ──────────────────
-// Every per-user function above takes the user's database as its first argument and none is
-// exported: a caller gets them from forUser(uid), bound to that user's database, so a call
-// that forgets the user does not compile, and nothing at module level can run against "the"
-// database (static check S3 holds the module's exports to the list in
-// tests/isolation/static.test.ts). Phase 1 knows one mapping, OWNER_UID → `lazyboy`; any
-// other uid throws. Phase 2's identity read returns each user's db_name and calls
-// forUserAt with it.
-const USER_FNS = {
-  acquireLock,
-  benchStore,
-  checkPlayedAtConvention,
-  clearSpotifyTokens,
-  deletePlaylistFromDb,
-  findTrackWithPlaylists,
-  getAllTimePlays,
-  getAllTimeStats,
-  getCaptureHealth,
-  getHealthMarks,
-  getCleanBackupPref,
-  getContextName,
-  getContextsFullCheckAt,
-  getDailyStats,
-  getHarvestGate,
-  getHistoryIndex,
-  getHistoryIndexVersion,
-  getHomePayload,
-  getLastSync,
-  getLibraryIndex,
-  getLibraryIndexVersion,
-  getLibraryScanAttemptAt,
-  getLibrarySyncedAt,
-  getLibraryTracks,
-  getLikedSignals,
-  getMeId,
-  getPlaylistSnapshot,
-  getPlaylistsSyncedAt,
-  getPlaylistTrackOrder,
-  getPlaylistTracks,
-  getPlaysByDay,
-  getSavedSyncedAt,
-  getSpotifyTokens,
-  getStoredPlaylist,
-  getStoredPlaylists,
-  getUniqueSongCount,
-  getUserTzOffset,
-  hasHomePayload,
-  hasPlaysBeforeDay,
-  ledgerSyncCall,
-  maybeRecomputeAllTimeStats,
-  playedTracksInContext,
-  rebuildHomePayload,
-  recomputeAllTimeStats,
-  recomputeUniqueSongCount,
-  recordContexts,
-  recordPlays,
-  releaseLock,
-  removeCachedPlaylistTrack,
-  searchHistory,
-  setContextsFullCheckAt,
-  setHealthMark,
-  setHarvestGate,
-  setLibraryScanAttemptAt,
-  setLibrarySyncedAt,
-  setSpotifyTokens,
-  setUserTzOffset,
-  storePlaylists,
-  storePlaylistTracks,
-  storeSavedTracks,
-  unresolvedContextUris,
-  unseenContexts,
-  upsertStoredPlaylist,
-};
-
-type Bound<F> = F extends (u: UserDb, ...args: infer A) => infer R ? (...args: A) => R : never;
-export type UserStore = {
-  readonly uid: Uid;
-  readonly dbName: string;
-  /** The database's `store_epoch` (PLAN §4.5): part of every cache key and search ETag. */
-  storeEpoch(): Promise<string>;
-} & { readonly [K in keyof typeof USER_FNS]: Bound<(typeof USER_FNS)[K]> };
-
-/** Phase 1's directory: the owner's uid names Rem's database; any other uid has none. */
-function phase1DbName(uid: Uid): string {
-  if (uid !== phase1Owner()) throw new Error(`no database is mapped to user ${uid}`);
-  return PRIMARY_DB;
-}
-
-/** A user's data, bound to their database. Throws for a uid with no database. */
-export function forUser(uid: Uid): UserStore {
-  return forUserAt(uid, phase1DbName(uid));
-}
-
-/** The same, at a named database: what forUser resolves to, what Phase 2's identity read
- *  calls with the user's db_name, and what the tests use for their per-user files. The open's
- *  owner check is what stands between a wrong name and someone else's data. */
-export function forUserAt(uid: Uid, dbName: string): UserStore {
-  const u = userDb(uid, dbName);
-  const store: Record<string, unknown> = { uid, dbName, storeEpoch: () => u.epoch() };
-  for (const [name, fn] of Object.entries(USER_FNS)) {
-    store[name] = (...args: unknown[]) => (fn as (u: UserDb, ...a: unknown[]) => unknown)(u, ...args);
-  }
-  return Object.freeze(store) as unknown as UserStore;
-}
-
-/** The admin's database, for the app-wide rows that live there until Phase 2's app database
- *  (the Spotify cooldown). Throws when OWNER_UID is unset. */
-function adminDb(): UserDb {
-  const owner = phase1Owner();
-  if (!owner) throw new Error("OWNER_UID is unset: there is no admin database");
-  return userDb(owner, PRIMARY_DB);
 }

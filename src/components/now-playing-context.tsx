@@ -24,8 +24,6 @@ import {
   STEADY_MS,
   type PollOutcome,
 } from "@/lib/now-playing-poll";
-import { leaveForAnotherUser, namesAnotherUser, userStorageName } from "@/lib/user-storage";
-import { useUid } from "@/components/user-context";
 
 export type NowPlayingTrack = {
   id: string;
@@ -67,17 +65,16 @@ type NPMessage =
   | { type: "optimistic"; playing: Playing; until: number; at: number } // a user action
   | { type: "request" }; // a new tab asking the leader for the current state
 
-// The channel, the cache key and the leader lock are per user: userStorageName(uid,
-// "lb-nowplaying") for the first two and (uid, "lb-nowplaying-leader") for the lock, so two
-// users' tabs in one browser neither read nor relay each other's player (multi-user PLAN §6.2
-// layer 6).
-// How old a cached entry may be and still paint. The cache exists so a NEW tab shows the
+const CHANNEL = "lb-nowplaying";
+const CACHE_KEY = "lb-nowplaying";
+// How old a CACHE_KEY entry may be and still paint. The cache exists so a NEW tab shows the
 // chip instantly while a sibling tab's poll is seconds old — it must never resurrect a dead
 // session: a tab reopened a day later painted yesterday's song as "playing now", and that
 // stale state flowed into Home's instant-handoff as if freshly observed, minting a phantom
 // play stamped with the reopen time (等一個人 5:37 PM, Rem 2026-08-19). 30s covers a
 // throttled background leader; anything older waits the ~1s for the live poll.
 const CACHE_MAX_AGE_MS = 30_000;
+const LEADER_LOCK = "lb-nowplaying-leader";
 // This bundle's build id (inlined by next.config.ts), and where the last skew reload was
 // stamped — the throttle that keeps a broken beacon from reload-looping.
 const BUILD_ID = process.env.NEXT_PUBLIC_BUILD_ID;
@@ -114,7 +111,6 @@ function markNowPlayingReady(): void {
 // bucket with the login profile fetch and was tripping Spotify's 429). If the browser
 // lacks Web Locks / BroadcastChannel, it falls back to per-tab polling.
 export function NowPlayingProvider({ children }: { children: React.ReactNode }) {
-  const uid = useUid();
   const [playing, setPlaying] = useState<Playing>(null);
   const aliveRef = useRef(true);
   const playingRef = useRef<Playing>(null);
@@ -241,15 +237,12 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     }
     if (msg.type !== "request") {
       try {
-        localStorage.setItem(
-          userStorageName(uid, "lb-nowplaying"),
-          JSON.stringify({ playing: msg.playing, at: msg.at }),
-        );
+        localStorage.setItem(CACHE_KEY, JSON.stringify({ playing: msg.playing, at: msg.at }));
       } catch {
         /* storage unavailable */
       }
     }
-  }, [uid]);
+  }, []);
 
   // Apply an incoming shared state, honoring suppression, monotonic ordering — and AGE.
   // The age gate lives HERE, not just on the localStorage seed: the leader's `request`
@@ -285,13 +278,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
           ? { kind: "error", retryAfterMs: retryAfterS * 1000 }
           : { kind: "error" };
       }
-      const data = (await res.json()) as { playing: Playing; build?: string; u?: string };
-      // The browser's cookie names someone else now (a sign-in in another tab): this answer is
-      // theirs, so it is neither shown, cached nor relayed, and the page reloads as theirs.
-      if (namesAnotherUser(data, uid)) {
-        leaveForAnotherUser(uid);
-        return { kind: "error" };
-      }
+      const data = (await res.json()) as { playing: Playing; build?: string };
       // The answer is here. Marked before the ordering/suppression guards below for the same
       // reason checkSkew is: those decide whether to DISPLAY this reply, not whether it landed.
       markNowPlayingReady();
@@ -316,7 +303,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       /* transient — keep the last known state rather than flicker */
       return { kind: "error" };
     }
-  }, [broadcast, checkSkew, probeCurrentBuild, uid]);
+  }, [broadcast, checkSkew, probeCurrentBuild]);
 
   useEffect(() => {
     pollOnceRef.current = pollOnce;
@@ -369,12 +356,12 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       };
     }
 
-    const bc = new BroadcastChannel(userStorageName(uid, "lb-nowplaying"));
+    const bc = new BroadcastChannel(CHANNEL);
     bcRef.current = bc;
 
     // Paint instantly from the shared cache while we wait for a live answer.
     try {
-      const cached = localStorage.getItem(userStorageName(uid, "lb-nowplaying"));
+      const cached = localStorage.getItem(CACHE_KEY);
       if (cached) {
         const { playing: p, at } = JSON.parse(cached) as { playing: Playing; at: number };
         if (Date.now() - at < CACHE_MAX_AGE_MS) applyShared(p, at);
@@ -466,7 +453,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     // hidden holder too); a hidden one queues and takes over when the holder closes. A new
     // leader holding a state under one steady period old continues that schedule rather than
     // asking again at once — tab switches between two app tabs cost no extra request.
-    election = leaderElection(navigator.locks, userStorageName(uid, "lb-nowplaying-leader"), isVisible(), (lead) => {
+    election = leaderElection(navigator.locks, LEADER_LOCK, isVisible(), (lead) => {
       isLeaderRef.current = lead;
       if (!lead) {
         loop.stop();
@@ -488,7 +475,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       bc.close();
       bcRef.current = null;
     };
-  }, [applyShared, broadcast, checkSkew, probeCurrentBuild, uid]);
+  }, [applyShared, broadcast, checkSkew, probeCurrentBuild]);
 
   // Show a track as playing immediately (e.g. double-click a song); the next poll confirms.
   const playOptimistic = useCallback(

@@ -2,7 +2,7 @@
 //
 // The Scan folder = every playlist named "Cleaned: …", every artist "… - others", plus
 // "test". Rem is about to delete them; their songs are his pre-tracking listening. This
-// script (run with `node --env-file=.env.local scripts/backfill-scan.mjs --user <OWNER_UID> [--run]`):
+// script (run with `node --env-file=.env.local scripts/backfill-scan.mjs [--run]`):
 //
 //   1. BACKS UP every member as "track \t artist \t id" per playlist under
 //      ~/Downloads/lazyboy-scan-backup/ (the recreate-it-later record).
@@ -18,9 +18,7 @@ import { createClient } from "@libsql/client";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { checkScriptDb, scriptUserOrExit } from "./script-user.mjs";
 
-const USER = scriptUserOrExit(process.argv.slice(2));
 const RUN = process.argv.includes("--run");
 const SENTINEL = "2026-05-30T00:00:00.000Z";
 const BACKUP_DIR = path.join(homedir(), "Downloads", "lazyboy-scan-backup");
@@ -29,7 +27,6 @@ const url = process.env.TURSO_DATABASE_URL;
 const authToken = process.env.TURSO_AUTH_TOKEN;
 if (!url) throw new Error("TURSO_DATABASE_URL missing — run with --env-file=.env.local");
 const db = createClient({ url, authToken });
-await checkScriptDb(db, USER, url);
 
 // ── The Scan folder, by name (Spotify's API doesn't expose folders) ──────────────────
 const pls = (await db.execute("SELECT id, name FROM playlists ORDER BY name")).rows;

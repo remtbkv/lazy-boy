@@ -1,16 +1,13 @@
 import { after } from "next/server";
 import { startLibrarySync } from "@/lib/playlists-sync";
-import { requireRouteUser } from "@/lib/require-user";
 import { taskDone } from "@/lib/tasks/registry";
 
 // Triggered by the client when the stored library is empty or stale. Kicks the full
 // library scan as a background task and returns its id immediately — the scan runs off the
 // request, paced and committing per playlist, while the client polls progress.
 export async function POST() {
-  const user = await requireRouteUser();
-  if (user instanceof Response) return user;
   try {
-    const r = await startLibrarySync(user);
+    const r = await startLibrarySync();
     if (r.skipped !== undefined || r.taskId === undefined) {
       return Response.json({ ok: true, skipped: r.skipped ?? "unknown" });
     }

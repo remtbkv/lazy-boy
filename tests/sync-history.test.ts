@@ -2,10 +2,14 @@
 // gating, context resolution + negative caching, the home-payload rebuild trigger.
 import { describe, expect, it, vi } from "vitest";
 import { syncRecentPlays } from "@/lib/sync/history";
-import { getSpotifyCooldownUntil, setSpotifyCooldownUntil } from "@/lib/db";
-import { ownerStore } from "./owner-store";
+import {
+  getHomePayload,
+  getPlaysByDay,
+  getSpotifyCooldownUntil,
+  setSpotifyCooldownUntil,
+  getContextName,
+} from "@/lib/db";
 
-const store = ownerStore();
 
 type FakeSp = Parameters<typeof syncRecentPlays>[0];
 
@@ -69,28 +73,28 @@ describe("syncRecentPlays (fake Spotify, real store)", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-08-13T12:00:00Z"));
     let added: number;
-    let payload: Awaited<ReturnType<typeof store.getHomePayload>>;
+    let payload: Awaited<ReturnType<typeof getHomePayload>>;
     try {
-      ({ added } = await syncRecentPlays(sp, store));
-      payload = await store.getHomePayload();
+      ({ added } = await syncRecentPlays(sp));
+      payload = await getHomePayload();
     } finally {
       vi.useRealTimers();
     }
     expect(added).toBe(2);
-    expect(await store.getContextName("spotify:playlist:good")).toBe("Good List");
-    expect(await store.getContextName("spotify:playlist:dead")).toBeNull(); // negative, not undefined
+    expect(await getContextName("spotify:playlist:good")).toBe("Good List");
+    expect(await getContextName("spotify:playlist:dead")).toBeNull(); // negative, not undefined
     expect(payload).not.toBeNull(); // rebuild ran because plays landed
     expect(payload!.daily.some((d) => d.day === DAY)).toBe(true);
-    const rows = await store.getPlaysByDay(DAY, 0);
+    const rows = await getPlaysByDay(DAY, 0);
     expect(rows.find((r) => r.id === "s2")?.source).toBe("Good List");
   });
 
   it("a second run with the same window adds nothing and skips the rebuild", async () => {
     const sp = fakeSp({ recent: [rec("s2", "10:10", "spotify:playlist:good")], contexts: {} });
-    const before = (await store.getHomePayload())!.builtAt;
-    const { added } = await syncRecentPlays(sp, store);
+    const before = (await getHomePayload())!.builtAt;
+    const { added } = await syncRecentPlays(sp);
     expect(added).toBe(0);
-    expect((await store.getHomePayload())!.builtAt).toBe(before); // unchanged
+    expect((await getHomePayload())!.builtAt).toBe(before); // unchanged
   });
 
   it("a persisted cooldown suppresses the harvest entirely", async () => {
@@ -103,7 +107,7 @@ describe("syncRecentPlays (fake Spotify, real store)", () => {
         return [];
       },
     } as unknown as FakeSp;
-    const r = await syncRecentPlays(sp, store);
+    const r = await syncRecentPlays(sp);
     expect(r.skipped).toBe("cooldown");
     expect(called).toBe(0); // zero Spotify calls
   });

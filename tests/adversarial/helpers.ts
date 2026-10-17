@@ -6,24 +6,16 @@
 // TURSO_DATABASE_URL at. It exists to (a) truncate between tests and (b) read the stored
 // `plays.skipped` verdicts directly, which no public reader exposes.
 import { createClient, type Client } from "@libsql/client";
-import type { PlayRecord } from "@/lib/db";
+import { getLastSync, type PlayRecord } from "@/lib/db";
 import type { Track } from "@/lib/spotify/types";
-import { ownerStore } from "../owner-store";
 
 let raw: Client | null = null;
 
 export async function rawClient(): Promise<Client> {
-  // Forces the owner's first open, which provisions the throwaway file (the schema and the
-  // four `meta` keys), and the telemetry init, which creates the log tables beside it.
-  await ownerStore().getLastSync();
-  await ledgerTouch();
+  // Forces db.ts's one-time init(), which is what creates the schema.
+  await getLastSync();
   raw ??= createClient({ url: process.env.TURSO_DATABASE_URL as string, intMode: "number" });
   return raw;
-}
-
-async function ledgerTouch(): Promise<void> {
-  const { readLedger } = await import("@/lib/db");
-  await readLedger(1);
 }
 
 const TABLES = [
@@ -39,15 +31,9 @@ const TABLES = [
   "client_metrics",
 ];
 
-// The four keys the open checks (db.ts, the versioned open) survive a reset: they say whose
-// database the file is, not what is in it.
-const OPEN_KEYS = "'owner_uid', 'schema_version', 'min_reader', 'store_epoch'";
-
 export async function resetStore(): Promise<void> {
   const c = await rawClient();
-  await c.executeMultiple(
-    TABLES.map((t) => (t === "meta" ? `DELETE FROM meta WHERE key NOT IN (${OPEN_KEYS});` : `DELETE FROM ${t};`)).join("\n"),
-  );
+  await c.executeMultiple(TABLES.map((t) => `DELETE FROM ${t};`).join("\n"));
 }
 
 export const DAY_MS = 86_400_000;

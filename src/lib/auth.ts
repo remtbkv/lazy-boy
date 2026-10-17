@@ -5,20 +5,15 @@ import NextAuth, { customFetch } from "next-auth";
 import Spotify from "next-auth/providers/spotify";
 import { cache } from "react";
 import {
-  checkIdentity,
-  mintUid,
-  ownerOnlyLookup,
-  ownerUid,
-  signupsMode,
-  type IdentityVerdict,
-  type Uid,
-} from "@/lib/identity";
+  getSpotifyTokens,
+  setSpotifyTokens,
+  clearSpotifyTokens,
+  acquireLock,
+  releaseLock,
+  type SpotifyTokens,
+} from "@/lib/db";
 import { isOwnerSignIn } from "@/lib/owner";
-import { gateJwt, sessionFields, signInClaims } from "@/lib/session-gate";
-import type { OwnedToken } from "@/lib/spotify";
 import { SPOTIFY_NOT_REGISTERED, spotifyUserinfo } from "@/lib/spotify/userinfo";
-import { createTokenCore, isFresh, RefreshError, type UserTokens } from "@/lib/token-core";
-import { ownerTokenStore } from "@/lib/token-store-owner";
 
 // Spotify banned `localhost` redirect URIs (Nov 2025): only the loopback IP literal
 // `http://127.0.0.1:PORT` is allowed over HTTP. But Next.js normalizes 127.0.0.1 ->
@@ -50,57 +45,211 @@ const SCOPES = [
   "user-read-playback-position",
 ].join(" ");
 
+const TOKEN_URL = "https://accounts.spotify.com/api/token";
+
 // Custom fields we stash on the JWT (kept local so the callbacks don't depend on
 // module-augmentation resolution).
 type SpotifyToken = {
-  uid?: string;
-  ep?: number;
-  auth_time?: number;
   accessToken?: string;
   refreshToken?: string;
   expiresAt?: number;
   error?: "RefreshAccessTokenError";
 };
 
-// The token core, per user (src/lib/token-core.ts: the refresh, the in-flight map and the lock,
-// all keyed by uid). Phase 1 has one user: its store is the owner's plaintext `meta` row.
-const core = createTokenCore(ownerTokenStore(ownerUid));
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// ── Request-scoped reads ───────────────────────────────────────────────────────────────
+// ── Request-scoped token read ──────────────────────────────────────────────────────────
 // One tokens read per request instead of one per callback. /home calls auth() twice (the
 // (app) layout and home/page), and each call read the tokens row in BOTH the jwt and the
 // session callback — 4 serial primary round trips (~20-30ms median each, tails to 700ms)
 // before any content. React cache() scopes this box to the request, so they share one read.
 // The box holds the PROMISE, and every write/refresh republishes it, so a later read in the
-// same request sees the fresh tokens instead of the pre-refresh snapshot. It is keyed by uid,
-// so two users can never share a box even where cache() is a pass-through.
+// same request sees the fresh tokens instead of the pre-refresh snapshot.
 // Outside a request (the cron path) cache() has no dispatcher and is a pass-through: each
 // call gets a fresh box, i.e. a plain direct read. Anything that polls or double-checks the
-// DB across instances (the token core's refresh paths, getValidAccessToken) deliberately
-// reads DIRECTLY — those need real-time state, not this request's snapshot.
-const tokenBox = cache((_uid: Uid) => ({ p: null as Promise<UserTokens | null> | null }));
-function readTokensShared(uid: Uid): Promise<UserTokens | null> {
-  const box = tokenBox(uid);
-  box.p ??= core.getStored(uid);
+// DB across instances (coordinatedRefresh, waitForFreshToken, clearTokensIfStale,
+// getValidAccessToken) deliberately reads DIRECTLY — those need real-time state, not this
+// request's snapshot.
+const tokenBox = cache(() => ({ p: null as Promise<SpotifyTokens | null> | null }));
+function readTokensShared(): Promise<SpotifyTokens | null> {
+  const box = tokenBox();
+  box.p ??= getSpotifyTokens();
   return box.p;
 }
 /** Publish what the DB now holds (null after a clear) so later reads in this request don't
  *  serve a stale — or dead — token. */
-function publishTokens(uid: Uid, t: UserTokens | null): void {
-  tokenBox(uid).p = Promise.resolve(t);
+function publishTokens(t: SpotifyTokens | null): void {
+  tokenBox().p = Promise.resolve(t);
 }
 
-// The identity check (docs/multi-user/PLAN.md §5.1), once per request per cookie: the jwt
-// callback and the session callback ask the same box. Phase 1's lookup is the OWNER_UID
-// constant (no app database yet), so it never throws; Phase 2's app-database read can, and
-// that is the "unavailable" outcome.
-const identityFor = cache(
-  (uid: unknown, ep: unknown, authTime: unknown): Promise<IdentityVerdict> =>
-    checkIdentity({ uid, ep, auth_time: authTime }, ownerOnlyLookup(ownerUid()), {
-      now: Date.now(),
-      signups: signupsMode(),
-    }),
-);
+// `terminal` distinguishes a genuinely dead refresh token (revoked / re-consent
+// needed → force re-login) from a transient failure (token endpoint rate-limited,
+// network blip → keep the session and retry later). Only terminal failures should
+// log the user out; a transient one must not.
+class RefreshError extends Error {
+  terminal: boolean;
+  constructor(terminal: boolean, message: string) {
+    super(message);
+    this.name = "RefreshError";
+    this.terminal = terminal;
+  }
+}
+
+async function refreshAccessToken(refreshToken: string) {
+  const basic = Buffer.from(
+    `${process.env.SPOTIFY_CLIENT_ID}:${process.env.SPOTIFY_CLIENT_SECRET}`,
+  ).toString("base64");
+
+  // Up to 3 tries with small, bounded backoff. Bounded so a slow token endpoint
+  // can't hang the page render — we'd rather keep the session and retry next load.
+  for (let attempt = 0; ; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(TOKEN_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Authorization: `Basic ${basic}`,
+        },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: refreshToken,
+        }),
+        // Hard timeout: a slow/hanging token endpoint must NOT block the page
+        // render (the layout awaits auth()). On timeout we fall back to the
+        // existing session and retry on a later request.
+        signal: AbortSignal.timeout(3000),
+      });
+    } catch (e) {
+      // Network error or timeout: at most one retry, so render is never blocked
+      // for more than ~10s before falling back to the current session.
+      if (attempt >= 1) throw new RefreshError(false, `network: ${String(e)}`);
+      await sleep(300 * (attempt + 1));
+      continue;
+    }
+
+    if (res.ok) {
+      // Guarded: a 200 with a non-JSON body used to escape as a raw SyntaxError, skipping
+      // the RefreshError terminal/transient classification every caller relies on.
+      let data: { access_token?: string; refresh_token?: string; expires_in?: number };
+      try {
+        data = await res.json();
+      } catch {
+        throw new RefreshError(false, "token endpoint returned non-JSON 200");
+      }
+      if (!data.access_token || !data.expires_in) {
+        throw new RefreshError(false, "token endpoint 200 missing fields");
+      }
+      return {
+        accessToken: data.access_token as string,
+        // Spotify may or may not return a new refresh token.
+        refreshToken: (data.refresh_token as string | undefined) ?? refreshToken,
+        expiresAt: Math.floor(Date.now() / 1000) + (data.expires_in as number),
+      };
+    }
+
+    const data = await res.json().catch(() => ({}) as { error?: string });
+    // A revoked/invalid refresh token is the one case that truly needs re-login.
+    if (res.status === 400 && data?.error === "invalid_grant") {
+      throw new RefreshError(true, "invalid_grant");
+    }
+    // Rate-limited or server error: retry, then give up transiently (no logout).
+    if ((res.status === 429 || res.status >= 500) && attempt < 2) {
+      await sleep(300 * (attempt + 1));
+      continue;
+    }
+    throw new RefreshError(false, `token endpoint ${res.status}`);
+  }
+}
+
+// Guard against a cross-process rotation race wiping good tokens. A terminal
+// `invalid_grant` only means the refresh token *we* sent is dead — but if another
+// process already refreshed successfully in the meantime, the stored refresh token
+// has moved on and is still valid. Only clear when what's stored is still the exact
+// token we just failed with; otherwise someone else won the race, so keep theirs.
+async function clearTokensIfStale(attemptedRefreshToken: string): Promise<void> {
+  const current = await getSpotifyTokens();
+  // A FRESH stored access token vetoes the clear regardless of the refresh-token compare:
+  // Spotify doesn't always rotate refresh tokens, so a winner's successful refresh can
+  // leave the same refresh token beside a brand-new access token — and the loser's
+  // invalid_grant (a replay rejection) then matched on refreshToken and logged the user
+  // out of a live session (wave-2 audit, B4).
+  if (current && isFresh(current)) return;
+  if (!current || current.refreshToken === attemptedRefreshToken) {
+    await clearSpotifyTokens();
+  }
+}
+
+const isFresh = (t: SpotifyTokens) => Date.now() / 1000 < t.expiresAt - 60;
+
+// In-process lock: concurrent requests in THIS instance that all see an expired
+// token share ONE refresh instead of each firing their own (which, with Spotify's
+// rotating PKCE refresh token, would invalidate each other and log the user out).
+let inflightRefresh: Promise<SpotifyTokens> | null = null;
+function refreshShared(refreshToken: string): Promise<SpotifyTokens> {
+  if (!inflightRefresh) {
+    inflightRefresh = coordinatedRefresh(refreshToken).finally(() => {
+      inflightRefresh = null;
+    });
+  }
+  return inflightRefresh;
+}
+
+// Cross-INSTANCE coordination for serverless: the in-process lock above only covers
+// one instance, but Vercel can run several. The DB is the shared source of truth, so:
+//   1) double-check the DB — another request/instance may have already refreshed;
+//   2) take a short-lived DB lock so only one refresh hits Spotify with a given
+//      rotating token; losers poll the DB for the winner's freshly-written token.
+// This is what stops concurrent cold starts from racing into invalid_grant.
+async function coordinatedRefresh(triedToken: string): Promise<SpotifyTokens> {
+  let current = await getSpotifyTokens();
+  if (current && isFresh(current)) return current;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    // 30s, not 15: the refresh worst-case (3 attempts × 3s + backoff, plus the DB writes)
+    // can overrun a 15s lease, and a holder past its lease writing tokens is the PKCE
+    // collision the lock exists to prevent (wave-2 audit, B2).
+    const lockOwner = await acquireLock("spotify_refresh", 30_000);
+    if (lockOwner) {
+      try {
+        current = await getSpotifyTokens(); // the winner may have just written
+        if (current && isFresh(current)) return current;
+        const updated = await refreshAccessToken(current?.refreshToken ?? triedToken);
+        await setSpotifyTokens(updated);
+        return updated;
+      } finally {
+        await releaseLock("spotify_refresh", lockOwner);
+      }
+    }
+    // Lost the lock — wait for whoever holds it to publish a fresh token. Two 16s waits
+    // total 32s > the 30s lease, so by the time the loop falls through to the unilateral
+    // last resort the holder's lease has genuinely expired (and the last resort re-reads
+    // the STORE's current refresh token, not this caller's original — audit T2.13).
+    const published = await waitForFreshToken(16_000);
+    if (published) return published;
+    // Holder stalled/crashed; loop to retry (its lock TTL has genuinely expired now).
+  }
+  // Last resort: refresh ourselves rather than fail the request — with the STORE's current
+  // refresh token, not the one this caller started with, which the winner may have rotated.
+  const latest = await getSpotifyTokens();
+  const updated = await refreshAccessToken(latest?.refreshToken ?? triedToken);
+  await setSpotifyTokens(updated);
+  return updated;
+}
+
+// Freshness alone proves the winner published: callers only wait here after seeing an
+// expired stored token, so any fresh one is new. (Don't also require the refresh token
+// to have changed — Spotify doesn't always rotate it, and that check made losers stare
+// at a perfectly good token for the whole timeout, then refresh redundantly.)
+async function waitForFreshToken(timeoutMs: number): Promise<SpotifyTokens | null> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    await sleep(500);
+    const t = await getSpotifyTokens();
+    if (t && isFresh(t)) return t;
+  }
+  return null;
+}
 
 /** The Spotify access token for THIS request — server-only, and deliberately NOT a field on
  *  the session.
@@ -118,18 +267,25 @@ const identityFor = cache(
  *
  *  Free: it reads the box the jwt callback already populated — the same read the session
  *  callback used to make to fill the field in. */
-export async function spotifyAccessTokenFor(uid: Uid): Promise<OwnedToken | undefined> {
-  const t = await readTokensShared(uid).catch(() => null);
-  return t ? { uid: t.uid, accessToken: t.accessToken } : undefined;
+export async function spotifyAccessToken(): Promise<string | undefined> {
+  return (await readTokensShared().catch(() => null))?.accessToken;
 }
 
-// Server-side, session-less access token for background jobs (e.g. the cron sync) that run
-// without a request. Reuses the same stored tokens and shared refresh lock as the request
-// path, so background and request refreshes coordinate (no PKCE rotation races). Returns
-// null when the user has no row or the refresh is dead.
-export async function getValidAccessTokenFor(uid: Uid): Promise<OwnedToken | null> {
-  const t = await core.getValidAccessToken(uid);
-  return t ? { uid: t.uid, accessToken: t.accessToken } : null;
+// Server-side, session-less access token for background jobs (e.g. the daily cron
+// sync) that run without a request. Reuses the same stored tokens and shared
+// refresh lock as the request path, so background and request refreshes coordinate
+// (no PKCE rotation races). Returns null when nobody's signed in or refresh is dead.
+export async function getValidAccessToken(): Promise<string | null> {
+  const stored = await getSpotifyTokens();
+  if (!stored) return null;
+  if (Date.now() / 1000 < stored.expiresAt - 60) return stored.accessToken;
+  try {
+    const fresh = await refreshShared(stored.refreshToken);
+    return fresh.accessToken;
+  } catch (e) {
+    if (e instanceof RefreshError && e.terminal) await clearTokensIfStale(stored.refreshToken);
+    return null;
+  }
 }
 
 export const { handlers, signIn, signOut, auth } = NextAuth({
@@ -184,40 +340,26 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
   ],
   callbacks: {
     // Owner-only. Runs before jwt, so a refused account never reaches the token write below;
-    // Auth.js answers it with AccessDenied. See lib/owner.ts. With no OWNER_UID configured
-    // there is no uid to put on the cookie, so every sign-in is refused (multi-user Phase 1).
+    // Auth.js answers it with AccessDenied. See lib/owner.ts.
     async signIn({ profile }) {
       if (profile?.id === SPOTIFY_NOT_REGISTERED) return "/login?error=SpotifyNotRegistered";
-      if (!ownerUid()) {
-        console.error("[auth] OWNER_UID is unset or malformed: refusing sign-in");
-        return false;
-      }
       return isOwnerSignIn(profile?.id ?? undefined);
     },
     async jwt({ token, account }) {
       const t = token as SpotifyToken;
-      // Initial sign-in: name the user on the cookie (uid, session epoch, auth_time, from the
-      // owner constant in Phase 1, never from the incoming cookie), then stash tokens in the
-      // DB (the source of truth) and keep the cookie lean. The DB lets concurrent refreshes
-      // coordinate (see the token core's refreshShared).
+      // Initial sign-in: stash tokens in the DB (the source of truth) and keep the
+      // cookie lean. The DB lets concurrent refreshes coordinate (see refreshShared).
       if (account) {
-        const claims = signInClaims(ownerUid(), Date.now());
-        if (!claims) return null;
-        t.uid = claims.uid;
-        t.ep = claims.ep;
-        t.auth_time = claims.auth_time;
-        const uid = mintUid(claims.uid);
-        const tokens: UserTokens = {
-          uid,
+        const tokens = {
           accessToken: account.access_token!,
           refreshToken: account.refresh_token!,
           expiresAt: account.expires_at!,
         };
         try {
-          await core.setTokens(uid, tokens);
+          await setSpotifyTokens(tokens);
           // The session callback reads next, in this same request — hand it what we wrote
           // instead of making it re-read the row we just stamped.
-          publishTokens(uid, tokens);
+          publishTokens(tokens);
           // Stored in the DB (the source of truth) — keep the cookie lean.
           delete t.accessToken;
           delete t.refreshToken;
@@ -234,18 +376,9 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         return t;
       }
 
-      // Every later request: who is this? Refused (no uid — every cookie minted before Phase 1
-      // — an unknown uid, a stale epoch, a sign-in over 30 days old) signs the request out.
-      // Unavailable keeps the cookie exactly as it is and sets no uid, so nothing below runs
-      // and requireUser() answers a retryable error.
-      const verdict = await identityFor(t.uid, t.ep, t.auth_time);
-      if (!gateJwt(t, verdict)) return null;
-      if (verdict.kind !== "allowed") return t;
-      const uid = verdict.uid;
-
-      let stored: UserTokens | null;
+      let stored: SpotifyTokens | null;
       try {
-        stored = await readTokensShared(uid);
+        stored = await readTokensShared();
       } catch {
         // Transient DB read error — a Turso hiccup must NOT crash the request into a
         // Configuration error / forced logout. Keep the session exactly as-is and let a
@@ -255,15 +388,14 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       // Migrate older sessions that kept tokens in the cookie into the DB once.
       if (!stored && t.refreshToken && t.accessToken && t.expiresAt) {
         stored = {
-          uid,
           accessToken: t.accessToken,
           refreshToken: t.refreshToken,
           expiresAt: t.expiresAt,
         };
         // Best-effort: if the write fails, keep the cookie tokens and retry next time.
         try {
-          await core.setTokens(uid, stored);
-          publishTokens(uid, stored);
+          await setSpotifyTokens(stored);
+          publishTokens(stored);
           delete t.accessToken;
           delete t.refreshToken;
           delete t.expiresAt;
@@ -276,7 +408,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         return t;
       }
       // Still valid (>60s headroom)?
-      if (isFresh(stored)) {
+      if (Date.now() / 1000 < stored.expiresAt - 60) {
         delete t.error;
         return t;
       }
@@ -285,7 +417,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         // refreshShared resolves to the tokens now in the DB (ours, or a winner's) — publish
         // them so the session callback hands out the fresh access token rather than the
         // expired one this request started with.
-        publishTokens(uid, await core.refreshShared(uid, stored.refreshToken));
+        publishTokens(await refreshShared(stored.refreshToken));
         delete t.error;
       } catch (e) {
         if (e instanceof RefreshError && e.terminal) {
@@ -293,12 +425,12 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           // process already rotated to a fresh one (then this failure is a stale race).
           // Guarded so a DB error while checking doesn't itself crash the callback.
           try {
-            await core.clearTokensIfStale(uid, stored.refreshToken);
+            await clearTokensIfStale(stored.refreshToken);
             // DIRECT read: it has to see the post-clear state, which the request box can't
             // (it still holds the token we just failed with). Publishing the result is what
             // keeps the session callback from handing out that dead token.
-            const after = await core.getStored(uid);
-            publishTokens(uid, after);
+            const after = await getSpotifyTokens();
+            publishTokens(after);
             if (after) delete t.error;
             else t.error = "RefreshAccessTokenError";
           } catch {
@@ -312,11 +444,9 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     async session({ session, token }) {
       const t = token as SpotifyToken;
       // Whatever this callback puts on `session` is what Auth.js hands the browser at
-      // GET /api/auth/session. So: the refresh state and who the request runs as (the uid,
-      // not a credential), and nothing else. The Spotify access token used to be set here —
-      // server code now takes it from spotifyAccessTokenFor() instead, which reads the same
-      // request-scoped box this callback used to read.
-      Object.assign(session, sessionFields(await identityFor(t.uid, t.ep, t.auth_time)));
+      // GET /api/auth/session. So: the refresh state, and nothing else. The Spotify access
+      // token used to be set here — server code now takes it from spotifyAccessToken()
+      // instead, which reads the same request-scoped box this callback used to read.
       session.error = t.error;
       return session;
     },

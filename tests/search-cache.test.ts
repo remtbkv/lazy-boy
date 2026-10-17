@@ -33,12 +33,8 @@ const failingKV: SearchKV = {
   clear: () => Promise.reject(new Error("private mode")),
 };
 
-// The (app) layout renders the uid, which is the user key (multi-user Phase 1); every route body
-// carries it as `u`.
-const UID = "aaaaaaaaaaaa";
-const LIB = { u: UID, v: "41", images: ["i"], albums: ["a"], playlists: ["p"], tracks: [["n", "ar", 0, 0, [0]]] };
+const LIB = { v: "41", images: ["i"], albums: ["a"], playlists: ["p"], tracks: [["n", "ar", 0, 0, [0]]] };
 const HIST = {
-  u: UID,
   v: "907",
   images: [],
   albums: [],
@@ -46,8 +42,8 @@ const HIST = {
   tracks: [["n", "ar", -1, -1, 200000]],
   plays: [[0, 29_000_000, 0]],
 };
-const lib = (u = UID) => slotFor(u, "library");
-const hist = (u = UID) => slotFor(u, "history");
+const lib = (u = "solo") => slotFor(u, "library");
+const hist = (u = "solo") => slotFor(u, "history");
 
 describe("readStored / writeStored", () => {
   it("round-trips each half", async () => {
@@ -66,8 +62,8 @@ describe("readStored / writeStored", () => {
     const kv = memoryKV();
     await writeStored(kv, hist(), "907", JSON.stringify(HIST));
     const [key] = kv.map.keys();
-    expect(JSON.parse(key)).toEqual([UID, "0", "history", "all", "907", HISTORY_INDEX_SHAPE]);
-    expect((kv.map.get(key) as { u: string }).u).toBe(UID);
+    expect(JSON.parse(key)).toEqual(["solo", "0", "history", "all", "907", HISTORY_INDEX_SHAPE]);
+    expect((kv.map.get(key) as { u: string }).u).toBe("solo");
   });
 
   it("stores a body the server could not version (v: null)", async () => {
@@ -119,22 +115,11 @@ describe("readStored / writeStored", () => {
     expect(kv.map.size).toBe(0);
   });
 
-  it("a stored body whose `u` is not the page's user is a miss and is deleted (T7's browser half)", async () => {
-    // Under this user's key and stamp, a body another session's network answer wrote: the
-    // network path refuses it (den-home.tsx fetchPayload), and so does the copy.
-    const kv = memoryKV();
-    await writeStored(kv, lib(), "41", JSON.stringify({ ...LIB, u: "bbbbbbbbbbbb" }));
-    await writeStored(kv, hist(), "907", JSON.stringify({ ...HIST, u: undefined }));
-    expect(await readStored(kv, lib(), libraryOk)).toBeNull();
-    expect(await readStored(kv, hist(), historyOk)).toBeNull();
-    expect(kv.map.size).toBe(0);
-  });
-
   it("a different user key clears the whole store, both halves", async () => {
     const kv = memoryKV();
-    await writeStored(kv, lib(UID), "41", JSON.stringify(LIB));
-    await writeStored(kv, hist(UID), "907", JSON.stringify(HIST));
-    expect(await readStored(kv, lib("bbbbbbbbbbbb"), libraryOk)).toBeNull();
+    await writeStored(kv, lib("solo"), "41", JSON.stringify(LIB));
+    await writeStored(kv, hist("solo"), "907", JSON.stringify(HIST));
+    expect(await readStored(kv, lib("u2"), libraryOk)).toBeNull();
     expect(kv.map.size).toBe(0);
   });
 
@@ -206,14 +191,14 @@ describe("clearStored (the sign-out form)", () => {
 
 describe("slotFor", () => {
   it("today: epoch 0, one segment, this build's shapes", () => {
-    expect(slotFor(UID, "library")).toEqual({
-      userKey: UID,
+    expect(slotFor("solo", "library")).toEqual({
+      userKey: "solo",
       epoch: "0",
       kind: "library",
       segment: "all",
       shape: LIBRARY_INDEX_SHAPE,
     });
-    expect(slotFor(UID, "history").shape).toBe(HISTORY_INDEX_SHAPE);
+    expect(slotFor("solo", "history").shape).toBe(HISTORY_INDEX_SHAPE);
   });
 });
 

@@ -1,8 +1,6 @@
 "use client";
 
 import { useEffect } from "react";
-import { clearIfSignedOut } from "@/lib/user-storage";
-import { useUid } from "@/components/user-context";
 
 // Keeps listen-history current automatically: pings POST /api/sync once when
 // the app loads, then every 2 minutes while the tab is visible, and again whenever the
@@ -14,11 +12,10 @@ import { useUid } from "@/components/user-context";
 const POLL_MS = 2 * 60 * 1000;
 
 export function SyncOnLoad() {
-  const uid = useUid();
   useEffect(() => {
     const sync = () => {
       if (document.visibilityState === "visible") {
-        fetch("/api/sync", { method: "POST" }).then((r) => clearIfSignedOut(r, uid), () => {});
+        fetch("/api/sync", { method: "POST" }).catch(() => {});
       }
     };
     sync(); // immediate, so a fresh open catches up right away
@@ -28,6 +25,6 @@ export function SyncOnLoad() {
       clearInterval(id);
       document.removeEventListener("visibilitychange", sync);
     };
-  }, [uid]);
+  }, []);
   return null;
 }

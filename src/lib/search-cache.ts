@@ -5,13 +5,10 @@
 // half is kept in IndexedDB, Home builds its searchable set from it before the network answers,
 // and the fresh pair replaces it when it lands (den-home.tsx, loadIndex).
 //
-// Each user has their own database, `userStorageName(uid, "lb-search")`, and the sign-out form
-// and the signed-out 401 delete every user's (user-storage.ts clearThisBrowser).
 // A record's KEY is the tuple (userKey, epoch, kind, segment, version, shape), JSON-encoded:
-//   userKey  the uid the (app) layout renders (multi-user Phase 1; components/user-context.tsx).
-//            It is stamped on the record too. A key with any other user in it clears the whole
-//            store; a record stamped with another user is dropped, and so is a body whose `u`
-//            is not this user (PLAN §6.2 layer 6, T7).
+//   userKey  the opaque key the (app) layout renders on #den-root (a constant until multi-user
+//            Phase 1's uid replaces it). It is stamped on the record too. A key with any other
+//            user in it clears the whole store; a record stamped with another user is dropped.
 //   epoch    the store epoch (multi-user PLAN §4.5). "0" until that exists.
 //   segment  "all": one body per kind today. P3's monthly history segments are the reason the
 //            dimension is here, so that change needs no second migration of browser data.
@@ -30,7 +27,6 @@
 // about the same (4.8 ms), so text is a simplicity choice, not a speed one. Every storage failure (private mode, quota, no IndexedDB) reads as a
 // miss and is otherwise silent: the page then behaves exactly as it did before this existed.
 import { HISTORY_INDEX_SHAPE, LIBRARY_INDEX_SHAPE } from "@/lib/search-shape";
-import { bodyIsFor, userStorageName } from "@/lib/user-storage";
 
 export type Kind = "library" | "history";
 export type Slot = { userKey: string; epoch: string; kind: Kind; segment: string; shape: string };
@@ -112,7 +108,7 @@ export async function readStored<T>(kv: SearchKV, slot: Slot, ok: (d: unknown) =
         body = null;
       }
     }
-    if (!bodyIsFor(body, slot.userKey) || !ok(body)) {
+    if (!ok(body)) {
       await kv.del([hit[0]]);
       return null;
     }
@@ -153,14 +149,15 @@ export async function clearStored(kv: SearchKV): Promise<void> {
 }
 
 // ---- IndexedDB -----------------------------------------------------------------------------
-// One database per user, one object store, out-of-line string keys. A connection is opened per
-// operation and closed when its transaction completes, so nothing holds the database open (a held
-// connection would block a version change from another tab, and the sign-out delete).
+// One database, one object store, out-of-line string keys. A connection is opened per operation
+// and closed when its transaction completes, so nothing holds the database open (a held
+// connection would block a version change from another tab).
+const DB_NAME = "lb-search";
 const OBJECTS = "payloads";
 
-function openDb(uid: string): Promise<IDBDatabase> {
+function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(userStorageName(uid, "lb-search"), 1);
+    const req = indexedDB.open(DB_NAME, 1);
     req.onupgradeneeded = () => req.result.createObjectStore(OBJECTS);
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -168,8 +165,8 @@ function openDb(uid: string): Promise<IDBDatabase> {
   });
 }
 
-function run<T>(uid: string, mode: IDBTransactionMode, op: (s: IDBObjectStore) => IDBRequest<T> | void): Promise<T> {
-  return openDb(uid).then(
+function run<T>(mode: IDBTransactionMode, op: (s: IDBObjectStore) => IDBRequest<T> | void): Promise<T> {
+  return openDb().then(
     (db) =>
       new Promise<T>((resolve, reject) => {
         let result: T;
@@ -193,13 +190,12 @@ function run<T>(uid: string, mode: IDBTransactionMode, op: (s: IDBObjectStore) =
   );
 }
 
-/** The page user's database. */
-export function idbKV(uid: string): SearchKV {
+export function idbKV(): SearchKV {
   return {
-    keys: () => run(uid, "readonly", (s) => s.getAllKeys()).then((ks) => ks.map(String)),
-    get: (key) => run(uid, "readonly", (s) => s.get(key)),
-    put: (key, value) => run(uid, "readwrite", (s) => void s.put(value, key)),
-    del: (keys) => run(uid, "readwrite", (s) => keys.forEach((k) => s.delete(k))),
-    clear: () => run(uid, "readwrite", (s) => void s.clear()),
+    keys: () => run("readonly", (s) => s.getAllKeys()).then((ks) => ks.map(String)),
+    get: (key) => run("readonly", (s) => s.get(key)),
+    put: (key, value) => run("readwrite", (s) => void s.put(value, key)),
+    del: (keys) => run("readwrite", (s) => keys.forEach((k) => s.delete(k))),
+    clear: () => run("readwrite", (s) => void s.clear()),
   };
 }

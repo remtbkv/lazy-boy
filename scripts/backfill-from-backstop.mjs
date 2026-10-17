@@ -10,10 +10,7 @@
 //   ssh ubuntu 'python3 -c "import sqlite3,json;\
 //     [print(r[0]) for r in sqlite3.connect(\"/home/remtbkv/lazyboy-recorder/backstop.db\")\
 //     .execute(\"SELECT raw FROM plays\")]"' > /tmp/backstop.jsonl
-//   node --env-file=.env.local scripts/backfill-from-backstop.mjs /tmp/backstop.jsonl --user <OWNER_UID>
-//
-// `--user` is required and must be the admin (scripts/script-user.mjs): the recorder captures
-// Rem's account alone, so its plays belong in no one else's database.
+//   node --env-file=.env.local scripts/backfill-from-backstop.mjs /tmp/backstop.jsonl
 //
 // Field mapping mirrors normTrack() in src/lib/spotify/resources.ts exactly (first
 // artist only, middle album image, skip local/episode/artist-less tracks) so a
@@ -30,19 +27,17 @@
 //
 // Pass --db <path-or-url> to target a scratch copy instead of the primary (how the
 // known-answer test below is run):
-//   node scripts/backfill-from-backstop.mjs /tmp/backstop.jsonl --user <OWNER_UID> --db file:/tmp/scratch.db
+//   node scripts/backfill-from-backstop.mjs /tmp/backstop.jsonl --db file:/tmp/scratch.db
 import fs from "node:fs";
 import { createClient } from "@libsql/client";
 import { importTailStmts, insertedRuns } from "./import-tail.mjs";
-import { checkScriptDb, scriptUserOrExit, withoutUser } from "./script-user.mjs";
 
-const USER = scriptUserOrExit(process.argv.slice(2), { adminOnly: true });
-const args = withoutUser(process.argv.slice(2));
+const args = process.argv.slice(2);
 const dbFlag = args.indexOf("--db");
 const dbUrl = dbFlag >= 0 ? args[dbFlag + 1] : process.env.TURSO_DATABASE_URL;
 const input = args.find((a) => !a.startsWith("--") && a !== dbUrl);
 if (!input || !dbUrl) {
-  console.error("usage: backfill-from-backstop.mjs <backstop.jsonl> --user <uid> [--db <url>]");
+  console.error("usage: backfill-from-backstop.mjs <backstop.jsonl> [--db <url>]");
   process.exit(2);
 }
 
@@ -51,7 +46,6 @@ const client = createClient({
   authToken: dbUrl.startsWith("file:") ? undefined : process.env.TURSO_AUTH_TOKEN,
   intMode: "number",
 });
-await checkScriptDb(client, USER, dbUrl);
 
 // Mirror of normTrack() in src/lib/spotify/resources.ts.
 function normTrack(raw) {

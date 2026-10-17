@@ -16,13 +16,8 @@ const state = vi.hoisted(() => ({
 vi.mock("next/server", () => ({ after: () => {} }));
 vi.mock("next/navigation", () => ({ unstable_rethrow: () => {} }));
 vi.mock("@/lib/auth", () => ({}));
-// The gate as the owner's session would pass it (multi-user Phase 1).
-vi.mock("@/lib/require-user", async () => {
-  const { ownerUid } = await import("./owner-store");
-  return { requireActionUser: async () => ({ uid: ownerUid(), admin: true }) };
-});
 vi.mock("@/lib/session", () => ({
-  getSpotify: async (_uid: string, source: string) => {
+  getSpotify: async (source: string) => {
     state.sources.push(source);
     return {
       resumePlayback: async () => {},
@@ -32,19 +27,13 @@ vi.mock("@/lib/session", () => ({
     };
   },
 }));
-vi.mock("@/lib/db", async (orig) => {
-  const real = await orig<typeof import("@/lib/db")>();
-  return {
-    ...real,
-    forUser: (uid: Parameters<typeof real.forUser>[0]) => ({
-      ...real.forUser(uid),
-      removeCachedPlaylistTrack: () => state.removeCache(),
-    }),
-    recordClientMetrics: async () => {
-      state.recorded++;
-    },
-  };
-});
+vi.mock("@/lib/db", async (orig) => ({
+  ...(await orig<typeof import("@/lib/db")>()),
+  removeCachedPlaylistTrack: () => state.removeCache(),
+  recordClientMetrics: async () => {
+    state.recorded++;
+  },
+}));
 
 const actions = await import("@/app/(app)/actions");
 const db = await import("@/lib/db");

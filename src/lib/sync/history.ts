@@ -1,10 +1,17 @@
 import "server-only";
 import { spotifyClient } from "@/lib/spotify";
 import {
+  recordPlays,
+  recordContexts,
+  unresolvedContextUris,
+  unseenContexts,
+  getContextsFullCheckAt,
+  setContextsFullCheckAt,
   getSpotifyCooldownUntil,
+  hasHomePayload,
+  rebuildHomePayload,
   type PlayRecord,
   type ContextRecord,
-  type UserStore,
 } from "@/lib/db";
 
 // How often the full unresolved-context pass runs. It is the only reader that can find a
@@ -20,7 +27,6 @@ type Spotify = ReturnType<typeof spotifyClient>;
 // contexts (playlist/album names). recordPlays() stamps `last_sync`.
 export async function syncRecentPlays(
   sp: Spotify,
-  store: UserStore,
 ): Promise<{ added: number; skipped?: string }> {
   // Spotify handed out a rate-limit ban recently — don't poke it again until the window
   // passes (persisted, so serverless ticks honor it across invocations). Re-poking a
@@ -41,17 +47,17 @@ export async function syncRecentPlays(
     contextType: r.contextType,
     contextUri: r.contextUri,
   }));
-  const added = await store.recordPlays(rows);
+  const added = await recordPlays(rows);
 
   // Resolve names for any contexts we don't have yet (cap per sync to be gentle).
   // Per-call: only the batch's own URIs are checked (a new context can't enter any other
   // way) — an indexed read over ≤50 URIs. Once a day the full pass runs instead, which is
   // what re-checks negative-cached names whose 30-day window lapsed.
-  const fullDue = Date.now() - (await store.getContextsFullCheckAt()) > CONTEXTS_FULL_CHECK_MS;
+  const fullDue = Date.now() - (await getContextsFullCheckAt()) > CONTEXTS_FULL_CHECK_MS;
   const cands = rows
     .filter((r) => r.contextUri !== null)
     .map((r) => ({ uri: r.contextUri as string, type: r.contextType ?? "" }));
-  const pending = (fullDue ? await store.unresolvedContextUris() : await store.unseenContexts(cands)).slice(
+  const pending = (fullDue ? await unresolvedContextUris() : await unseenContexts(cands)).slice(
     0,
     20,
   );
@@ -76,13 +82,13 @@ export async function syncRecentPlays(
     );
     for (const r of batch) if (r) resolved.push(r);
   }
-  await store.recordContexts(resolved);
+  await recordContexts(resolved);
   // Stamp only after a completed pass, so a throw above retries it on the next call. The
   // stamp is UNCONDITIONAL on truncation: gating it on `pending.length < 20` (a wave-1
   // attempt to un-starve negative re-checks) meant a standing backlog of ≥20 unresolved
   // URIs re-ran the full-pass scan on EVERY tick instead of daily (wave-2 adversarial
   // review, finding L). The backlog drains at ≤20/day instead — slower, bounded, cheap.
-  if (fullDue) await store.setContextsFullCheckAt();
+  if (fullDue) await setContextsFullCheckAt();
 
   // Home renders from one materialized row (db.ts, "The Home payload"), so the sync that
   // changes the data is what has to rewrite it. This is the single point both triggers pass
@@ -97,7 +103,7 @@ export async function syncRecentPlays(
   // scheduler that gets a 500 here would eventually disable itself over a failure that cost
   // nothing.
   try {
-    if (added > 0 || !(await store.hasHomePayload())) await store.rebuildHomePayload();
+    if (added > 0 || !(await hasHomePayload())) await rebuildHomePayload();
   } catch (e) {
     console.error("[home-payload] rebuild after sync failed", e);
   }

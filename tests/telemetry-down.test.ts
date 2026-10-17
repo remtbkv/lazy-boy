@@ -23,10 +23,7 @@ const tel = vi.hoisted(() => {
 });
 
 import { syncRecentPlays } from "@/lib/sync/history";
-import { ledgerAdd, logSpotifyRequest, recordClientMetrics } from "@/lib/db";
-import { ownerStore } from "./owner-store";
-
-const store = ownerStore();
+import { getHomePayload, ledgerAdd, logSpotifyRequest, recordClientMetrics } from "@/lib/db";
 
 type FakeSp = Parameters<typeof syncRecentPlays>[0];
 let n = 0;
@@ -59,8 +56,8 @@ const NORMAL_MS = 1_500;
 
 async function userPath(): Promise<number> {
   const t0 = Date.now();
-  const { added } = await syncRecentPlays(oneNewPlay(), store);
-  const payload = await store.getHomePayload();
+  const { added } = await syncRecentPlays(oneNewPlay());
+  const payload = await getHomePayload();
   const took = Date.now() - t0;
   expect(added).toBe(1);
   expect(payload).not.toBeNull();

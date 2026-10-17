@@ -61,13 +61,13 @@ export const FINDINGS: Record<FindingId, { title: string; detail: string; owner:
   F1: {
     title: "Any cookie signed with AUTH_SECRET is served as the owner",
     detail:
-      "The session never names its user (auth.ts's jwt callback reads the one global token row for every cookie), so a friend's, a revoked friend's, or any other validly signed cookie reaches Rem's store and Rem's Spotify grant on every user entry point. Today only the owner-only signIn callback (src/lib/owner.ts) and AUTH_SECRET's secrecy stand in front of it. Closed for Phase 1 in its turn (lane 12): every request's cookie passes the identity check (src/lib/identity.ts), which knows one uid, OWNER_UID; requireUser is the only source of a uid. Phase 2 adds status and session_epoch.",
+      "The session never names its user (auth.ts's jwt callback reads the one global token row for every cookie), so a friend's, a revoked friend's, or any other validly signed cookie reaches Rem's store and Rem's Spotify grant on every user entry point. Today only the owner-only signIn callback (src/lib/owner.ts) and AUTH_SECRET's secrecy stand in front of it.",
     owner: "P1: the uid on the session, its identity check and requireUser (lane 12); P2: status and session_epoch from the identity read (lane 15)",
   },
   F2: {
     title: "A session whose Spotify grant is gone still reads the whole library and history",
     detail:
-      "The two search routes, the six history actions, /api/metrics and /api/tasks/[id] check only that a session exists (!!auth()). Once the token row is gone (Log out, or invalid_grant) the session carries `error` and every page refuses it, but these keep serving Rem's data to it, including a cookie copied before Log out. PLAN §5.4 says requireUser applies the pages' rule to them; mu/phase1's gateFromSession allows an errored session (canCallSpotify: false), which would keep serving it. Closed in Phase 1's turn (lane 12): requireUser refuses a session whose grant is gone on every entry point (src/lib/session-gate.ts).",
+      "The two search routes, the six history actions, /api/metrics and /api/tasks/[id] check only that a session exists (!!auth()). Once the token row is gone (Log out, or invalid_grant) the session carries `error` and every page refuses it, but these keep serving Rem's data to it, including a cookie copied before Log out. PLAN §5.4 says requireUser applies the pages' rule to them; mu/phase1's gateFromSession allows an errored session (canCallSpotify: false), which would keep serving it.",
     owner: "P1 (lane 12): requireUser applying PLAN §5.4's rule; P4a (lane 19): Log out bumps session_epoch",
   },
   F3: {
@@ -79,19 +79,19 @@ export const FINDINGS: Record<FindingId, { title: string; detail: string; owner:
   F4: {
     title: "logout runs with no session check",
     detail:
-      "The logout server action clears the global Spotify token row in after() whoever posts it: no cookie, a forged or stale cookie, a friend. Anyone who can post the action stops closed-app capture until Rem signs in again (the cron then answers 503 'no token'), and plays past Spotify's last 50 are lost. Closed in Phase 1's turn (lane 12): logout clears only the gated user's own token row; a refused caller gets only its cookie cleared.",
+      "The logout server action clears the global Spotify token row in after() whoever posts it: no cookie, a forged or stale cookie, a friend. Anyone who can post the action stops closed-app capture until Rem signs in again (the cron then answers 503 'no token'), and plays past Spotify's last 50 are lost.",
     owner: "P1 (lane 12, item 6: every action onto requireActionUser, logout included)",
   },
   F5: {
     title: "/usage has no admin rule",
     detail:
-      "Any session sees the operator's page: the rows-read ledger, per-page client timings and the Spotify call breakdown with raw paths. PLAN §6.2 layer 7 says both 'require is_admin' and 'for any user but the admin, aggregated'; lane 12's brief says admin-only, which this map takes. Closed in Phase 1's turn (lane 12): /usage is the admin's; anyone else gets notFound() after requirePageUser.",
+      "Any session sees the operator's page: the rows-read ledger, per-page client timings and the Spotify call breakdown with raw paths. PLAN §6.2 layer 7 says both 'require is_admin' and 'for any user but the admin, aggregated'; lane 12's brief says admin-only, which this map takes.",
     owner: "P1 (lane 12, item 6)",
   },
   F6: {
     title: "Search payloads carry no user: ETags without a uid, bodies revalidated from the HTTP cache",
     detail:
-      "The library and history ETags are \"lib-<shape>-<version>-<day>\" with per-store counters that collide across users, the bodies are `private, max-age=0, must-revalidate` (kept in the HTTP cache after sign-out) and carry no `u`, and the cached reads behind them key on the version alone. Closed in Phase 1's turn (lane 12): both ETags carry the uid and the store epoch, the bodies are `private, no-store` with `u`, and every cached read goes through userCache (uid and epoch in the key).",
+      "The library and history ETags are \"lib-<shape>-<version>-<day>\" with per-store counters that collide across users, the bodies are `private, max-age=0, must-revalidate` (kept in the HTTP cache after sign-out) and carry no `u`, and the cached reads behind them key on the version alone.",
     owner: "P1 (lane 12, items 3-4; PLAN §6.2 layers 4 and 6)",
   },
   F7: {
@@ -103,13 +103,13 @@ export const FINDINGS: Record<FindingId, { title: string; detail: string; owner:
   F8: {
     title: "/home reads Rem's store before its gate",
     detail:
-      "home/page.tsx runs getHomePayload, the cooldown and capture health in one Promise.all with auth(): an anonymous request pays three store reads before the redirect (nothing ships; the cost lands on the shared store budget). Closed in Phase 1's turn (lane 12): Home's reads start after requirePageUser.",
+      "home/page.tsx runs getHomePayload, the cooldown and capture health in one Promise.all with auth(): an anonymous request pays three store reads before the redirect (nothing ships; the cost lands on the shared store budget).",
     owner: "P1 (lane 12, item 6: Home's first wave behind the gate)",
   },
   F9: {
     title: "Phase 1's claims are not checked: a cookie never expires by age",
     detail:
-      "auth_time is not read, so a 31-day-old sign-in is still a session as long as the cookie keeps being renewed (F3). PLAN §5.4 bounds a session to 30 days from its sign-in. Closed by the identity check (mu/phase1): auth_time over 30 days refuses the cookie.",
+      "auth_time is not read, so a 31-day-old sign-in is still a session as long as the cookie keeps being renewed (F3). PLAN §5.4 bounds a session to 30 days from its sign-in.",
     owner: "P1 (lane 12: the identity check reads auth_time)",
   },
   F10: {
@@ -121,37 +121,41 @@ export const FINDINGS: Record<FindingId, { title: string; detail: string; owner:
   F11: {
     title: "Background tasks have no owner",
     detail:
-      "/api/tasks/[id] answers any session the task's full record, result included; only the random id stands in the way. Closed by mu/phase1: tasks record their owner and getTaskFor answers another user's task as missing.",
+      "/api/tasks/[id] answers any session the task's full record, result included; only the random id stands in the way.",
     owner: "P1 (mu/phase1 built getTaskFor; lane 12 carries it)",
   },
 };
 
 // ── Rules shared by many cells ───────────────────────────────────────────────────────────
 const R = {
-  owner: "the owner's session: the identity check allows OWNER_UID, Phase 1's one user (src/lib/identity.ts)",
+  owner: "the owner's session: today every session is the owner's",
   noCookie: "carries no session cookie; user entry points read only the cookie, so auth() is null and the Authorization header is never consulted",
   badJwe: "the JWE does not decrypt under the current AUTH_SECRET, so Auth.js answers no session (auth() null)",
-  friend:
-    "requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read",
-  deadGrantRefused:
-    "the token row is gone, so the jwt callback sets session.error and requireUser refuses it, the pages' rule (PLAN §5.4)",
+  friend: "none: no per-request identity (F1), so the cookie is served Rem's store and grant",
+  deadGrantRefused: "the token row is gone, so the jwt callback sets session.error and this gate refuses it",
+  deadGrantAllowed: "none: this gate checks only that a session exists (F2)",
   cronOnly: "cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret",
   cronCaller: "cronCaller() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET` (the Zenbook) or `Bearer $CRON_SECRET_EXT` (cron-job.org), timing-safe, an unset secret matching nobody; a cookie is not a secret",
 };
 
-function userCells(anonRule: string, over: Partial<Record<Principal, Cell>> = {}): Record<Principal, Cell> {
+type UserGate = "session" | "session+grant";
+
+function userCells(gate: UserGate, anonRule: string, over: Partial<Record<Principal, Cell>> = {}): Record<Principal, Cell> {
   const cells: Record<Principal, Cell> = {
     anon: { target: "deny", rule: anonRule },
     rem: { target: "allow", rule: R.owner },
-    friendA: { target: "isolated", rule: R.friend },
-    friendB: { target: "isolated", rule: R.friend },
-    revoked: { target: "deny", rule: R.friend },
+    friendA: { target: "isolated", today: "allow", phase: "P1", rule: R.friend, finding: "F1" },
+    friendB: { target: "isolated", today: "allow", phase: "P1", rule: R.friend, finding: "F1" },
+    revoked: { target: "deny", today: "allow", phase: "P1", rule: R.friend, finding: "F1" },
     vercelCron: { target: "deny", rule: R.noCookie },
     zenbookPinger: { target: "deny", rule: R.noCookie },
     zenbookRecorder: { target: "deny", rule: R.noCookie },
     cronjobOrg: { target: "deny", rule: R.noCookie },
     staleSecret: { target: "deny", rule: R.badJwe },
-    staleLogout: { target: "deny", rule: R.deadGrantRefused },
+    staleLogout:
+      gate === "session+grant"
+        ? { target: "deny", rule: R.deadGrantRefused }
+        : { target: "deny", today: "allow", phase: "P1", rule: R.deadGrantAllowed, finding: "F2" },
     forged: { target: "deny", rule: R.badJwe },
   };
   return { ...cells, ...over };
@@ -276,9 +280,9 @@ export const ENTRIES: Entry[] = [
     id: "GET /api/now-playing",
     file: "src/app/api/now-playing/route.ts",
     kind: "route",
-    gate: "const user = await requireUser();",
+    gate: "const accessToken = session && !session.error ? await spotifyAccessToken() : undefined;",
     does: "reads Spotify's currently-playing with Rem's grant; reads and writes the context-name cache (contexts)",
-    cells: userCells("requireUser refused → 200 {playing:null} with no store read (deliberately not 401: polled every 6 s)"),
+    cells: userCells("session+grant", "auth() null → 200 {playing:null} with no store read (deliberately not 401: polled every 6 s)"),
     refused: nowPlayingRefused,
     invoke: async () => (await route("@/app/api/now-playing/route", "GET")())(),
   },
@@ -286,18 +290,18 @@ export const ENTRIES: Entry[] = [
     id: "POST /api/sync",
     file: "src/app/api/sync/route.ts",
     kind: "route",
-    gate: "const user = await requireRouteUser();",
+    gate: "const accessToken = session && !session.error ? await spotifyAccessToken() : undefined;",
     does: "harvests recently-played with Rem's grant into plays/tracks; writes meta user_tz from the tzoffset cookie and the sync stamps",
-    cells: userCells("requireRouteUser: no session → 401 with the signed-out marker before any read"),
+    cells: userCells("session+grant", "auth() null → 401 before any read"),
     invoke: async () => (await route("@/app/api/sync/route", "POST")())(),
   },
   {
     id: "POST /api/metrics",
     file: "src/app/api/metrics/route.ts",
     kind: "route",
-    gate: "const user = await requireRouteUser();",
-    does: "appends client timing rows to client_metrics under the session's uid (shown on /usage); drops server-only event names",
-    cells: userCells("requireRouteUser: no session → 401 with the signed-out marker before any read"),
+    gate: "if (!(await auth())) return new Response(\"Unauthorized\", { status: 401 });",
+    does: "appends client timing rows to client_metrics (shown on /usage)",
+    cells: userCells("session", "auth() null → 401 before the body is read"),
     invoke: async () =>
       (await route("@/app/api/metrics/route", "POST")())(
         request("/api/metrics", { method: "POST", body: { session: "s", events: [{ page: "/home", event: "ttfb", value: 1 }] } }),
@@ -307,27 +311,30 @@ export const ENTRIES: Entry[] = [
     id: "GET /api/search/library",
     file: "src/app/api/search/library/route.ts",
     kind: "route",
-    gate: "const user = await requireRouteUser();",
-    does: "returns every track in a playlist or Liked Songs (the library index), ETag'd with the uid, private, no-store",
-    cells: userCells("requireRouteUser: no session → 401 with the signed-out marker before any read"),
+    gate: "if (!(await auth())) return new Response(\"Unauthorized\", { status: 401 });",
+    does: "returns every track in a playlist or Liked Songs (the library index), ETag'd",
+    cells: userCells("session", "auth() null → 401 before any read", {}),
     invoke: async () => (await route("@/app/api/search/library/route", "GET")())(request("/api/search/library")),
   },
   {
     id: "GET /api/search/history",
     file: "src/app/api/search/history/route.ts",
     kind: "route",
-    gate: "const user = await requireRouteUser();",
-    does: "returns every played track and every play (the history index), ETag'd with the uid, private, no-store",
-    cells: userCells("requireRouteUser: no session → 401 with the signed-out marker before any read"),
+    gate: "if (!(await auth())) return new Response(\"Unauthorized\", { status: 401 });",
+    does: "returns every played track and every play (the history index), ETag'd",
+    cells: userCells("session", "auth() null → 401 before any read"),
     invoke: async () => (await route("@/app/api/search/history/route", "GET")())(request("/api/search/history")),
   },
   {
     id: "GET /api/tasks/[id]",
     file: "src/app/api/tasks/[id]/route.ts",
     kind: "route",
-    gate: "const user = await requireRouteUser();",
-    does: "returns one background task's progress and result from the in-process registry, to its owner only (getTaskFor)",
-    cells: userCells("requireRouteUser: no session → 401 with the signed-out marker before any read"),
+    gate: "if (!session) return Response.json({ error: \"unauthorized\" }, { status: 401 });",
+    does: "returns one background task's progress and result from the in-process registry",
+    cells: userCells("session", "auth() null → 401", {
+      friendA: { target: "isolated", today: "allow", phase: "P1", rule: R.friend, finding: "F11" },
+      friendB: { target: "isolated", today: "allow", phase: "P1", rule: R.friend, finding: "F11" },
+    }),
     before: async () => {
       const { runTask, taskDone } = await import("@/lib/tasks/registry");
       // Owned by Rem: Phase 1's runTask takes the owner's uid as a third argument; today's ignores it.
@@ -345,9 +352,9 @@ export const ENTRIES: Entry[] = [
     id: "POST /api/playlists/[id]/tracks",
     file: "src/app/api/playlists/[id]/tracks/route.ts",
     kind: "route",
-    gate: "const user = await requireRouteUser();",
+    gate: "const accessToken = session && !session.error ? await spotifyAccessToken() : undefined;",
     does: "reads one playlist's snapshot from Spotify with Rem's grant; re-fetches and rewrites its cached tracks when changed",
-    cells: userCells("requireRouteUser: no session → 401 with the signed-out marker before any read"),
+    cells: userCells("session+grant", "auth() null → 401 before any read"),
     invoke: async () =>
       (await route("@/app/api/playlists/[id]/tracks/route", "POST")())(
         request(`/api/playlists/${REM_PLAYLIST}/tracks`, { method: "POST", body: { snapshot: "old" } }),
@@ -358,9 +365,10 @@ export const ENTRIES: Entry[] = [
     id: "POST /api/playlists/sync",
     file: "src/app/api/playlists/sync/route.ts",
     kind: "route",
-    gate: "const user = await requireRouteUser();",
+    gate: "if (!session || session.error || !(await spotifyAccessToken())) throw new Error(\"unauthorized\");",
+    gateFile: "src/lib/playlists-sync.ts",
     does: "starts a full library scan with Rem's grant as a background task; rewrites playlists, playlist_tracks, saved_tracks",
-    cells: userCells("requireRouteUser: no session → 401 with the signed-out marker before any read"),
+    cells: userCells("session+grant", "startLibrarySync: auth() null → 'unauthorized' → 401"),
     invoke: async () => (await route("@/app/api/playlists/sync/route", "POST")())(),
   },
   {
@@ -414,20 +422,6 @@ export const ENTRIES: Entry[] = [
     cells: cronCells({ cronjobOrg: EXT_TRIPWIRE }),
     invoke: async () => (await route("@/app/api/cron/store-bench/route", "GET")())(request("/api/cron/store-bench")),
   },
-  {
-    id: "GET /api/cron/health",
-    reaches: false,
-    file: "src/app/api/cron/health/route.ts",
-    kind: "route",
-    gate: "if (!cronCaller(req.headers.get(\"authorization\"))) {",
-    does: "the hourly health check: the owner's capture health, the daily stamp, the pace verdict, isolation events; replies ok/reasons/unchecked and nothing about anyone's listening",
-    cells: cronCells({
-      vercelCron: { target: "allow", rule: "cronCaller(): Bearer $CRON_SECRET (src/lib/cron-auth.ts)" },
-      zenbookPinger: { target: "allow", rule: "cronCaller(): Bearer $CRON_SECRET (src/lib/cron-auth.ts)" },
-      cronjobOrg: { target: "allow", rule: "cronCaller(): Bearer $CRON_SECRET_EXT opens this route and /api/cron/sync only (PLAN §5.5)" },
-    }),
-    invoke: async () => (await route("@/app/api/cron/health/route", "GET")())(request("/api/cron/health")),
-  },
   // Auth.js
   {
     id: "GET /api/auth/session",
@@ -438,11 +432,11 @@ export const ENTRIES: Entry[] = [
     gateFile: "src/lib/auth.ts",
     does: "answers the cookie's own session (name, email, expiry, error; never a token) and re-issues the cookie with a fresh 30 days",
     cells: {
-      ...userCells("no cookie → null"),
-      rem: { target: "allow", rule: "the cookie decodes; the session callback adds `uid`, `admin` and `error` (tokens stay off the session, SECURITY.md)" },
-      friendA: { target: "isolated", rule: "the jwt callback's identity check refuses a uid that is not OWNER_UID → no session (null)" },
-      friendB: { target: "isolated", rule: "the jwt callback's identity check refuses a uid that is not OWNER_UID → no session (null)" },
-      revoked: { target: "deny", rule: "the jwt callback's identity check refuses a uid that is not OWNER_UID → no session (null)" },
+      ...userCells("session", "no cookie → null"),
+      rem: { target: "allow", rule: "the cookie decodes; the session callback copies only `error` (tokens stay off the session, SECURITY.md)" },
+      friendA: { target: "isolated", rule: "answers the cookie's own claims only; no identity check (F1), harmless here", finding: "F1" },
+      friendB: { target: "isolated", rule: "answers the cookie's own claims only; no identity check (F1), harmless here", finding: "F1" },
+      revoked: { target: "deny", today: "allow-own", phase: "P1", rule: "none: a revoked friend's cookie still gets its session (F1)", finding: "F1" },
       staleLogout: {
         target: "deny",
         today: "allow-own",
@@ -550,26 +544,23 @@ export const ENTRIES: Entry[] = [
     id: "action logout",
     file: "src/app/(app)/actions.ts",
     kind: "action",
-    gate: "const user = await requireActionUser();",
-    does: "deletes the gated user's Spotify token row (after the response) and this browser's cookie",
+    gate: null,
+    does: "deletes the global Spotify token row (after the response) and this browser's cookie",
     cells: (() => {
-      const refused: Cell = {
-        target: "deny",
-        rule: "requireActionUser refuses → only this browser's cookie is cleared; no token row is touched",
-      };
+      const f4: Cell = { target: "deny", today: "allow", phase: "P1", rule: "none: no session check before the token row is cleared (F4)", finding: "F4" };
       return {
-        anon: refused,
-        rem: { target: "allow", rule: "the owner signing out: clears his own token row, which stops capture (RULINGS Oct 15 1:33 PM)" },
-        friendA: { ...refused, target: "isolated" },
-        friendB: { ...refused, target: "isolated" },
-        revoked: refused,
-        vercelCron: refused,
-        zenbookPinger: refused,
-        zenbookRecorder: refused,
-        cronjobOrg: refused,
-        staleSecret: refused,
-        staleLogout: { target: "deny", rule: "requireActionUser refuses a session whose grant is gone; nothing to clear either" },
-        forged: refused,
+        anon: f4,
+        rem: { target: "allow", rule: "the owner signing out (today: clears the one token row, which stops capture)" },
+        friendA: { ...f4, target: "isolated" },
+        friendB: { ...f4, target: "isolated" },
+        revoked: f4,
+        vercelCron: f4,
+        zenbookPinger: f4,
+        zenbookRecorder: f4,
+        cronjobOrg: f4,
+        staleSecret: f4,
+        staleLogout: { target: "deny", rule: "nothing left to clear: the token row is already gone; still no session check (F4)", finding: "F4" },
+        forged: f4,
       } satisfies Record<Principal, Cell>;
     })(),
     invoke: async () => action("logout"),
@@ -595,10 +586,11 @@ export const ENTRIES: Entry[] = [
       id: `action ${name}`,
       file: "src/app/(app)/actions.ts",
       kind: "action",
-      gate: "const user = await requireActionUser();",
+      gate: "const accessToken = session && !session.error ? await spotifyAccessToken() : undefined;",
+      gateFile: "src/lib/session.ts",
       reaches: true,
       does,
-      cells: userCells("requireActionUser: no session → { ok: false } before any read"),
+      cells: userCells("session+grant", "getSpotify(): no session or no token → redirect('/login') before any read (src/lib/session.ts)"),
       invoke: async () => action(name, ...(args as readonly unknown[])),
     }),
   ),
@@ -606,27 +598,27 @@ export const ENTRIES: Entry[] = [
     id: "action startCleanAction",
     file: "src/app/(app)/actions.ts",
     kind: "action",
-    gate: "const user = await requireActionUser();",
+    gate: "if (!session || session.error || !(await spotifyAccessToken())) {",
     does: "dedupes a playlist into a new one on Rem's account (and a backup); takes a clean:<id> lock; a background reconcile task",
-    cells: userCells("requireActionUser: no session → { ok: false } before any read"),
+    cells: userCells("session+grant", "auth() null → { ok: false, 'Not authenticated' } before any read"),
     invoke: async () => action("startCleanAction", REM_PLAYLIST),
   },
   {
     id: "action deletePlaylistAction",
     file: "src/app/(app)/actions.ts",
     kind: "action",
-    gate: "const user = await requireActionUser();",
+    gate: "if (!session || session.error || !(await spotifyAccessToken())) {",
     does: "unfollows a playlist on Rem's account and deletes it from the store",
-    cells: userCells("requireActionUser: no session → { ok: false } before any read"),
+    cells: userCells("session+grant", "auth() null → { ok: false, 'Not authenticated' } before any read"),
     invoke: async () => action("deletePlaylistAction", REM_PLAYLIST),
   },
   {
     id: "action trackMenuAction",
     file: "src/app/(app)/actions.ts",
     kind: "action",
-    gate: "const user = await requireActionUser();",
+    gate: "if (!session || session.error) return { ok: false, error: \"Not signed in.\" };",
     does: "looks a track up by name and artist in Rem's library, with the playlists that hold it",
-    cells: userCells("requireActionUser: no session → { ok: false } before any read"),
+    cells: userCells("session+grant", "auth() null → { ok: false, 'Not signed in.' } before any read"),
     invoke: async () => action("trackMenuAction", "REM-only-song-1", "REM-only-artist"),
   },
 
@@ -644,9 +636,9 @@ export const ENTRIES: Entry[] = [
       id: `action ${name}`,
       file: "src/app/(app)/history-actions.ts",
       kind: "action",
-      gate: "const user = await requireActionUser();",
+      gate: "return !!(await auth());",
       does,
-      cells: userCells("gated(): requireActionUser refused → an empty answer before any read"),
+      cells: userCells("session", "allowed(): auth() null → an empty answer before any read"),
       invoke: async () => historyAction(name, ...(args as readonly unknown[])),
     }),
   ),
@@ -654,9 +646,11 @@ export const ENTRIES: Entry[] = [
     id: "action refreshHistoryAction",
     file: "src/app/(app)/history-actions.ts",
     kind: "action",
-    gate: "const user = await requireActionUser();",
+    gate: "return !!(await auth());",
     does: "harvests recently-played with Rem's grant, then re-reads the strip, all-time totals and the visible day",
-    cells: userCells("gated(): requireActionUser refused → NO_REFRESH before any read"),
+    cells: userCells("session", "allowed(): auth() null → NO_REFRESH before any read", {
+      staleLogout: { target: "deny", rule: "allowed() passes, then getSpotify() finds no token and redirects to /login before any read" },
+    }),
     invoke: async () => historyAction("refreshHistoryAction", "latest", 14, null),
   },
 
@@ -665,38 +659,40 @@ export const ENTRIES: Entry[] = [
     id: "page /home",
     file: "src/app/(app)/home/page.tsx",
     kind: "page",
-    gate: "const user = await requirePageUser();",
+    gate: "if (!session || session.error) redirect(\"/login\");",
     does: "renders the day strip, all-time card and the opening day's rows from the Home payload",
-    cells: userCells("requirePageUser: no session → redirect('/login') before any read"),
+    cells: userCells("session+grant", "auth() null → redirect('/login'), after three store reads", {
+      anon: { target: "deny", rule: "auth() null → redirect('/login'); nothing ships, but three store reads run first (F8)", finding: "F8" },
+    }),
     invoke: async () => (await import("@/app/(app)/home/page")).default(),
   },
   {
     id: "page /playlists",
     file: "src/app/(app)/playlists/page.tsx",
     kind: "page",
-    gate: "(await requirePageUser())",
+    gate: "if (!session || session.error) redirect(\"/login\");",
     does: "renders every stored playlist and the unique-song count",
-    cells: userCells("requirePageUser: no session → redirect('/login') before any read"),
+    cells: userCells("session+grant", "auth() null → redirect('/login') before any read"),
     invoke: async () => (await import("@/app/(app)/playlists/page")).default(),
   },
   {
     id: "page /playlists/[id]",
     file: "src/app/(app)/playlists/[id]/page.tsx",
     kind: "page",
-    gate: "(await requirePageUser())",
+    gate: "if (!session || session.error) redirect(\"/login\");",
     does: "renders one playlist's cached tracks; a cold playlist is fetched with Rem's grant and cached",
-    cells: userCells("requirePageUser: no session → redirect('/login') before any read"),
+    cells: userCells("session+grant", "auth() null → redirect('/login') before any read"),
     invoke: async () => (await import("@/app/(app)/playlists/[id]/page")).default(params({ id: REM_PLAYLIST })),
   },
   {
     id: "page /usage",
     file: "src/app/(app)/usage/page.tsx",
     kind: "page",
-    gate: "if (!user.admin) notFound();",
-    does: "renders the admin's page: per-page timings, the rows-read ledger, the Spotify call breakdown, capture health",
-    cells: userCells("requirePageUser: no session → redirect('/login') before any read", {
-      friendA: { target: "deny", rule: "requirePageUser refuses a uid that is not OWNER_UID; past it, /usage is the admin's (notFound() otherwise)" },
-      friendB: { target: "deny", rule: "requirePageUser refuses a uid that is not OWNER_UID; past it, /usage is the admin's (notFound() otherwise)" },
+    gate: "if (!session || session.error) redirect(\"/login\");",
+    does: "renders the operator's page: per-page timings, the rows-read ledger, the Spotify call breakdown, capture health",
+    cells: userCells("session+grant", "auth() null → redirect('/login') before any read", {
+      friendA: { target: "deny", today: "allow", phase: "P1", rule: "none: no admin rule (F5); any session is the owner (F1)", finding: "F5" },
+      friendB: { target: "deny", today: "allow", phase: "P1", rule: "none: no admin rule (F5); any session is the owner (F1)", finding: "F5" },
     }),
     invoke: async () => (await import("@/app/(app)/usage/page")).default(),
   },
@@ -714,9 +710,13 @@ export const ENTRIES: Entry[] = [
     reaches: false,
     file: "src/app/(app)/layout.tsx",
     kind: "layout",
-    gate: "const user = await requirePageUser();",
-    does: "renders the chrome with the session's name and image and the uid for the browser's storage names; not a gate for its pages (SECURITY.md)",
-    cells: userCells("requirePageUser: no session → redirect('/login')"),
+    gate: "if (!session || session.error) redirect(\"/login\");",
+    does: "renders the chrome with the session's name and image; not a gate for its pages (SECURITY.md)",
+    cells: userCells("session+grant", "auth() null → redirect('/login')", {
+      friendA: { target: "isolated", rule: "renders the cookie's own name and image; no identity check (F1), no store read", finding: "F1" },
+      friendB: { target: "isolated", rule: "renders the cookie's own name and image; no identity check (F1), no store read", finding: "F1" },
+      revoked: { target: "deny", today: "allow-own", phase: "P1", rule: "none: renders the chrome for a revoked friend's cookie (F1)", finding: "F1" },
+    }),
     invoke: async () => (await import("@/app/(app)/layout")).default({ children: null }),
   },
   {

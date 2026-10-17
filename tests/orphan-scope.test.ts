@@ -9,12 +9,8 @@
 //   • a `tracks` row whose name or artist changes re-rules the plays sharing its old or new
 //     identity, from whichever playlist;
 //   • the identity-first predicate gives the old predicate's verdict on every identity case,
-//     and its plan starts from the song;
-//   • on a per-user store (multi-user Phase 1, forUser), a user's library change re-rules that
-//     user's plays only, and the read-cost ledger charges the pass at that user's size.
-// Every suite but the last runs as the owner (ownerStore(): OWNER_UID's database, the file
-// TURSO_DATABASE_URL names); the last runs two users over their own files.
-import { createClient, type Client } from "@libsql/client";
+//     and its plan starts from the song.
+import { createClient } from "@libsql/client";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -45,13 +41,16 @@ vi.mock("@libsql/client", async (orig) => {
   };
 });
 
-import { forUserAt, ORPHAN_PREDICATE } from "@/lib/db";
-import { orphanPurgePassRows } from "@/lib/read-costs";
+import {
+  deletePlaylistFromDb,
+  ORPHAN_PREDICATE,
+  recordPlays,
+  removeCachedPlaylistTrack,
+  storePlaylists,
+  storePlaylistTracks,
+  storeSavedTracks,
+} from "@/lib/db";
 import { play, rawClient, resetStore, track } from "./adversarial/helpers";
-import { A, B, dumpDb, useUserFiles } from "./isolation/user-dbs";
-import { ownerStore } from "./owner-store";
-
-const store = () => ownerStore();
 
 // The predicate as it stood before L10 (db.ts at origin/main 4577215): the reference verdict.
 const OLD_PREDICATE = `
@@ -67,10 +66,9 @@ const OLD_PREDICATE = `
 
 const orphanPasses = () => sent.filter((s) => /UPDATE plays AS p SET ctx_orphan/.test(s));
 
-/** Every play: its stored flag and the full-pass verdict from source (the owner's file unless a
- *  client is given). */
-async function flags(client?: Client): Promise<{ id: number; key: string; stored: number | null; full: number }[]> {
-  const c = client ?? (await rawClient());
+/** Every play: its stored flag and the full-pass verdict from source. */
+async function flags(): Promise<{ id: number; key: string; stored: number | null; full: number }[]> {
+  const c = await rawClient();
   const res = await c.execute(
     `SELECT p.id AS id, p.track_id || '@' || COALESCE(p.context_uri, '-') AS key,
             p.ctx_orphan AS stored, (${OLD_PREDICATE}) AS full
@@ -84,8 +82,8 @@ async function flags(client?: Client): Promise<{ id: number; key: string; stored
   }));
 }
 
-async function expectScopedEqualsFull(client?: Client) {
-  const rows = await flags(client);
+async function expectScopedEqualsFull() {
+  const rows = await flags();
   expect(rows.map((r) => [r.key, r.stored])).toEqual(rows.map((r) => [r.key, r.full]));
 }
 
@@ -164,17 +162,17 @@ describe("library-list rewrite: the pass covers exactly the purged playlists", (
   });
 
   it("1910's counterexample: a playlist in neither list, cached, then a rename-only rewrite", async () => {
-    await store().storePlaylists([pl("L1")], "me");
-    await store().storePlaylistTracks("L1", [track("t1")]);
+    await storePlaylists([pl("L1")], "me");
+    await storePlaylistTracks("L1", [track("t1")]);
     // X was cached (by URL, Resume's cold fetch, or a store racing a rewrite) but is in no list.
-    await store().storePlaylistTracks("X", [track("t1")]);
+    await storePlaylistTracks("X", [track("t1")]);
     await seedTracks([["t2", "Song t2", "Artist t2"]]);
     await seedPlays([["t2", "spotify:playlist:X", null]]);
     await ruleAll();
     expect((await flags())[0].stored).toBe(1); // before: t2 is not among X's members
     sent.length = 0;
 
-    await store().storePlaylists([pl("L1", "renamed")], "me");
+    await storePlaylists([pl("L1", "renamed")], "me");
 
     const rows = await flags();
     expect(rows[0]).toMatchObject({ stored: 0, full: 0 }); // 1910: before 1, full 0, scoped 0
@@ -185,12 +183,12 @@ describe("library-list rewrite: the pass covers exactly the purged playlists", (
   });
 
   it("adds one playlist and removes another: scoped equals full on every play", async () => {
-    await store().storePlaylists([pl("A"), pl("B"), pl("C")], "me");
-    await store().storePlaylistTracks("A", [track("a1")]);
-    await store().storePlaylistTracks("B", [track("b1")]);
-    await store().storePlaylistTracks("C", [track("c1")]);
+    await storePlaylists([pl("A"), pl("B"), pl("C")], "me");
+    await storePlaylistTracks("A", [track("a1")]);
+    await storePlaylistTracks("B", [track("b1")]);
+    await storePlaylistTracks("C", [track("c1")]);
     // D is cached before it joins the list (opened by URL), so its plays already have verdicts.
-    await store().storePlaylistTracks("D", [track("d1")]);
+    await storePlaylistTracks("D", [track("d1")]);
     await seedTracks([["z9", "Song z9", "Artist z9"]]);
     await seedPlays([
       ["a1", "spotify:playlist:A", null], // member of an untouched playlist → 0
@@ -206,7 +204,7 @@ describe("library-list rewrite: the pass covers exactly the purged playlists", (
     expect((await flags()).map((r) => r.stored)).toEqual([0, 1, 0, 1, 1, 0, 1, 0]);
     sent.length = 0;
 
-    await store().storePlaylists([pl("A"), pl("C"), pl("D")], "me");
+    await storePlaylists([pl("A"), pl("C"), pl("D")], "me");
 
     expect((await flags()).map((r) => r.stored)).toEqual([0, 1, 0, 0, 1, 0, 1, 0]);
     await expectScopedEqualsFull();
@@ -216,15 +214,15 @@ describe("library-list rewrite: the pass covers exactly the purged playlists", (
   });
 
   it("nothing purged: no recompute statement is issued", async () => {
-    await store().storePlaylists([pl("A"), pl("U")], "me"); // U is in the list but never cached
-    await store().storePlaylistTracks("A", [track("a1")]);
+    await storePlaylists([pl("A"), pl("U")], "me"); // U is in the list but never cached
+    await storePlaylistTracks("A", [track("a1")]);
     await seedPlays([["a1", "spotify:playlist:A", null]]);
     await ruleAll();
     sent.length = 0;
 
-    await store().storePlaylists([pl("A"), pl("U"), pl("N")], "me"); // added, nothing cached for N
-    await store().storePlaylists([pl("A"), pl("N")], "me"); // removed U, which had no cached rows
-    await store().storePlaylists([pl("A", "renamed"), pl("N")], "me"); // rename only
+    await storePlaylists([pl("A"), pl("U"), pl("N")], "me"); // added, nothing cached for N
+    await storePlaylists([pl("A"), pl("N")], "me"); // removed U, which had no cached rows
+    await storePlaylists([pl("A", "renamed"), pl("N")], "me"); // rename only
 
     expect(sent.some((s) => /DELETE FROM playlist_tracks WHERE playlist_id NOT IN/.test(s))).toBe(true);
     expect(orphanPasses()).toEqual([]);
@@ -239,8 +237,8 @@ describe("the heals the full pass gave, now scoped at their call sites", () => {
   });
 
   it("removeCachedPlaylistTrack re-rules that playlist's plays", async () => {
-    await store().storePlaylists([pl("P")], "me");
-    await store().storePlaylistTracks("P", [track("t1"), track("t2")]);
+    await storePlaylists([pl("P")], "me");
+    await storePlaylistTracks("P", [track("t1"), track("t2")]);
     await seedPlays([
       ["t2", "spotify:playlist:P", null],
       ["t1", "spotify:playlist:P", null],
@@ -248,11 +246,11 @@ describe("the heals the full pass gave, now scoped at their call sites", () => {
     await ruleAll();
     expect((await flags()).map((r) => r.stored)).toEqual([0, 0]);
 
-    await store().removeCachedPlaylistTrack("P", "spotify:track:t2");
+    await removeCachedPlaylistTrack("P", "spotify:track:t2");
     expect((await flags()).map((r) => r.stored)).toEqual([1, 0]); // t2 is no longer a member
     await expectScopedEqualsFull();
 
-    await store().removeCachedPlaylistTrack("P", "spotify:track:t1");
+    await removeCachedPlaylistTrack("P", "spotify:track:t1");
     // P's cache is now empty, so its plays are unverifiable → non-orphan.
     expect((await flags()).map((r) => r.stored)).toEqual([0, 0]);
     await expectScopedEqualsFull();
@@ -262,8 +260,8 @@ describe("the heals the full pass gave, now scoped at their call sites", () => {
   // t3's identity; t4 ("Song Y") is in Q too. A rename of t3 from any writer moves both sides:
   // plays sharing t3's OLD identity (t9 from Q loses its match) and its NEW identity.
   async function identityFixture() {
-    await store().storePlaylists([pl("Q"), pl("R")], "me");
-    await store().storePlaylistTracks("Q", [
+    await storePlaylists([pl("Q"), pl("R")], "me");
+    await storePlaylistTracks("Q", [
       track("t3", { title: "Song X", artist: "Art" }),
       track("t4", { title: "Song Y", artist: "Art" }),
     ]);
@@ -285,21 +283,21 @@ describe("the heals the full pass gave, now scoped at their call sites", () => {
 
   it("a rename landing through storePlaylistTracks (another playlist) re-rules both identities", async () => {
     await identityFixture();
-    await store().storePlaylistTracks("R", [renamed]);
+    await storePlaylistTracks("R", [renamed]);
     expect((await flags()).map((r) => r.stored)).toEqual([1, 0, 0, 0]);
     await expectScopedEqualsFull();
   });
 
   it("a rename landing through storeSavedTracks re-rules both identities", async () => {
     await identityFixture();
-    await store().storeSavedTracks([renamed]);
+    await storeSavedTracks([renamed]);
     expect((await flags()).map((r) => r.stored)).toEqual([1, 0, 0, 0]);
     await expectScopedEqualsFull();
   });
 
   it("a rename landing through recordPlays re-rules both identities", async () => {
     await identityFixture();
-    await store().recordPlays([
+    await recordPlays([
       play("t3", "2026-10-02T00:00:00.000Z", 200_000, { name: "Song Z", artist: "Art" }),
     ]);
     expect((await flags()).map((r) => r.stored)).toEqual([1, 0, 0, 0, 0]);
@@ -308,7 +306,7 @@ describe("the heals the full pass gave, now scoped at their call sites", () => {
 
   it("a write that changes no name or artist issues no identity pass", async () => {
     await identityFixture();
-    await store().storeSavedTracks([track("t3", { title: "Song X", artist: "Art", album: "Another" })]);
+    await storeSavedTracks([track("t3", { title: "Song X", artist: "Art", album: "Another" })]);
     expect(orphanPasses()).toEqual([]);
   });
 });
@@ -405,9 +403,9 @@ describe("review (lane 1911): the attack list", () => {
   }
 
   it("a reorder-only rewrite purges nothing and issues no pass", async () => {
-    await store().storePlaylists([pl("A"), pl("B")], "me");
-    await store().storePlaylistTracks("A", [track("a1")]);
-    await store().storePlaylistTracks("B", [track("b1")]);
+    await storePlaylists([pl("A"), pl("B")], "me");
+    await storePlaylistTracks("A", [track("a1")]);
+    await storePlaylistTracks("B", [track("b1")]);
     await seedTracks([["z9", "Song z9", "Artist z9"]]);
     await seedPlays([
       ["a1", "spotify:playlist:A", null],
@@ -416,7 +414,7 @@ describe("review (lane 1911): the attack list", () => {
     await ruleAll();
     sent.length = 0;
 
-    await store().storePlaylists([pl("B"), pl("A")], "me");
+    await storePlaylists([pl("B"), pl("A")], "me");
 
     expect(orphanPasses()).toEqual([]);
     expect((await flags()).map((r) => r.stored)).toEqual([0, 1]);
@@ -424,8 +422,8 @@ describe("review (lane 1911): the attack list", () => {
   });
 
   it("an emptied playlist: its plays become unverifiable, so 0", async () => {
-    await store().storePlaylists([pl("P")], "me");
-    await store().storePlaylistTracks("P", [track("t1")]);
+    await storePlaylists([pl("P")], "me");
+    await storePlaylistTracks("P", [track("t1")]);
     await seedTracks([["z9", "Song z9", "Artist z9"]]);
     await seedPlays([
       ["t1", "spotify:playlist:P", null],
@@ -434,16 +432,16 @@ describe("review (lane 1911): the attack list", () => {
     await ruleAll();
     expect((await flags()).map((r) => r.stored)).toEqual([0, 1]);
 
-    await store().storePlaylistTracks("P", []);
+    await storePlaylistTracks("P", []);
 
     expect((await flags()).map((r) => r.stored)).toEqual([0, 0]);
     await expectScopedEqualsFull();
   });
 
   it("removed, then re-added under the same id, then re-cached: back to the first verdicts", async () => {
-    await store().storePlaylists([pl("A"), pl("B")], "me");
-    await store().storePlaylistTracks("A", [track("a1")]);
-    await store().storePlaylistTracks("B", [track("b1")]);
+    await storePlaylists([pl("A"), pl("B")], "me");
+    await storePlaylistTracks("A", [track("a1")]);
+    await storePlaylistTracks("B", [track("b1")]);
     await seedTracks([["z9", "Song z9", "Artist z9"]]);
     await seedPlays([
       ["b1", "spotify:playlist:B", null],
@@ -453,40 +451,40 @@ describe("review (lane 1911): the attack list", () => {
     await ruleAll();
     expect((await flags()).map((r) => r.stored)).toEqual([0, 1, 1]);
 
-    await store().storePlaylists([pl("A")], "me"); // unfollowed: B's rows purged
+    await storePlaylists([pl("A")], "me"); // unfollowed: B's rows purged
     expect((await flags()).map((r) => r.stored)).toEqual([0, 0, 1]);
     await expectScopedEqualsFull();
 
     sent.length = 0;
-    await store().storePlaylists([pl("A"), pl("B")], "me"); // followed again: nothing to purge
+    await storePlaylists([pl("A"), pl("B")], "me"); // followed again: nothing to purge
     expect(orphanPasses()).toEqual([]);
     await expectScopedEqualsFull();
 
-    await store().storePlaylistTracks("B", [track("b1")]); // its tracks fetched again
+    await storePlaylistTracks("B", [track("b1")]); // its tracks fetched again
     expect((await flags()).map((r) => r.stored)).toEqual([0, 1, 1]);
     await expectScopedEqualsFull();
   });
 
   it("a play naming a playlist never cached stays 0 through other writes, and is ruled once cached", async () => {
-    await store().storePlaylists([pl("A"), pl("U")], "me");
-    await store().storePlaylistTracks("A", [track("a1")]);
+    await storePlaylists([pl("A"), pl("U")], "me");
+    await storePlaylistTracks("A", [track("a1")]);
     await seedTracks([["z9", "Song z9", "Artist z9"]]);
     await seedPlays([["z9", "spotify:playlist:U", null]]);
     await ruleAll();
-    await store().storePlaylists([pl("A")], "me"); // U leaves the list; it had no rows to purge
-    await store().storePlaylistTracks("A", [track("a1"), track("a2")]);
+    await storePlaylists([pl("A")], "me"); // U leaves the list; it had no rows to purge
+    await storePlaylistTracks("A", [track("a1"), track("a2")]);
     expect((await flags()).map((r) => r.stored)).toEqual([0]);
     await expectScopedEqualsFull();
 
-    await store().storePlaylistTracks("U", [track("a1")]); // opened by URL
+    await storePlaylistTracks("U", [track("a1")]); // opened by URL
     expect((await flags()).map((r) => r.stored)).toEqual([1]);
     await expectScopedEqualsFull();
   });
 
   it("deletePlaylistFromDb re-rules that playlist's plays", async () => {
-    await store().storePlaylists([pl("D"), pl("K")], "me");
-    await store().storePlaylistTracks("D", [track("d1")]);
-    await store().storePlaylistTracks("K", [track("k1")]);
+    await storePlaylists([pl("D"), pl("K")], "me");
+    await storePlaylistTracks("D", [track("d1")]);
+    await storePlaylistTracks("K", [track("k1")]);
     await seedTracks([["z9", "Song z9", "Artist z9"]]);
     await seedPlays([
       ["z9", "spotify:playlist:D", null],
@@ -495,7 +493,7 @@ describe("review (lane 1911): the attack list", () => {
     await ruleAll();
     expect((await flags()).map((r) => r.stored)).toEqual([1, 1]);
 
-    await store().deletePlaylistFromDb("D");
+    await deletePlaylistFromDb("D");
 
     expect((await flags()).map((r) => r.stored)).toEqual([0, 1]);
     await expectScopedEqualsFull();
@@ -503,7 +501,7 @@ describe("review (lane 1911): the attack list", () => {
 
   it("a purge wider than one scope chunk (105 playlists) re-rules every one of them", async () => {
     const ids = Array.from({ length: 105 }, (_, i) => `P${String(i).padStart(3, "0")}`);
-    await store().storePlaylists(ids.map((id) => pl(id)), "me");
+    await storePlaylists(ids.map((id) => pl(id)), "me");
     await seedTracks([
       ...ids.map((id): [string, string, string] => [`m${id}`, `Song m${id}`, "Art"]),
       ["z9", "Song z9", "Artist z9"],
@@ -514,7 +512,7 @@ describe("review (lane 1911): the attack list", () => {
     expect((await flags()).every((r) => r.stored === 1)).toBe(true);
     sent.length = 0;
 
-    await store().storePlaylists([], "me"); // unfollow everything
+    await storePlaylists([], "me"); // unfollow everything
 
     expect(orphanPasses()).toHaveLength(2);
     expect((await flags()).every((r) => r.stored === 0)).toBe(true);
@@ -539,92 +537,10 @@ describe("review (lane 1911): the attack list", () => {
     expect((await flags()).map((r) => r.stored)).toEqual([...ix.map(() => 0), ...ix.map(() => 1)]);
     sent.length = 0;
 
-    await store().storeSavedTracks(ix.map((i) => track(`r${i}`, { title: `New ${i}`, artist: "Art" })));
+    await storeSavedTracks(ix.map((i) => track(`r${i}`, { title: `New ${i}`, artist: "Art" })));
 
     expect(orphanPasses()).toHaveLength(2);
     expect((await flags()).map((r) => r.stored)).toEqual([...ix.map(() => 1), ...ix.map(() => 0)]);
     await expectScopedEqualsFull();
-  });
-});
-
-// The same pass through forUser on per-user databases (PLAN §6.2 layer 3, PHASE1.md §7): A and B
-// cache the same playlist ids with the same members and play the same songs from them; B
-// unfollows one. Only B's plays are re-ruled, B's stored flags equal the full pass over B's own
-// file, A's file is byte for byte what it was, and the ledger charges the pass at B's size.
-describe("on a per-user store: one user's library change", () => {
-  const ledgerRows = async (reader: string) => {
-    const c = await rawClient(); // telemetry shares the owner's file in the tests
-    const res = await c.execute({ sql: "SELECT calls, modeled_rows FROM usage_ledger WHERE reader = ?", args: [reader] });
-    return res.rows.map((r) => ({ calls: Number(r.calls), rows: Number(r.modeled_rows) }));
-  };
-  // The charge is fire-and-forget (ledgerAddLinear): wait for the row to move.
-  const total = async (reader: string) =>
-    (await ledgerRows(reader)).reduce((t, r) => ({ calls: t.calls + r.calls, rows: t.rows + r.rows }), { calls: 0, rows: 0 });
-  const untilMoved = async (reader: string, from: { calls: number }) => {
-    for (let i = 0; i < 100 && (await total(reader)).calls === from.calls; i++) await new Promise((r) => setTimeout(r, 20));
-    return total(reader);
-  };
-
-  it("re-rules that user's plays only, scoped equals full on their file, and charges their own size", async () => {
-    await resetStore();
-    useUserFiles();
-    const a = forUserAt(A, "lb-u-a");
-    const b = forUserAt(B, "lb-u-b");
-    const P = "spotify:playlist:P";
-    const K = "spotify:playlist:K";
-    // A plays more than B, so a pass charged at the wrong user's size reads differently.
-    const playsOf = (n: number) =>
-      Array.from({ length: n }, (_, i) =>
-        // Five minutes apart, so no play is a skip and the all-time count is n.
-        play(i % 2 ? "z9" : "p1", new Date(Date.UTC(2026, 9, 1) + i * 300_000).toISOString(), 200_000, {
-          contextType: "playlist",
-          contextUri: i % 3 ? P : K,
-        }),
-      );
-    for (const [st, n] of [[a, 40], [b, 6]] as const) {
-      await st.recordPlays(playsOf(n));
-      await st.recomputeAllTimeStats();
-      await st.storePlaylists([pl("P"), pl("K")], "me");
-      await st.storePlaylistTracks("P", [track("p1")]);
-      await st.storePlaylistTracks("K", [track("k1")]);
-    }
-    const url = (db: string) => (process.env.STORE_URL_TEMPLATE as string).replaceAll("{db}", db);
-    const cb = createClient({ url: url("lb-u-b"), intMode: "number" });
-    try {
-      // z9 is in neither playlist: its plays from both are orphans, for both users.
-      expect((await flags(cb)).filter((r) => r.stored === 1).length).toBeGreaterThan(0);
-      const aBefore = await dumpDb("lb-u-a");
-      const charged = await total("orphan_purge_pass");
-      const full = await total("orphan_full_pass");
-      sent.length = 0;
-
-      await b.storePlaylists([pl("K")], "me"); // B unfollows P: P's cached rows are purged
-
-      expect(orphanPasses()).toHaveLength(1);
-      expect(orphanPasses()[0]).toMatch(/p\.context_uri IN \(\?\)/);
-      // B's plays from P are unverifiable now (0); B's plays from K keep their verdict.
-      const bRows = await flags(cb);
-      expect(bRows.filter((r) => r.key.endsWith(`@${P}`)).every((r) => r.stored === 0)).toBe(true);
-      expect(bRows.filter((r) => r.key === `z9@${K}`).every((r) => r.stored === 1)).toBe(true);
-      await expectScopedEqualsFull(cb);
-      expect(await dumpDb("lb-u-a")).toBe(aBefore);
-
-      // The ledger line for the pass that ran, at B's size: B's 6 plays over B's 2 playlists
-      // before the rewrite, one purged (read-costs.ts orphanPurgePassRows).
-      expect(await untilMoved("orphan_purge_pass", charged)).toEqual({
-        calls: charged.calls + 1,
-        rows: charged.rows + Math.round(orphanPurgePassRows(1, 6, 2)),
-      });
-      expect(await total("orphan_full_pass")).toEqual(full);
-
-      // A rename-only rewrite purges nothing: no pass, and no second charge.
-      sent.length = 0;
-      await b.storePlaylists([pl("K", "renamed")], "me");
-      expect(orphanPasses()).toHaveLength(0);
-      await new Promise((r) => setTimeout(r, 50));
-      expect((await total("orphan_purge_pass")).calls).toBe(charged.calls + 1);
-    } finally {
-      cb.close();
-    }
   });
 });

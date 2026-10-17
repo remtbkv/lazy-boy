@@ -3,17 +3,11 @@
 //
 // EXTENSION SEAM (ROADMAP Phase 3): replace the Map with Redis/DB so tasks survive a
 // refresh and work across server instances. Keep this interface stable.
-//
-// Every task records the user it runs for, and only that user can read it back
-// (getTaskFor): a task's result can name playlists, so another user polling its id gets
-// nothing (multi-user PLAN.md §6.2 layer 4, 01b S7).
-import type { Uid } from "@/lib/identity";
 
 export type TaskStatus = "queued" | "running" | "done" | "error";
 
 export type Task<R = unknown> = {
   id: string;
-  owner: Uid;
   label: string;
   status: TaskStatus;
   processed: number;
@@ -28,10 +22,9 @@ const store: Map<string, Task> =
   (globalThis as { __taskStore?: Map<string, Task> }).__taskStore ??
   ((globalThis as { __taskStore?: Map<string, Task> }).__taskStore = new Map());
 
-export function createTask(label: string, owner: Uid): Task {
+export function createTask(label: string): Task {
   const task: Task = {
     id: crypto.randomUUID(),
-    owner,
     label,
     status: "queued",
     processed: 0,
@@ -56,14 +49,11 @@ function sweepFinished(): void {
   }
 }
 
-/** The task, if it exists and belongs to `uid`; undefined otherwise, alike, so a caller
- *  cannot tell another user's task from a missing one. */
-export function getTaskFor(id: string, uid: Uid): Task | undefined {
-  const t = store.get(id);
-  return t && t.owner === uid ? t : undefined;
+export function getTask(id: string): Task | undefined {
+  return store.get(id);
 }
 
-export function updateTask(id: string, patch: Partial<Omit<Task, "id" | "owner">>): void {
+export function updateTask(id: string, patch: Partial<Omit<Task, "id">>): void {
   const t = store.get(id);
   if (!t) return;
   store.set(id, { ...t, ...patch, updatedAt: Date.now() });
@@ -87,9 +77,8 @@ export function taskDone(id: string): Promise<void> {
 export function runTask<R>(
   label: string,
   work: (onProgress: (processed: number, total: number) => void) => Promise<R>,
-  owner: Uid,
 ): Task {
-  const task = createTask(label, owner);
+  const task = createTask(label);
   updateTask(task.id, { status: "running" });
   const done = (async () => {
     try {

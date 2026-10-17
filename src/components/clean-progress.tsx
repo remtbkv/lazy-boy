@@ -3,10 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { toast } from "@/lib/toast";
-import { cleanActiveKey, clearCleanActive, readCleanActive } from "@/lib/clean-progress";
+import {
+  CLEAN_LS_KEY,
+  clearCleanActive,
+  readCleanActive,
+} from "@/lib/clean-progress";
 import type { Task } from "@/lib/tasks/registry";
-import { clearIfSignedOut } from "@/lib/user-storage";
-import { useUid } from "@/components/user-context";
 
 type ReconcileResult = { changed: boolean; name: string; added: number; removed: number };
 
@@ -15,7 +17,6 @@ type ReconcileResult = { changed: boolean; name: string; added: number; removed:
 // the background Phase-2 reconcile and only speaks up if the refresh actually adjusted
 // the result. A small "Tidying up…" pill shows while it runs.
 export function CleanProgressWatcher() {
-  const uid = useUid();
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
   const misses = useRef(0);
   const [active, setActive] = useState(false);
@@ -48,14 +49,13 @@ export function CleanProgressWatcher() {
     }
 
     async function poll() {
-      const a = readCleanActive(uid);
+      const a = readCleanActive();
       if (!a) {
         stop();
         return;
       }
       const res = await fetch(`/api/tasks/${a.taskId}`).catch(() => null);
       if (!res) return; // transient blip — keep polling
-      clearIfSignedOut(res, uid);
       if (res.status === 404) {
         // The task registry is per-instance on serverless: a poll routed to another
         // instance 404s while the reconcile is running fine, and clearing on the first
@@ -63,7 +63,7 @@ export function CleanProgressWatcher() {
         // Only three consecutive misses (≈ the task genuinely gone or swept) clear it.
         misses.current += 1;
         if (misses.current >= 3) {
-          clearCleanActive(uid);
+          clearCleanActive();
           stop();
         }
         return;
@@ -77,7 +77,7 @@ export function CleanProgressWatcher() {
         if (r?.changed) {
           toast.success(`Tidied "${r.name}" after refresh — added ${r.added}, removed ${r.removed}`);
         }
-        clearCleanActive(uid);
+        clearCleanActive();
         stop();
       } else if (task.status === "error") {
         // Phase 1 already succeeded, but a failed reconcile can leave the cleaned playlist
@@ -86,13 +86,13 @@ export function CleanProgressWatcher() {
         toast.error(
           `Couldn't finish tidying the cleaned playlist after refresh${task.error ? ` (${task.error})` : ""} — check it and its backup.`,
         );
-        clearCleanActive(uid);
+        clearCleanActive();
         stop();
       }
     }
 
     function ensureRunning() {
-      if (readCleanActive(uid) && !timer.current) {
+      if (readCleanActive() && !timer.current) {
         setActive(true);
         tick();
         timer.current = setInterval(tick, 1000);
@@ -102,7 +102,7 @@ export function CleanProgressWatcher() {
     ensureRunning();
     const onActive = () => ensureRunning();
     const onStorage = (e: StorageEvent) => {
-      if (e.key === cleanActiveKey(uid)) ensureRunning();
+      if (e.key === CLEAN_LS_KEY) ensureRunning();
     };
     window.addEventListener("clean:active", onActive);
     window.addEventListener("storage", onStorage);
@@ -111,7 +111,7 @@ export function CleanProgressWatcher() {
       window.removeEventListener("storage", onStorage);
       stop();
     };
-  }, [uid]);
+  }, []);
 
   if (!active) return null;
 

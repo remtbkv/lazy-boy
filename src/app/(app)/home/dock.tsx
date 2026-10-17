@@ -13,7 +13,6 @@ import {
 } from "@/app/(app)/actions";
 import { PlaylistsSync } from "@/components/playlists-sync";
 import { writeCleanActive } from "@/lib/clean-progress";
-import { useUid } from "@/components/user-context";
 import { settleAction } from "@/lib/home-recovery";
 import { toast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
@@ -231,7 +230,6 @@ function ActionSheet({
   onRetry?: () => void;
   onClose: () => void;
 }) {
-  const uid = useUid();
   // Ordered selections. For "subtract" both lists are live and the toggle decides
   // which one a tap adds to; for everything else only `picked` is used.
   const [picked, setPicked] = useState<string[]>([]);
@@ -328,7 +326,7 @@ function ActionSheet({
             break;
           }
           // Hand the task to the global watcher so progress keeps showing after this closes.
-          if (r.taskId) writeCleanActive(uid, { taskId: r.taskId, playlistId: picked[0] });
+          if (r.taskId) writeCleanActive({ taskId: r.taskId, playlistId: picked[0] });
           toast.success(
             r.unique
               ? `"${r.name}" — nothing to strip, every song is new`

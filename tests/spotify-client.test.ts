@@ -21,13 +21,7 @@ async function fresh() {
   vi.resetModules();
   const mod = await import("@/lib/spotify");
   const db = await import("@/lib/db");
-  const { ownerUid } = await import("./owner-store");
-  const owner = ownerUid();
-  return {
-    sp: mod.spotifyClient(owner, { uid: owner, accessToken: "test-token" }, false, "sim"),
-    SpotifyError: mod.SpotifyError,
-    db,
-  };
+  return { sp: mod.spotifyClient("test-token", false, "sim"), SpotifyError: mod.SpotifyError, db };
 }
 
 describe("spotify client (scripted fetch)", () => {
