@@ -226,10 +226,14 @@ every friend with one redeploy.
   also retry any deletion still `deleting`.
 - **What it removes**: the sessions (epoch + 1), the token, queue, lock and request rows, the
   database `lb-u-<uid>` (Turso's Platform API, `TURSO_PLATFORM_TOKEN`, Production only), their
-  telemetry rows, then the users row becomes `deleted` (uid, account_id, status, date) for five
-  days. It refuses the admin, any row not naming `lb-u-<uid>`, and any database whose `owner_uid`
-  is someone else's (T11). Backups hold no friend's data to delete (`ops/zenbook-backup`: the
-  nightly job deletes any `lb-u-` copy first and checks that none is left).
+  rows in every telemetry table with a `user_id` column (api_log, client_metrics, the meter's
+  cpu_meter), then the users row becomes `deleted` (uid, account_id, status, date) for at most five
+  days. While that row is kept, every daily run deletes the uid's telemetry rows again (a request or
+  task in flight writes after the job) and expires the uid's entries in Vercel's Data Cache (the
+  `u:<uid>` tag userCache puts on each). It refuses the admin, any row not naming `lb-u-<uid>`,
+  and any database whose `owner_uid` is someone else's (T11). Backups hold no friend's data to
+  delete (`ops/zenbook-backup`: the nightly job deletes any `lb-u-` copy first and checks that none
+  is left). The browser that disconnects clears its copies before the action runs.
 - **Check it finished**: `/api/cron/health` turns red (`deletion`) on a user `revoked` or
   `deleting` for over a day; the users row reads `deleted`; `turso db list` has no `lb-u-<uid>`.
 

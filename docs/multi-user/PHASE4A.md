@@ -477,3 +477,37 @@ Left, not defects of this slice: the authz map has no friend admitted under `SIG
 after day five (a random id no row links to a person by then); `turso-platform.ts` says it is the only reader of
 `TURSO_PLATFORM_TOKEN` in `src/`, but `/usage`'s `liveCounters` reads it too (admin-only, main's code); the health
 check is red through a revoked friend's days 1-4, as PLAN §7.10 words it.
+## 13. Lane 21's review of the whole multi-user diff (Oct 16-17)
+
+An adversarial review of `1eac835..mu/s-p4a` (Phase 1, the meter, Phases 2, 3 and 4a as stitched) in a fresh
+context, told to find a cross-user path or a departed friend's data kept past five days. No request, cache entry,
+job or script was found to show or change one user's data for another on this stack (the class table, the
+entry-point trace and the two-user paths are in `lb_21/NOTES.md`). Copies of a departed friend were found in five
+places, each a guarantee one slice relied on that another slice changed; each is fixed on `mu/rv-whole` with a
+test shown failing first:
+
+- **The meter's `cpu_meter`** (per day, route and user) was never deleted: the deletion's telemetry step listed
+  api_log and client_metrics, written before the meter existed. It now deletes from every telemetry table with a
+  `user_id` column, found when it runs, in both runners (`e237b3f`).
+- **Late telemetry and Vercel's Data Cache**: rows written after the job's telemetry step stayed, and every
+  userCache entry stayed under the uid (`revalidate` marks an entry stale, and a stale entry is served, so PLAN
+  §6.2's "expire within 24 hours" did not hold). Entries carry a `u:<uid>` tag; every daily run, for each friend
+  whose `deleted` row is kept, expires the tag and deletes the uid's telemetry again (`11e01f9`, `37fa9a7`).
+- **The deleted row** (the Spotify account ID) could stay up to a day past five; it is swept before day five ends
+  (`79b6241`).
+- **The browser**: Disconnect left the IndexedDB history and library; the pages after Log out and Disconnect
+  cleared Storage only; a browser whose session ended elsewhere never cleared. Disconnect's form, those pages and
+  /login clear IndexedDB too (`6486132`).
+- **A `lazyboy-app` restore from a nightly copy** (the admin's rows alone since RULINGS Oct 15 6:21 PM) orphans
+  every friend's database with no path to delete it; SECURITY.md's runbook says to restore from point-in-time
+  history and how to hand an orphan to the deletion job (`a421f35`).
+
+Guards for lane 35's fold: a memoized now-playing reply must equal the fresh one, field for field, since lane 13's
+`u` (`mu/rv-p1` `253ea15`) meets the memo only there (`4360d78`); a census of all seventeen planted bugs, which
+could each be deleted unseen (`71532f5`); the backup fixture's `cpu_meter` rows (`a6fbc38`). Thirteen mutants
+aimed at these places, all caught (`lb_21/mutants.log`).
+
+Not changed, recorded: `events` rows keep a departed uid (pseudonymous once the deleted row is swept; evidence for
+§13.6); a sign-in over another user's live session without Log out leaves the previous user's stores in that
+browser, keyed by their uid and never read; the daily chores' per-user heal (all-time recompute, Home payload
+rebuild, PLAN §7.11 "per user") runs for the admin alone, which is a friend's correctness, not isolation.
