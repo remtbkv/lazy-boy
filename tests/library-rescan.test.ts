@@ -192,6 +192,17 @@ describe("the rescan's deadline (PLAN §7.2 step 4: one rescan a tick, under its
     expect(await ownerStore().getLibrarySyncedAt()).toBeNull();
   });
 
+  it("a head read that cannot meet the store by the deadline (a first scan of 299 likes) stops between its pages, writing nothing", async () => {
+    const pages = slowSpotify();
+    const { spotifyClient } = await import("@/lib/spotify");
+    const sp = spotifyClient(ownerUid(), { uid: ownerUid(), accessToken: "tok" }, true, "test");
+    await syncLibrary(sp, ownerStore(), undefined, { meId: "rem-spotify", deadline: Date.now() + 150 });
+    vi.unstubAllGlobals();
+    expect(pages.length).toBeLessThan(5);
+    expect(await ownerStore().readSavedRows()).toEqual([]);
+    expect(await ownerStore().getLibrarySyncedAt()).toBeNull();
+  });
+
   it("…and with the time it needs, the same refetch writes the unlike", async () => {
     await ownerStore().storeSavedTracks(likes);
     const pages = slowSpotify();
