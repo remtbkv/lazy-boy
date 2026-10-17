@@ -12,25 +12,17 @@
 //     the point (the search payloads, per-play history, source labels, the all-time list)."
 //   docs/LOGIC_AUDIT_2026-08-19.md:49-53 (T1.5) — `since` must not read as the sentinel.
 import { beforeEach, describe, expect, it } from "vitest";
-import {
-  getAllTimePlays,
-  getDailyStats,
-  getHistoryIndex,
-  getPlaysByDay,
-  hasPlaysBeforeDay,
-  recomputeAllTimeStats,
-  recordPlays,
-  searchHistory,
-  findTrackWithPlaylists,
-} from "@/lib/db";
+import { ownerStore } from "../owner-store";
 import { DAY_MS, iso, play, resetStore, verdicts } from "./helpers";
+
+const store = ownerStore();
 
 const BASE = Math.floor((Date.now() - 3 * DAY_MS) / DAY_MS) * DAY_MS + 10 * 3_600_000;
 const DUR = 100_000; // 35% = 35_000 exactly
 
 /** Record `a`, then `b` ending `gapMs` later, and return b's stored verdict. */
 async function verdictOf(gapMs: number, durationMs: number | null): Promise<number | null> {
-  await recordPlays([
+  await store.recordPlays([
     play("a", iso(BASE), 200_000),
     play("b", iso(BASE + gapMs), durationMs),
   ]);
@@ -65,23 +57,23 @@ describe("the 35% skip boundary", () => {
   });
 
   it("a lone play is ruled on arrival (no predecessor → a listen) and counts", async () => {
-    await recordPlays([play("only", iso(BASE), DUR)]);
+    await store.recordPlays([play("only", iso(BASE), DUR)]);
     expect(await verdicts()).toEqual({ [`only@${iso(BASE)}`]: 0 });
-    expect((await recomputeAllTimeStats()).plays).toBe(1);
-    expect(await searchHistory("")).toHaveLength(1);
+    expect((await store.recomputeAllTimeStats()).plays).toBe(1);
+    expect(await store.searchHistory("")).toHaveLength(1);
   });
 
   it("a skipped play is excluded from every counter but keeps its row", async () => {
-    await recordPlays([
+    await store.recordPlays([
       play("kept", iso(BASE), 200_000),
       play("skipme", iso(BASE + 1_000), DUR),
       play("last", iso(BASE + 600_000), 200_000),
     ]);
     expect((await verdicts())[`skipme@${iso(BASE + 1_000)}`]).toBe(1);
-    const stats = await recomputeAllTimeStats();
+    const stats = await store.recomputeAllTimeStats();
     expect(stats.plays).toBe(2);
-    expect(await searchHistory("Song skipme")).toEqual([]);
-    const day = await getPlaysByDay(iso(BASE).slice(0, 10), 0);
+    expect(await store.searchHistory("Song skipme")).toEqual([]);
+    const day = await store.getPlaysByDay(iso(BASE).slice(0, 10), 0);
     expect(day.map((t) => t.id).sort()).toEqual(["kept", "last"]);
   });
 
@@ -95,7 +87,7 @@ describe("the 35% skip boundary", () => {
     const A = play("A", at, DUR);
     const B = play("B", at, DUR);
     const tail = play("tail", iso(BASE + 1_800_000), DUR);
-    await recordPlays(first === "A" ? [A, B, tail] : [B, A, tail]);
+    await store.recordPlays(first === "A" ? [A, B, tail] : [B, A, tail]);
     return verdicts();
   };
 
@@ -125,11 +117,11 @@ describe("the 35% skip boundary", () => {
     const Z = play("Z", at, DUR);
     const Y = play("Y", iso(BASE + 1_800_000), DUR);
 
-    await recordPlays([X, Z, Y]);
+    await store.recordPlays([X, Z, Y]);
     const together = await verdicts();
     await resetStore();
-    await recordPlays([X, Y]);
-    await recordPlays([Z]);
+    await store.recordPlays([X, Y]);
+    await store.recordPlays([Z]);
     const late = await verdicts();
 
     expect(late).toEqual(together);
@@ -143,24 +135,24 @@ describe("the 35% skip boundary", () => {
     const Z = play("Z", at, DUR);
     const Y = play("Y", iso(BASE + 1_800_000), DUR);
 
-    await recordPlays([X, Z, Y]);
-    const together = (await recomputeAllTimeStats()).plays;
+    await store.recordPlays([X, Z, Y]);
+    const together = (await store.recomputeAllTimeStats()).plays;
     await resetStore();
-    await recordPlays([X, Y]);
-    await recordPlays([Z]);
-    const late = (await recomputeAllTimeStats()).plays;
+    await store.recordPlays([X, Y]);
+    await store.recordPlays([Z]);
+    const late = (await store.recomputeAllTimeStats()).plays;
 
     expect(late).toBe(together);
   });
 
   it("mixed timestamp precision at the same second records both plays", async () => {
-    await recordPlays([
+    await store.recordPlays([
       play("noms", `${iso(BASE).slice(0, 19)}Z`, DUR),
       play("withms", iso(BASE + 789), DUR),
       play("later", iso(BASE + 1_800_000), DUR),
     ]);
-    expect((await recomputeAllTimeStats()).plays).toBeGreaterThanOrEqual(2);
-    expect(await searchHistory("")).toHaveLength(3);
+    expect((await store.recomputeAllTimeStats()).plays).toBeGreaterThanOrEqual(2);
+    expect(await store.searchHistory("")).toHaveLength(3);
   });
 });
 
@@ -172,49 +164,49 @@ describe("backfill rows (context_type = 'backfill')", () => {
   beforeEach(resetStore);
 
   it("is excluded from every listening counter", async () => {
-    await recordPlays([backfill("cat1"), backfill("cat2")]);
-    await recordPlays([play("real1", iso(BASE), 200_000), play("real2", iso(BASE + 600_000), 200_000)]);
-    const stats = await recomputeAllTimeStats();
+    await store.recordPlays([backfill("cat1"), backfill("cat2")]);
+    await store.recordPlays([play("real1", iso(BASE), 200_000), play("real2", iso(BASE + 600_000), 200_000)]);
+    const stats = await store.recomputeAllTimeStats();
     expect(stats.plays).toBe(2);
     expect(stats.uniqueTracks).toBe(2);
 
-    const daily = await getDailyStats(0, 400);
+    const daily = await store.getDailyStats(0, 400);
     expect(daily.reduce((n, d) => n + d.plays, 0)).toBe(2);
     expect(daily.map((d) => d.day)).not.toContain(SENTINEL.slice(0, 10));
 
-    expect(await getPlaysByDay(SENTINEL.slice(0, 10), 0)).toEqual([]);
+    expect(await store.getPlaysByDay(SENTINEL.slice(0, 10), 0)).toEqual([]);
     // The sentinel is the only thing before today, and it must not make the strip expandable.
-    expect(await hasPlaysBeforeDay(iso(BASE).slice(0, 10), 0)).toBe(false);
+    expect(await store.hasPlaysBeforeDay(iso(BASE).slice(0, 10), 0)).toBe(false);
   });
 
   it("the 2026-05-30 sentinel never becomes `since` (T1.5)", async () => {
-    await recordPlays([backfill("cat1")]);
-    await recordPlays([play("real1", iso(BASE), 200_000), play("real2", iso(BASE + 600_000), 200_000)]);
-    const stats = await recomputeAllTimeStats();
+    await store.recordPlays([backfill("cat1")]);
+    await store.recordPlays([play("real1", iso(BASE), 200_000), play("real2", iso(BASE + 600_000), 200_000)]);
+    const stats = await store.recomputeAllTimeStats();
     expect(stats.since).toBe(iso(BASE));
     expect(stats.since?.slice(0, 10)).not.toBe("2026-05-30");
   });
 
   it("is INCLUDED in search, the all-time list and the history payload", async () => {
-    await recordPlays([backfill("cat1")]);
-    await recordPlays([play("real1", iso(BASE), 200_000), play("real2", iso(BASE + 600_000), 200_000)]);
+    await store.recordPlays([backfill("cat1")]);
+    await store.recordPlays([play("real1", iso(BASE), 200_000), play("real2", iso(BASE + 600_000), 200_000)]);
 
-    expect((await searchHistory("")).map((t) => t.id)).toContain("cat1");
-    expect((await searchHistory("Song cat1")).map((t) => t.id)).toEqual(["cat1"]);
-    expect((await getAllTimePlays(500)).map((t) => t.id)).toContain("cat1");
-    const idx = await getHistoryIndex("v");
+    expect((await store.searchHistory("")).map((t) => t.id)).toContain("cat1");
+    expect((await store.searchHistory("Song cat1")).map((t) => t.id)).toEqual(["cat1"]);
+    expect((await store.getAllTimePlays(500)).map((t) => t.id)).toContain("cat1");
+    const idx = await store.getHistoryIndex("v");
     expect(idx.tracks.map((t) => t[0])).toContain("Song cat1");
   });
 
   it("a store holding ONLY backfill rows reports an empty listening history", async () => {
-    await recordPlays([backfill("cat1"), backfill("cat2")]);
-    expect(await recomputeAllTimeStats()).toEqual({
+    await store.recordPlays([backfill("cat1"), backfill("cat2")]);
+    expect(await store.recomputeAllTimeStats()).toEqual({
       plays: 0,
       uniqueTracks: 0,
       durationMs: 0,
       since: null,
     });
-    expect(await getDailyStats(0, 400)).toEqual([]);
+    expect(await store.getDailyStats(0, 400)).toEqual([]);
   });
 });
 
@@ -237,9 +229,9 @@ describe("hostile text", () => {
       name: text,
       artist: `${text} (artist)`,
     }));
-    await recordPlays(plays);
+    await store.recordPlays(plays);
 
-    const rows = await searchHistory("", 500);
+    const rows = await store.searchHistory("", 500);
     const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
     for (let i = 0; i < NASTY.length; i++) {
       const [label, text] = NASTY[i];
@@ -251,10 +243,10 @@ describe("hostile text", () => {
     }
     // The table the injection string names is still there with every row in it.
     expect(rows).toHaveLength(NASTY.length);
-    expect((await getAllTimePlays(500)).map((t) => t.name).sort()).toEqual(
+    expect((await store.getAllTimePlays(500)).map((t) => t.name).sort()).toEqual(
       NASTY.map(([, t]) => t).sort(),
     );
-    const idx = await getHistoryIndex("v");
+    const idx = await store.getHistoryIndex("v");
     expect(idx.tracks.map((t) => t[0]).sort()).toEqual(NASTY.map(([, t]) => t).sort());
   });
 
@@ -264,7 +256,7 @@ describe("hostile text", () => {
       name: text,
       artist: `${text} (artist)`,
     }));
-    await recordPlays(plays);
+    await store.recordPlays(plays);
     // A fragment of each string that contains no LIKE metacharacter.
     const probes: [number, string][] = [
       [0, "O'Brien"],
@@ -273,19 +265,19 @@ describe("hostile text", () => {
       [4, "line two"],
     ];
     for (const [i, q] of probes) {
-      const hit = await searchHistory(q, 500);
+      const hit = await store.searchHistory(q, 500);
       expect({ q, ids: hit.map((r) => r.id) }).toEqual({ q, ids: [`h${i}`] });
     }
     // 10k characters survive the round trip at full length.
-    const long = (await searchHistory("", 500)).find((r) => r.id === "h5");
+    const long = (await store.searchHistory("", 500)).find((r) => r.id === "h5");
     expect(long?.name).toHaveLength(10_000);
   });
 
   it("identity lookup matches a unicode name exactly", async () => {
-    await recordPlays([
+    await store.recordPlays([
       { ...play("bj", iso(BASE), 200_000), name: "Jóga", artist: "Björk" },
     ]);
-    const found = await findTrackWithPlaylists("Jóga", "Björk");
+    const found = await store.findTrackWithPlaylists("Jóga", "Björk");
     expect(found.track?.id).toBe("bj");
   });
 });

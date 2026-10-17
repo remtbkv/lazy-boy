@@ -1,5 +1,6 @@
 import { cronAuthorized } from "@/lib/cron-auth";
-import { benchStore } from "@/lib/db";
+import { forUser } from "@/lib/db";
+import { phase1Owner } from "@/lib/identity";
 
 // Store round-trip timings from inside a production function (docs/STORE_MIGRATION.md §6.5,
 // requirement R1): `?store=core` (default) or `?store=telemetry`. Reads only; the history
@@ -17,7 +18,10 @@ export async function GET(req: Request) {
   if (store !== "core" && store !== "telemetry") {
     return Response.json({ ok: false, error: "store must be core or telemetry" }, { status: 400 });
   }
-  const result = await benchStore(store);
+  // The core store is Rem's database: the bench measures the round trips his pages pay.
+  const owner = phase1Owner();
+  if (!owner) return Response.json({ ok: false, error: "no owner" }, { status: 503 });
+  const result = await forUser(owner).benchStore(store);
   return Response.json(
     { ok: true, region: process.env.VERCEL_REGION ?? null, cold, ...result },
     { headers: { "cache-control": "no-store" } },

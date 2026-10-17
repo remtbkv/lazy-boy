@@ -2,12 +2,7 @@ import "server-only";
 import { spotifyClient } from "@/lib/spotify";
 import { intersect, subtract } from "@/lib/spotify/domain";
 import type { Track } from "@/lib/spotify/types";
-import {
-  getLibrarySyncedAt,
-  getLibraryTracks,
-  getPlaylistTracks,
-  storePlaylistTracks,
-} from "@/lib/db";
+import { type UserStore } from "@/lib/db";
 import { syncLibrary } from "@/lib/sync/library";
 import { cleanedName, backupName as makeBackupName } from "@/lib/clean/names";
 
@@ -51,23 +46,24 @@ export type ReconcileResult = {
 // X". The library read is pure DB — fast — so this is near-instant on a warm index.
 export async function cleanPhase1(
   sp: Spotify,
+  store: UserStore,
   targetId: string,
   backup: boolean,
 ): Promise<{ result: CleanResult; ctx: CleanContext | null }> {
   // Cold start only: with no index yet we'd clean against an empty library and remove
   // nothing, so build it once here. Normally the hourly cron keeps it warm.
-  if (!(await getLibrarySyncedAt())) await syncLibrary(sp);
+  if (!(await store.getLibrarySyncedAt())) await syncLibrary(sp, store);
 
   const target = await sp.playlist(targetId);
-  let targetTracks = await getPlaylistTracks(targetId);
+  let targetTracks = await store.getPlaylistTracks(targetId);
   if (targetTracks.length === 0) {
     targetTracks = await sp.playlistTracks(targetId);
-    if (targetTracks.length) await storePlaylistTracks(targetId, targetTracks, target.snapshot);
+    if (targetTracks.length) await store.storePlaylistTracks(targetId, targetTracks, target.snapshot);
   }
 
   // Other cleaned playlists count as library (so a song kept in an earlier clean is purged
   // here); only this target's own "Cleaned: <name>" output is excluded — see getLibraryTracks.
-  const library = await getLibraryTracks(targetId, target.name);
+  const library = await store.getLibraryTracks(targetId, target.name);
   const kept = subtract(targetTracks, library);
   const removed = intersect(targetTracks, library);
 
@@ -113,16 +109,20 @@ export async function cleanPhase1(
 // and reconcile the cleaned playlist to match (exact-mirror). Fixes both directions of
 // staleness — wrongly-removed songs go back at their right position; wrongly-kept songs
 // come out (and the backup is mirrored to the true removed set).
-export async function reconcileClean(sp: Spotify, ctx: CleanContext): Promise<ReconcileResult> {
-  await syncLibrary(sp);
+export async function reconcileClean(
+  sp: Spotify,
+  store: UserStore,
+  ctx: CleanContext,
+): Promise<ReconcileResult> {
+  await syncLibrary(sp, store);
   const target = await sp.playlist(ctx.targetId);
   const targetFresh = await sp.playlistTracks(ctx.targetId);
-  if (targetFresh.length) await storePlaylistTracks(ctx.targetId, targetFresh, target.snapshot);
+  if (targetFresh.length) await store.storePlaylistTracks(ctx.targetId, targetFresh, target.snapshot);
 
   // Exclude this clean's own output by ID, not just name: a rename between phases or a
   // name clamp made the name-based exclusion miss, and the reconcile then counted the
   // cleaned playlist's own tracks as "saved elsewhere" — emptying it (audit wave 2, A1/A2).
-  const libraryFresh = await getLibraryTracks(ctx.targetId, target.name, [
+  const libraryFresh = await store.getLibraryTracks(ctx.targetId, target.name, [
     ctx.cleanedId,
     ctx.backupId ?? "",
   ]);

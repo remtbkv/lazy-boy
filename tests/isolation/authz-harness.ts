@@ -294,13 +294,24 @@ export const FAR = 4_000_000_000;
 export const REM_PLAYLIST = "rem-pl-1";
 export const REM_DAY = new Date(Date.now() - 3_600_000).toISOString().slice(0, 10);
 
+/** Rem's store: forUser over OWNER_UID, his database the throwaway file (multi-user Phase 1). */
+async function remStore() {
+  const db = await import("@/lib/db");
+  const { mintUid } = await import("@/lib/identity");
+  return db.forUser(mintUid(OWNER_UID as string));
+}
+
 let rawClient: Client | null = null;
 async function raw(): Promise<Client> {
   const db = await import("@/lib/db");
-  await db.getLastSync(); // forces db.ts's schema init
+  await (await remStore()).getLastSync(); // the first open provisions the file for Rem
+  await db.readLedger(1); // the telemetry init creates the log tables beside it
   rawClient ??= createClient({ url: process.env.TURSO_DATABASE_URL as string, intMode: "number" });
   return rawClient;
 }
+
+// The four keys the open checks say whose database the file is; a reseed keeps them.
+const OPEN_KEYS = "'owner_uid', 'schema_version', 'min_reader', 'store_epoch'";
 
 async function tables(): Promise<string[]> {
   const c = await raw();
@@ -312,9 +323,12 @@ async function tables(): Promise<string[]> {
 
 export async function seedRem(opts: { tokenExpiresAt?: number } = {}): Promise<void> {
   const c = await raw();
-  for (const t of await tables()) await c.execute(`DELETE FROM ${t}`);
+  for (const t of await tables()) {
+    await c.execute(t === "meta" ? `DELETE FROM meta WHERE key NOT IN (${OPEN_KEYS})` : `DELETE FROM ${t}`);
+  }
   const db = await import("@/lib/db");
-  await db.setSpotifyTokens({
+  const rem = await remStore();
+  await rem.setSpotifyTokens({
     accessToken: "at-REM",
     refreshToken: "rt-REM",
     expiresAt: opts.tokenExpiresAt ?? FAR,
@@ -333,9 +347,9 @@ export async function seedRem(opts: { tokenExpiresAt?: number } = {}): Promise<v
     contextType: "playlist",
     contextUri: `spotify:playlist:${REM_PLAYLIST}`,
   });
-  await db.recordPlays([playOf(1, 60), playOf(2, 50), playOf(1, 40)]);
-  await db.recordContexts([{ uri: `spotify:playlist:${REM_PLAYLIST}`, name: "REM-only-playlist", type: "playlist" }]);
-  await db.storePlaylists(
+  await rem.recordPlays([playOf(1, 60), playOf(2, 50), playOf(1, 40)]);
+  await rem.recordContexts([{ uri: `spotify:playlist:${REM_PLAYLIST}`, name: "REM-only-playlist", type: "playlist" }]);
+  await rem.storePlaylists(
     [{ id: REM_PLAYLIST, name: "REM-only-playlist", ownerId: "rem-spotify", image: null, trackCount: 2 }],
     "rem-spotify",
   );
@@ -349,8 +363,8 @@ export async function seedRem(opts: { tokenExpiresAt?: number } = {}): Promise<v
     durationMs: 200_000,
     addedAt: "2026-01-01T00:00:00.000Z",
   });
-  await db.storePlaylistTracks(REM_PLAYLIST, [trackOf(1), trackOf(2)], "snap-1");
-  await db.rebuildHomePayload();
+  await rem.storePlaylistTracks(REM_PLAYLIST, [trackOf(1), trackOf(2)], "snap-1");
+  await rem.rebuildHomePayload();
   await db.recordClientMetrics([{ session: "s-rem", page: "/REM-only-page", event: "ttfb", value: 120, meta: "pv:v1" }]);
   // The library stays stale on purpose: a scan request then reaches Spotify, which is the
   // observable proof that a gate let it through.

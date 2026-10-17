@@ -9,11 +9,18 @@ vi.mock("next/server", async (orig) => (await import("./authz-context")).nextSer
 
 import { cookies } from "next/headers";
 import { decode } from "next-auth/jwt";
-import { SECRETS, installSpotify, observe, request, type Principal } from "./authz-harness";
+import { OWNER_UID, SECRETS, installSpotify, observe, request, type Principal } from "./authz-harness";
 import { expectedObservations } from "./authz-cells";
 import { ENTRIES } from "./authz-registry";
 
 installSpotify();
+
+// Rem's store, reached the way a bug would reach it: by naming the owner with no gate.
+async function remStore() {
+  const { forUser } = await import("@/lib/db");
+  const { mintUid } = await import("@/lib/identity");
+  return forUser(mintUid(OWNER_UID as string));
+}
 
 // Decodes the session cookie with the right secret and stops there: no identity check. Kept off
 // src/lib/auth.ts so the planted bugs stay bugs whatever that file's own checks become.
@@ -28,8 +35,7 @@ const PLANTED: { name: string; as: Principal; fn: () => Promise<unknown> }[] = [
     name: "a route with no gate serving the library index",
     as: "anon",
     fn: async () => {
-      const { getLibraryIndex } = await import("@/lib/db");
-      return Response.json(await getLibraryIndex(null));
+      return Response.json(await (await remStore()).getLibraryIndex(null));
     },
   },
   {
@@ -37,8 +43,7 @@ const PLANTED: { name: string; as: Principal; fn: () => Promise<unknown> }[] = [
     as: "forged",
     fn: async () => {
       if (!(await cookies()).has("authjs.session-token")) return new Response(null, { status: 401 });
-      const { getStoredPlaylists } = await import("@/lib/db");
-      return Response.json(await getStoredPlaylists());
+      return Response.json(await (await remStore()).getStoredPlaylists());
     },
   },
   {
@@ -47,10 +52,11 @@ const PLANTED: { name: string; as: Principal; fn: () => Promise<unknown> }[] = [
     fn: async () => {
       const req = request("/api/cron/sync");
       if (!req.headers.get("authorization")?.startsWith("Bearer ")) return new Response(null, { status: 401 });
-      const { getValidAccessToken } = await import("@/lib/auth");
+      const { getValidAccessTokenFor } = await import("@/lib/auth");
       const { spotifyClient } = await import("@/lib/spotify");
-      const t = await getValidAccessToken();
-      await spotifyClient(t!, false, "planted").currentlyPlaying();
+      const uid = (await remStore()).uid;
+      const t = await getValidAccessTokenFor(uid);
+      await spotifyClient(uid, t!, false, "planted").currentlyPlaying();
       return Response.json({ ok: true });
     },
   },
@@ -58,8 +64,7 @@ const PLANTED: { name: string; as: Principal; fn: () => Promise<unknown> }[] = [
     name: "an action that writes before its gate refuses",
     as: "anon",
     fn: async () => {
-      const { clearSpotifyTokens } = await import("@/lib/db");
-      await clearSpotifyTokens();
+      await (await remStore()).clearSpotifyTokens();
       return { ok: false, error: "Not authenticated" };
     },
   },
@@ -68,8 +73,7 @@ const PLANTED: { name: string; as: Principal; fn: () => Promise<unknown> }[] = [
     as: "revoked",
     fn: async () => {
       if (!(await cookieDecodes())) return [];
-      const { searchHistory } = await import("@/lib/db");
-      return searchHistory("", 5);
+      return (await remStore()).searchHistory("", 5);
     },
   },
   {
@@ -77,8 +81,7 @@ const PLANTED: { name: string; as: Principal; fn: () => Promise<unknown> }[] = [
     as: "friendA",
     fn: async () => {
       if (!(await cookieDecodes())) return new Response(null, { status: 401 });
-      const { getSpotifyTokens } = await import("@/lib/db");
-      return Response.json({ token: (await getSpotifyTokens())?.accessToken });
+      return Response.json({ token: (await (await remStore()).getSpotifyTokens())?.accessToken });
     },
   },
 ];

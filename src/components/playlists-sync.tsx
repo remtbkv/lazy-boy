@@ -3,6 +3,8 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import type { Task } from "@/lib/tasks/registry";
+import { clearIfSignedOut } from "@/lib/user-storage";
+import { useUid } from "@/components/user-context";
 
 // The 2-minute cron tick owns library freshness — it re-scans whenever the store is more than
 // 30 min old, without a session and whether or not the app is open. So this client kick is a
@@ -24,7 +26,7 @@ let watching = false;
 // not an effect: the first refresh changes `syncedAt`, which re-runs the effect below — an
 // effect-scoped poll would cancel itself on the very refresh it just fired. It ends on the
 // task's terminal state (or the deadline), so nothing is left spinning.
-async function watchColdStart(taskId: string, refresh: () => void): Promise<void> {
+async function watchColdStart(taskId: string, uid: string, refresh: () => void): Promise<void> {
   if (watching) return;
   watching = true;
   const deadline = Date.now() + WATCH_MAX_MS;
@@ -33,6 +35,7 @@ async function watchColdStart(taskId: string, refresh: () => void): Promise<void
   try {
     while (Date.now() < deadline) {
       const res = await fetch(`/api/tasks/${taskId}`).catch(() => null);
+      if (res) clearIfSignedOut(res, uid);
       if (!res?.ok) {
         // The task registry is per-instance on serverless, so a poll routed to another
         // instance 404s even while the scan is running fine. Bailing on the first miss
@@ -78,6 +81,7 @@ async function watchColdStart(taskId: string, refresh: () => void): Promise<void
 // we watch the scan and refresh as it lands — with nothing on screen, there is nothing to shift.
 export function PlaylistsSync({ syncedAt }: { syncedAt: string | null }) {
   const router = useRouter();
+  const uid = useUid();
 
   useEffect(() => {
     const stale = !syncedAt || Date.now() - new Date(syncedAt).getTime() > STALE_MS;
@@ -87,9 +91,10 @@ export function PlaylistsSync({ syncedAt }: { syncedAt: string | null }) {
     lastAttempt = Date.now();
     fetch("/api/playlists/sync", { method: "POST" })
       .then(async (res) => {
+        clearIfSignedOut(res, uid);
         if (!coldStart || !res.ok) return;
         const { taskId } = (await res.json()) as { taskId?: string };
-        if (taskId) void watchColdStart(taskId, () => router.refresh());
+        if (taskId) void watchColdStart(taskId, uid, () => router.refresh());
       })
       .catch(() => {
         /* offline / kickoff failed — a later mount retries past the cooldown */
@@ -97,7 +102,7 @@ export function PlaylistsSync({ syncedAt }: { syncedAt: string | null }) {
       .finally(() => {
         inFlight = false;
       });
-  }, [syncedAt, router]);
+  }, [syncedAt, router, uid]);
 
   return null;
 }

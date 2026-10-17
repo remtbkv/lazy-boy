@@ -1,8 +1,8 @@
 # SECURITY.md
 
-Security posture and the checklist to clear before a public production deploy.
-(Storage is currently a local SQLite file; if you move to Supabase/Postgres,
-the user-scoping item below is handled by row-level security instead.)
+Security posture and the checklist to clear before a public production deploy. The data is a
+database per user (multi-user PLAN §4; Phase 1 knows one user, `OWNER_UID`); the runbooks for
+a rollback and for a suspected cross-user exposure are at the end.
 
 ## Already in place
 
@@ -18,7 +18,7 @@ the user-scoping item below is handled by row-level security instead.)
   theft into Spotify account takeover. Nothing client-side ever used it (the app mounts no
   `SessionProvider`).
 
-  The token now travels server-side only, via `spotifyAccessToken()` in `src/lib/auth.ts`: it
+  The token now travels server-side only, via `spotifyAccessTokenFor(uid)` in `src/lib/auth.ts`: it
   reads the request-scoped token box that the jwt callback already populated — the same read
   the session callback used to make — so there is no extra DB round trip. **Call it after
   `auth()` in the same request**, never in parallel: the jwt callback is what refreshes an
@@ -29,10 +29,23 @@ the user-scoping item below is handled by row-level security instead.)
   `Session` interface in `src/types/next-auth.d.ts`, so `session.accessToken` is now
   `TS2339: Property 'accessToken' does not exist on type 'Session'` (verified). Adding any
   field to that interface publishes it to the browser — treat it as a public API.
-- **Every API route checks `auth()`** and returns 401 (verified against production
-  2026-08-11: `/api/sync`, `/api/metrics`, `/api/playlists/*`, `/api/search/*` all 401 without
-  a session; `/api/now-playing` answers `{playing:null}`; `/api/build` is deliberately public
-  and carries no personal data).
+- **Every entry point takes its user from `requireUser()`** (`src/lib/require-user.ts`), the
+  only source of a uid for a request: pages redirect, routes answer 401 with the signed-out
+  marker (or 503 when the identity check cannot run), actions answer `{ ok: false }`. A
+  session whose Spotify grant is gone is refused everywhere. `/api/now-playing` answers
+  `{playing:null}`; `/api/build` is deliberately public and carries no personal data. The
+  census (`tests/isolation/entry-points.test.ts`) and the authorization map
+  (`docs/multi-user/AUTHZ.md`, every entry point against twelve principals through the real
+  Auth.js) fail on an entry point nobody accounted for.
+- **The session names its user, checked on every request** (multi-user Phase 1): the cookie
+  carries a uid, a session epoch and `auth_time`; the identity check refuses a cookie with no
+  uid, an unknown uid, a stale epoch, or a sign-in over 30 days old.
+- **A database names its owner.** The first open of a user's database in a process checks its
+  `meta.owner_uid` against the uid asking, before any read result is used or any write is
+  sent; a mismatch is refused and recorded as an isolation event, which turns the hourly
+  health check (`/api/cron/health`) red. Cached reads carry the uid in their key and its stamp
+  on their value (`src/lib/user-cache.ts`); the search payloads carry it in their ETag and body
+  and are served `private, no-store`; browser storage names carry it, and sign-out clears them.
 - **Every page that reads personal data gates for ITSELF**, before its first read. The `(app)`
   layout's `redirect()` is chrome, not the gate: Next renders a layout and its page in
   parallel, so a page under a redirecting layout still runs its fetches and still flushes its
@@ -44,8 +57,9 @@ the user-scoping item below is handled by row-level security instead.)
 - **Centralized token refresh** in `src/lib/auth.ts` (no scattered token handling).
 - **No SQL injection.** All libSQL (`@libsql/client`) queries use bound params (`:name`/`?`).
 - **Cron auth (fail-closed).** Every `/api/cron/*` route (`sync`, `daily`, `usage-check`,
-  `store-bench`) is session-less; each requires `Authorization: Bearer $CRON_SECRET`, checked in
-  constant time by one function (`src/lib/cron-auth.ts`). An unset `CRON_SECRET` rejects every
+  `store-bench`, `health`) is session-less; each requires `Authorization: Bearer $CRON_SECRET`,
+  checked in constant time (`src/lib/cron-auth.ts`: `cronAuthorized`; `cronCaller` for the
+  health check, which also accepts cron-job.org's `CRON_SECRET_EXT`). An unset `CRON_SECRET` rejects every
   caller (it does not wave them through), so no cron route can be triggered anonymously in a
   misconfigured deploy. `store-bench` returns timings and the store's host, never a token.
   `/api/cron/sync` alone also takes `CRON_SECRET_EXT` (cron-job.org's, `cronCaller()`), answers it
@@ -63,19 +77,24 @@ the user-scoping item below is handled by row-level security instead.)
 - **Baseline security headers** in `next.config.ts` (`X-Content-Type-Options`,
   `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`, HSTS).
 - **Secrets are gitignored** (`.env.local`); only `.env.example` is committed.
-- **Owner-only sign-in.** The store and its token row are single-user, so the `signIn`
+- **Owner-only sign-in.** Until Phase 2's app database there is one user, so the `signIn`
   callback (`src/lib/owner.ts`) refuses every Spotify account but `SPOTIFY_OWNER_ID` (falling
-  back to the stored `me_id`). A refused login gets AccessDenied before the token is written.
+  back to the owner's stored `me_id`), and every sign-in is refused while `OWNER_UID` is unset.
+  A refused login gets AccessDenied before the token is written.
+- **Scripts name their user.** Every script that reads or writes a user's database requires
+  `--user <uid>`, checked before it opens anything, and refuses a database that names another
+  owner (`scripts/script-user.mjs`).
 
 ## Before production — checklist
 
 - [ ] **`AUTH_URL`** set to the real HTTPS origin; **`AUTH_SECRET`** is a strong random value
       (`openssl rand -base64 32`), stored in the host's secret manager, not in the repo.
-- [ ] **User-scope the listen-history store.** `tracks`/`plays` are currently global (single
-      user). For multiple users, add a `user_id` column keyed to the Spotify user and filter
-      every query by it — or move to Postgres/Supabase with row-level security.
-- [ ] **Spotify app out of development mode.** Dev mode blocks other users' data (403) and
-      caps to 25 allowlisted users; request extended quota for real multi-user use.
+- [x] **User-scope the listen-history store.** A database per user, reached only through
+      `forUser(uid)` (multi-user Phase 1). Phase 2 adds the app database (users, encrypted
+      tokens) and Phase 4a the first other user.
+- [ ] **Spotify's development mode allows five accounts, Rem's included** (the dashboard's
+      User Management; multi-user PLAN §13.2, RULINGS Oct 15 12:46 PM). Each friend is added by hand in the dashboard;
+      at most four. Other accounts get Spotify's 403 at sign-in. Extended quota is not sought.
 - [ ] **Content-Security-Policy.** Add a strict CSP with per-request nonces for Next's inline
       runtime (omitted now because a naive CSP breaks the app).
 - [ ] **Rate limiting** on route handlers / server actions (e.g. per-IP or per-user) to protect
@@ -88,8 +107,44 @@ the user-scoping item below is handled by row-level security instead.)
 - [ ] `allowedDevOrigins` is dev-only and harmless in prod, but review it isn't masking a real
       CORS need.
 
+## Rollback (multi-user PLAN §13.5)
+
+1. **Revert the phase's merge on `main` and push.** An ordinary production deploy of the old
+   code on today's environment; it survives the morning push and keeps domain assignment on.
+2. **Instant Rollback only as a stopgap** while the revert builds, and only when the previous
+   deployment is the pre-phase build and no secret or store credential changed in between.
+   That rules it out across Phase 0 and Phase 1 (`AUTH_SECRET` rotated), Phase 2 (the
+   `lazyboy` token invalidated) and Phase 4a (friends' cookies would meet pre-friend code).
+   Undo Rollback once the revert is live.
+3. **Environment changes are additive**, or the phase says why the older build works with the
+   new value. Phase 1's four `meta` keys and `OWNER_UID` are ignored by the build before it.
+4. **Schema state**: additive steps leave `min_reader`, so the older build opens the database;
+   a rebuild raises it, and that phase's rollback is the migrate script's reverse step.
+5. **After each secret rotation**, once the new build has run a day, delete the production
+   deployments built before it (`vercel rm <url>`), so no rollback can bring the old secret
+   back or put single-user code in front of a friend's cookie.
+6. **Rehearse it** on Rem alone inside the phase's soak.
+
+## A suspected cross-user exposure (multi-user PLAN §13.6)
+
+For an isolation event that is not a test, a friend's report, or anything else that suggests
+one person saw or changed another's data:
+
+1. **Freeze**: set `SIGNUPS=owner` and redeploy; every non-admin session ends at its next
+   request and every non-admin sync at the next claim.
+2. **Keep the evidence**: the isolation events and their codes (`client_metrics` rows with
+   event `isolation` in Phase 1, `events` from Phase 2), `api_log` by `user_id` for the
+   window, the deployment id, the request ids in Vercel's logs while they last (about an hour
+   on Hobby).
+3. **Work out whose data reached whom**, from the codes and the logs.
+4. **Within 24 hours of suspecting it**, write to `security@spotify.com` (Developer Terms, Data
+   Protection Appendix §9) and tell the affected friend directly.
+5. **Fix**, move the affected shape tokens so every cached body is rebuilt, and run the whole
+   suite with its planted-bug self-test.
+6. **Unfreeze**, and add the case to the isolation suite.
+
 ---
 
 **Related:** [ARCHITECTURE → Auth & tokens](ARCHITECTURE.md#auth--tokens) (how refresh is
 coordinated) · [GOTCHAS → Per-instance server state / Production security](GOTCHAS.md) ·
-[ROADMAP](ROADMAP.md) (multi-user is Phase 3+).
+[ROADMAP](ROADMAP.md) · [multi-user PLAN](multi-user/PLAN.md) and [Phase 1](multi-user/PHASE1.md).

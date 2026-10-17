@@ -6,31 +6,39 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const spy = vi.hoisted(() => {
   process.env.CRON_SECRET = "s3cret";
   const calls: string[] = [];
+  const marks: [string, string][] = [];
   const chore =
     (name: string, fail = false) =>
     async () => {
       calls.push(name);
       if (fail || spy.failing.has(name)) throw new Error(`${name} failed`);
-      return name === "runUsageCheck" ? { status: 200, body: { ok: true } } : undefined;
+      return name === "runUsageCheck" ? spy.usage : undefined;
     };
-  return { calls, failing: new Set<string>(), chore };
+  return { calls, marks, failing: new Set<string>(), chore, usage: { status: 200, body: { ok: true } as Record<string, unknown> } };
 });
 
 vi.mock("@/lib/db", () => ({
-  recomputeAllTimeStats: spy.chore("recomputeAllTimeStats"),
-  rebuildHomePayload: spy.chore("rebuildHomePayload"),
   pruneApiLog: spy.chore("pruneApiLog"),
   pruneClientMetrics: spy.chore("pruneClientMetrics"),
-  checkPlayedAtConvention: spy.chore("checkPlayedAtConvention"),
-  benchStore: async (store: string) => {
-    spy.calls.push(`benchStore:${store}`);
-    return { store, host: "file", probes: {} };
-  },
-  // /api/cron/sync's no-token exit, so its GET returns before touching Spotify.
-  getSpotifyTokens: async () => null,
+  // The owner's store (multi-user Phase 1: the cron and the chores run for OWNER_UID).
+  forUser: () => ({
+    recomputeAllTimeStats: spy.chore("recomputeAllTimeStats"),
+    rebuildHomePayload: spy.chore("rebuildHomePayload"),
+    checkPlayedAtConvention: spy.chore("checkPlayedAtConvention"),
+    // The chores' bookkeeping: the health check's marks, not a chore.
+    setHealthMark: async (key: string, value: string) => {
+      spy.marks.push([key, value]);
+    },
+    benchStore: async (store: string) => {
+      spy.calls.push(`benchStore:${store}`);
+      return { store, host: "file", probes: {} };
+    },
+    // /api/cron/sync's no-token exit, so its GET returns before touching Spotify.
+    getSpotifyTokens: async () => null,
+  }),
 }));
 vi.mock("@/lib/usage-check", () => ({ runUsageCheck: spy.chore("runUsageCheck") }));
-vi.mock("@/lib/auth", () => ({ getValidAccessToken: async () => null }));
+vi.mock("@/lib/auth", () => ({ getValidAccessTokenFor: async () => null }));
 
 const daily = await import("@/app/api/cron/daily/route");
 const bench = await import("@/app/api/cron/store-bench/route");
@@ -43,7 +51,9 @@ const authed = { authorization: "Bearer s3cret" };
 describe("cron routes", () => {
   beforeEach(() => {
     spy.calls.length = 0;
+    spy.marks.length = 0;
     spy.failing.clear();
+    spy.usage = { status: 200, body: { ok: true } };
   });
 
   it("daily and store-bench answer 401 without the secret, and run nothing", async () => {
@@ -90,5 +100,23 @@ describe("cron routes", () => {
     expect((await bench.GET(req("/api/cron/store-bench?store=telemetry", authed))).status).toBe(200);
     expect((await bench.GET(req("/api/cron/store-bench?store=nope", authed))).status).toBe(400);
     expect(spy.calls).toEqual(["benchStore:core", "benchStore:telemetry"]);
+  });
+
+  // The health check reads these (PLAN §7.10): when the chores last finished, and Turso's pace.
+  it("daily stamps daily_at when its run finishes, and the usage check's pace verdict", async () => {
+    spy.usage = { status: 500, body: { ok: false, breached: ["rows_read"] } };
+    spy.failing.add("pruneApiLog"); // a failed chore still finishes the run
+    const t0 = Date.now();
+    await daily.GET(req("/api/cron/daily", authed));
+    const daily_at = spy.marks.find(([k]) => k === "daily_at");
+    expect(Number(daily_at?.[1])).toBeGreaterThanOrEqual(t0);
+    const pace = JSON.parse(spy.marks.find(([k]) => k === "quota_pace")?.[1] ?? "null");
+    expect(pace).toMatchObject({ ahead: true });
+  });
+
+  it("an unconfigured usage check records no pace verdict", async () => {
+    spy.usage = { status: 500, body: { ok: false, error: "unconfigured" } };
+    await daily.GET(req("/api/cron/daily", authed));
+    expect(spy.marks.map(([k]) => k)).toEqual(["daily_at"]);
   });
 });

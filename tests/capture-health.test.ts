@@ -63,7 +63,7 @@ describe("captureHealthMessage", () => {
 
 describe("getCaptureHealth (real store)", () => {
   it("reads last_sync and token presence", async () => {
-    const db = await import("@/lib/db");
+    const db = (await import("./owner-store")).ownerStore();
     expect((await db.getCaptureHealth()).reason).toBe("signed out");
     await db.setSpotifyTokens({ accessToken: "a", refreshToken: "r", expiresAt: 0 });
     // No last_sync yet: signed in but never synced.
@@ -91,7 +91,7 @@ describe("getCaptureHealth (real store)", () => {
 // next-auth can't load under vitest (next/server); the route only needs the token getter, which
 // for a store with no tokens returns null — the case under test. Tokens present + null is the
 // transient refresh failure, which must stay a 200.
-vi.mock("@/lib/auth", () => ({ getValidAccessToken: async () => null }));
+vi.mock("@/lib/auth", () => ({ getValidAccessTokenFor: async () => null }));
 
 describe("cron with no token", () => {
   const call = async () => {
@@ -105,7 +105,7 @@ describe("cron with no token", () => {
     expect(await res.json()).toEqual({ ok: false, error: "no token" });
   });
   it("tokens stored but no access token (transient refresh failure) → still 200", async () => {
-    const db = await import("@/lib/db");
+    const db = (await import("./owner-store")).ownerStore();
     await db.setSpotifyTokens({ accessToken: "a", refreshToken: "r", expiresAt: 0 });
     const res = await call();
     expect(res.status).toBe(200);

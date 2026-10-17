@@ -1,19 +1,11 @@
 import { after } from "next/server";
-import { getValidAccessToken } from "@/lib/auth";
+import { getValidAccessTokenFor } from "@/lib/auth";
 import { cronCaller, type CronCaller } from "@/lib/cron-auth";
-import { spotifyClient, SpotifyError } from "@/lib/spotify";
+import { forUser, type UserStore } from "@/lib/db";
+import { phase1Owner } from "@/lib/identity";
+import { spotifyClient, SpotifyError, type OwnedToken } from "@/lib/spotify";
 import { syncRecentPlays } from "@/lib/sync/history";
 import { syncLibrary } from "@/lib/sync/library";
-import {
-  acquireLock,
-  getHarvestGate,
-  getLibraryScanAttemptAt,
-  getLibrarySyncedAt,
-  getSpotifyTokens,
-  ledgerSyncCall,
-  setHarvestGate,
-  setLibraryScanAttemptAt,
-} from "@/lib/db";
 import { shouldHarvest } from "@/lib/harvest-gate";
 
 // Rebuild the library index at most every 30 min (snapshot-diffing makes a run cheap, but no
@@ -23,17 +15,17 @@ import { shouldHarvest } from "@/lib/harvest-gate";
 // scan can outlive the ~1h access token.
 const LIBRARY_MAX_AGE_MS = 30 * 60 * 1000;
 
-async function maybeSyncLibrary(token: () => Promise<string>): Promise<string> {
-  const at = await getLibrarySyncedAt();
+async function maybeSyncLibrary(store: UserStore, token: () => Promise<OwnedToken>): Promise<string> {
+  const at = await store.getLibrarySyncedAt();
   if (at && Date.now() - Date.parse(at) < LIBRARY_MAX_AGE_MS) return "fresh";
   // Attempt stamp, checked as well as the completion stamp: the completion stamp only
   // lands at the END of a successful scan, so a scan that kept throwing was retried on
   // every 2-minute tick — an unpaced failure storm (audit 2026-08-19, T2.9). One attempt
   // per 10 min, however it ended.
-  const attemptAt = await getLibraryScanAttemptAt();
+  const attemptAt = await store.getLibraryScanAttemptAt();
   if (attemptAt && Date.now() - attemptAt < 10 * 60 * 1000) return "cooling";
-  await setLibraryScanAttemptAt();
-  await syncLibrary(spotifyClient(token, true, "cron-library-scan"), undefined, { paceMs: 150 });
+  await store.setLibraryScanAttemptAt();
+  await syncLibrary(spotifyClient(store.uid, token, true, "cron-library-scan"), store, undefined, { paceMs: 150 });
   return "synced";
 }
 
@@ -72,9 +64,14 @@ export async function GET(req: Request) {
 }
 
 async function tick(caller: CronCaller): Promise<Response> {
+  // Phase 1 has one user, the owner (OWNER_UID); Phase 3's claim hands this tick each due user
+  // instead (multi-user PLAN §7.2). No owner configured: capture cannot run, and says so.
+  const uid = phase1Owner();
+  if (!uid) return Response.json({ ok: false, error: "no owner" }, { status: 503 });
+  const store = forUser(uid);
   // The owner alarm, read before the stamp so the Zenbook sees it whichever pinger's tick ran
   // this window (PLAN §7.2 step 0). A store error here is no verdict: the stamp decides.
-  if (caller === "zenbook" && (await getSpotifyTokens().catch(() => undefined)) === null) {
+  if (caller === "zenbook" && (await store.getSpotifyTokens().catch(() => undefined)) === null) {
     return Response.json({ ok: false, error: "no token" }, { status: 503 });
   }
   // The stamp (PLAN §7.2 step 1): one compare-and-set on a meta row, so a burst of calls does
@@ -82,7 +79,7 @@ async function tick(caller: CronCaller): Promise<Response> {
   // stamp skips the tick: nothing runs past the guard unless it holds the window.
   let stamped: string | null;
   try {
-    stamped = await acquireLock("tick", TICK_WINDOW_MS);
+    stamped = await store.acquireLock("tick", TICK_WINDOW_MS);
   } catch (e) {
     console.error("[cron] tick stamp failed", e);
     return Response.json({ ok: true, skipped: "store unavailable" });
@@ -92,7 +89,7 @@ async function tick(caller: CronCaller): Promise<Response> {
   // used to escape as a 500 — feeding the external pinger's auto-disable, the exact storm
   // the 429 branch dodges (wave-2 audit, B5).
   let tokenReadFailed = false;
-  const token = await getValidAccessToken().catch((e) => {
+  const token = await getValidAccessTokenFor(uid).catch((e) => {
     // Logged: a persistent store outage otherwise reads as an endless silent
     // "nobody signed in" (wave-3 adversarial review, F1).
     console.error("[cron] token read failed", e);
@@ -105,14 +102,14 @@ async function tick(caller: CronCaller): Promise<Response> {
     // 2026-10-03, M1). 503 so the pinger's unit fails visibly. A store hiccup or a transient
     // refresh failure still answers 200 — those heal on their own.
     const signedOut =
-      !tokenReadFailed && (await getSpotifyTokens().then((t) => t === null, () => false));
+      !tokenReadFailed && (await store.getSpotifyTokens().then((t) => t === null, () => false));
     if (signedOut) return Response.json({ ok: false, error: "no token" }, { status: 503 });
     return Response.json({ ok: true, skipped: "no token" });
   }
   // Getter for the longer-running work below — re-validates through the shared
   // refresh lock if the run crosses the token's expiry.
   const freshToken = async () => {
-    const t = await getValidAccessToken();
+    const t = await getValidAccessTokenFor(uid);
     if (!t) throw new Error("token expired mid-sync");
     return t;
   };
@@ -125,16 +122,16 @@ async function tick(caller: CronCaller): Promise<Response> {
     // harvest (the session's tail), or hourly as a backstop (other-device edge cases;
     // recently-played buffers 50 plays, so nothing is lost by waiting).
     const now = Date.now();
-    const gate = await getHarvestGate();
+    const gate = await store.getHarvestGate();
     // `isPlaying`, not just "a track is loaded": currentlyPlaying() reports a PAUSED
     // device too, and `!!state` read a client left paused overnight as active — sustaining
     // the every-2-min harvests the gate exists to stop (audit 2026-08-19, T1.2).
     const playingNow = !!(
-      await spotifyClient(token, false, "cron-player-check")
+      await spotifyClient(uid, token, false, "cron-player-check")
         .currentlyPlaying()
         .catch(() => null)
     )?.isPlaying;
-    if (playingNow) await setHarvestGate({ lastActive: now });
+    if (playingNow) await store.setHarvestGate({ lastActive: now });
     // `>=`, not `>`: playing ticks stamp lastActive and lastHarvest with the SAME `now`,
     // so strict-greater made the session-tail branch unreachable — the last plays of every
     // session waited for the hourly backstop (audit 2026-08-19, T1.3). With `>=`, the
@@ -150,24 +147,24 @@ async function tick(caller: CronCaller): Promise<Response> {
     // case still deliberately withholds the stamp (it made no Spotify call).
     let harvest: { added: number; skipped?: string };
     try {
-      harvest = await syncRecentPlays(spotifyClient(token, false, "cron-sync"));
+      harvest = await syncRecentPlays(spotifyClient(uid, token, false, "cron-sync"), store);
     } catch (e) {
       // Only a SPOTIFY failure stamps: it means a call was actually spent. A store error
       // thrown before the call (the cooldown read) must not burn an hour of harvesting
       // over a 2-minute store blip (wave-3 adversarial review, F2).
-      if (e instanceof SpotifyError) await setHarvestGate({ lastHarvest: now }).catch(() => {});
+      if (e instanceof SpotifyError) await store.setHarvestGate({ lastHarvest: now }).catch(() => {});
       throw e;
     }
     const { added, skipped } = harvest;
-    if (!skipped) await setHarvestGate({ lastHarvest: now });
+    if (!skipped) await store.setHarvestGate({ lastHarvest: now });
     // Attribution for the dominant traffic on this database: ~720 of these a day, and which
     // of the two costs a tick paid depends entirely on whether it landed a play. A skipped
     // tick short-circuits on the cooldown for ~2 rows and is deliberately not ledgered.
-    if (!skipped) void ledgerSyncCall(added > 0 ? "sync_tick_landed" : "sync_tick_steady", added);
+    if (!skipped) void store.ledgerSyncCall(added > 0 ? "sync_tick_landed" : "sync_tick_steady", added);
     // Rate-limited/cooling down: don't pile the heavier library scan onto a throttle.
     if (skipped) return Response.json({ ok: true, added, skipped });
     // Heavier, lower-frequency upkeep — each self-gates so this stays cheap on most ticks.
-    const library = await maybeSyncLibrary(freshToken);
+    const library = await maybeSyncLibrary(store, freshToken);
     return Response.json({ ok: true, added, library });
   } catch (e) {
     // A rate-limit is transient and self-heals — never surface it as a 5xx. An external

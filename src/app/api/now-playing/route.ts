@@ -1,6 +1,7 @@
-import { auth, spotifyAccessToken } from "@/lib/auth";
+import { spotifyAccessTokenFor } from "@/lib/auth";
+import { requireUser } from "@/lib/require-user";
 import { SpotifyError, spotifyClient, spotifyCooldownMs } from "@/lib/spotify";
-import { getContextName, recordContexts } from "@/lib/db";
+import { forUser } from "@/lib/db";
 
 // Live "what's playing right now". Returns { playing: null } when nothing is
 // actively playing or there's no active device — never stale/last-played data —
@@ -12,28 +13,38 @@ import { getContextName, recordContexts } from "@/lib/db";
 // already makes — no extra endpoint, no extra request — and lets a tab left open across a
 // deploy notice its bundle is stale and reload itself (src/lib/build-skew.ts,
 // docs/GOTCHAS.md "Deployment skew + stale tabs").
-const reply = (playing: unknown) =>
-  Response.json({ playing, build: process.env.NEXT_PUBLIC_BUILD_ID });
+// A signed-in answer names its user (`u`): every (app) page polls this, so it is how a tab
+// rendered for one user learns that the browser's cookie now names another (a sign-in in
+// another tab) instead of showing, caching and relaying that user's player under the first
+// one's names (multi-user PLAN §6.2 layer 6; user-storage.ts namesAnotherUser).
+const reply = (playing: unknown, u?: string) =>
+  Response.json({ playing, build: process.env.NEXT_PUBLIC_BUILD_ID, ...(u ? { u } : {}) });
 
 export async function GET() {
-  const session = await auth();
+  const user = await requireUser();
+  // The identity check could not run: "could not tell" (a non-200 the poll ignores), never
+  // "nothing playing", which would make Home finish the current song.
+  if (user.kind === "unavailable") {
+    return Response.json({ error: "unavailable", retry: true }, { status: 503 });
+  }
   // Short-circuited: this route is public and polled every 6s, so a signed-out caller must
   // cost zero DB reads (it did before the token moved off the session — keep it that way).
-  const accessToken = session && !session.error ? await spotifyAccessToken() : undefined;
+  const accessToken = user.kind === "allowed" ? await spotifyAccessTokenFor(user.gate.uid) : undefined;
   // Deliberately 200 {playing:null}, not 401: the poll runs every 6s, and a just-expired
   // session would otherwise error-spam the console until re-login. Nothing leaks — the
   // signed-out answer is indistinguishable from "nothing playing".
-  if (!accessToken) {
-    return reply(null);
-  }
+  if (user.kind !== "allowed") return reply(null);
+  const uid = user.gate.uid;
+  if (!accessToken) return reply(null, uid);
+  const store = forUser(uid);
   try {
-    const sp = spotifyClient(accessToken, false, "now-playing");
+    const sp = spotifyClient(uid, accessToken, false, "now-playing");
     const playing = await sp.currentlyPlaying();
-    if (!playing) return reply(null);
+    if (!playing) return reply(null, uid);
 
     let context: { name: string; type: string } | null = null;
     if (playing.context) {
-      const cached = await getContextName(playing.context.uri);
+      const cached = await store.getContextName(playing.context.uri);
       if (cached) {
         context = { name: cached, type: playing.context.type };
       } else if (cached === undefined) {
@@ -42,14 +53,14 @@ export async function GET() {
         // 6s poll is what the negative cache exists to prevent.
         const resolved = await sp.contextName(playing.context.uri);
         if (resolved) {
-          await recordContexts([{ uri: playing.context.uri, name: resolved.name, type: resolved.type }]);
+          await store.recordContexts([{ uri: playing.context.uri, name: resolved.name, type: resolved.type }]);
           context = { name: resolved.name, type: resolved.type };
         } else {
           // Cache the FAILURE too. Only the sync path wrote negative rows, so a 403'd
           // context playing right now (a friend's playlist, dev mode) cost ~2 forbidden
           // Spotify calls per 6s poll until a sync happened to carry the URI — ~1,200
           // calls/hour into a dead endpoint (audit 2026-08-19, T2.14).
-          await recordContexts([
+          await store.recordContexts([
             { uri: playing.context.uri, name: null, type: playing.context.type },
           ]);
         }
@@ -58,7 +69,7 @@ export async function GET() {
 
     // Spread first, then overwrite the raw {type,uri} context with the resolved
     // {name,type} one (later keys win).
-    return reply({ ...playing, context });
+    return reply({ ...playing, context }, uid);
   } catch (e) {
     // Rate-limited: say so, with how long to wait, so the poller backs off for that long
     // instead of asking again on its steady cadence (src/lib/now-playing-poll.ts).

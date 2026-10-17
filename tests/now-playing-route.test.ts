@@ -6,13 +6,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({
   signedIn: true,
+  unavailable: false,
   currentlyPlaying: (async () => null) as () => Promise<unknown>,
   getContextName: (async () => "Mix") as (uri: string) => Promise<string | null | undefined>,
 }));
 
 vi.mock("@/lib/auth", () => ({
-  auth: async () => (state.signedIn ? { user: {} } : null),
-  spotifyAccessToken: async () => "tok",
+  auth: async () =>
+    state.unavailable
+      ? { user: {}, idUnavailable: true }
+      : state.signedIn
+        ? { user: {}, uid: "aaaaaaaaaaaa", admin: true }
+        : null,
+  spotifyAccessTokenFor: async () => "tok",
 }));
 const spotifyStub = vi.hoisted(() => ({
   SpotifyError: class SpotifyError extends Error {
@@ -35,8 +41,10 @@ vi.mock("@/lib/spotify", () => ({
   }),
 }));
 vi.mock("@/lib/db", () => ({
-  getContextName: (uri: string) => state.getContextName(uri),
-  recordContexts: async () => {},
+  forUser: () => ({
+    getContextName: (uri: string) => state.getContextName(uri),
+    recordContexts: async () => {},
+  }),
 }));
 
 const { GET } = await import("@/app/api/now-playing/route");
@@ -51,6 +59,7 @@ const PLAYING = {
 
 beforeEach(() => {
   state.signedIn = true;
+  state.unavailable = false;
   state.currentlyPlaying = async () => null;
   state.getContextName = async () => "Mix";
 });
@@ -67,6 +76,12 @@ describe("/api/now-playing", () => {
     const res = await GET();
     expect(res.status).toBe(200);
     expect((await res.json()).playing).toBeNull();
+  });
+
+  it("an identity check that could not run is a 503 (could not tell), never playing:null", async () => {
+    state.unavailable = true;
+    const res = await GET();
+    expect(res.status).toBe(503);
   });
 
   it("answers the track with its resolved context", async () => {
@@ -98,6 +113,17 @@ describe("/api/now-playing", () => {
     spotifyStub.cooldownMs = 0;
     const res2 = await GET();
     expect(res2.headers.get("Retry-After")).toBe("1"); // no cooldown recorded: the 1 s floor
+  });
+
+  // A tab rendered for user A keeps polling after a sign-in in another tab hands the browser's
+  // cookie to user B: the reply must say whose it is, or that tab shows, caches and relays B's
+  // player under A's names (multi-user PLAN §6.2 layer 6, lane 13's review).
+  it("names its user (`u`) on every signed-in answer, and no one on a signed-out one", async () => {
+    expect((await (await GET()).json()).u).toBe("aaaaaaaaaaaa");
+    state.currentlyPlaying = async () => PLAYING;
+    expect((await (await GET()).json()).u).toBe("aaaaaaaaaaaa");
+    state.signedIn = false;
+    expect((await (await GET()).json()).u).toBeUndefined();
   });
 
   it("answers non-200 when the store blips while resolving the context name", async () => {

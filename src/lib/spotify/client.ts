@@ -3,6 +3,7 @@
 
 import type { Paging } from "./types";
 import { getApiLogSummary, logSpotifyRequest, setSpotifyCooldownUntil } from "@/lib/db";
+import { reportIsolation } from "@/lib/isolation";
 
 const BASE = "https://api.spotify.com/v1";
 const MAX_RETRIES = 3;
@@ -56,7 +57,19 @@ export function spotifyCooldownMs(): number {
 // A bearer token, or a getter that returns a currently-valid one. Interactive callers
 // pass the request's token (fresh for the request's lifetime); long-running background
 // work passes a getter so a token that expires mid-run is refreshed, not used dead.
-export type TokenSource = string | (() => Promise<string>);
+// The app's tokens name their owner (multi-user PLAN §5.2): a client made for a user
+// refuses a token that names anyone else, so a refactor that shares a token, a promise or a
+// cache across users fails on its first mixed call instead of acting on another account.
+export type OwnedToken = { uid: string; accessToken: string };
+export type TokenSource = string | OwnedToken | (() => Promise<string | OwnedToken>);
+
+/** A token handed to a client made for `owner` that names someone else, or no one. */
+export class TokenOwnerError extends Error {
+  constructor() {
+    super("Spotify token does not belong to this user");
+    this.name = "TokenOwnerError";
+  }
+}
 
 export class HttpClient {
   // `patient` = ride out rate limits (background bulk work). Default false so
@@ -67,10 +80,19 @@ export class HttpClient {
     /** WHO is calling and why — written into api_log per request, so a 429 can be
      *  attributed to its traffic source, not just its endpoint (Rem, 2026-08-16). */
     private source: string = "untagged",
+    /** The user this client acts for: every token must name them, and every api_log row
+     *  carries them. Null only for a client built without a user (the unit tests). */
+    private owner: string | null = null,
   ) {}
 
   private async bearer(): Promise<string> {
-    return typeof this.token === "string" ? this.token : await this.token();
+    const t = typeof this.token === "function" ? await this.token() : this.token;
+    if (this.owner === null) return typeof t === "string" ? t : t.accessToken;
+    if (typeof t === "string" || t.uid !== this.owner) {
+      await reportIsolation("token-owner", this.owner);
+      throw new TokenOwnerError();
+    }
+    return t.accessToken;
   }
 
   private async raw(
@@ -101,12 +123,14 @@ export class HttpClient {
         }
         await sleep(Math.min(cooldown, capMs) + 250);
       }
+      // Outside the try: a token that names someone else is not a network error to retry.
+      const bearer = await this.bearer();
       let res: Response;
       try {
         res = await fetch(url, {
           method,
           headers: {
-            Authorization: `Bearer ${await this.bearer()}`,
+            Authorization: `Bearer ${bearer}`,
             ...(body ? { "Content-Type": "application/json" } : {}),
           },
           body: body ? JSON.stringify(body) : undefined,
@@ -116,7 +140,7 @@ export class HttpClient {
         });
       } catch (e) {
         // Log the failed attempt too (network error / timeout), then retry or surface it.
-        void logSpotifyRequest({ method, path, status: 0, retryAfter: null, source: this.source }).catch(() => {});
+        void logSpotifyRequest({ method, path, status: 0, retryAfter: null, source: this.source, uid: this.owner }).catch(() => {});
         // Never blind-retry a POST: a timeout doesn't mean Spotify didn't apply it, and
         // POSTs here aren't idempotent (add items again = duplicate tracks; create
         // playlist again = a second playlist; next/previous again = double skip).
@@ -145,7 +169,7 @@ export class HttpClient {
       // Negative values are junk, not an answer — they used to zero out both the sleep
       // floor and the shared cooldown (wave-3 independent suite, G).
       const rawRetryAfter = Number.isFinite(retryParsed) && retryParsed >= 0 ? retryParsed : null;
-      void logSpotifyRequest({ method, path, status: res.status, retryAfter: rawRetryAfter, source: this.source }).catch(
+      void logSpotifyRequest({ method, path, status: res.status, retryAfter: rawRetryAfter, source: this.source, uid: this.owner }).catch(
         () => {},
       );
 

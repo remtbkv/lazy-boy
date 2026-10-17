@@ -1,7 +1,9 @@
 // benchStore (docs/STORE_MIGRATION.md §6.5) against the simulated file store: the probe counts,
 // the summary fields, and no token or URL credentials in what it returns.
 import { describe, expect, it } from "vitest";
-import { benchStore } from "@/lib/db";
+import { ownerStore } from "./owner-store";
+
+const benchStore = (which: "core" | "telemetry") => ownerStore().benchStore(which);
 
 describe("benchStore", () => {
   it("core: SELECT 1 x30, a one-key meta read x10, the history payload x2, all succeeding", async () => {

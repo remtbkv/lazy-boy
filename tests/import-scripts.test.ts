@@ -9,15 +9,18 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createClient } from "@libsql/client";
 import { beforeAll, describe, expect, it } from "vitest";
-import { recordPlays, rebuildHomePayload, type PlayRecord } from "@/lib/db";
+import { type PlayRecord } from "@/lib/db";
+import { ownerStore, ownerUid } from "./owner-store";
 import { insertedRuns } from "../scripts/import-tail.mjs";
+
+const owner = ownerStore();
 
 const DB = process.env.TURSO_DATABASE_URL!;
 const scratch = mkdtempSync(path.join(tmpdir(), "lazyboy-import-"));
 const root = path.resolve(__dirname, "..");
 
 function run(script: string, ...args: string[]) {
-  const r = spawnSync(process.execPath, [path.join(root, "scripts", script), ...args, "--db", DB], {
+  const r = spawnSync(process.execPath, [path.join(root, "scripts", script), ...args, "--user", ownerUid(), "--db", DB], {
     cwd: root,
     encoding: "utf8",
   });
@@ -115,9 +118,9 @@ describe("backfill-from-backstop (D3)", () => {
       ["e", "12:30"],
       ["f", "13:00"],
     ]) {
-      await recordPlays([play(id, t(hhmm))]);
+      await owner.recordPlays([play(id, t(hhmm))]);
     }
-    await rebuildHomePayload();
+    await owner.rebuildHomePayload();
   });
 
   it("re-opens the neighbours on BOTH sides of EVERY inserted run, and nothing else", async () => {
@@ -172,10 +175,10 @@ describe("import-extended-history (D2)", () => {
   const window = `${D}T10:00:00Z/${D}T12:00:00Z`;
 
   beforeAll(async () => {
-    await recordPlays([play("before", t("09:00:00"))]);
-    await recordPlays([play("inside", t("10:30:00"))]);
-    await recordPlays([play("after", t("12:30:00"))]);
-    await rebuildHomePayload();
+    await owner.recordPlays([play("before", t("09:00:00"))]);
+    await owner.recordPlays([play("inside", t("10:30:00"))]);
+    await owner.recordPlays([play("after", t("12:30:00"))]);
+    await owner.rebuildHomePayload();
   });
 
   it("inserts only qualifying rows inside the gap windows, then is a no-op on re-run", async () => {
