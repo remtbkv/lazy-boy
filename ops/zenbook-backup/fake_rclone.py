@@ -34,10 +34,12 @@ elif cmd == "delete":
     days = int(args[args.index("--min-age") + 1].rstrip("d"))
     if not os.path.isdir(d):
         missing(d)
+    # backup.py's clock (LAZYBOY_BACKUP_NOW), so a night run days ahead ages OneDrive's copies too.
+    now = float(os.environ.get("LAZYBOY_BACKUP_NOW") or time.time())
     for dirpath, _, files in os.walk(d):
         for n in files:
             p = os.path.join(dirpath, n)
-            if time.time() - os.path.getmtime(p) >= days * 86400:
+            if now - os.path.getmtime(p) >= days * 86400:
                 os.remove(p)
 elif cmd == "deletefile":
     p = local(args[1])

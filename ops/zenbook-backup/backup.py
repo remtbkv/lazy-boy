@@ -54,8 +54,16 @@ APP_TABLES = {"users": "uid", "user_tokens": "uid", "sync_state": "uid", "events
 TELEMETRY_PER_USER = ("api_log", "client_metrics")
 
 
+def now():
+    """The time the age prunes, file names and log read: LAZYBOY_BACKUP_NOW (epoch seconds) when set,
+    so the two-user rehearsal can run a night days ahead (tests/rehearsal/); the real clock otherwise.
+    Nothing sets it on the Zenbook, and rclone there keeps its own clock."""
+    v = os.environ.get("LAZYBOY_BACKUP_NOW")
+    return float(v) if v else time.time()
+
+
 def log(msg):
-    line = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + " " + msg
+    line = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now())) + " " + msg
     print(line, flush=True)
     with open(os.path.join(HOME, "backup.log"), "a") as f:
         f.write(line + "\n")
@@ -116,7 +124,7 @@ def prune_friends():
 
 def prune(name, local_dir, remote, keep_days):
     os.makedirs(local_dir, exist_ok=True)
-    cutoff, gone = time.time() - KEEP_LOCAL_DAYS * 86400, 0
+    cutoff, gone = now() - KEEP_LOCAL_DAYS * 86400, 0
     for p in glob.glob(os.path.join(local_dir, "*.db.gz")):
         if os.path.getmtime(p) < cutoff:
             os.remove(p)
@@ -210,7 +218,7 @@ def integrity(raw):
 def sqlite_file(name, src, local_dir, remote, slack, keep=None):
     """Online-backup copy of a live SQLite file. `slack`: rows the live file may gain or lose
     while the copy runs (it keeps taking writes)."""
-    raw = os.path.join(local_dir, "%s-%s.db" % (name, time.strftime("%Y%m%d-%H%M", time.gmtime())))
+    raw = os.path.join(local_dir, "%s-%s.db" % (name, time.strftime("%Y%m%d-%H%M", time.gmtime(now()))))
     s = sqlite3.connect("file:" + src + "?mode=ro", uri=True)
     d = sqlite3.connect(raw)
     with d:
@@ -296,7 +304,7 @@ def turso(db, url, token, local_dir, remote, keep=None, owner=None):
     if not dump.rstrip().endswith("COMMIT;"):
         raise RuntimeError("dump does not end in COMMIT; (%d bytes)" % len(dump))
     after = turso_counts(url, token)
-    raw = os.path.join(local_dir, "%s-%s.db" % (db, time.strftime("%Y%m%d-%H%M", time.gmtime())))
+    raw = os.path.join(local_dir, "%s-%s.db" % (db, time.strftime("%Y%m%d-%H%M", time.gmtime(now()))))
     c = sqlite3.connect(raw)
     c.executescript(dump)
     c.close()

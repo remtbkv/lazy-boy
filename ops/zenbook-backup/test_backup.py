@@ -376,6 +376,26 @@ class BackupTest(unittest.TestCase):
         self.assertEqual(self.run_backup(), 1, self.log)
         self.assertIsNone(self.uploaded("lazyboy-db"))
 
+    # ── the clock: a night days ahead (the rehearsal's daily cycle, tests/rehearsal/) ──────────
+    def test_the_age_prunes_read_the_clock_they_are_given(self):
+        now = time.time()
+        local = os.path.join(self.home, "lazyboy-backup/turso/lazyboy")
+        remote = os.path.join(self.remote, "onedrive-backup/lazyboy-turso/lazyboy")
+        made = {}
+        for where, d, age in (("local", local, 13), ("local", local, 11), ("remote", remote, 59), ("remote", remote, 57)):
+            t = now - age * 86400
+            p = os.path.join(d, "lazyboy-%s.db.gz" % time.strftime("%Y%m%d-%H%M", time.gmtime(t)))
+            os.makedirs(d, exist_ok=True)
+            with gzip.open(p, "wb") as f:
+                f.write(b"old")
+            os.utime(p, (t, t))
+            made[(where, age)] = p
+        # Two days on, the 13-day local copy passes the 14-day limit and the 59-day remote one the
+        # 60-day limit; the 11- and 57-day ones do not.
+        self.assertEqual(self.run_backup(LAZYBOY_BACKUP_NOW=str(now + 2 * 86400)), 0, self.log)
+        self.assertEqual({k: os.path.exists(p) for k, p in made.items()},
+                         {("local", 13): False, ("local", 11): True, ("remote", 59): False, ("remote", 57): True})
+
     def test_the_check_fails_when_a_friends_copy_cannot_be_deleted(self):
         self.assertEqual(self.run_backup(FAKE_RCLONE_FAIL="purge"), 1, self.log)
         self.assertTrue(os.path.exists(self.old_remote))
