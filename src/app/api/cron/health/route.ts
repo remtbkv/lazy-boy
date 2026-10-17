@@ -1,7 +1,9 @@
 // The hourly health check (docs/multi-user/PLAN.md §7.10): a cron-job.org job with failure
 // e-mail calls this; a 500 is the e-mail. The reply carries reasons and the names of checks
 // not yet measurable, never anything about anyone's listening (cron-job.org keeps bodies).
-import { forUser, getBudgetMode, isolationEventsAfter, readMeter } from "@/lib/db";
+import { forUser, getBudgetMode, isolationEventsAfter, readBudgetDay, readMeter } from "@/lib/db";
+import { worstMode } from "@/lib/budget/budget";
+import { isMode } from "@/lib/budget/modes";
 import { cronCaller } from "@/lib/cron-auth";
 import { DAILY_STALE_MS, healthVerdict } from "@/lib/health";
 import { phase1Owner } from "@/lib/identity";
@@ -49,11 +51,16 @@ export async function GET(req: Request) {
     /* unreadable: unchecked */
   }
 
-  // The budget (lib/budget/): the stored mode, uncached; the meter's last write, any day.
-  const [budgetMode, meter] = await Promise.all([
+  // The budget (lib/budget/): the stored mode, uncached, and the daily record's modes, the worst
+  // of them (the chores write the record before the mode, so a failed mode write leaves only the
+  // record saying economy); the meter's last write, any day.
+  const [storedMode, record, meter] = await Promise.all([
     getBudgetMode(0).catch(() => null),
+    readBudgetDay().catch(() => []),
     readMeter(new Date().toISOString().slice(0, 10)).catch(() => null),
   ]);
+  const modes = [storedMode, ...record.map((r) => r.mode)].filter(isMode);
+  const budgetMode = modes.length ? worstMode(modes) : null;
 
   const v = healthVerdict({
     isolationEvents: events ? events.count : null,

@@ -3,7 +3,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { healthVerdict, DAILY_STALE_MS, METER_QUIET_MS } from "@/lib/health";
 import { GET } from "@/app/api/cron/health/route";
-import { meterFlush, setBudgetMode } from "@/lib/db";
+import { meterFlush, recordBudgetDay, setBudgetMode } from "@/lib/db";
 import { rawClient, resetStore } from "../adversarial/helpers";
 import { reportIsolation } from "@/lib/isolation";
 import { ownerStore, ownerUid } from "../owner-store";
@@ -156,6 +156,30 @@ describe("/api/cron/health", () => {
     const c = await rawClient();
     await c.execute("DELETE FROM meta WHERE key = 'budget_mode'");
     expect((await (await call("Bearer ext-secret")).json()).unchecked).toEqual(["budget"]);
+  });
+
+  it("red while the daily record holds a dimension in economy or freeze, whatever the stored mode says", async () => {
+    // The chores write the record, then the mode; a failed mode write leaves the record alone
+    // saying economy, and /api/cron/daily still stamps daily_at ("the run finished").
+    await healthy();
+    const day = new Date().toISOString().slice(0, 10);
+    const rec = (mode: string) =>
+      recordBudgetDay([
+        { day, dimension: "vercel_cpu_ms", used: 1, projected: 1, limit: 4, mode: "normal", at: Date.now() },
+        { day, dimension: "turso_rows_read", used: 1, projected: 3.2e8, limit: 5e8, mode, at: Date.now() },
+      ]);
+    await rec("economy");
+    const red = await call("Bearer ext-secret");
+    expect(red.status).toBe(500);
+    expect((await red.json()).reasons).toEqual(["budget"]);
+    await rec("normal");
+    expect((await call("Bearer ext-secret")).status).toBe(200);
+    // A record with the stored mode never written is enough to check.
+    const c = await rawClient();
+    await c.execute("DELETE FROM meta WHERE key = 'budget_mode'");
+    const v = await (await call("Bearer ext-secret")).json();
+    expect(v.unchecked).toEqual([]);
+    expect(v.ok).toBe(true);
   });
 
   it("red when the meter has written nothing for six hours, or ever", async () => {

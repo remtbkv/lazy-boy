@@ -10,8 +10,9 @@
 //     stamped yet = unchecked;
 //   - Turso's month-to-date pace, as the daily chores' usage check last measured it; no
 //     verdict in the last 26 hours (unconfigured, or the platform API down) = unchecked;
-//   - the budget (CAPACITY §6, src/lib/budget/): red while the app-wide mode is economy or
-//     freeze, which it is whenever any dimension is; never recorded yet = unchecked;
+//   - the budget (CAPACITY §6, src/lib/budget/): red while the stored app-wide mode or any
+//     dimension in the latest daily record is economy or freeze (the two part when the mode's
+//     write fails after the record's); neither recorded yet = unchecked;
 //   - the CPU meter: red when it has written nothing for six hours, or never (every cron tick
 //     is metered, so a healthy meter writes every few minutes); telemetry down = unchecked.
 // The owner's capture uses capture-health.ts's rule (no token row, or no harvest in two
@@ -29,7 +30,7 @@ export type HealthInputs = {
   dailyAgeMs: number | null;
   /** Turso's month-to-date reads ahead of the month's pace; null = not measurable. */
   quotaAhead: boolean | null;
-  /** The stored app-wide budget mode; null = never recorded or not readable. */
+  /** The worst of the stored app-wide budget mode and the daily record's; null = neither readable. */
   budgetMode: Mode | null;
   /** Since the meter's last write (Infinity = never); null = not measurable. */
   meterAgeMs: number | null;
