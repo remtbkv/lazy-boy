@@ -18,6 +18,7 @@ import { createClient, type Client, type InStatement, type ResultSet } from "@li
 import { APP_SCHEMA, APP_SCHEMA_VERSION, appSchemaBatches, USER_STATUSES, type UserStatus } from "@/lib/app-schema";
 import { quotaDay } from "@/lib/brake";
 import { DELETION_SQL, type ExecResult as DeletionExecResult, type Stmt as DeletionStmt } from "@/lib/deletion";
+import type { AppHealth } from "@/lib/health";
 import { mintUid, newUid, signupsMode, type IdentityRow, type Uid } from "@/lib/identity";
 import { makeStoreFetch, type FetchLike } from "@/lib/store-fetch";
 import { TERMS_VERSION } from "@/lib/terms";
@@ -344,6 +345,50 @@ export async function endSessionsAndCapture(uid: Uid): Promise<void> {
   );
 }
 
+// ── the health check (PLAN.md §7.10, Phase 4a) ──────────────────────────────────────────────
+
+/** The health check's read of the app database: events not yet reported, by code, marked
+ *  reported in the same batch so each e-mails once; the users stuck in a state someone must act on
+ *  (counts, friends only for the reconnect, backoff and removed clocks); and `daily_at`. */
+export async function readHealth(now: number): Promise<{ app: AppHealth; dailyAt: number | null }> {
+  const args = { day: now - 24 * 3_600_000, six: now - 6 * 3_600_000, week: now - 7 * 24 * 3_600_000 };
+  const [ev, , st] = await (await appClient()).batch(
+    [
+      "SELECT code, count(*) AS n FROM events WHERE alarmed = 0 GROUP BY code",
+      "UPDATE events SET alarmed = 1 WHERE alarmed = 0",
+      {
+        sql: `SELECT
+                (SELECT count(*) FROM users WHERE status IN ('revoked', 'deleting') AND status_at < :day) AS stuck,
+                (SELECT count(*) FROM users WHERE is_admin = 0 AND status = 'needs_reconnect' AND status_at < :six) AS reconnect,
+                (SELECT count(*) FROM sync_state s JOIN users u ON u.uid = s.uid
+                   WHERE u.is_admin = 0 AND u.status = 'active' AND s.state = 'backoff'
+                     AND COALESCE(s.last_ok_at, 0) < :six) AS backoff,
+                (SELECT count(*) FROM users WHERE is_admin = 0 AND status = 'removed' AND status_at < :week) AS removed,
+                (SELECT value FROM app_meta WHERE key = 'daily_at') AS daily_at`,
+        args,
+      },
+    ],
+    "write",
+  );
+  const x = st.rows[0];
+  return {
+    app: {
+      events: Object.fromEntries(ev.rows.map((r) => [String(r.code), Number(r.n)])),
+      stuckDeletions: Number(x.stuck),
+      reconnect: Number(x.reconnect),
+      backoff: Number(x.backoff),
+      removed: Number(x.removed),
+    },
+    dailyAt: x.daily_at == null ? null : Number(x.daily_at),
+  };
+}
+
+/** The record of a red verdict the health check answered (time and reasons): what lanes 28 and 29
+ *  read to prove the planted probe's alarm went out. Pruned after 30 days by the daily sweeps. */
+export async function recordHealthRed(now: number, reasons: string[]): Promise<void> {
+  await setAppMeta(`health_red:${now}`, reasons.join(","));
+}
+
 // ── the daily chores Phase 4a adds (PLAN.md §7.11 as RULINGS change it) ─────────────────────
 // No dormant move and no twelve-month deletion (Oct 15 12:26 PM). Cross-user by design: they read
 // uids and times, never data, and each uid they name goes to the deletion job, which refuses the
@@ -485,6 +530,8 @@ const GLOBAL_KEYS = [
   /^budget_mode$/, // the app-wide budget mode the daily chores record (src/lib/budget/, CAPACITY §6)
   /^sentinel:v[0-9]+$/, // one encrypted sentinel per TOKEN_KEYS key (§5.3)
   /^token_copy:[a-z2-7]{12}$/, // the runtime's copy of a plaintext token row ran (§11.4 step 3)
+  /^health_red:[0-9]{13}$/, // each red verdict the health check answered, with its reasons (§7.10)
+  /^deleted_telemetry:[a-z2-7]{12}$/, // the deletion job's telemetry step ran (deletion.ts)
 ];
 function listed(key: string): string {
   if (!GLOBAL_KEYS.some((re) => re.test(key))) throw new Error(`app_meta: ${key} is not a listed key`);
@@ -534,18 +581,6 @@ export async function releaseAppLock(name: string, owner: string): Promise<void>
 /** An event a person must see: the uid and a code, never data. */
 export async function recordAppEvent(code: string, uid: string | null, at = Date.now()): Promise<void> {
   await one({ sql: "INSERT INTO events (at, uid, code) VALUES (:at, :uid, :code)", args: { at, uid, code } });
-}
-
-/** The health check's read (PLAN.md §7.10, cross-user by design, a count): how many events no
- *  check has reported yet, and the newest one's id. */
-export async function unreportedEvents(): Promise<{ count: number; newest: number | null }> {
-  const r = await one("SELECT count(*) AS n, max(id) AS newest FROM events WHERE alarmed = 0");
-  return { count: Number(r.rows[0]?.n ?? 0), newest: num(r.rows[0]?.newest) };
-}
-
-/** Mark the events a check reported, up to the newest it counted, so each e-mails once. */
-export async function markEventsAlarmed(throughId: number): Promise<void> {
-  await one({ sql: "UPDATE events SET alarmed = 1 WHERE alarmed = 0 AND id <= :id", args: { id: throughId } });
 }
 
 // ── the sync queue (Phase 3, PLAN.md §7.2, §7.5-7.8) ──────────────────────────────────────

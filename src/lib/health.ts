@@ -33,13 +33,50 @@ export type HealthInputs = {
   budgetMode: Mode | null;
   /** Since the meter's last write (Infinity = never); null = not measurable. */
   meterAgeMs: number | null;
+  /** Phase 4a's conditions, from the app database (app-db.ts readHealth); absent before it. */
+  app?: AppHealth;
 };
 
-export type HealthReason = "isolation" | "owner-capture" | "daily" | "quota-pace" | "budget" | "meter";
+/** What the app database says (PLAN.md §7.10, Phase 4a): events not yet reported, by code, and
+ *  users stuck in a state someone must act on. Counts only: nothing about anyone's listening. */
+export type AppHealth = {
+  events: Record<string, number>;
+  /** `revoked` or `deleting` for over a day: a deletion that is not finishing (§12.3). */
+  stuckDeletions: number;
+  /** A friend `needs_reconnect` for over six hours. */
+  reconnect: number;
+  /** A friend in `backoff` with no success for over six hours. */
+  backoff: number;
+  /** A friend `removed` from the allowlist for over seven days: Rem's `user.mjs --remove`. */
+  removed: number;
+};
+
+export type HealthReason =
+  | "isolation"
+  | "grant"
+  | "event"
+  | "owner-capture"
+  | "daily"
+  | "quota-pace"
+  | "budget"
+  | "meter"
+  | "deletion"
+  | "reconnect"
+  | "backoff"
+  | "removed";
 export type HealthVerdict = { ok: boolean; reasons: HealthReason[]; unchecked: string[] };
 
 export const DAILY_STALE_MS = 26 * 3_600_000;
 export const METER_QUIET_MS = 6 * 3_600_000;
+
+// The event codes that mean one user's data, token or database met another's (§6.5).
+export const ISOLATION_CODES = ["owner-mismatch", "cache-stamp", "token-owner", "decrypt"];
+const GRANT_CODES = ["invalid-grant", "grant-wide", "revoked"];
+
+/** How many of the unreported events are isolation events (the input Phase 1 could not measure). */
+export function isolationCount(app: AppHealth): number {
+  return ISOLATION_CODES.reduce((n, c) => n + (app.events[c] ?? 0), 0);
+}
 
 export function healthVerdict(i: HealthInputs): HealthVerdict {
   const reasons: HealthReason[] = [];
@@ -56,5 +93,14 @@ export function healthVerdict(i: HealthInputs): HealthVerdict {
   else if (i.budgetMode !== "normal") reasons.push("budget");
   if (i.meterAgeMs === null) unchecked.push("meter");
   else if (i.meterAgeMs > METER_QUIET_MS) reasons.push("meter");
+  if (i.app) {
+    const codes = Object.keys(i.app.events).filter((c) => i.app!.events[c] > 0);
+    if (codes.some((c) => GRANT_CODES.includes(c))) reasons.push("grant");
+    if (codes.some((c) => !GRANT_CODES.includes(c) && !ISOLATION_CODES.includes(c))) reasons.push("event");
+    if (i.app.stuckDeletions > 0) reasons.push("deletion");
+    if (i.app.reconnect > 0) reasons.push("reconnect");
+    if (i.app.backoff > 0) reasons.push("backoff");
+    if (i.app.removed > 0) reasons.push("removed");
+  }
   return { ok: reasons.length === 0, reasons, unchecked };
 }

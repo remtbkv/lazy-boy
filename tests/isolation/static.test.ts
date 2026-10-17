@@ -201,7 +201,6 @@ describe("S3: app-db.ts's exports match the reviewed snapshot", () => {
     "findUserByAccountId (function)",
     "getAppMeta (function)",
     "insertTokensIfAbsent (function)",
-    "markEventsAlarmed (function)",
     "moveStatus (function)",
     "readIdentityRow (function)",
     "readTokenRow (function)",
@@ -210,7 +209,6 @@ describe("S3: app-db.ts's exports match the reviewed snapshot", () => {
     "releaseAppLock (function)",
     "setAppMeta (function)",
     "setAppMetaIfAbsent (function)",
-    "unreportedEvents (function)",
     "updateTokensIfUnchanged (function)",
     "writeSignInTokens (function)",
     // Phase 3, the sync queue. Cross-user by design: readOwnerAlarm, claimDueUsers (the claim),
@@ -260,6 +258,9 @@ describe("S3: app-db.ts's exports match the reviewed snapshot", () => {
     "DailyCandidates (type)",
     "dailyCandidates (function)",
     "dailySweeps (function)",
+    // The health check (§7.10): counts by code and state, and its red-verdict record (health-4a.test.ts).
+    "readHealth (function)",
+    "recordHealthRed (function)",
   ];
 
   it("lists every export", () => {
