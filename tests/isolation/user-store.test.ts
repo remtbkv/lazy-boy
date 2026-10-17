@@ -40,7 +40,6 @@ const FIXTURES: Record<string, Fixture> = {
   getContextName: { kind: "read", call: (s) => s.getContextName("spotify:playlist:pl-1"), why: "A's name, B's negative cache" },
   getContextsFullCheckAt: { kind: "read", call: (s) => s.getContextsFullCheckAt() },
   getDailyStats: { kind: "read", call: (s) => s.getDailyStats(0, 30) },
-  getHarvestGate: { kind: "read", call: (s) => s.getHarvestGate() },
   getHealthMarks: { kind: "read", call: (s) => s.getHealthMarks() },
   getHistoryIndex: { kind: "marker", call: async (s) => s.getHistoryIndex(await s.getHistoryIndexVersion()) },
   getHistoryIndexVersion: { kind: "read", call: (s) => s.getHistoryIndexVersion() },
@@ -48,7 +47,6 @@ const FIXTURES: Record<string, Fixture> = {
   getLastSync: { kind: "read", call: (s) => s.getLastSync() },
   getLibraryIndex: { kind: "marker", call: async (s) => s.getLibraryIndex(await s.getLibraryIndexVersion()) },
   getLibraryIndexVersion: { kind: "read", call: (s) => s.getLibraryIndexVersion() },
-  getLibraryScanAttemptAt: { kind: "read", call: (s) => s.getLibraryScanAttemptAt() },
   getLibrarySyncedAt: { kind: "read", call: (s) => s.getLibrarySyncedAt() },
   getLibraryTracks: { kind: "marker", call: (s) => s.getLibraryTracks() },
   getLikedSignals: { kind: "read", call: (s) => s.getLikedSignals() },
@@ -73,6 +71,7 @@ const FIXTURES: Record<string, Fixture> = {
     why: "throttled: the seed's own recompute is under 10 minutes old",
   },
   playedTracksInContext: { kind: "marker", call: (s) => s.playedTracksInContext("spotify:playlist:pl-1") },
+  readProbe: { kind: "read", call: (s) => s.readProbe() },
   rebuildHomePayload: { kind: "write", call: (s) => s.rebuildHomePayload() },
   recomputeAllTimeStats: { kind: "write", call: (s) => s.recomputeAllTimeStats() },
   recomputeUniqueSongCount: { kind: "read", call: (s) => s.recomputeUniqueSongCount(), why: "rewrites the value the seed wrote" },
@@ -82,9 +81,8 @@ const FIXTURES: Record<string, Fixture> = {
   removeCachedPlaylistTrack: { kind: "write", call: (s) => s.removeCachedPlaylistTrack("pl-1", "spotify:track:t1") },
   searchHistory: { kind: "marker", call: (s) => s.searchHistory("") },
   setContextsFullCheckAt: { kind: "write", call: (s) => s.setContextsFullCheckAt() },
-  setHarvestGate: { kind: "write", call: (s) => s.setHarvestGate({ lastActive: 1, lastHarvest: 2 }) },
-  setHealthMark: { kind: "write", call: (s) => s.setHealthMark("daily_at", "1") },
-  setLibraryScanAttemptAt: { kind: "write", call: (s) => s.setLibraryScanAttemptAt() },
+  setHealthMark: { kind: "write", call: (s) => s.setHealthMark("quota_pace", "1") },
+
   setLibrarySyncedAt: { kind: "write", call: (s) => s.setLibrarySyncedAt() },
   setSpotifyTokens: { kind: "write", call: (s, t) => s.setSpotifyTokens({ accessToken: `${t}-only-at2`, refreshToken: `${t}-only-rt2`, expiresAt: 1 }) },
   setUserTzOffset: { kind: "write", call: (s) => s.setUserTzOffset(-300) },
@@ -94,6 +92,10 @@ const FIXTURES: Record<string, Fixture> = {
   unresolvedContextUris: { kind: "read", call: (s) => s.unresolvedContextUris() },
   unseenContexts: { kind: "read", call: (s) => s.unseenContexts([{ uri: "spotify:playlist:pl-1", type: "playlist" }]) },
   upsertStoredPlaylist: { kind: "write", call: (s, t) => s.upsertStoredPlaylist(playlistOf(t, "pl-3")) },
+  writeProbe: {
+    kind: "write",
+    call: (s) => s.writeProbe({ v: 1, track: "t1", progressMs: 0, at: 1, stoppedAt: null, changes: 1, tail: false, retryAt: null }),
+  },
 };
 
 const BOUND = new Set(["uid", "dbName", "storeEpoch"]);

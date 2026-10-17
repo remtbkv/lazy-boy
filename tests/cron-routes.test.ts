@@ -43,8 +43,9 @@ vi.mock("@/lib/identity-read", () => ({
 vi.mock("@/lib/app-db", () => ({ readTokenRow: async () => null }));
 vi.mock("@/lib/usage-check", () => ({ runUsageCheck: spy.chore("runUsageCheck") }));
 vi.mock("@/lib/budget/daily", () => ({ runBudgetChore: spy.chore("runBudgetChore") }));
-vi.mock("@/lib/auth", () => ({ getValidAccessTokenFor: async () => null, hasStoredTokens: async () => false }));
+vi.mock("@/lib/auth", () => ({ getValidAccessTokenFor: async () => null, tokenForTick: async () => null }));
 
+const { getAppMeta, setAppMeta } = await import("@/lib/app-db");
 const daily = await import("@/app/api/cron/daily/route");
 const bench = await import("@/app/api/cron/store-bench/route");
 const sync = await import("@/app/api/cron/sync/route");
@@ -96,8 +97,10 @@ describe("cron routes", () => {
   });
 
   it("/api/cron/sync has no daily block: the old x-vercel-cron header runs no chore", async () => {
+    // A tick runs the chores only when daily_at is over 26 hours old (PLAN §7.11).
+    await setAppMeta("daily_at", String(Date.now()));
     const res = await sync.GET(req("/api/cron/sync", { ...authed, "x-vercel-cron": "1" }));
-    expect(res.status).toBe(503); // the no-token exit, reached without any chore
+    expect(res.status).toBe(503); // the owner alarm (no admin row here), reached without any chore
     expect(spy.calls).toEqual([]);
   });
 
@@ -108,14 +111,14 @@ describe("cron routes", () => {
     expect(spy.calls).toEqual(["benchStore:core", "benchStore:telemetry"]);
   });
 
-  // The health check reads these (PLAN §7.10): when the chores last finished, and Turso's pace.
+  // The health check and the tick read these (PLAN §7.10-7.11): when the chores last finished
+  // (`app_meta.daily_at`), and Turso's pace.
   it("daily stamps daily_at when its run finishes, and the usage check's pace verdict", async () => {
     spy.usage = { status: 500, body: { ok: false, breached: ["rows_read"] } };
     spy.failing.add("pruneApiLog"); // a failed chore still finishes the run
     const t0 = Date.now();
     await daily.GET(req("/api/cron/daily", authed));
-    const daily_at = spy.marks.find(([k]) => k === "daily_at");
-    expect(Number(daily_at?.[1])).toBeGreaterThanOrEqual(t0);
+    expect(Number(await getAppMeta("daily_at"))).toBeGreaterThanOrEqual(t0);
     const pace = JSON.parse(spy.marks.find(([k]) => k === "quota_pace")?.[1] ?? "null");
     expect(pace).toMatchObject({ ahead: true });
   });
@@ -123,6 +126,7 @@ describe("cron routes", () => {
   it("an unconfigured usage check records no pace verdict", async () => {
     spy.usage = { status: 500, body: { ok: false, error: "unconfigured" } };
     await daily.GET(req("/api/cron/daily", authed));
-    expect(spy.marks.map(([k]) => k)).toEqual(["daily_at"]);
+    expect(spy.marks.map(([k]) => k)).toEqual([]);
+
   });
 });

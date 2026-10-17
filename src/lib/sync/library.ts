@@ -25,9 +25,13 @@ export async function syncLibrary(
   // pass a small value so the burst stays under Spotify's limit and never trips the shared
   // 429 cooldown (which would freeze now-playing/navigation). Interactive callers (clean)
   // leave it 0 for speed.
-  opts: { paceMs?: number } = {},
+  opts: { paceMs?: number; deadline?: number } = {},
 ): Promise<void> {
   const paceMs = opts.paceMs ?? 0;
+  // The cron's rescan stops between playlists at its deadline (multi-user PLAN §7.7): each
+  // playlist is committed with its snapshot, so the next rescan skips what this one finished,
+  // and the completion stamp waits for a run that reaches the end.
+  const late = () => opts.deadline !== undefined && Date.now() >= opts.deadline;
   const [me, playlists] = await Promise.all([sp.me(), sp.myPlaylistsAll()]);
   await store.storePlaylists(
     playlists.map((p) => ({
@@ -53,9 +57,14 @@ export async function syncLibrary(
   // Track whether anything in the library actually changed this run, so the expensive
   // derived-index rebuilds below only fire when needed (not every hourly steady-state sync).
   let changed = false;
+  let cut = false;
   for (const p of owned) {
     const cachedSnapshot = await store.getPlaylistSnapshot(p.id);
     if (!p.snapshot || cachedSnapshot !== p.snapshot) {
+      if (late()) {
+        cut = true;
+        break;
+      }
       const tracks = await sp.playlistTracks(p.id);
       await store.storePlaylistTracks(p.id, tracks, p.snapshot);
       changed = true;
@@ -70,9 +79,12 @@ export async function syncLibrary(
   const sig = await store.getLikedSignals();
   const savedAt = await store.getSavedSyncedAt();
   const stale = !savedAt || Date.now() - Date.parse(savedAt) > LIKED_FULL_MAX_AGE_MS;
-  if (stale || sig.total !== head.total || sig.topAddedAt !== head.topAddedAt) {
-    await store.storeSavedTracks(await sp.savedTracks());
-    changed = true;
+  if (!cut && (stale || sig.total !== head.total || sig.topAddedAt !== head.topAddedAt)) {
+    if (late()) cut = true;
+    else {
+      await store.storeSavedTracks(await sp.savedTracks());
+      changed = true;
+    }
   }
   processed += head.total;
   onProgress?.(processed, total);
@@ -91,5 +103,5 @@ export async function syncLibrary(
     await store.maybeRecomputeAllTimeStats();
   }
 
-  await store.setLibrarySyncedAt();
+  if (!cut) await store.setLibrarySyncedAt();
 }

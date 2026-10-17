@@ -1,5 +1,5 @@
-// Phase 3's probe and harvest policy (docs/multi-user/PLAN.md §7.2-7.4), pure, next to the
-// single-user gate it replaces (harvest-gate.ts). Known answers in tests/harvest-policy.test.ts.
+// Phase 3's probe and harvest policy (docs/multi-user/PLAN.md §7.2-7.4), pure, in place of the
+// single-user harvest gate. Known answers in tests/harvest-policy.test.ts.
 //
 // The probe is `/me/player` alone: it reports the active device's track, and 204 only when no
 // device is active (GOTCHAS "Player simulation"). What it last saw lives in the user's own

@@ -446,6 +446,9 @@ export async function stampTick(now: number, windowMs: number): Promise<boolean>
 export type ClaimedUser = {
   uid: Uid;
   dbName: string;
+  /** Their Spotify id, refreshed at sign-in: the rescan's owned-playlist filter, so it makes no
+   *  `/me` call (§7.7). */
+  spotifyId: string;
   isAdmin: boolean;
   blob: string | null;
   expiresAt: number | null;
@@ -479,11 +482,12 @@ export type Claim = {
 };
 
 const ACTIVE_LEASABLE = `u.status = 'active' AND (:signups = 'invite' OR u.is_admin = 1)`;
-const CLAIMED_COLS = `s.uid, u.db_name, u.is_admin, t.blob, t.expires_at, s.state, s.next_probe_at, s.next_rescan_at,
+const CLAIMED_COLS = `s.uid, u.db_name, u.spotify_id, u.is_admin, t.blob, t.expires_at, s.state, s.next_probe_at, s.next_rescan_at,
                       s.failures, s.last_error, s.last_harvest_at, s.quota_day, s.rp_calls`;
 const toClaimed = (r: Record<string, unknown>): ClaimedUser => ({
   uid: mintUid(String(r.uid)),
   dbName: String(r.db_name),
+  spotifyId: String(r.spotify_id),
   isAdmin: Number(r.is_admin) === 1,
   blob: r.blob == null ? null : String(r.blob),
   expiresAt: numOrNull(r.expires_at),

@@ -28,7 +28,15 @@ export async function syncRecentPlays(
   if (Date.now() < (await getSpotifyCooldownUntil())) {
     return { added: 0, skipped: "cooldown" };
   }
-  const recent = await sp.recentlyPlayed(50);
+  return { added: await recordRecentPlays(sp, store, await sp.recentlyPlayed(50)) };
+}
+
+type RecentPlay = Awaited<ReturnType<Spotify["recentlyPlayed"]>>[number];
+
+/** One harvest's plays into the user's store, after its Spotify call: the plays (natural keys,
+ *  safe to repeat), their context names resolved with the user's own client, the Home payload.
+ *  The cron step's recordHarvest (multi-user PLAN §7.2 step 3, sync/step-store.ts). */
+export async function recordRecentPlays(sp: Spotify, store: UserStore, recent: RecentPlay[]): Promise<number> {
   const rows: PlayRecord[] = recent.map((r) => ({
     trackId: r.track.id,
     name: r.track.title,
@@ -102,5 +110,5 @@ export async function syncRecentPlays(
     console.error("[home-payload] rebuild after sync failed", e);
   }
 
-  return { added };
+  return added;
 }

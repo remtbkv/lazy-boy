@@ -38,6 +38,7 @@ import {
   type AllTimeStats,
 } from "@/lib/skip-rule";
 import { captureHealth, type CaptureHealth } from "@/lib/capture-health";
+import type { ProbeState } from "@/lib/harvest-policy";
 import { makeStoreFetch } from "@/lib/store-fetch";
 import { HISTORY_INDEX_SHAPE, LIBRARY_INDEX_SHAPE } from "@/lib/search-shape";
 import { ALLTIME_GATE_MS, isMode, type Mode } from "@/lib/budget/modes";
@@ -2211,14 +2212,14 @@ async function getCaptureHealth(u: UserDb): Promise<CaptureHealth> {
   return captureHealth(Date.now(), lastSync, tokens !== null);
 }
 
-// The hourly health check's own marks (multi-user PLAN §7.10), in the admin's database until
-// they move to app_meta: when the daily chores last finished (`daily_at`, epoch ms) and the
-// last Turso pace verdict they recorded (`quota_pace`, {at, ahead}). Which isolation events a
-// check has reported is the app database's `events.alarmed`. Meta only: no marker bump.
-export type HealthMark = "daily_at" | "quota_pace";
+// The hourly health check's own mark (multi-user PLAN §7.10), in the admin's database: the
+// last Turso pace verdict the daily chores recorded (`quota_pace`, {at, ahead}). Meta only: no
+// marker bump. Which isolation events a check has reported is the app database's
+// `events.alarmed` (Phase 2); when the chores last finished is `app_meta.daily_at` (Phase 3),
+// which a cron tick reads too.
+export type HealthMark = "quota_pace";
 async function getHealthMarks(u: UserDb): Promise<Record<HealthMark, string | null>> {
-  const [daily, pace] = await Promise.all([getMeta(u, "daily_at"), getMeta(u, "quota_pace")]);
-  return { daily_at: daily, quota_pace: pace };
+  return { quota_pace: await getMeta(u, "quota_pace") };
 }
 async function setHealthMark(u: UserDb, key: HealthMark, value: string): Promise<void> {
   await setMeta(u, key, value);
@@ -2850,38 +2851,29 @@ async function setUserTzOffset(u: UserDb, offsetMin: number): Promise<void> {
   await setMeta(u, "user_tz_offset", String(Math.round(offsetMin)));
 }
 
-/** When a library scan was last STARTED (the completion stamp above only lands on success —
- *  gating on it alone retried a failing scan every cron tick). Epoch ms. */
-async function getLibraryScanAttemptAt(u: UserDb): Promise<number | null> {
-  const v = await getMeta(u, "library_scan_attempt_at");
-  return v ? Number(v) || null : null;
+// What the cron's /me/player probe last saw (multi-user PLAN §7.3, harvest-policy.ts), written
+// only when the track or the play state changes, so a probe that changes nothing writes nothing.
+// It replaces the single-user harvest gate's two stamps (`player_last_active`,
+// `rp_last_harvest`), which nothing reads from Phase 3. Unreadable = none.
+async function readProbe(u: UserDb): Promise<ProbeState | null> {
+  const v = await getMeta(u, "probe");
+  if (!v) return null;
+  try {
+    const p = JSON.parse(v) as ProbeState;
+    return p?.v === 1 ? p : null;
+  } catch {
+    return null;
+  }
 }
-async function setLibraryScanAttemptAt(u: UserDb): Promise<void> {
-  await setMeta(u, "library_scan_attempt_at", String(Date.now()));
+async function writeProbe(u: UserDb, p: ProbeState): Promise<void> {
+  await setMeta(u, "probe", JSON.stringify(p));
 }
 
 // Spotify rate-limit backoff, persisted so it survives across serverless invocations
 // (the HTTP client's in-memory cooldown is wiped between each cron/API invocation, so
 // without this every scheduled tick would re-poke a banned endpoint). Stored as epoch ms.
-// ── The recently-played harvest gate ────────────────────────────────────────────────
-// Two timestamps that let the cron tick SKIP the recently-played call when nothing has
-// played since the last harvest (Rem, 2026-08-17: two multi-hour QUOTA_EXCEEDED penalties
-// on that endpoint in two days — Spotify has this app on a tight quota, so the dominant
-// call must stop running around the clock). currently-playing sits in its own quota
-// bucket and is what the tick checks instead.
-async function getHarvestGate(u: UserDb): Promise<{ lastActive: number; lastHarvest: number }> {
-  const [a, h] = await Promise.all([getMeta(u, "player_last_active"), getMeta(u, "rp_last_harvest")]);
-  return { lastActive: Number(a) || 0, lastHarvest: Number(h) || 0 };
-}
-async function setHarvestGate(u: UserDb, v: {
-  lastActive?: number;
-  lastHarvest?: number;
-}): Promise<void> {
-  if (v.lastActive !== undefined) await setMeta(u, "player_last_active", String(v.lastActive));
-  if (v.lastHarvest !== undefined) await setMeta(u, "rp_last_harvest", String(v.lastHarvest));
-}
-
 // App-wide by meaning: Spotify's rate limit is per app, so one user's 429 holds everyone off
+
 // (multi-user PLAN §4.3). Phase 1 has no app database, so the row stays where it always was,
 // in the admin's database; Phase 2 moves it to `app_meta` (`cooldown:<bucket>`) and these two
 // keep their signatures.
@@ -3915,14 +3907,12 @@ const USER_FNS = {
   getContextName,
   getContextsFullCheckAt,
   getDailyStats,
-  getHarvestGate,
   getHistoryIndex,
   getHistoryIndexVersion,
   getHomePayload,
   getLastSync,
   getLibraryIndex,
   getLibraryIndexVersion,
-  getLibraryScanAttemptAt,
   getLibrarySyncedAt,
   getLibraryTracks,
   getLikedSignals,
@@ -3943,6 +3933,7 @@ const USER_FNS = {
   ledgerSyncCall,
   maybeRecomputeAllTimeStats,
   playedTracksInContext,
+  readProbe,
   rebuildHomePayload,
   recomputeAllTimeStats,
   recomputeUniqueSongCount,
@@ -3953,8 +3944,6 @@ const USER_FNS = {
   searchHistory,
   setContextsFullCheckAt,
   setHealthMark,
-  setHarvestGate,
-  setLibraryScanAttemptAt,
   setLibrarySyncedAt,
   setSpotifyTokens,
   setUserTzOffset,
@@ -3964,6 +3953,7 @@ const USER_FNS = {
   unresolvedContextUris,
   unseenContexts,
   upsertStoredPlaylist,
+  writeProbe,
 };
 
 type Bound<F> = F extends (u: UserDb, ...args: infer A) => infer R ? (...args: A) => R : never;

@@ -1,6 +1,6 @@
 // Capture health (burn review 2026-10-03, M1): every capture failure that night had been
 // silent for weeks. Known answers for the rule, the store read, and the cron's no-token reply.
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { captureHealth, captureHealthMessage, CAPTURE_STALE_MS } from "@/lib/capture-health";
 
 const NOW = Date.parse("2026-10-14T18:00:00Z");
@@ -94,49 +94,6 @@ describe("getCaptureHealth (real store)", () => {
   });
 });
 
-// next-auth can't load under vitest (next/server); the route only needs the token getter, which
-// for a store with no tokens returns null — the case under test. Tokens present + null is the
-// transient refresh failure, which must stay a 200. The owner alarm's question is the row of
-// record (no admin copy is pending in these cases).
-vi.mock("@/lib/auth", () => ({
-  getValidAccessTokenFor: async () => null,
-  hasStoredTokens: async (uid: string) => (await (await import("@/lib/app-db")).readTokenRow(uid)) !== null,
-}));
+// The cron's two no-token answers (signed out: 503 to the Zenbook; a transient refresh failure:
+// 200) moved with Phase 3's tick to tests/cron-pinger.test.ts, which runs the real route.
 
-describe("cron with no token", () => {
-  const call = async () => {
-    process.env.CRON_SECRET = "s3cret";
-    const { GET } = await import("@/app/api/cron/sync/route");
-    return GET(new Request("http://x/api/cron/sync", { headers: { authorization: "Bearer s3cret" } }));
-  };
-  it("signed out (no stored tokens) → 503 so the pinger's unit fails visibly", async () => {
-    const { ownerStore, seedOwnerApp } = await import("./owner-store");
-    await seedOwnerApp();
-    // A plaintext row left from the rollback week does not count as signed in (PLAN §11.4).
-    await ownerStore().setSpotifyTokens({ accessToken: "a", refreshToken: "r", expiresAt: 0 });
-    const res = await call();
-    expect(res.status).toBe(503);
-    expect(await res.json()).toEqual({ ok: false, error: "no token" });
-    await ownerStore().clearSpotifyTokens();
-  });
-  it("tokens stored but no access token (transient refresh failure) → still 200", async () => {
-    const { seedOwnerApp } = await import("./owner-store");
-    await seedOwnerApp({ accessToken: "a", refreshToken: "r", expiresAt: 0 });
-    const res = await call();
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, skipped: "no token" });
-    await seedOwnerApp();
-  });
-  it("no admin row: no owner, 503", async () => {
-    const { seedOwnerApp } = await import("./owner-store");
-    const { appDatabaseUrl } = await import("@/lib/app-db");
-    const { createClient } = await import("@libsql/client");
-    await seedOwnerApp();
-    const c = createClient({ url: appDatabaseUrl() });
-    await c.execute("DELETE FROM users");
-    c.close();
-    const res = await call();
-    expect(res.status).toBe(503);
-    expect(await res.json()).toEqual({ ok: false, error: "no owner" });
-  });
-});
