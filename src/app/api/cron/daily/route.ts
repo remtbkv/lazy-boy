@@ -4,24 +4,13 @@ import { runDailyChores } from "@/lib/daily-chores";
 import { adminStore } from "@/lib/identity-read";
 import { DAILY_LOCK_MS } from "@/lib/sync/tick";
 
-// The daily chores (QUEUE.md C2; docs/STORE_MIGRATION.md §6.7). Vercel's cron calls this at
-// 09:00 UTC (vercel.json) with `Authorization: Bearer $CRON_SECRET`. They used to sit in
-// /api/cron/sync behind an `x-vercel-cron` header Vercel never sends, so none of them ran from
-// Aug 10 to the store split. 09:00, not sync's 07:00: the Zenbook reboots around 07:00 UTC,
-// and the prunes and the ledger rows go to the telemetry store on it.
-//
-// The chores themselves are src/lib/daily-chores.ts, which a cron tick also runs when this
-// route's stamp is over 26 hours old (multi-user PLAN §7.11). Each chore is isolated: one
-// failing never stops the rest, and the route answers 200 with every chore's outcome. It
-// notifies nobody (R6): the usage check's breach verdict is recorded in the response and the
-// ledger, not raised. The cron-job.org watchdog that rode the old block (ensureCronJobEnabled)
-// is not run here: the job it re-enables holds a stale secret, so re-enabling it only produces
-// cron-job.org's daily "disabled automatically" e-mail (burn lazyboy-review Z2; deleting or
-// re-keying the job is Rem's call). Its code, src/lib/cronjob.ts, left with that block; git
-// history has it.
-//
-// When every chore has run, the route stamps `app_meta.daily_at`, which the tick and the hourly
-// health check read (§7.10, §7.11).
+// The daily chores (src/lib/daily-chores.ts, which the tick also runs when they are overdue).
+// Vercel's cron calls this at 09:00 UTC (vercel.json) with `Authorization: Bearer $CRON_SECRET`.
+// It answers 200 with every chore's outcome and notifies nobody (R6). The cron-job.org watchdog
+// that rode the old block (ensureCronJobEnabled) was not run here: the job it re-enabled held a
+// stale secret (burn lazyboy-review Z2). Phase 4a's chores re-enable the two jobs of today
+// (cronjob-jobs.ts, CRONJOB_JOB_IDS). When every chore has run, the route stamps
+// `app_meta.daily_at`, which the tick and the hourly health check read (§7.10, §7.11).
 //
 // Once a UTC day: a second delivery of the cron, or the cron after a tick already ran the chores
 // that day (daily_at gone stale before 09:00), runs nothing; and the run holds the tick's

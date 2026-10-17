@@ -50,6 +50,13 @@ vi.mock("@/lib/identity-read", () => ({
 }));
 vi.mock("@/lib/usage-check", () => ({ runUsageCheck: spy.chore("runUsageCheck") }));
 vi.mock("@/lib/budget/daily", () => ({ runBudgetChore: spy.chore("runBudgetChore") }));
+// Phase 4a's chores (daily-4a.ts, its own tests) run after the route's.
+vi.mock("@/lib/daily-4a", () => ({
+  runPhase4aChores: async () => {
+    spy.calls.push("phase4a");
+    return { deletions: "retried none; day4 none; invites none", sweeps: "{}", cronJobs: "{}" };
+  },
+}));
 vi.mock("@/lib/auth", () => ({ getValidAccessTokenFor: async () => null, tokenForTick: async () => null }));
 
 const { getAppMeta, setAppMeta } = await import("@/lib/app-db");
@@ -90,6 +97,7 @@ describe("cron routes", () => {
       "checkPlayedAtConvention",
       "runUsageCheck",
       "runBudgetChore",
+      "phase4a",
     ];
     for (const c of chores) expect(spy.calls.filter((x) => x === c), c).toHaveLength(1);
     expect(spy.calls).toHaveLength(chores.length);
@@ -185,6 +193,27 @@ describe("cron routes", () => {
     spy.usage = { status: 500, body: { ok: false, error: "unconfigured" } };
     await daily.GET(req("/api/cron/daily", authed));
     expect(spy.marks.map(([k]) => k)).toEqual([]);
+  });
 
+  // PLAN §7.11: the tick reads the app database's daily_at, so the cron's run must stamp it, or
+  // the next overdue tick runs every chore a second time.
+  it("daily stamps daily_at in the app database, and reports Phase 4a's chores", async () => {
+    const t0 = Date.now();
+    const res = await daily.GET(req("/api/cron/daily", authed));
+    const body = (await res.json()) as { chores: Record<string, string> };
+    expect(Number(await getAppMeta("daily_at"))).toBeGreaterThanOrEqual(t0);
+    expect(body.chores.deletions).toMatch(/^retried/);
+    expect(Object.keys(body.chores)).toEqual(expect.arrayContaining(["sweeps", "cronJobs"]));
+  });
+
+  it("runDailyChores is the same run for the tick (TickDeps.dailyChores): each chore once, no stamp of its own", async () => {
+    const { runDailyChores } = await import("@/lib/daily-chores");
+    const { adminStore } = await import("@/lib/identity-read");
+    const out = await runDailyChores((await adminStore())!);
+    expect(Object.keys(out)).toHaveLength(10);
+    expect(spy.calls.filter((x) => x === "phase4a")).toHaveLength(1);
+    expect(spy.calls.filter((x) => x === "runBudgetChore")).toHaveLength(1);
+    // The caller stamps daily_at (the daily route, or the tick in the app database).
+    expect(spy.marks).toEqual([]);
   });
 });

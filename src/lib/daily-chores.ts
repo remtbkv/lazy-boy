@@ -1,16 +1,24 @@
+// The daily chores (QUEUE.md C2; docs/STORE_MIGRATION.md §6.7; multi-user PLAN.md §7.11), in one
+// place for their two callers: `/api/cron/daily` (Vercel's cron, 09:00 UTC, vercel.json) and the
+// tick (`TickDeps.dailyChores`, under `lock:daily`), which runs them when `app_meta.daily_at` is
+// over 26 hours old, so either pinger covers a missed cron. They used to sit in /api/cron/sync
+// behind an `x-vercel-cron` header Vercel never sends, so none of them ran from Aug 10 to the
+// store split. 09:00, not sync's 07:00: the Zenbook reboots around 07:00 UTC, and the prunes and
+// the ledger rows go to the telemetry store on it.
+//
+// Each chore is isolated: one failing never stops the rest, and every chore's outcome comes back.
+// It notifies nobody (R6): the usage check's breach verdict is recorded in the outcome and the
+// ledger, not raised. The per-user chores run for the admin's store, which the caller passes;
+// Phase 4a's (daily-4a.ts: deletion retries, day 4 of `revoked`, the 14-day invite expiry, the
+// sweeps, re-enabling the cron-job.org jobs; no dormant move and no twelve-month deletion, RULINGS
+// Oct 15) run after them. The caller stamps `app_meta.daily_at` when the run finishes, which the
+// hourly health check (§7.10) and the tick read.
 import "server-only";
+import { runPhase4aChores } from "@/lib/daily-4a";
 import { pruneApiLog, pruneClientMetrics, type UserStore } from "@/lib/db";
 import { runUsageCheck } from "@/lib/usage-check";
 import { runBudgetChore } from "@/lib/budget/daily";
 
-// The daily chores (QUEUE.md C2; docs/STORE_MIGRATION.md §6.7; multi-user PLAN §7.11), run by
-// /api/cron/daily (Vercel's cron, 09:00 UTC) and by a cron tick that finds `app_meta.daily_at`
-// over 26 hours old (sync/tick.ts, under `lock:daily`), so either pinger covers a missed cron.
-// Each chore is isolated: one failing never stops the rest. The caller stamps `daily_at` when
-// the run finishes.
-//
-// They run for the admin (OWNER_UID) alone: Phases 1-3 serve nobody else (SIGNUPS=owner), and
-// the per-user loop over every user's database comes with the first friend (Phase 4a).
 type Chore = [name: string, run: (store: UserStore) => Promise<unknown>];
 
 const CHORES: Chore[] = [
@@ -46,7 +54,7 @@ const CHORES: Chore[] = [
   ["runBudgetChore", () => runBudgetChore()],
 ];
 
-/** Every chore once, each isolated; their outcomes by name. */
+/** Every daily chore once, each isolated, Phase 4a's after the owner's; their outcomes by name. */
 export async function runDailyChores(store: UserStore): Promise<Record<string, string>> {
   const chores: Record<string, string> = {};
   for (const [name, run] of CHORES) {
@@ -59,5 +67,5 @@ export async function runDailyChores(store: UserStore): Promise<Record<string, s
       chores[name] = `failed: ${e instanceof Error ? e.message : String(e)}`;
     }
   }
-  return chores;
+  return { ...chores, ...(await runPhase4aChores()) };
 }

@@ -406,7 +406,7 @@ export const ENTRIES: Entry[] = [
     file: "src/app/api/cron/daily/route.ts",
     kind: "route",
     gate: "if (!cronAuthorized(req)) {",
-    does: "the daily chores: recompute all-time totals, rebuild the Home payload, prune api_log and client_metrics, the played_at check, the usage check",
+    does: "the daily chores (daily-chores.ts): recompute all-time totals, rebuild the Home payload, prune api_log and client_metrics, the played_at check, the usage check; Phase 4a's deletion retries, day 4 of revoked, the invite expiry, the sweeps, the cron-job.org jobs",
     cells: cronCells({
       vercelCron: { target: "allow", rule: "Bearer $CRON_SECRET → the chores (vercel.json, 09:00 UTC)" },
       cronjobOrg: EXT_TRIPWIRE,
