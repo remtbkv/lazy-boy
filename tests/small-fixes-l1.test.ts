@@ -11,6 +11,7 @@ const state = vi.hoisted(() => ({
   sources: [] as string[],
   removeCache: (async () => {}) as () => Promise<void>,
   recorded: 0,
+  pages: [] as string[],
 }));
 
 vi.mock("next/server", () => ({ after: () => {} }));
@@ -42,8 +43,9 @@ vi.mock("@/lib/db", async (orig) => {
       ...real.forUser(uid),
       removeCachedPlaylistTrack: () => state.removeCache(),
     }),
-    recordClientMetrics: async () => {
+    recordClientMetrics: async (rows: { page: string }[]) => {
       state.recorded++;
+      state.pages.push(...rows.map((r) => r.page));
     },
   };
 });
@@ -56,6 +58,7 @@ beforeEach(() => {
   state.sources = [];
   state.removeCache = async () => {};
   state.recorded = 0;
+  state.pages = [];
 });
 
 describe("playerControl api_log source", () => {
@@ -116,6 +119,22 @@ describe("instrumentation onRequestError", () => {
     const { onRequestError } = await import("@/instrumentation");
     await onRequestError(err, req, ctx);
     expect(state.recorded).toBe(1);
+    vi.unstubAllEnvs();
+  });
+
+  it("files the route's template, never the raw path: a row with no uid carries no playlist id (multi-user PLAN §12.2)", async () => {
+    // server-error rows name no user, so /usage lists them for the admin and the backups keep
+    // them; the raw path of a friend's request held their playlist's id.
+    vi.stubEnv("NEXT_RUNTIME", "nodejs");
+    const { onRequestError } = await import("@/instrumentation");
+    const route = { routerKind: "App Router", routePath: "/(app)/playlists/[id]/page", routeType: "render", revalidateReason: undefined } as const;
+    await onRequestError(err, { path: "/playlists/37i9dQZF1DXcBWIGoYBM5M", method: "GET", headers: {} }, route);
+    await onRequestError(err, { path: "/api/playlists/37i9dQZF1DXcBWIGoYBM5M/tracks", method: "POST", headers: {} }, {
+      ...route,
+      routePath: "/api/playlists/[id]/tracks/route",
+      routeType: "route",
+    });
+    expect(state.pages).toEqual(["/(app)/playlists/[id]/page", "/api/playlists/[id]/tracks/route"]);
     vi.unstubAllEnvs();
   });
 });

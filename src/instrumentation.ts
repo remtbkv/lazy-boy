@@ -7,7 +7,10 @@
 // write fails too, and the error still surfaces normally.
 import type { Instrumentation } from "next";
 
-export const onRequestError: Instrumentation.onRequestError = async (err, request) => {
+// The row names no user, so /usage lists it for the admin and the backups keep it: it files the
+// route's template (`/(app)/playlists/[id]/page`), never the raw path, which held the playlist id
+// of whoever made the request (multi-user PLAN §12.2).
+export const onRequestError: Instrumentation.onRequestError = async (err, _request, context) => {
   // db.ts is Node-only (node:fs, process.cwd). Without this guard the Edge build compiles it
   // too and every `next build` prints Edge-runtime errors that bury real warnings.
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
@@ -17,7 +20,7 @@ export const onRequestError: Instrumentation.onRequestError = async (err, reques
     await recordClientMetrics([
       {
         session: "server",
-        page: request.path ?? "",
+        page: context?.routePath ?? "",
         event: "server-error",
         value: null,
         meta: `${e.digest ?? "no-digest"} ${e.message ?? String(err)}`.slice(0, 200),
