@@ -100,7 +100,7 @@ export class Service {
   replaceItems(playlistId: string, uris: string[]) {
     return this.resources.replaceItems(playlistId, uris);
   }
-  savedTracks(opts: { paceMs?: number } = {}) {
+  savedTracks(opts: { paceMs?: number; deadline?: number } = {}) {
     return this.resources.savedTracks(undefined, opts);
   }
   savedTracksPage(cursor: string | null) {
