@@ -285,6 +285,12 @@ export async function createJoinRequest(o: { email: string; name: string; agreed
   return { ok: false, reason: "busy" };
 }
 
+/** /join's "N of 5 spots taken": the places held, counted as the form's insert counts them. */
+export async function seatsHeld(): Promise<number> {
+  const r = await one("SELECT count(*) AS n FROM users WHERE status <> 'deleted'");
+  return Number(r.rows[0].n);
+}
+
 export type RequestState = "pending" | "approved" | "claimed" | null;
 
 /** What /join shows the holder of a request cookie: where their request stands, nothing else. */

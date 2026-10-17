@@ -838,7 +838,7 @@ export const ENTRIES: Entry[] = [
     kind: "page",
     gate: null,
     does: "PLAN §12.6's text and the request form, or, with a request cookie, where that request stands; the closed notice under SIGNUPS=owner",
-    cells: publicCells("public: a friend's first visit; it reads only the request its own signed cookie names"),
+    cells: publicCells("public: a friend's first visit; it reads only the request its own signed cookie names, and the count of places held (seatsHeld, no row)"),
     invoke: async () => (await import("@/app/(auth)/join/page")).default({ searchParams: Promise.resolve({}) }),
   },
   {

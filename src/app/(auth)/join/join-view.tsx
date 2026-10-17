@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { login } from "@/app/(app)/actions";
 import { Button } from "@/components/ui/button";
-import type { RequestState } from "@/lib/app-db";
+import { SEATS, type RequestState } from "@/lib/app-db";
 
 const ERRORS: Record<string, string> = {
   closed: "Lazy Boy isn't taking requests right now.",
@@ -57,7 +57,17 @@ function WhatYouGet() {
   );
 }
 
-export function JoinView({ state, error, closed = false }: { state: RequestState; error?: string; closed?: boolean }) {
+export function JoinView({
+  state,
+  error,
+  closed = false,
+  held = null,
+}: {
+  state: RequestState;
+  error?: string;
+  closed?: boolean;
+  held?: number | null;
+}) {
   const failed = closed && state === null ? ERRORS.closed : error ? (ERRORS[error] ?? null) : null;
   return (
     <main className="flex flex-1 items-center justify-center p-6">
@@ -91,6 +101,11 @@ export function JoinView({ state, error, closed = false }: { state: RequestState
         {state === null && !closed && (
           <>
             <WhatYouGet />
+            {held !== null && (
+              <p className="text-sm font-medium">
+                {held} of {SEATS} spots taken
+              </p>
+            )}
             <form method="post" action="/api/join" className="space-y-3 text-left">
               <label className="block text-sm">
                 The e-mail on your Spotify account

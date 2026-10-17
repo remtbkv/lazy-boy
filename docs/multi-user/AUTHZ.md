@@ -776,8 +776,8 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 - File: `src/app/(auth)/join/page.tsx`. Gate today: none (public).
 - Does, when allowed: PLAN §12.6's text and the request form, or, with a request cookie, where that request stands; the closed notice under SIGNUPS=owner.
-- Calls (from the source): via `requestState`, `signupsMode`, `verifyRequestCookie`.
-- `anon`, `rem`, `friendA`, `friendB`, `revoked`, `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`, `staleSecret`, `staleLogout`, `forged`: A — public: a friend's first visit; it reads only the request its own signed cookie names
+- Calls (from the source): via `requestState`, `seatsHeld`, `signupsMode`, `verifyRequestCookie`.
+- `anon`, `rem`, `friendA`, `friendB`, `revoked`, `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`, `staleSecret`, `staleLogout`, `forged`: A — public: a friend's first visit; it reads only the request its own signed cookie names, and the count of places held (seatsHeld, no row)
 
 ### page /signed-out
 

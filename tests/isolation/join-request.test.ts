@@ -6,7 +6,7 @@
 // creates a database or calls anything outside the app database.
 import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createJoinRequest, JOIN_PENDING_CAP, JOIN_PER_HOUR, SEATS } from "@/lib/app-db";
+import { createJoinRequest, JOIN_PENDING_CAP, JOIN_PER_HOUR, SEATS, seatsHeld } from "@/lib/app-db";
 import { TERMS_VERSION } from "@/lib/terms";
 import { appTokenStore } from "@/lib/token-store-app";
 import { freshAppDb, seedUser } from "./harness";
@@ -98,6 +98,20 @@ describe("the request form's storage", () => {
     expect(await ask("x@example.com")).toEqual({ ok: false, reason: "full" });
     await q("UPDATE users SET status = 'deleted' WHERE uid = 'bbbbbbbbbbbb'");
     expect((await ask("x@example.com")).ok).toBe(true);
+  });
+
+  it("counts the places held for /join's counter by the same rule that closes the form", async () => {
+    expect(await seatsHeld()).toBe(1);
+    expect((await ask("x@example.com")).ok).toBe(true);
+    expect(await seatsHeld()).toBe(1); // a pending request holds no place
+    for (const [i, status] of ["active", "invited", "needs_reconnect", "disabled"].entries()) {
+      await seedUser(db.raw(), { uid: `${"bcde"[i]}`.repeat(12), status });
+    }
+    expect(await seatsHeld()).toBe(SEATS);
+    expect(await ask("y@example.com")).toEqual({ ok: false, reason: "full" });
+    await q("UPDATE users SET status = 'deleted' WHERE uid = 'bbbbbbbbbbbb'");
+    expect(await seatsHeld()).toBe(SEATS - 1);
+    expect((await ask("y@example.com")).ok).toBe(true);
   });
 
   it("never calls out of the app database: no fetch, so no database is created", async () => {

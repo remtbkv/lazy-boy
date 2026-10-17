@@ -11,6 +11,7 @@ import { appTokenStore } from "@/lib/token-store-app";
 import { freshAppDb, seedApprovedInvite, seedUser } from "./harness";
 
 vi.mock("@/app/(app)/actions", () => ({ login: async () => {} }));
+vi.mock("next/headers", async () => (await import("./authz-context")).nextHeadersMock());
 
 const NOW = Date.now();
 let db: ReturnType<typeof freshAppDb>;
@@ -121,6 +122,24 @@ describe("/join", () => {
     expect(await view("approved")).not.toContain("Ask to join");
     expect(await view("claimed")).toContain("Sign in");
     expect(await view(null, "full")).toContain("five people");
+  });
+  it("beside the form, how many of the five places are taken; nothing when the count is unknown or there is no form", async () => {
+    const { JoinView } = await import("@/app/(auth)/join/join-view");
+    const html = (p: Record<string, unknown>) =>
+      renderToStaticMarkup(createElement(JoinView, { state: null, ...p } as never)).replace(/<[^>]+>/g, "");
+    expect(html({ held: 1 })).toContain("1 of 5 spots taken");
+    expect(html({ held: 4 })).toContain("4 of 5 spots taken");
+    expect(html({})).not.toContain("spots taken");
+    expect(html({ held: null })).not.toContain("spots taken");
+    expect(html({ held: 1, closed: true })).not.toContain("spots taken");
+    expect(html({ held: 1, state: "pending" })).not.toContain("spots taken");
+  });
+  it("the page counts the places only while the door is open", async () => {
+    const page = async () => renderToStaticMarkup(await (await import("@/app/(auth)/join/page")).default({ searchParams: Promise.resolve({}) }));
+    await seedUser(db.raw(), { uid: "bbbbbbbbbbbb", status: "active" });
+    expect(await page()).toContain("2 of 5 spots taken");
+    vi.stubEnv("SIGNUPS", "owner");
+    expect(await page()).not.toContain("spots taken");
   });
   it("under SIGNUPS=owner it offers no form, only the closed notice", async () => {
     const { JoinView } = await import("@/app/(auth)/join/join-view");

@@ -53,7 +53,7 @@ const REGISTRY: Record<string, Status> = {
   "src/app/(legal)/privacy/page.tsx": { exempt: "/privacy: static text" },
   "src/app/(legal)/terms/page.tsx": { exempt: "/terms: static text" },
   "src/app/(app)/friends/page.tsx": { exempt: "prerendered placeholder with no user data; gate it when it gains any" },
-  "src/app/(auth)/join/page.tsx": { exempt: "/join: a friend's first visit, no session; shows only the cookie's own request (join-routes.test.ts)" },
+  "src/app/(auth)/join/page.tsx": { exempt: "/join: a friend's first visit, no session; shows only the cookie's own request and the count of places held (join-routes.test.ts)" },
   "src/app/api/join/route.ts": { exempt: "the request form's POST: public, bounded in SQL, shut under SIGNUPS=owner (join-request.test.ts)" },
   "src/app/api/join/link/route.ts": { exempt: "the join link: a token whose hash opens one approved invite; reads no user data (join-routes.test.ts)" },
   "src/app/(auth)/signed-out/page.tsx": { exempt: "the page after Log out: static text, no session or reads (logout-disconnect.test.ts)" },
