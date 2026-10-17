@@ -5,6 +5,7 @@ import { forUser } from "@/lib/db";
 import { requireRouteUser } from "@/lib/require-user";
 import { runOpenApp } from "@/lib/sync/tick";
 import { liveTickDeps } from "@/lib/sync/tick-deps";
+import { allowUserCall, OPEN_APP_LOAD_LIMIT } from "@/lib/user-bucket";
 
 // The open app's sync (docs/multi-user/PLAN.md §7.6). SyncOnLoad pings this on load, every 2 min
 // while the tab is visible, and on a return to the tab; `x-sync: load` marks the load and the
@@ -35,7 +36,12 @@ export async function POST() {
   }
   const zone = jar.get("tzname")?.value;
   if (zone) void store.setUserTz(zone).catch(() => {});
-  const load = (await headers()).get("x-sync") === "load";
+  // A load probes /me/player, the player bucket every user shares, and its lease ends with the
+  // step: ten a minute per user (PLAN §6.6), so a tab flipping visibility in a loop cannot run it
+  // up; past that the load waits like the timer, which still stands in when no tick has run.
+  const load =
+    (await headers()).get("x-sync") === "load" &&
+    allowUserCall("open-app-load", user.uid, Date.now(), OPEN_APP_LOAD_LIMIT.limit, OPEN_APP_LOAD_LIMIT.windowMs);
   try {
     const r = await runOpenApp(liveTickDeps(), { uid: user.uid, load });
     return Response.json({ ok: true, ...r, intervalMs });

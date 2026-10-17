@@ -164,6 +164,26 @@ describe("POST /api/sync, the open app (PLAN §7.6)", () => {
     expect(probes()).toBe(1);
   });
 
+  it("a stuck tab's loads take ten a minute per user; past that a load waits like the timer (PLAN §6.6)", async () => {
+    // Each load probes /me/player, the player bucket every user shares, and its lease is released
+    // when the step ends, so nothing else spaced them: a tab flipping visibility in a loop probed
+    // Spotify once per flip.
+    w.player = { id: "a", progress: 10_000, playing: true };
+    await appDb.setAppMeta("tick_at", String(base)); // the pingers are ticking
+    const replies = [];
+    for (let i = 0; i < 12; i++) {
+      at(i * 1_000);
+      replies.push(await sync(true));
+    }
+    expect(probes()).toBe(10);
+    for (const r of replies.slice(10)) expect(r).toMatchObject({ ok: true, ran: false, reason: "cron" });
+    // A minute after the first, a load runs again.
+    at(61_000);
+    await appDb.setAppMeta("tick_at", String(base + 60_000));
+    expect(await sync(true)).toMatchObject({ ok: true, ran: true });
+    expect(probes()).toBe(11);
+  });
+
   it("the browser's zone is written only when it changes", async () => {
     expect(await owner.setUserTzOffset(-240)).toBe(true);
     expect(await owner.setUserTzOffset(-240)).toBe(false);

@@ -2,8 +2,8 @@
 // security R13): a fixed window per (limit name, uid), in this process. With Fluid compute few
 // instances serve everyone, so an in-process count catches a stuck tab cheaply; it does not stop a
 // determined user spreading calls across instances (that answer is `user.mjs --disable`).
-// `/api/playlists/[id]/tracks`, `searchPlaysAction` (ten a minute each) and the player actions in
-// actions.ts (thirty a minute, shared) use it.
+// `/api/playlists/[id]/tracks`, `searchPlaysAction`, `/api/sync`'s loads (ten a minute each) and the
+// player actions in actions.ts (thirty a minute, shared) use it.
 import "server-only";
 import type { Uid } from "@/lib/identity";
 
@@ -38,3 +38,7 @@ export const SEARCH_PLAYS_LIMIT = { limit: 10, windowMs: 60_000 } as const;
 /** §6.6, security R13: every player action of one user shares one window. Thirty a minute is past
  *  a person queueing an album track by track, and a stuck tab reaches it within seconds. */
 export const PLAYER_LIMIT = { limit: 30, windowMs: 60_000 } as const;
+
+/** §6.6: `/api/sync`'s loads (a page load or a return to the tab), each a /me/player probe: ten a
+ *  minute per user per instance; past that a load waits like the tab's timer. */
+export const OPEN_APP_LOAD_LIMIT = { limit: 10, windowMs: 60_000 } as const;
