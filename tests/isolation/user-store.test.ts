@@ -35,7 +35,6 @@ const FIXTURES: Record<string, Fixture> = {
   findTrackWithPlaylists: { kind: "marker", call: (s, t) => s.findTrackWithPlaylists(`${t}-only-song-1`, `${t}-only-artist`) },
   getAllTimePlays: { kind: "marker", call: (s) => s.getAllTimePlays(10) },
   getAllTimeStats: { kind: "read", call: (s) => s.getAllTimeStats() },
-  getCaptureHealth: { kind: "read", call: (s) => s.getCaptureHealth() },
   getCleanBackupPref: { kind: "read", call: (s) => s.getCleanBackupPref() },
   getContextName: { kind: "read", call: (s) => s.getContextName("spotify:playlist:pl-1"), why: "A's name, B's negative cache" },
   getContextsFullCheckAt: { kind: "read", call: (s) => s.getContextsFullCheckAt() },

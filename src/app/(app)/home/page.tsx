@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { auth } from "@/lib/auth";
-import { forUser, getSpotifyCooldownUntil, type HomePayload, type UserStore } from "@/lib/db";
+import { readCapture } from "@/lib/capture-read";
+import { forUser, type HomePayload, type UserStore } from "@/lib/db";
 import { requirePageUser } from "@/lib/require-user";
 import { tzOffsetMinutes } from "@/lib/tz";
 import { DenHome } from "./den-home";
@@ -75,12 +76,15 @@ export default async function HomePage() {
   // crash the render into the error boundary (Rem's stale-tab morning refresh, 2026-08-15).
   // auth() again costs no store read: the identity check and the token read are per-request
   // boxes the gate's call already filled; it is here for the greeting's name.
-  const [session, payload, cooldownUntil, captureHealth] = await Promise.all([
+  // The capture line and the cooldown that explains a pause come from the user's sync_state and
+  // the recently-played bucket's cooldown, one app-database statement (multi-user PLAN §7.10).
+  const [session, payload, capture] = await Promise.all([
     auth(),
     store.getHomePayload().catch(() => null),
-    getSpotifyCooldownUntil().catch(() => 0),
-    store.getCaptureHealth().catch(() => null),
+    readCapture(user.uid).catch(() => null),
   ]);
+  const cooldownUntil = capture?.rpCooldownUntil ?? 0;
+  const captureHealth = capture?.health ?? null;
   const name = session?.user?.name ?? "You";
   const { daily, allTime, initialDay, initialTracks } = payload ?? (await readHomeInline(store));
   const first = name.split(" ")[0] || name;

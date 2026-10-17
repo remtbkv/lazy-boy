@@ -2,6 +2,7 @@
 // e-mail calls this; a 500 is the e-mail. The reply carries reasons and the names of checks
 // not yet measurable, never anything about anyone's listening (cron-job.org keeps bodies).
 import { getAppMeta, markEventsAlarmed, unreportedEvents } from "@/lib/app-db";
+import { readCapture } from "@/lib/capture-read";
 import { getBudgetMode, readBudgetDay, readMeter } from "@/lib/db";
 import { worstMode } from "@/lib/budget/budget";
 import { isMode } from "@/lib/budget/modes";
@@ -22,7 +23,7 @@ export async function GET(req: Request) {
     const store = await adminStore();
     if (!store) return Response.json({ ok: false, reasons: ["store"] }, { status: 500 });
     [ownerCapture, marks, dailyMark] = await Promise.all([
-      store.getCaptureHealth(),
+      readCapture(store.uid).then((c) => c.health),
       store.getHealthMarks(),
       getAppMeta("daily_at"),
     ]);
