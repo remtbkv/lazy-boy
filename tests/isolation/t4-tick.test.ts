@@ -419,6 +419,15 @@ describe("T4: the lease and the brake's counter, through the tick", () => {
     ]);
   });
 
+  it("the brake is inert in Phase 3: a user past the app's whole budget still has each change harvested at once (BRAKE_ON)", async () => {
+    install({ [`at-${A}`]: { player: playing(`${A}-a`), recent: recent(A) }, [`at-${B}`]: healthy(B) });
+    await runTick(tickDeps({ now: () => NOW, stores }).deps, ZEN);
+    await q("UPDATE sync_state SET rp_calls = 500, quota_day = '2026-10-16' WHERE uid = :u", { u: A });
+    install({ [`at-${A}`]: { player: playing(`${A}-b`), recent: recent(A) }, [`at-${B}`]: healthy(B) });
+    const r = await runTick(tickDeps({ now: () => NOW + 2 * MIN, stores }).deps, ZEN);
+    expect(r.detail!.steps.find((s) => s.uid === A)).toMatchObject({ outcome: "ok", trigger: "change" });
+  });
+
   it("a harvest the client re-sends is counted before each send: a 403 retried once is two calls, two counts (§7.5 item 1)", async () => {
     const spotify = install({ [`at-${A}`]: { player: playing(`${A}-now`), recent: 403 }, [`at-${B}`]: healthy(B) });
     await runTick(tickDeps({ now: () => NOW, stores }).deps, ZEN);
