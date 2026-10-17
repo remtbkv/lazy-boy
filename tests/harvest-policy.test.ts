@@ -137,11 +137,11 @@ describe("the harvest decision (§7.4) and its trigger tag", () => {
   it("completeness at 25 changes, whatever the brake says", () => {
     const now = T0 + 10 * MIN;
     for (const brake of ["normal", "share", "all"] as const) {
-      expect(decideHarvest(base({ brake, probe: state({ changes: COMPLETENESS_CHANGES }), lastHarvestAt: now }))).toBe(
+      expect(decideHarvest(base({ brake, probe: state({ changes: COMPLETENESS_CHANGES }), lastHarvestAt: now - MIN }))).toBe(
         "completeness",
       );
     }
-    expect(decideHarvest(base({ brake: "all", probe: state({ changes: COMPLETENESS_CHANGES - 1 }), lastHarvestAt: now }))).toBeNull();
+    expect(decideHarvest(base({ brake: "all", probe: state({ changes: COMPLETENESS_CHANGES - 1 }), lastHarvestAt: now - MIN }))).toBeNull();
     expect(COMPLETENESS_CHANGES).toBe(25);
   });
 
@@ -185,6 +185,21 @@ describe("the harvest decision (§7.4) and its trigger tag", () => {
     expect(decideHarvest(base({ now, probe: state(), brake: "all", lastHarvestAt: now - 5 * MIN, openApp: true }))).toBeNull();
     // With the brake off a change harvests anyway, tagged as the change it is.
     expect(decideHarvest(base({ now, probe: p, lastHarvestAt: now - 5 * MIN, openApp: true }))).toBe("change");
+  });
+
+  it("nothing fires within a minute of the last harvest, so an open tab and the cron never harvest one user twice in a minute (§7.6)", () => {
+    const now = T0 + 10 * MIN;
+    const cases: [Partial<HarvestInput>, string][] = [
+      [{ probe: state({ changes: 1 }) }, "change"],
+      [{ probe: state({ changes: 1 }), openApp: true }, "change"],
+      [{ probe: state({ tail: true, changes: 1, stoppedAt: now }) }, "tail"],
+      [{ probe: state({ changes: COMPLETENESS_CHANGES }), brake: "all" }, "completeness"],
+      [{ probe: state({ changes: 2 }), brake: "all", openApp: true }, "open-app"],
+    ];
+    for (const [over, trigger] of cases) {
+      expect(decideHarvest(base({ now, lastHarvestAt: now - 59 * S, ...over })), trigger).toBeNull();
+      expect(decideHarvest(base({ now, lastHarvestAt: now - MIN, ...over }))).toBe(trigger);
+    }
   });
 
   it("the recently-played cooldown holds every trigger", () => {

@@ -93,8 +93,9 @@ export const COMPLETENESS_CHANGES = 25;
 export const TAIL_RETRY_MS = 5 * 60_000;
 /** Every due time counts 30 s early, so a late tick does not stretch two minutes to four. */
 export const EARLY_MS = 30_000;
-/** Opening the app harvests a change the brake held back, at most this often (B's H4). */
-const OPEN_APP_MIN_GAP_MS = 60_000;
+/** No harvest within a minute of the last, whatever fired: an open tab's load (B's H4) and the
+ *  cron's step never harvest one user twice in a minute (§7.6). What fired stays pending. */
+const MIN_GAP_MS = 60_000;
 /** A player-endpoint refusal (§7.8): users active in the last 3 hours, every 30 minutes. */
 const BLIND_ACTIVE_MS = 3 * 3_600_000;
 const BLIND_EVERY_MS = 30 * 60_000;
@@ -121,6 +122,7 @@ export type HarvestInput = {
 export function decideHarvest(i: HarvestInput): HarvestTrigger | null {
   if (i.now < i.cooldownUntil) return null;
   const since = i.lastHarvestAt === null ? Infinity : i.now - i.lastHarvestAt;
+  if (since < MIN_GAP_MS) return null;
   const p = i.probe;
   if (p?.tail) return "tail";
   if (p && p.changes >= COMPLETENESS_CHANGES) return "completeness";
@@ -130,7 +132,7 @@ export function decideHarvest(i: HarvestInput): HarvestTrigger | null {
   if (!i.probeOk && p && (p.stoppedAt === null || i.now - p.stoppedAt <= BLIND_ACTIVE_MS) && since >= BLIND_EVERY_MS) {
     return "backstop";
   }
-  if (i.openApp && p && p.changes > 0 && since >= OPEN_APP_MIN_GAP_MS) return "open-app";
+  if (i.openApp && p && p.changes > 0) return "open-app";
   return null;
 }
 

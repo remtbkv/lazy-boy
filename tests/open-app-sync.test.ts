@@ -135,6 +135,22 @@ describe("POST /api/sync, the open app (PLAN §7.6)", () => {
     expect(harvests()).toBe(1);
   });
 
+  it("a load within a minute of the cron's harvest harvests nothing, though its probe saw a change; the change waits, it is not lost", async () => {
+    w.player = { id: "a", progress: 10_000, playing: true };
+    await sync(true); // the first probe: the state it starts from
+    // The cron's step harvested 10 s into the test.
+    await raw.execute({ sql: "UPDATE sync_state SET last_harvest_at = ? WHERE uid = ?", args: [base + 10_000, OWNER] });
+    at(30_000);
+    w.player = { id: "b", progress: 5_000, playing: true };
+    expect(await sync(true)).toMatchObject({ ran: true, trigger: null });
+    expect(harvests()).toBe(0);
+    // A minute on, the next step harvests the change the probe kept.
+    at(75_000);
+    w.player = { id: "b", progress: 50_000, playing: true };
+    expect(await sync(true)).toMatchObject({ ran: true, trigger: "change" });
+    expect(harvests()).toBe(1);
+  });
+
   it("the tab's 2-minute timer does nothing while ticks run, and stands in after 5 minutes without one", async () => {
     w.player = { id: "a", progress: 10_000, playing: true };
     await appDb.setAppMeta("tick_at", String(base - 4 * MIN));

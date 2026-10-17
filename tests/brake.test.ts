@@ -60,8 +60,8 @@ describe("completeness, the tail, its retry and the backstop fire in every mode 
   const now = Date.UTC(2026, 9, 16, 20, 0);
   for (const brake of ["share", "all"] as const) {
     it(`in ${brake}`, () => {
-      expect(decideHarvest({ brake, now, probe: state0({ changes: 25 }), lastHarvestAt: now })).toBe("completeness");
-      expect(decideHarvest({ brake, now, probe: state0({ tail: true }), lastHarvestAt: now })).toBe("tail");
+      expect(decideHarvest({ brake, now, probe: state0({ changes: 25 }), lastHarvestAt: now - 60_000 })).toBe("completeness");
+      expect(decideHarvest({ brake, now, probe: state0({ tail: true }), lastHarvestAt: now - 60_000 })).toBe("tail");
       expect(decideHarvest({ brake, now, probe: state0({ retryAt: now }), lastHarvestAt: now - 5 * 60_000 })).toBe("tail-retry");
       expect(decideHarvest({ brake, now, probe: state0(), lastHarvestAt: now - 3_600_000 })).toBe("backstop");
       expect(decideHarvest({ brake, now, probe: state0({ changes: 1 }), lastHarvestAt: now - 2 * 60_000, openApp: true })).toBe("open-app");
