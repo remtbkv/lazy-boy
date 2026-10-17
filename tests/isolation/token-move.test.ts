@@ -91,6 +91,12 @@ describe("the copy (§11.4 step 3)", () => {
     expect(await q("SELECT key FROM app_meta WHERE key LIKE 'token_copy:%'")).toEqual([]);
   });
 
+  it("the plaintext row is the admin's alone: a copy run for another uid reaches none and writes nothing", async () => {
+    await expect(copyAdminTokens(B)).rejects.toThrow(/not the admin's/);
+    expect(await q("SELECT uid FROM user_tokens")).toEqual([]);
+    expect(await q("SELECT key FROM app_meta WHERE key LIKE 'token_copy:%'")).toEqual([]);
+  });
+
   it("the copied token refreshes like any other", async () => {
     await setSpotifyTokens({ ...PLAIN, expiresAt: EXPIRED });
     const spotify = scriptedSpotify();
@@ -111,6 +117,15 @@ describe("the rollback flag (§11.4 Rollback)", () => {
     vi.stubGlobal("fetch", scriptedSpotify().fetch);
     await createTokenCore(store).getValidAccessToken(A);
     expect((await getSpotifyTokens())?.accessToken).toBe("at:blob-rt");
+  });
+
+  it("a sign-in mirrors on an instance where nothing has named his database (the jwt callback's sign-in branch names none)", async () => {
+    vi.stubEnv("LB_TOKEN_ROLLBACK", "1");
+    // A cold instance: no identity read, claim or admin lookup in this process has named the
+    // admin's database yet (db.ts's uid -> db_name directory).
+    (globalThis as unknown as { __lbUserDbNames?: Map<string, string> }).__lbUserDbNames?.delete(A);
+    await bridge().set(A, { accessToken: "signin-at", refreshToken: "signin-rt", expiresAt: FAR });
+    expect(await getSpotifyTokens()).toEqual({ accessToken: "signin-at", refreshToken: "signin-rt", expiresAt: FAR });
   });
 
   it("touches no other user's row and copies nothing", async () => {

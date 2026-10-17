@@ -13,23 +13,34 @@
 //   build the revert brings back finds a live token in `meta`.
 import "server-only";
 import { getAppMeta, insertTokensIfAbsent, readTokenRow, setAppMeta } from "@/lib/app-db";
-import { forUser, type SpotifyTokens } from "@/lib/db";
+import type { SpotifyTokens, UserStore } from "@/lib/db";
 import type { Uid } from "@/lib/identity";
+import { adminStore } from "@/lib/identity-read";
 import type { TokenStore } from "@/lib/token-core";
 import { decryptTokens, encryptTokens } from "@/lib/token-crypto";
 import { tokenKeysReady } from "@/lib/token-keys";
 
-/** The admin's plaintext row in `lazyboy.meta`, his own database (forUser's for his uid). */
+/** The admin's plaintext row in `lazyboy.meta`, his own database. */
 export type Plaintext = {
   read(): Promise<SpotifyTokens | null>;
   write(t: SpotifyTokens): Promise<void>;
   clear(): Promise<void>;
 };
-const metaPlaintext = (uid: Uid): Plaintext => ({
-  read: () => forUser(uid).getSpotifyTokens(),
-  write: (t) => forUser(uid).setSpotifyTokens(t),
-  clear: () => forUser(uid).clearSpotifyTokens(),
-});
+// Reached through his `users` row (adminStore), not forUser: the jwt callback's sign-in branch,
+// which mirrors under the rollback flag, runs where no identity read has named his database.
+// A uid that is not the admin row's has no plaintext row to reach.
+const metaPlaintext = (uid: Uid): Plaintext => {
+  const store = async (): Promise<UserStore> => {
+    const s = await adminStore();
+    if (s?.uid !== uid) throw new Error(`no plaintext token row for ${uid}: not the admin's`);
+    return s;
+  };
+  return {
+    read: async () => (await store()).getSpotifyTokens(),
+    write: async (t) => (await store()).setSpotifyTokens(t),
+    clear: async () => (await store()).clearSpotifyTokens(),
+  };
+};
 
 const copyKey = (uid: string) => `token_copy:${uid}`;
 export const rollbackOn = () => process.env.LB_TOKEN_ROLLBACK === "1";
