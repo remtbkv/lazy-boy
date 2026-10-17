@@ -87,7 +87,8 @@ describe("the request form's storage", () => {
     for (let i = 0; i < JOIN_PENDING_CAP; i++) {
       expect((await ask(`p${i}@example.com`, { now: NOW + i * HOUR })).ok, String(i)).toBe(true);
     }
-    expect(await ask("one-more@example.com", { now: NOW + 99 * HOUR })).toEqual({ ok: false, reason: "full" });
+    // Its own reason: with places still free, "full" would contradict /join's "1 of 5 spots taken".
+    expect(await ask("one-more@example.com", { now: NOW + 99 * HOUR })).toEqual({ ok: false, reason: "waiting" });
     expect(await q("SELECT count(*) AS n FROM requests")).toEqual([{ n: JOIN_PENDING_CAP }]);
   });
 

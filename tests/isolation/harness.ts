@@ -345,3 +345,21 @@ export function expectMemoPerUser(get: (uid: Uid, now: number) => { playing: unk
   expect(get(A, 1_001)).toEqual({ playing: "A-only-track" });
   expect(get(B, 1_001)).toBeNull();
 }
+
+/** /join under SIGNUPS=owner sends the app database nothing: no counter is read for a shut door.
+ *  The store is a production URL whose every request is counted; the caller's afterEach unstubs. */
+export async function expectShutJoinReadsNothing(page: () => Promise<unknown>): Promise<void> {
+  let sent = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      sent++;
+      return new Response("no", { status: 503 });
+    }),
+  );
+  vi.stubEnv("VERCEL_ENV", "production");
+  vi.stubEnv("APP_DATABASE_URL", "https://lazyboy-app-test.example.invalid");
+  vi.stubEnv("SIGNUPS", "owner");
+  await page();
+  expect(sent).toBe(0);
+}

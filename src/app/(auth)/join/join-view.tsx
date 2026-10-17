@@ -10,6 +10,7 @@ const ERRORS: Record<string, string> = {
   name: "That name is too long.",
   duplicate: "A request for that address is already waiting. Rem will be in touch.",
   busy: "Too many requests just now. Try again in an hour.",
+  waiting: "Too many requests are waiting for Rem just now. Try again in a few days.",
   full: "Lazy Boy is full: Spotify lets it have five people, Rem included.",
   link: "That link has expired or was already used. Ask Rem for a new one.",
   unavailable: "Something went wrong on our side. Try again in a minute.",

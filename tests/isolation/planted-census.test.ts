@@ -33,6 +33,8 @@ const PLANTS = [
   "planted: a deletion with no admin refusal",
   "planted: a /usage read that takes the viewer's uid for the admin's (Phase 4a's turn)",
   "planted: a now-playing memo keyed by nobody",
+  // Lane 1970's review of /join's counter.
+  "planted: a /join that counts the places whatever SIGNUPS says",
 ];
 
 type Plant = { title: string; failing: number; passing: number };

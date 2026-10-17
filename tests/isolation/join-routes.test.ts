@@ -8,7 +8,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { joinTokenHash, REQUEST_COOKIE, verifyRequestCookie } from "@/lib/request-cookie";
 import { appTokenStore } from "@/lib/token-store-app";
-import { freshAppDb, seedApprovedInvite, seedUser } from "./harness";
+import { JOIN_PENDING_CAP } from "@/lib/app-db";
+import { expectShutJoinReadsNothing, freshAppDb, seedApprovedInvite, seedUser } from "./harness";
 
 vi.mock("@/app/(app)/actions", () => ({ login: async () => {} }));
 vi.mock("next/headers", async () => (await import("./authz-context")).nextHeadersMock());
@@ -140,6 +141,40 @@ describe("/join", () => {
     expect(await page()).toContain("2 of 5 spots taken");
     vi.stubEnv("SIGNUPS", "owner");
     expect(await page()).not.toContain("spots taken");
+  });
+  it("under SIGNUPS=owner the page sends the app database nothing", async () => {
+    await expectShutJoinReadsNothing(async () => (await import("@/app/(auth)/join/page")).default({ searchParams: Promise.resolve({}) }));
+  });
+  it("a store that does not answer costs the page one request and leaves the counter out, the form still there", async () => {
+    let sent = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        sent++;
+        return new Response("no", { status: 503 });
+      }),
+    );
+    vi.stubEnv("VERCEL_ENV", "production");
+    vi.stubEnv("APP_DATABASE_URL", "https://lazyboy-app-test.example.invalid");
+    const html = renderToStaticMarkup(await (await import("@/app/(auth)/join/page")).default({ searchParams: Promise.resolve({}) }));
+    expect(html).toContain('action="/api/join"');
+    expect(html).not.toContain("spots taken");
+    expect(sent).toBe(1);
+    vi.unstubAllGlobals();
+  });
+  it("a queue of waiting requests is never called full while places are free", async () => {
+    for (let i = 0; i < JOIN_PENDING_CAP; i++) {
+      await q("INSERT INTO requests (id, email, name, status, created_at, status_at, terms_version) VALUES (:id, :e, 'A friend', 'pending', 0, 0, 't')", {
+        id: `req${i}`,
+        e: `p${i}@example.com`,
+      });
+    }
+    const r = await post("email=x%40example.com&agree=on");
+    const error = new URLSearchParams(r.headers.get("location")!.split("?")[1]).get("error")!;
+    const html = renderToStaticMarkup(await (await import("@/app/(auth)/join/page")).default({ searchParams: Promise.resolve({ error }) })).replace(/<[^>]+>/g, "");
+    expect(html).toContain("1 of 5 spots taken");
+    expect(html).not.toMatch(/full/i);
+    expect(html).toContain("Try again in a few days");
   });
   it("under SIGNUPS=owner it offers no form, only the closed notice", async () => {
     const { JoinView } = await import("@/app/(auth)/join/join-view");

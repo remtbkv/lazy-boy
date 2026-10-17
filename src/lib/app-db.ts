@@ -236,7 +236,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // Rem's terminal through `invite.mjs --list`, so a stranger's escape sequence is never stored.
 const UNPRINTABLE = /[\p{Cc}\p{Cf}\u2028\u2029]/gu;
 
-export type JoinRefusal = "closed" | "terms" | "email" | "name" | "duplicate" | "busy" | "full";
+export type JoinRefusal = "closed" | "terms" | "email" | "name" | "duplicate" | "busy" | "waiting" | "full";
 export type JoinResult = { ok: true; id: string } | { ok: false; reason: JoinRefusal };
 
 export async function createJoinRequest(o: { email: string; name: string; agreed: boolean; now: number }): Promise<JoinResult> {
@@ -281,13 +281,17 @@ export async function createJoinRequest(o: { email: string; name: string; agreed
   if (ins.rowsAffected === 1) return { ok: true, id: args.id };
   const s = state.rows[0];
   if (Number(s.dup) > 0) return { ok: false, reason: "duplicate" };
-  if (Number(s.held) >= SEATS || Number(s.pending) >= JOIN_PENDING_CAP) return { ok: false, reason: "full" };
+  if (Number(s.held) >= SEATS) return { ok: false, reason: "full" };
+  // Places are free but the queue is at its cap: "full" would contradict /join's counter.
+  if (Number(s.pending) >= JOIN_PENDING_CAP) return { ok: false, reason: "waiting" };
   return { ok: false, reason: "busy" };
 }
 
-/** /join's "N of 5 spots taken": the places held, counted as the form's insert counts them. */
+/** /join's "N of 5 spots taken": the places held, counted as the form's insert counts them. A
+ *  stranger's page waits on it, so it rides the tick's one 5-second attempt, not the store
+ *  fetch's three 15-second ones. */
 export async function seatsHeld(): Promise<number> {
-  const r = await one("SELECT count(*) AS n FROM users WHERE status <> 'deleted'");
+  const r = await onTickClient((c) => c.execute("SELECT count(*) AS n FROM users WHERE status <> 'deleted'"));
   return Number(r.rows[0].n);
 }
 

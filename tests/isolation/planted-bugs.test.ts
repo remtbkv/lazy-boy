@@ -19,7 +19,8 @@
 //
 // Phase 4a adds: a claim without its compare-and-set; a Log out that leaves capture on; a deletion
 // with no admin refusal; a now-playing memo keyed by nobody. Its turn adds a /usage read that takes
-// the viewer for the admin (friends' telemetry only by page template).
+// the viewer for the admin (friends' telemetry only by page template). Lane 1970's review adds a
+// /join that counts the places held under SIGNUPS=owner.
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
@@ -51,6 +52,7 @@ import {
   expectFreshIvPerWrite,
   expectFriendTelemetryAggregated,
   expectRefreshLosesToSignIn,
+  expectShutJoinReadsNothing,
   expectSignupsOwnerRefusesFriend,
   expectStoreAnswersOwnRow,
   expectWrongOlderKeyRefuses,
@@ -61,6 +63,10 @@ import {
 } from "./harness";
 import { expectReleaseNeedsItsLease, expectStepsKeepToTheirStore } from "./tick-harness";
 import { expectOwnDatabases, useUserFiles } from "./user-dbs";
+
+// The /join page entry renders the real page, which reads cookies and imports the sign-in action.
+vi.mock("next/headers", async () => (await import("./authz-context")).nextHeadersMock());
+vi.mock("@/app/(app)/actions", () => ({ login: async () => {} }));
 
 const data: Record<string, string> = { [A]: "A-only-history", [B]: "B-only-history" };
 
@@ -477,5 +483,16 @@ describe("planted: a now-playing memo keyed by nobody", () => {
   it("and passes over the real memo", () => {
     clearNowPlayingMemo();
     expectMemoPerUser(memoizedNowPlaying, rememberNowPlaying);
+  });
+});
+
+describe("planted: a /join that counts the places whatever SIGNUPS says", () => {
+  it("the shut-door check catches it: the count reaches the app database", async () => {
+    const { seatsHeld } = await import("@/lib/app-db");
+    await expect(expectShutJoinReadsNothing(() => seatsHeld().catch(() => null))).rejects.toThrow();
+  });
+  it("and passes over the real page", async () => {
+    const page = (await import("@/app/(auth)/join/page")).default;
+    await expectShutJoinReadsNothing(() => page({ searchParams: Promise.resolve({}) }));
   });
 });
