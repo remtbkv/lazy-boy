@@ -76,11 +76,13 @@ type Databases = Pick<IDBFactory, "deleteDatabase"> & { databases?: () => Promis
 /** Delete every user's IndexedDB database on this device: each name that is user data, per-user
  *  or the bare name written before Phase 1. The bare one and the page user's are deleted by name;
  *  other users' are found with indexedDB.databases(), which a browser without it (Firefox before
- *  126) cannot list, so there theirs stay until their own sign-out. A delete waits for open
+ *  126) cannot list, so there theirs stay until their own sign-out. A page with no user (/login,
+ *  the pages after Log out and Disconnect) has no name of its own to add. A delete waits for open
  *  connections to close; nothing here waits for it. */
-export async function clearUserDatabases(idb: Databases, pageUid: string): Promise<string[]> {
+export async function clearUserDatabases(idb: Databases, pageUid?: string): Promise<string[]> {
   const listed = idb.databases ? (await idb.databases()).map((d) => d.name ?? "") : [];
-  const names = [...new Set(["lb-search", userStorageName(pageUid, "lb-search"), ...listed.filter(isUserDataKey)])];
+  const own = pageUid ? [userStorageName(pageUid, "lb-search")] : [];
+  const names = [...new Set(["lb-search", ...own, ...listed.filter(isUserDataKey)])];
   for (const n of names) idb.deleteDatabase(n);
   return names;
 }
@@ -90,7 +92,7 @@ export async function clearUserDatabases(idb: Databases, pageUid: string): Promi
  *  form before it submits, by the fetchers on the signed-out 401, and by a tab that finds the
  *  browser signed in as someone else. Storage that is unavailable (private mode, a server render)
  *  clears nothing. */
-export function clearThisBrowser(pageUid: string): string[] {
+export function clearThisBrowser(pageUid?: string): string[] {
   try {
     if (typeof indexedDB !== "undefined") void clearUserDatabases(indexedDB, pageUid).catch(() => {});
   } catch {
