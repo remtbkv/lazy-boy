@@ -430,3 +430,50 @@ removed before A is invited) and `stitch: a memoized now-playing reply carries t
 lane 21): lane 15's naming is now under the harness, and `claim-signin.test.ts` proves a friend's sign-in reaches
 their own row and token through the real callback. Gates at the slice head: `tsc`, lint, `npm test`, build green;
 `AUTHZ_TARGET=1 … authz-` passes in full. Lane 34's NOTES and OUTCOMES entry have the full range-diff.
+
+## 12. Lane 20's review of the stitched slice (lane 1945_lb_mu_20_p4a_turn_review, Oct 16-17)
+
+An adversarial review in a fresh context of `mu/s-p3..mu/s-p4a` (f7f09ee..3b81ae4) as it will deploy, on
+`mu/rv-p4a` (lane 35 folds it in). Every defect was fixed with a test shown failing first; the commit messages say
+against what. Nothing pushed; the Zenbook only read (`backup.py`'s sha256 there is `cf8f581c…`, the bytes of db306c8).
+
+- **`4179966`, the deletion left the meter's per-user counts.** `cpu_meter` (the meter, stitched in below 4a) keeps
+  a row per (day, route, uid), which `/privacy` names among the diagnostic logs a Disconnect deletes. The job's
+  telemetry step looped over `api_log` and `client_metrics` only, in the runtime and on the Mac, and nothing prunes
+  `cpu_meter`. Both now loop over `deletion.ts TELEMETRY_USER_TABLES`.
+- **`414a641`, the backup prune missed friend files outside the per-database directories.** It removed only
+  `lb-u-*` directories directly under `turso/` and `lazyboy-turso`; a friend file anywhere else (a lone file, one
+  under `snapshots/` or Rem's directory, one in `lazyboy-db` or `lazyboy-backstop`) failed the nightly check and
+  stayed, and a local file went through `rmtree(..., ignore_errors=True)`, which cannot remove a file, while the log
+  said "removed". The prune now walks the trees the check reads. A new case pins Rem's 60 days (nothing did: a
+  prune that purged every directory passed). The README's hand run read `tail -8` of a ten-line run and named the
+  first line `prune others`.
+- **`dbf00b0`, `/api/sync`'s loads were unbounded per user.** Each load probes `/me/player` and its lease ends with
+  the step, and `SyncLoop.focus()` fires on every return to a visible tab, so a tab flipping visibility in a loop
+  ran up the player bucket every user shares. Ten loads a minute per user; past that a load waits like the timer.
+  `dc79279` regenerates AUTHZ.md for it.
+- **`9c6c71d`, server-error rows held a friend's raw path.** `instrumentation.ts` filed `request.path`, so a friend's
+  error on `/playlists/<id>` stored the playlist id in a row with no uid, which `/usage` lists for the admin and the
+  backup keeps. It files Next's `routePath` template now.
+- **`facba8c`, `/privacy`'s diagnostic line** named page timings only; it now names the browser's error messages,
+  the song-change beacon's track id, and the server's own error rows (no account's ID).
+- **`c02016c`, the pages after Log out and Disconnect left the IndexedDB search copy.** `ClearUserStorage` cleared
+  local and session storage only; Disconnect's form clears nothing first, so a departed friend kept every play in
+  that browser. It calls `clearThisBrowser` now.
+- **`f60f1dc`, a test for `/usage`'s admin check.** The authz map's friends run under `SIGNUPS=owner` (the harness
+  sets none), so `requirePageUser` refuses them first and deleting `if (!user.admin) notFound()` left every suite
+  green. `usage-admin-only.test.ts` gives the page a friend's gate.
+
+Checked and holding: `/usage` is the only admin view and 404s a non-admin before any read; the cron replies carry
+codes and counts; `SIGNUPS=owner` refuses a friend at sign-in (no write), at every request (the identity read) and at
+the claim, the open app's claim and the grant confirmation (`ACTIVE_LEASABLE`); `invite` admits only an approved
+request's claim; the brake's N is `ACTIVE_LEASABLE`'s count; every per-user bound keys on the uid; `owner.ts` and
+`me_id` at sign-in are gone, `getMeId` reads only a user's own database, `PRIMARY_DB` maps a name to a URL and
+`scripts/script-user.mjs` refuses anyone but `OWNER_UID` (scripts stay admin-only, fail-closed). Mutants: 8 on
+`backup.py`, 13 on the app, all caught (M1 only after `f60f1dc`): lb_20/mutants.log.
+
+Left, not defects of this slice: the authz map has no friend admitted under `SIGNUPS=invite` (lanes 19 and 34's
+"positive control", lane 28's rehearsal); `events` rows naming a deleted friend's uid and the lifecycle line stay
+after day five (a random id no row links to a person by then); `turso-platform.ts` says it is the only reader of
+`TURSO_PLATFORM_TOKEN` in `src/`, but `/usage`'s `liveCounters` reads it too (admin-only, main's code); the health
+check is red through a revoked friend's days 1-4, as PLAN §7.10 words it.
