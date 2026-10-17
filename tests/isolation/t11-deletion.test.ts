@@ -76,13 +76,23 @@ const appRows = async (uid: string) => ({
   lock: (await q("SELECT count(*) AS n FROM app_meta WHERE key = :k", { k: `lock:spotify_refresh:${uid}` }))[0].n,
   request: (await q("SELECT count(*) AS n FROM requests WHERE uid = :u", { u: uid }))[0].n,
 });
+// The three telemetry tables that hold one user's rows: the Spotify call log, the browser's
+// metrics and the CPU meter's per-user counts (/privacy names all three as diagnostic logs).
 const teleRows = async (uid: string) =>
-  Number((await tele.execute({ sql: "SELECT (SELECT count(*) FROM api_log WHERE user_id = ?) + (SELECT count(*) FROM client_metrics WHERE user_id = ?) AS n", args: [uid, uid] })).rows[0].n);
+  Number(
+    (
+      await tele.execute({
+        sql: `SELECT (SELECT count(*) FROM api_log WHERE user_id = ?) + (SELECT count(*) FROM client_metrics WHERE user_id = ?)
+                   + (SELECT count(*) FROM cpu_meter WHERE user_id = ?) AS n`,
+        args: [uid, uid, uid],
+      })
+    ).rows[0].n,
+  );
 
 const untouched = async () => {
   expect(destroyed).toEqual([]);
   expect(await appRows(B)).toEqual({ tokens: 1, queue: 1, lock: 1, request: 1 });
-  expect(await teleRows(B)).toBe(2);
+  expect(await teleRows(B)).toBe(3);
 };
 
 beforeEach(async () => {
@@ -114,11 +124,18 @@ beforeEach(async () => {
   tele = createClient({ url: process.env.TURSO_DATABASE_URL! });
   await tele.execute("CREATE TABLE IF NOT EXISTS api_log (id INTEGER PRIMARY KEY, ts INTEGER, path TEXT, user_id TEXT)");
   await tele.execute("CREATE TABLE IF NOT EXISTS client_metrics (id INTEGER PRIMARY KEY, ts INTEGER, event TEXT, user_id TEXT)");
+  await tele.execute(
+    `CREATE TABLE IF NOT EXISTS cpu_meter (day TEXT NOT NULL, route TEXT NOT NULL, user_id TEXT NOT NULL, invocations INTEGER NOT NULL DEFAULT 0,
+       cpu_us INTEGER NOT NULL DEFAULT 0, wall_ms INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+       PRIMARY KEY (day, route, user_id))`,
+  );
   await tele.execute("DELETE FROM api_log");
   await tele.execute("DELETE FROM client_metrics");
+  await tele.execute("DELETE FROM cpu_meter");
   for (const u of [A, B, C]) {
     await tele.execute({ sql: "INSERT INTO api_log (ts, path, user_id) VALUES (1, '/v1/me/player', ?)", args: [u] });
     await tele.execute({ sql: "INSERT INTO client_metrics (ts, event, user_id) VALUES (1, 'paint', ?)", args: [u] });
+    await tele.execute({ sql: "INSERT INTO cpu_meter (day, route, user_id, invocations, updated_at) VALUES ('2026-10-16', 'page /home', ?, 3, 1)", args: [u] });
   }
 });
 afterEach(() => {
@@ -163,8 +180,8 @@ describe("T11: deleting B", () => {
     expect(await dump("lazyboy")).toEqual(before.a);
     expect(await dump(`lb-u-${C}`)).toEqual(before.c);
     expect(await appRows(C)).toEqual(before.cRows);
-    expect(await teleRows(A)).toBe(2);
-    expect(await teleRows(C)).toBe(2);
+    expect(await teleRows(A)).toBe(3);
+    expect(await teleRows(C)).toBe(3);
     expect((await q("SELECT status FROM users WHERE uid IN (:a, :c) ORDER BY uid", { a: A, c: C })).map((r) => r.status)).toEqual(["active", "active"]);
 
     // A second run is a no-op.
@@ -181,7 +198,7 @@ describe("T11: deleting B", () => {
     expect(await runDeletion(B, deps({ destroy: down }))).toEqual({ kind: "pending", step: "destroy" });
     expect((await q("SELECT status FROM users WHERE uid = :u", { u: B }))[0].status).toBe("deleting");
     expect(await runDeletion(B, deps({ telemetry: { deleteUser: down, appendLifecycle } }))).toEqual({ kind: "pending", step: "telemetry" });
-    expect(await teleRows(B)).toBe(2);
+    expect(await teleRows(B)).toBe(3);
     clock = T0 + 10 * LEASE_WINDOW_MS;
     expect(await runDeletion(B, deps())).toEqual({ kind: "done" });
     expect(await teleRows(B)).toBe(0);
@@ -201,7 +218,7 @@ describe("T11: the refusals, each changing nothing", () => {
     }
     expect(await dump("lazyboy")).toEqual(before);
     expect(destroyed).toEqual([]);
-    expect(await teleRows(A)).toBe(2);
+    expect(await teleRows(A)).toBe(3);
   });
 
   it("never a database the users row does not name as lb-u-<uid>", async () => {

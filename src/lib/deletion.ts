@@ -83,12 +83,19 @@ export const DELETION_SQL = {
   withdrawRequest: `DELETE FROM requests WHERE uid = :uid AND status IN ('pending', 'approved')`,
 } as const;
 
+// The telemetry tables that hold one user's rows, tagged `user_id`: the Spotify call log, the
+// browser's metrics and the CPU meter's per-user counts (src/lib/budget/), the three /privacy
+// names as diagnostic logs. Both runners (telemetry-lifecycle.ts, scripts/turso-mac.mjs) loop
+// over this list.
+export const TELEMETRY_USER_TABLES = ["api_log", "client_metrics", "cpu_meter"] as const;
+export type TelemetryUserTable = (typeof TELEMETRY_USER_TABLES)[number];
+
 // The telemetry store's statements (§4.1, §12.3 step 3, §12.5). `api_log` and `client_metrics`
 // carry `user_id` once Phases 1 and 3's turns add it; a table without the column holds no row of
 // anyone's, so the delete skips it.
 export const TELEMETRY_SQL = {
-  columns: (table: "api_log" | "client_metrics") => `SELECT name FROM pragma_table_info('${table}')`,
-  deleteRows: (table: "api_log" | "client_metrics") => `DELETE FROM ${table} WHERE user_id = :uid`,
+  columns: (table: TelemetryUserTable) => `SELECT name FROM pragma_table_info('${table}')`,
+  deleteRows: (table: TelemetryUserTable) => `DELETE FROM ${table} WHERE user_id = :uid`,
   lifecycleTable: `CREATE TABLE IF NOT EXISTS lifecycle_log (
                      id INTEGER PRIMARY KEY, at INTEGER NOT NULL, uid TEXT NOT NULL, action TEXT NOT NULL, by TEXT NOT NULL)`,
   appendLifecycle: "INSERT INTO lifecycle_log (at, uid, action, by) VALUES (:at, :uid, :action, :by)",

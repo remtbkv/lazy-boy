@@ -219,7 +219,20 @@ describe("user.mjs", () => {
     const o = await resolveSignIn({ id: "sam-sp", account_id: "acct-sam" }, clock, rid);
     const uid = o.kind === "allowed" ? o.user.uid : "";
     await appTokenStore().set(uid as never, { accessToken: "a", refreshToken: "r", expiresAt: 4_000_000_000 });
+    // The three telemetry tables that hold one user's rows (/privacy's diagnostic logs).
+    await tele.execute("CREATE TABLE api_log (id INTEGER PRIMARY KEY, ts INTEGER, path TEXT, user_id TEXT)");
+    await tele.execute("CREATE TABLE client_metrics (id INTEGER PRIMARY KEY, ts INTEGER, event TEXT, user_id TEXT)");
+    await tele.execute("CREATE TABLE cpu_meter (day TEXT NOT NULL, route TEXT NOT NULL, user_id TEXT NOT NULL, invocations INTEGER, updated_at INTEGER, PRIMARY KEY (day, route, user_id))");
+    for (const u of [uid, ADMIN]) {
+      await tele.execute({ sql: "INSERT INTO api_log (ts, path, user_id) VALUES (1, '/v1/me/player', ?)", args: [u] });
+      await tele.execute({ sql: "INSERT INTO client_metrics (ts, event, user_id) VALUES (1, 'paint', ?)", args: [u] });
+      await tele.execute({ sql: "INSERT INTO cpu_meter VALUES ('2026-10-16', 'page /home', ?, 3, 1)", args: [u] });
+    }
+    const teleOf = async (u: string) =>
+      Promise.all(["api_log", "client_metrics", "cpu_meter"].map(async (t) => Number((await tele.execute({ sql: `SELECT count(*) AS n FROM ${t} WHERE user_id = ?`, args: [u] })).rows[0].n)));
     expect(await user(["--remove", uid], deps())).toBe(0);
+    expect(await teleOf(uid)).toEqual([0, 0, 0]);
+    expect(await teleOf(ADMIN)).toEqual([1, 1, 1]);
     expect((await q("SELECT status, db_name FROM users WHERE uid = :u", { u: uid }))[0]).toEqual({ status: "deleted", db_name: `deleted:${uid}` });
     expect(await q("SELECT count(*) AS n FROM user_tokens WHERE uid = :u", { u: uid })).toEqual([{ n: 0 }]);
     expect(await q("SELECT count(*) AS n FROM requests")).toEqual([{ n: 0 }]);

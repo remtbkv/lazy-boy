@@ -5,7 +5,7 @@
 // hand this db.ts's client instead. Never on a user path: only the deletion job awaits it (S7).
 import "server-only";
 import { createClient, type Client } from "@libsql/client";
-import { TELEMETRY_SQL, type LifecycleEntry } from "@/lib/deletion";
+import { TELEMETRY_SQL, TELEMETRY_USER_TABLES, type LifecycleEntry } from "@/lib/deletion";
 import { makeStoreFetch } from "@/lib/store-fetch";
 
 function open(): Client {
@@ -26,7 +26,7 @@ async function withClient<T>(run: (c: Client) => Promise<T>): Promise<T> {
 /** Delete every telemetry row tagged with this uid. A table without `user_id` holds none. */
 export function deleteUserTelemetry(uid: string): Promise<void> {
   return withClient(async (c) => {
-    for (const table of ["api_log", "client_metrics"] as const) {
+    for (const table of TELEMETRY_USER_TABLES) {
       const cols = await c.execute(TELEMETRY_SQL.columns(table));
       if (cols.rows.some((r) => r.name === "user_id")) await c.execute({ sql: TELEMETRY_SQL.deleteRows(table), args: { uid } });
     }
