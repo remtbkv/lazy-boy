@@ -17,6 +17,8 @@ vi.mock("@/lib/sync/library", () => ({
   },
 }));
 
+import { createClient } from "@libsql/client";
+import { appDatabaseUrl, getAppMeta } from "@/lib/app-db";
 import { getBudgetMode, setBudgetMode } from "@/lib/db";
 import { ALLTIME_GATE_MS, LIBRARY_RESCAN_MS, NOW_PLAYING_MIN_POLL_MS, SYNC_INTERVAL_MS, type Mode } from "@/lib/budget/modes";
 import { currentMode } from "@/lib/budget/mode";
@@ -42,9 +44,24 @@ describe("the policy table", () => {
   });
 });
 
+// The mode is the app's, so it lives in the app database's app_meta (beside the cooldowns and
+// the tick's stamps), never in a user's database.
+async function appMeta(sql: string): Promise<void> {
+  await getAppMeta("schema_version"); // the first open creates the app database
+  const c = createClient({ url: appDatabaseUrl(), intMode: "number" });
+  try {
+    await c.execute(sql);
+  } finally {
+    c.close();
+  }
+}
+
 describe("the stored mode and its cache", () => {
   beforeEach(async () => {
     await resetStore();
+    await appMeta("DELETE FROM app_meta WHERE key = 'budget_mode'");
+    await setBudgetMode("normal"); // resets this process's memo
+    await appMeta("DELETE FROM app_meta WHERE key = 'budget_mode'");
   });
 
   it("never written reads as none (the hot paths take it as normal)", async () => {
@@ -58,22 +75,35 @@ describe("the stored mode and its cache", () => {
     await setBudgetMode("economy");
     expect(await currentMode()).toBe("economy");
     // Another instance (the daily chores) moves it: this one sees it within 10 minutes.
-    const c = await rawClient();
-    await c.execute("UPDATE meta SET value = 'freeze' WHERE key = 'budget_mode'");
+    await appMeta("UPDATE app_meta SET value = 'freeze' WHERE key = 'budget_mode'");
     expect(await currentMode()).toBe("economy");
     vi.setSystemTime(Date.parse("2026-10-16T10:09:59Z"));
     expect(await currentMode()).toBe("economy");
     vi.setSystemTime(Date.parse("2026-10-16T10:10:00Z"));
     expect(await currentMode()).toBe("freeze");
     // The health check reads it uncached.
-    await c.execute("UPDATE meta SET value = 'normal' WHERE key = 'budget_mode'");
+    await appMeta("UPDATE app_meta SET value = 'normal' WHERE key = 'budget_mode'");
     expect(await getBudgetMode(0)).toBe("normal");
   });
 
   it("a value that is not a mode reads as none", async () => {
-    const c = await rawClient();
-    await c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('budget_mode', 'panic')");
+    await appMeta("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('budget_mode', 'panic')");
     expect(await getBudgetMode(0)).toBeNull();
+  });
+
+  it("is the app's: in app_meta, untouched by the admin's database, read with OWNER_UID unset", async () => {
+    await setBudgetMode("economy");
+    const user = await rawClient();
+    expect((await user.execute("SELECT value FROM meta WHERE key = 'budget_mode'")).rows).toEqual([]);
+    const owner = process.env.OWNER_UID;
+    delete process.env.OWNER_UID;
+    try {
+      expect(await getBudgetMode(0)).toBe("economy");
+      await setBudgetMode("freeze");
+      expect(await getAppMeta("budget_mode")).toBe("freeze");
+    } finally {
+      process.env.OWNER_UID = owner;
+    }
   });
 });
 

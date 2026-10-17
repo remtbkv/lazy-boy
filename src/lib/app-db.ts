@@ -293,6 +293,7 @@ const GLOBAL_KEYS = [
   /^tick_at$/,
   /^daily_at$/,
   /^lock:daily$/,
+  /^budget_mode$/, // the app-wide budget mode the daily chores record (src/lib/budget/, CAPACITY §6)
   /^sentinel:v[0-9]+$/, // one encrypted sentinel per TOKEN_KEYS key (§5.3)
   /^token_copy:[a-z2-7]{12}$/, // the runtime's copy of a plaintext token row ran (§11.4 step 3)
 ];

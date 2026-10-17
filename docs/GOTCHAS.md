@@ -614,7 +614,7 @@ that line first in any new action's catch.
 ARCHITECTURE.md "The budget" has the design. What bites:
 
 - **The health check turns red (500, e-mail through cron-job.org) for two budget reasons.**
-  `budget`: `meta.budget_mode` is economy or freeze, i.e. some dimension's projected month is
+  `budget`: `app_meta.budget_mode` is economy or freeze, i.e. some dimension's projected month is
   past 60% of its hard limit (or was, and has not fallen to 50%); `/usage`'s budget table says
   which. `meter`: `cpu_meter` has not been written for six hours, or ever. Every cron tick is
   metered, so a quiet meter means the meter is broken (or the telemetry store refuses it), not

@@ -112,7 +112,7 @@ src/lib/budget/          the Vercel/Turso budget (CAPACITY.md §6): request-mete
                          invocation's CPU at requireUser and the cron secret check, flushed to the
                          telemetry store's cpu_meter; budget.ts projects the month per limit and
                          sets normal/economy/freeze; daily.ts records it (the daily chores) and
-                         writes meta.budget_mode; modes.ts is what each mode slows. ARCHITECTURE.md
+                         writes app_meta.budget_mode; modes.ts is what each mode slows. ARCHITECTURE.md
 src/lib/build-skew.ts    when a tab running an old bundle reloads itself (debounce/throttle/
                          defer). The unpinned /api/build probe overrules the cheaper
                          now-playing beacon, which a pinned tab can fake. GOTCHAS.md

@@ -203,9 +203,10 @@ describe("/api/cron/health", () => {
     expect((await (await call("Bearer ext-secret")).json()).reasons).toEqual(["budget"]);
     await setBudgetMode("normal");
     expect((await call("Bearer ext-secret")).status).toBe(200);
-    // Never recorded: not measurable yet.
-    const c = await rawClient();
-    await c.execute("DELETE FROM meta WHERE key = 'budget_mode'");
+    // Never recorded: not measurable yet. The mode is the app's, in app_meta.
+    const app = createClient({ url: appDatabaseUrl(), intMode: "number" });
+    await app.execute("DELETE FROM app_meta WHERE key = 'budget_mode'");
+    app.close();
     expect((await (await call("Bearer ext-secret")).json()).unchecked).toEqual(["budget"]);
   });
 
