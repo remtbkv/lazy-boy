@@ -83,23 +83,30 @@ export const DELETION_SQL = {
   withdrawRequest: `DELETE FROM requests WHERE uid = :uid AND status IN ('pending', 'approved')`,
 } as const;
 
-// The telemetry tables that hold one user's rows, tagged `user_id`: the Spotify call log, the
-// browser's metrics and the CPU meter's per-user counts (src/lib/budget/), the three /privacy
-// names as diagnostic logs. Both runners (telemetry-lifecycle.ts, scripts/turso-mac.mjs) loop
-// over this list.
-export const TELEMETRY_USER_TABLES = ["api_log", "client_metrics", "cpu_meter"] as const;
-export type TelemetryUserTable = (typeof TELEMETRY_USER_TABLES)[number];
-
-// The telemetry store's statements (§4.1, §12.3 step 3, §12.5). `api_log` and `client_metrics`
-// carry `user_id` once Phases 1 and 3's turns add it; a table without the column holds no row of
-// anyone's, so the delete skips it.
+// The telemetry store's statements (§4.1, §12.3 step 3, §12.5). Every table with a `user_id`
+// column holds rows of one user each (api_log, client_metrics, the capacity meter's cpu_meter, and
+// any a later lane adds); the tables are found when the step runs, so a new one is covered without
+// a list to keep. `lifecycle_log` names users by `uid`, not `user_id`: it is the record of the
+// deletion itself, which §12.5 re-applies after a restore.
 export const TELEMETRY_SQL = {
-  columns: (table: TelemetryUserTable) => `SELECT name FROM pragma_table_info('${table}')`,
-  deleteRows: (table: TelemetryUserTable) => `DELETE FROM ${table} WHERE user_id = :uid`,
+  userTables: `SELECT m.name AS name FROM sqlite_master m, pragma_table_info(m.name) p
+               WHERE m.type = 'table' AND p.name = 'user_id' ORDER BY m.name`,
+  deleteRows: (table: string) => {
+    if (!/^[a-z_]+$/.test(table)) throw new Error(`telemetry: not a table name: ${table}`);
+    return `DELETE FROM ${table} WHERE user_id = :uid`;
+  },
   lifecycleTable: `CREATE TABLE IF NOT EXISTS lifecycle_log (
                      id INTEGER PRIMARY KEY, at INTEGER NOT NULL, uid TEXT NOT NULL, action TEXT NOT NULL, by TEXT NOT NULL)`,
   appendLifecycle: "INSERT INTO lifecycle_log (at, uid, action, by) VALUES (:at, :uid, :action, :by)",
 } as const;
+
+type TelemetryExec = (stmt: string | { sql: string; args: Record<string, string> }) => Promise<{ rows: ArrayLike<Record<string, unknown>> }>;
+
+/** Every telemetry row tagged with `uid`, over the caller's client: the runtime's and the Mac's. */
+export async function deleteTelemetryRows(uid: string, execute: TelemetryExec): Promise<void> {
+  const tables = Array.from((await execute(TELEMETRY_SQL.userTables)).rows, (r) => String(r.name));
+  for (const table of tables) await execute({ sql: TELEMETRY_SQL.deleteRows(table), args: { uid } });
+}
 
 const s = (sql: string, args: Stmt["args"]): Stmt => ({ sql, args });
 

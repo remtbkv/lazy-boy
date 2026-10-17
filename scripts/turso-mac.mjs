@@ -7,7 +7,7 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createClient } from "@libsql/client";
-import { TELEMETRY_SQL, TELEMETRY_USER_TABLES } from "../src/lib/deletion.ts";
+import { deleteTelemetryRows, TELEMETRY_SQL } from "../src/lib/deletion.ts";
 import { makeStoreFetch } from "../src/lib/store-fetch.ts";
 
 export const API = "https://api.turso.tech/v1";
@@ -110,12 +110,7 @@ export function macDeletionDeps(deps, plat, app, tele, by) {
     },
     destroy: (name) => plat.destroy(name),
     telemetry: {
-      deleteUser: async (uid) => {
-        for (const table of TELEMETRY_USER_TABLES) {
-          const cols = await tele.execute(TELEMETRY_SQL.columns(table));
-          if (cols.rows.some((r) => r.name === "user_id")) await tele.execute({ sql: TELEMETRY_SQL.deleteRows(table), args: { uid } });
-        }
-      },
+      deleteUser: (uid) => deleteTelemetryRows(uid, (s) => tele.execute(s)),
       appendLifecycle: (e) => appendLifecycle(tele, e),
     },
     now: deps.now,

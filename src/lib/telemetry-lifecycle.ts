@@ -5,7 +5,7 @@
 // hand this db.ts's client instead. Never on a user path: only the deletion job awaits it (S7).
 import "server-only";
 import { createClient, type Client } from "@libsql/client";
-import { TELEMETRY_SQL, TELEMETRY_USER_TABLES, type LifecycleEntry } from "@/lib/deletion";
+import { deleteTelemetryRows, TELEMETRY_SQL, type LifecycleEntry } from "@/lib/deletion";
 import { makeStoreFetch } from "@/lib/store-fetch";
 
 function open(): Client {
@@ -23,14 +23,9 @@ async function withClient<T>(run: (c: Client) => Promise<T>): Promise<T> {
   }
 }
 
-/** Delete every telemetry row tagged with this uid. A table without `user_id` holds none. */
+/** Delete every telemetry row tagged with this uid, in every table with a `user_id` column. */
 export function deleteUserTelemetry(uid: string): Promise<void> {
-  return withClient(async (c) => {
-    for (const table of TELEMETRY_USER_TABLES) {
-      const cols = await c.execute(TELEMETRY_SQL.columns(table));
-      if (cols.rows.some((r) => r.name === "user_id")) await c.execute({ sql: TELEMETRY_SQL.deleteRows(table), args: { uid } });
-    }
-  });
+  return withClient((c) => deleteTelemetryRows(uid, (s) => c.execute(s)));
 }
 
 /** One line in the lifecycle log, which an app-database restore re-applies (§12.5). */
