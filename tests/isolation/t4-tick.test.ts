@@ -184,6 +184,23 @@ describe("T4: two users, one tick", () => {
     expect(await row(B)).toMatchObject({ state: "active", failures: 0 });
   });
 
+  it("A's probe keeps failing with a 5xx for 4 hours of listening: A backs off, and A is still harvested at least hourly (§7.4's backstop)", async () => {
+    // Today's route swallowed a failed player check and harvested on the hourly backstop. A
+    // friend has no recorder: a probe that stops every harvest loses each play past the last 50.
+    const spotify = install({ [`at-${A}`]: { player: 502, recent: recent(A) }, [`at-${B}`]: healthy(B) });
+    const at: number[] = [];
+    for (let m = 0; m <= 240; m++) {
+      const before = spotify.calls.filter((c) => c.bearer === `at-${A}` && c.path.endsWith("/recently-played")).length;
+      await runTick(tickDeps({ now: () => NOW + m * MIN, stores }).deps, ZEN);
+      if (spotify.calls.filter((c) => c.bearer === `at-${A}` && c.path.endsWith("/recently-played")).length > before) at.push(m);
+    }
+    expect(at[0]).toBe(0);
+    const gaps = at.slice(1).map((m, i) => m - at[i]);
+    expect(Math.max(240 - at[at.length - 1], ...gaps)).toBeLessThanOrEqual(62);
+    expect(await row(A)).toMatchObject({ state: "backoff", last_error: "spotify-error" });
+    expect(stores[A].plays.size).toBe(2);
+  }, 60_000);
+
   it("A's token does not decrypt: nothing about A is written, the lease lapses; B ok", async () => {
     install({ [`at-${A}`]: healthy(A), [`at-${B}`]: healthy(B) });
     const bad = () => {

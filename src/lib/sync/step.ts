@@ -157,8 +157,11 @@ export async function runStep(ctx: StepContext, view: StepView): Promise<StepOut
   }
 
   // The probe, unless the player bucket is cooling down. A player refusal leaves the policy blind
-  // to track changes, and its 30-minute rule takes over (§7.8).
+  // to track changes, and its 30-minute rule takes over (§7.8). So does a probe that fails on its
+  // own (a 5xx, a timeout): the user backs off, but the backstop still harvests, as the
+  // single-user route did when its player check failed, so a failing probe never stops capture.
   let probeOk = false;
+  let probeFailed: StepCode | null = null;
   let obs: PlayerObservation = null;
   let cooldown: StepOutcome["cooldown"] = null;
   if (now >= (view.cooldowns.player ?? 0)) {
@@ -167,10 +170,12 @@ export async function runStep(ctx: StepContext, view: StepView): Promise<StepOut
       probeOk = true;
     } catch (e) {
       const code = spotifyFailure(e) ?? tokenFailure(e);
-      if (code !== "quota") return outcome(code, { probe: prev });
-      cooldown = { bucket: "player", until: quotaCooldownUntil(now) };
+      if (code === "quota") cooldown = { bucket: "player", until: quotaCooldownUntil(now) };
+      else if (code === "spotify-error") probeFailed = code;
+      else return outcome(code, { probe: prev });
     }
   }
+  const settled = (): StepCode => probeFailed ?? (cooldown ? "quota" : "ok");
 
   let probe = prev;
   if (probeOk) {
@@ -198,7 +203,7 @@ export async function runStep(ctx: StepContext, view: StepView): Promise<StepOut
     cooldownUntil: view.cooldowns["recently-played"] ?? 0,
     openApp: view.openApp,
   });
-  if (!trigger || Date.now() >= ctx.deadline) return outcome(cooldown ? "quota" : "ok", { probe, cooldown });
+  if (!trigger || Date.now() >= ctx.deadline) return outcome(settled(), { probe, cooldown });
 
   // The count first, awaited, so a lost write cannot undercount (§7.5 item 1).
   try {
@@ -228,5 +233,5 @@ export async function runStep(ctx: StepContext, view: StepView): Promise<StepOut
   } catch {
     return outcome("store-error", { probe, trigger, cooldown });
   }
-  return outcome(cooldown ? "quota" : "ok", { trigger, added, harvestedAt: now, probe, cooldown });
+  return outcome(settled(), { trigger, added, harvestedAt: now, probe, cooldown });
 }
