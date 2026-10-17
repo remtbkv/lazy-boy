@@ -93,6 +93,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 - File: `src/app/api/build/route.ts`. Gate today: none (public).
 - Does, when allowed: returns this deployment's build id; no store, no session.
+- Calls (from the source): via `meterRequest`, `meterStart`.
 - `anon`, `rem`, `friendA`, `friendB`, `revoked`, `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`, `staleSecret`, `staleLogout`, `forged`: A — public by design: a git sha already public in every asset URL (route comment, GOTCHAS)
 
 ### GET /api/now-playing

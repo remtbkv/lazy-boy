@@ -10,9 +10,14 @@
 //
 // No auth, no DB, no session — nothing here may become expensive, since a tab hits it every
 // ~5 minutes for as long as it is open. See docs/GOTCHAS.md "Deployment skew + stale tabs".
+// Those calls are invocations against Vercel's allowance, so the CPU meter counts them
+// (lib/budget/request-meter.ts: no store read; its flush runs in after(), shared with every route).
+import { meterRequest, meterStart } from "@/lib/budget/request-meter";
+
 export const dynamic = "force-dynamic";
 
 export function GET() {
+  meterRequest(meterStart(), null);
   return Response.json(
     { build: process.env.NEXT_PUBLIC_BUILD_ID },
     { headers: { "Cache-Control": "no-store" } },

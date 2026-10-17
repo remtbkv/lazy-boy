@@ -634,9 +634,9 @@ ARCHITECTURE.md "The budget" has the design. What bites:
   gate, so first) reads the CPU before the others run, so cron-job.org's tick and the
   background scans were missing from every row. Each finish now tops the rows up to the
   process's own CPU total as `(unattributed)`, short of the oldest request still in flight, so
-  that work, the CPU before each gate and the routes that pass no choke point (`/api/build`,
-  Auth.js's own routes, `/login`, the legal pages) are counted by the next finish on the same
-  instance; their invocations are not, and an instance retired straight after its last request
+  that work, the CPU before each gate and the routes that pass no choke point (Auth.js's own
+  routes, `/login`, the legal pages) are counted by the next finish on the same instance; their
+  invocations are not (`/api/build`, which every open tab calls every ~5 minutes, meters itself), and an instance retired straight after its last request
   takes that request's `after()` CPU with it. The calibration factor in `budget.ts` is where lane 05's
   dashboard reading corrects what is left.
 - **The month is the UTC calendar month.** Turso resets on it. Whether Vercel Hobby counts a

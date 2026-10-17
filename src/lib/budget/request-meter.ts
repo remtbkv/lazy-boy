@@ -5,8 +5,9 @@
 //
 // The hooks sit at the two choke points every metered request passes, not in each route:
 // requireUser() (require-user.ts: every page, gated route and server action) and the cron
-// secret check (cron-auth.ts: every /api/cron/* route). Not metered: /api/build, Auth.js's own
-// routes, /login and the legal pages, which pass neither; CAPACITY counts them as ~10 ms each.
+// secret check (cron-auth.ts: every /api/cron/* route); /api/build, which every open tab calls
+// every ~5 minutes, meters itself. Not metered: Auth.js's own routes, /login and the legal
+// pages, which pass neither; CAPACITY counts them as ~10 ms each.
 // A request's own row starts its clock where the hook runs; the CPU before it, and theirs, lands
 // in "(unattributed)" (below), so their invocations are uncounted but not their CPU.
 //

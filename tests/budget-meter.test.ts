@@ -191,6 +191,13 @@ describe("the request meter", () => {
     expect(totalMs).toBeLessThan(50);
   });
 
+  it("/api/build, which no gate passes, is metered: every open tab calls it", async () => {
+    const { GET } = await import("@/app/api/build/route");
+    await inRequest(scope("/api/build"), async () => GET());
+    await drainAfter();
+    expect(row("/api/build")!.invocations).toBe(1);
+  });
+
   it("the gates are the choke points: requireUser and the cron secret check", async () => {
     hooks.session = { user: {}, uid: "aaaaaaaaaaaa", admin: true };
     await inRequest(scope("/api/sync"), async () => {
