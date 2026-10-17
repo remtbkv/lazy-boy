@@ -204,7 +204,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 - File: `src/app/api/cron/sync/route.ts`. Gate today: `src/app/api/cron/sync/route.ts:55`.
 - Does, when allowed: the tick, at most one per 90 s whoever calls (the stamp, acquireLock('tick')): currently-playing and recently-played with Rem's stored grant, harvest stamps, plays; a library rescan every 30 min.
-- Calls (from the source): Spotify `currentlyPlaying`; via `readTokenRow`, `getValidAccessTokenFor`, `cronCaller`, `adminStore`, `spotifyClient`, `syncRecentPlays`, `syncLibrary`, `shouldHarvest`, `currentMode`.
+- Calls (from the source): Spotify `currentlyPlaying`; via `readTokenRow`, `getValidAccessTokenFor`, `hasStoredTokens`, `cronCaller`, `adminStore`, `spotifyClient`, `syncRecentPlays`, `syncLibrary`, `shouldHarvest`, `currentMode`.
 - `anon`: D — cronCaller() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET` (the Zenbook) or `Bearer $CRON_SECRET_EXT` (cron-job.org), timing-safe, an unset secret matching nobody; a cookie is not a secret; no header → 401
 - `rem`: D — cronCaller() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET` (the Zenbook) or `Bearer $CRON_SECRET_EXT` (cron-job.org), timing-safe, an unset secret matching nobody; a cookie is not a secret; Rem's cookie → 401
 - `friendA`, `friendB`, `revoked`, `staleSecret`, `staleLogout`, `forged`: D — cronCaller() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET` (the Zenbook) or `Bearer $CRON_SECRET_EXT` (cron-job.org), timing-safe, an unset secret matching nobody; a cookie is not a secret; a cookie → 401
@@ -264,7 +264,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/auth/session
 
-- File: `src/app/api/auth/[...nextauth]/route.ts`. Gate today: `src/lib/auth.ts:277`.
+- File: `src/app/api/auth/[...nextauth]/route.ts`. Gate today: `src/lib/auth.ts:284`.
 - Does, when allowed: answers the cookie's own session (name, email, expiry, error; never a token) and re-issues the cookie with a fresh 30 days.
 - Calls (from the source): via `Auth.js`.
 - `anon`: D — no cookie → null
@@ -298,7 +298,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/auth/callback/spotify
 
-- File: `src/app/api/auth/[...nextauth]/route.ts`. Gate today: `src/lib/auth.ts:189`.
+- File: `src/app/api/auth/[...nextauth]/route.ts`. Gate today: `src/lib/auth.ts:196`.
 - Does, when allowed: finishes OAuth: exchanges the code, reads /v1/me uncached-by-design, runs signIn (owner only), writes the token row, sets the session cookie.
 - Calls (from the source): via `Auth.js`.
 - `anon`: D — a stranger off the dev-mode allowlist: /v1/me 403 → /login?error=SpotifyNotRegistered, nothing written

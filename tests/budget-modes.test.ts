@@ -5,7 +5,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const spy = vi.hoisted(() => ({ librarySyncs: 0 }));
-vi.mock("@/lib/auth", () => ({ getValidAccessTokenFor: async () => "tok" }));
+vi.mock("@/lib/auth", () => ({
+  getValidAccessTokenFor: async () => "tok",
+  hasStoredTokens: async (uid: string) => (await (await import("@/lib/app-db")).readTokenRow(uid)) !== null,
+}));
 vi.mock("@/lib/spotify", () => ({
   SpotifyError: class SpotifyError extends Error {},
   spotifyClient: () => ({ currentlyPlaying: async () => null }),

@@ -1,6 +1,6 @@
 import { after } from "next/server";
 import { readTokenRow } from "@/lib/app-db";
-import { getValidAccessTokenFor } from "@/lib/auth";
+import { getValidAccessTokenFor, hasStoredTokens } from "@/lib/auth";
 import { cronCaller, type CronCaller } from "@/lib/cron-auth";
 import type { UserStore } from "@/lib/db";
 import { adminStore } from "@/lib/identity-read";
@@ -76,8 +76,10 @@ async function tick(caller: CronCaller): Promise<Response> {
   if (!store) return Response.json({ ok: true, skipped: "store" });
   const uid = store.uid;
   // The owner alarm, read before the stamp so the Zenbook sees it whichever pinger's tick ran
-  // this window (PLAN §7.2 step 0). A store error here is no verdict: the stamp decides.
-  if (caller === "zenbook" && (await readTokenRow(uid).catch(() => undefined)) === null) {
+  // this window (PLAN §7.2 step 0). It asks the token store, so Phase 2's first tick copies the
+  // admin's plaintext row in before deciding he has none (token-move.ts, §11.4 step 3). A store
+  // error here is no verdict: the stamp decides.
+  if (caller === "zenbook" && (await hasStoredTokens(uid).catch(() => undefined)) === false) {
     return Response.json({ ok: false, error: "no token" }, { status: 503 });
   }
   // The stamp (PLAN §7.2 step 1): one compare-and-set on a meta row, so a burst of calls does

@@ -43,7 +43,7 @@ vi.mock("@/lib/identity-read", () => ({
 vi.mock("@/lib/app-db", () => ({ readTokenRow: async () => null }));
 vi.mock("@/lib/usage-check", () => ({ runUsageCheck: spy.chore("runUsageCheck") }));
 vi.mock("@/lib/budget/daily", () => ({ runBudgetChore: spy.chore("runBudgetChore") }));
-vi.mock("@/lib/auth", () => ({ getValidAccessTokenFor: async () => null }));
+vi.mock("@/lib/auth", () => ({ getValidAccessTokenFor: async () => null, hasStoredTokens: async () => false }));
 
 const daily = await import("@/app/api/cron/daily/route");
 const bench = await import("@/app/api/cron/store-bench/route");

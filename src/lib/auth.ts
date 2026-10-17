@@ -122,6 +122,13 @@ export async function getValidAccessTokenFor(uid: Uid): Promise<OwnedToken | nul
   return t ? { uid: t.uid, accessToken: t.accessToken } : null;
 }
 
+/** Whether the user holds a token of record, read through the token store, so the admin's
+ *  one-time copy of his plaintext row (token-move.ts) runs first: the cron's owner alarm, which
+ *  read raw would answer "no token" to every tick before Phase 2's first read copied it. */
+export async function hasStoredTokens(uid: Uid): Promise<boolean> {
+  return (await core.getStored(uid)) !== null;
+}
+
 /** Log out's clear (RULINGS Oct 15 1:33 PM): the user's `user_tokens` row goes, so capture
  *  stops and a copied cookie is refused (a session with no grant is, session-gate.ts) until
  *  the next sign-in. */

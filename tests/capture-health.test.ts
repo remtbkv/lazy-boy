@@ -96,8 +96,12 @@ describe("getCaptureHealth (real store)", () => {
 
 // next-auth can't load under vitest (next/server); the route only needs the token getter, which
 // for a store with no tokens returns null — the case under test. Tokens present + null is the
-// transient refresh failure, which must stay a 200.
-vi.mock("@/lib/auth", () => ({ getValidAccessTokenFor: async () => null }));
+// transient refresh failure, which must stay a 200. The owner alarm's question is the row of
+// record (no admin copy is pending in these cases).
+vi.mock("@/lib/auth", () => ({
+  getValidAccessTokenFor: async () => null,
+  hasStoredTokens: async (uid: string) => (await (await import("@/lib/app-db")).readTokenRow(uid)) !== null,
+}));
 
 describe("cron with no token", () => {
   const call = async () => {
