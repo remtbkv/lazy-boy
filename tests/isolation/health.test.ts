@@ -97,8 +97,8 @@ describe("/api/cron/health", () => {
     expect(Object.keys(await green.json()).sort()).toEqual(["ok", "reasons", "unchecked"]);
   });
 
-  // The inputs Phase 1's turn wired in (PLAN §7.10): isolation events where Phase 1 records them
-  // (telemetry rows), the daily chores' stamp, the pace verdict the chores record.
+  // The inputs (PLAN §7.10): isolation events in the app database's `events`, the daily chores'
+  // stamp, the pace verdict the chores record.
   async function healthy(): Promise<void> {
     await seedOwnerApp({ accessToken: "a", refreshToken: "r", expiresAt: FAR });
     const c = await rawClient();

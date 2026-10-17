@@ -331,3 +331,15 @@ export async function releaseAppLock(name: string, owner: string): Promise<void>
 export async function recordAppEvent(code: string, uid: string | null, at = Date.now()): Promise<void> {
   await one({ sql: "INSERT INTO events (at, uid, code) VALUES (:at, :uid, :code)", args: { at, uid, code } });
 }
+
+/** The health check's read (PLAN.md §7.10, cross-user by design, a count): how many events no
+ *  check has reported yet, and the newest one's id. */
+export async function unreportedEvents(): Promise<{ count: number; newest: number | null }> {
+  const r = await one("SELECT count(*) AS n, max(id) AS newest FROM events WHERE alarmed = 0");
+  return { count: Number(r.rows[0]?.n ?? 0), newest: num(r.rows[0]?.newest) };
+}
+
+/** Mark the events a check reported, up to the newest it counted, so each e-mails once. */
+export async function markEventsAlarmed(throughId: number): Promise<void> {
+  await one({ sql: "UPDATE events SET alarmed = 1 WHERE alarmed = 0 AND id <= :id", args: { id: throughId } });
+}

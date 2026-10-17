@@ -2212,18 +2212,13 @@ async function getCaptureHealth(u: UserDb): Promise<CaptureHealth> {
 }
 
 // The hourly health check's own marks (multi-user PLAN §7.10), in the admin's database until
-// Phase 2's app_meta: when the daily chores last finished (`daily_at`, epoch ms), the last
-// Turso pace verdict they recorded (`quota_pace`, {at, ahead}), and the newest isolation
-// event a check has already reported (`isolation_seen`, the row's ts), so each event e-mails
-// once. Meta only: no marker bump.
-export type HealthMark = "daily_at" | "quota_pace" | "isolation_seen";
+// they move to app_meta: when the daily chores last finished (`daily_at`, epoch ms) and the
+// last Turso pace verdict they recorded (`quota_pace`, {at, ahead}). Which isolation events a
+// check has reported is the app database's `events.alarmed`. Meta only: no marker bump.
+export type HealthMark = "daily_at" | "quota_pace";
 async function getHealthMarks(u: UserDb): Promise<Record<HealthMark, string | null>> {
-  const [daily, pace, seen] = await Promise.all([
-    getMeta(u, "daily_at"),
-    getMeta(u, "quota_pace"),
-    getMeta(u, "isolation_seen"),
-  ]);
-  return { daily_at: daily, quota_pace: pace, isolation_seen: seen };
+  const [daily, pace] = await Promise.all([getMeta(u, "daily_at"), getMeta(u, "quota_pace")]);
+  return { daily_at: daily, quota_pace: pace };
 }
 async function setHealthMark(u: UserDb, key: HealthMark, value: string): Promise<void> {
   await setMeta(u, key, value);
@@ -3292,21 +3287,6 @@ export async function pruneApiLog(): Promise<void> {
 /** client_metrics had NO prune at all — unbounded growth with only the last 7 days ever
  *  read (audit 2026-08-19, T2.16). 30 days kept for post-hoc digging; the daily cron tick
  *  calls this alongside pruneApiLog. ISO-TEXT ts, so the cutoff is the same format. */
-/** Isolation events (isolation.ts) newer than `afterTs` (an ISO ts, exclusive; null = the
- *  whole retention window): how many, and the newest one's ts. Read by the health check. */
-export async function isolationEventsAfter(
-  afterTs: string | null,
-): Promise<{ count: number; newest: string | null }> {
-  const client = await getTelemetryClient();
-  const res = await client.execute({
-    sql: `SELECT COUNT(*) AS n, MAX(ts) AS newest FROM client_metrics
-          WHERE event = 'isolation' AND ts > ?`,
-    args: [afterTs ?? ""],
-  });
-  const r = res.rows[0];
-  return { count: r ? Number(r.n) || 0 : 0, newest: r?.newest == null ? null : String(r.newest) };
-}
-
 export async function pruneClientMetrics(): Promise<void> {
   const client = await getTelemetryClient();
   await client.execute({
