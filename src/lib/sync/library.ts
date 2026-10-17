@@ -1,5 +1,5 @@
 import "server-only";
-import { spotifyClient } from "@/lib/spotify";
+import { DeadlineError, spotifyClient } from "@/lib/spotify";
 import type { Track } from "@/lib/spotify/types";
 import { type UserStore } from "@/lib/db";
 import { likedHead, type LikedRow } from "@/lib/liked-diff";
@@ -89,8 +89,9 @@ export async function syncLibrary(
   const savedAt = await store.getSavedSyncedAt();
   const stale = !savedAt || Date.now() - Date.parse(savedAt) > LIKED_FULL_MAX_AGE_MS;
   if (!cut && (stale || sig.total !== head.total || sig.topAddedAt !== head.topAddedAt)) {
-    if (late()) cut = true;
-    else if ((await syncLiked(sp, store, paceMs)) > 0) changed = true;
+    const written = late() ? null : await syncLiked(sp, store, paceMs, opts.deadline);
+    if (written === null) cut = true;
+    else if (written > 0) changed = true;
   }
   processed += head.total;
   onProgress?.(processed, total);
@@ -115,8 +116,10 @@ export async function syncLibrary(
 /** Liked Songs, sized for a friend with thousands (multi-user PLAN §7.7, scale 3): read from
  *  the newest page until a stored (track, added_at) appears, write what the head shows, and
  *  refetch the whole list only when the count still disagrees (an unlike the head cannot
- *  see). Nothing changed costs one page. Returns the saved_tracks rows written. */
-async function syncLiked(sp: Spotify, store: UserStore, paceMs: number): Promise<number> {
+ *  see). Nothing changed costs one page. Returns the saved_tracks rows written, or null when the
+ *  rescan's deadline came first: then nothing is written, and the read starts over next time. */
+async function syncLiked(sp: Spotify, store: UserStore, paceMs: number, deadline?: number): Promise<number | null> {
+  const late = () => deadline !== undefined && Date.now() >= deadline;
   const stored = await store.readSavedRows();
   const read: Track[] = [];
   const row = (t: Track): LikedRow => ({ trackId: t.id, addedAt: t.addedAt ?? null });
@@ -124,12 +127,19 @@ async function syncLiked(sp: Spotify, store: UserStore, paceMs: number): Promise
     const page = await sp.savedTracksPage(cursor);
     read.push(...page.tracks);
     const v = likedHead(read.map(row), page.total, stored, page.next === null);
-    if (v.kind === "refetch") return store.storeSavedTracks(await sp.savedTracks({ paceMs }));
+    if (v.kind === "refetch") {
+      const all = await sp.savedTracks({ paceMs, deadline }).catch((e) => {
+        if (e instanceof DeadlineError) return null;
+        throw e;
+      });
+      return all === null ? null : store.storeSavedTracks(all);
+    }
     if (v.kind === "diff") {
       const up = new Set(v.upserts.map((r) => r.trackId));
       return store.storeSavedDiff(read.filter((t) => up.has(t.id)), v.deletes, page.total, read[0]?.addedAt ?? null);
     }
     cursor = page.next;
+    if (late()) return null;
     if (paceMs) await sleep(paceMs);
   }
 }

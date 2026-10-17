@@ -210,7 +210,7 @@ export class Resources {
   // ---- library ----
   async savedTracks(
     onProgress?: (collected: number, total: number) => void,
-    opts: { paceMs?: number } = {},
+    opts: { paceMs?: number; deadline?: number } = {},
   ): Promise<Track[]> {
     const items = await this.http.getAll<RawSavedTrackItem>(
       "/me/tracks?limit=50",

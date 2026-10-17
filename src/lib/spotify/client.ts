@@ -101,6 +101,14 @@ function reasonOf(text: string): string | null {
 export type OwnedToken = { uid: string; accessToken: string };
 export type TokenSource = string | OwnedToken | (() => Promise<string | OwnedToken>);
 
+/** A paginated read stopped at its caller's deadline: nothing it read is returned. */
+export class DeadlineError extends Error {
+  constructor(path: string) {
+    super(`deadline passed reading ${path}`);
+    this.name = "DeadlineError";
+  }
+}
+
 /** A token handed to a client made for `owner` that names someone else, or no one. */
 export class TokenOwnerError extends Error {
   constructor() {
@@ -350,7 +358,7 @@ export class HttpClient {
   async getAll<T>(
     firstPath: string,
     onProgress?: (collected: number, total: number) => void,
-    opts: { paceMs?: number } = {},
+    opts: { paceMs?: number; deadline?: number } = {},
   ): Promise<T[]> {
     const items: T[] = [];
     let cursor: string | null = firstPath;
@@ -362,6 +370,9 @@ export class HttpClient {
     while (cursor) {
       if (seen.has(cursor)) throw new SpotifyError(508, `pagination did not terminate: ${firstPath}`);
       seen.add(cursor);
+      // A background read with a deadline (the cron's rescan, multi-user PLAN §7.2 step 4) stops
+      // between pages once it has passed, rather than run until the invocation is killed.
+      if (opts.deadline !== undefined && Date.now() >= opts.deadline) throw new DeadlineError(firstPath);
       if (opts.paceMs && seen.size > 1) await sleep(opts.paceMs);
       const page: Paging<T> = await this.page<T>(cursor);
       items.push(...page.items);

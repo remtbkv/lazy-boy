@@ -153,6 +153,58 @@ describe("Liked Songs for a friend with thousands (scale 3)", () => {
   });
 });
 
+describe("the rescan's deadline (PLAN §7.2 step 4: one rescan a tick, under its own deadline)", () => {
+  // 300 likes stored; Spotify now lists 299 (one unliked mid-list), 50 a page, each page 40 ms
+  // away: the head meets the store on its first row and the count disagrees, so a refetch.
+  const likes = Array.from({ length: 300 }, (_, i) => track(`t${i}`, new Date(Date.UTC(2026, 9, 1) - i * 60_000).toISOString()));
+  const listed = likes.filter((_, i) => i !== 150);
+  const raw = (t: Track) => ({
+    added_at: t.addedAt,
+    track: { id: t.id, name: t.title, uri: t.uri, type: "track", artists: [{ name: t.artist }], album: { name: "album", images: [] }, duration_ms: 200_000 },
+  });
+  function slowSpotify() {
+    const pages: number[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.pathname === "/v1/me/playlists") return Response.json({ items: [], next: null, total: 0 });
+      if (url.pathname !== "/v1/me/tracks") throw new Error(`unexpected ${url.pathname}`);
+      await new Promise((r) => setTimeout(r, 40));
+      const limit = Number(url.searchParams.get("limit"));
+      const offset = Number(url.searchParams.get("offset") ?? 0);
+      if (limit === 50) pages.push(offset);
+      const end = offset + limit;
+      const next = end < listed.length ? `https://api.spotify.com/v1/me/tracks?limit=${limit}&offset=${end}` : null;
+      return Response.json({ items: listed.slice(offset, end).map(raw), total: listed.length, next });
+    });
+    return pages;
+  }
+
+  it("a Liked refetch that cannot finish by the deadline stops there: nothing written, the scan not stamped, no throw", async () => {
+    await ownerStore().storeSavedTracks(likes);
+    const pages = slowSpotify();
+    const { spotifyClient } = await import("@/lib/spotify");
+    const sp = spotifyClient(ownerUid(), { uid: ownerUid(), accessToken: "tok" }, true, "test");
+    await syncLibrary(sp, ownerStore(), undefined, { meId: "rem-spotify", deadline: Date.now() + 150 });
+    vi.unstubAllGlobals();
+    // The head's page and at most a couple of the refetch's, not the list's seven.
+    expect(pages.length).toBeLessThan(5);
+    expect((await ownerStore().getLikedSignals()).total).toBe(300);
+    expect(await ownerStore().getLibrarySyncedAt()).toBeNull();
+  });
+
+  it("…and with the time it needs, the same refetch writes the unlike", async () => {
+    await ownerStore().storeSavedTracks(likes);
+    const pages = slowSpotify();
+    const { spotifyClient } = await import("@/lib/spotify");
+    const sp = spotifyClient(ownerUid(), { uid: ownerUid(), accessToken: "tok" }, true, "test");
+    await syncLibrary(sp, ownerStore(), undefined, { meId: "rem-spotify", deadline: Date.now() + 60_000 });
+    vi.unstubAllGlobals();
+    expect(pages).toEqual([0, 0, 50, 100, 150, 200, 250]);
+    expect((await ownerStore().getLikedSignals()).total).toBe(299);
+    expect(await ownerStore().getLibrarySyncedAt()).not.toBeNull();
+  });
+});
+
 describe("the client's pages (PLAN §6.6, §7.7)", () => {
   async function client(handler: (url: URL) => Response) {
     const urls: string[] = [];
