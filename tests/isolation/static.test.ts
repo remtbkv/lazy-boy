@@ -85,9 +85,10 @@ describe("S2: a Uid is minted in one place", () => {
 
   // phase1Owner() mints Rem's uid from OWNER_UID for the paths that act for him with no
   // session: identity-read.ts's adminStore (the cron, the daily chores, the health check, the
-  // store bench, the sign-in's owner guard and token-move.ts's plaintext row, until Phase 3's
-  // claim), which reads his users row for his database. db.ts no longer does: its app-wide rows
-  // (the cooldown, the budget mode) are app_meta's from Phase 3's turn.
+  // store bench and token-move.ts's plaintext row), which reads his users row for his database.
+  // db.ts no longer does: its app-wide rows (the cooldown, the budget mode) are app_meta's from
+  // Phase 3's turn; and owner.ts, the sign-in's owner guard, went with Phase 4a's turn (the app
+  // database decides every sign-in).
   const OWNER_PATHS = new Set(["src/lib/identity-read.ts"]);
   it("phase1Owner is imported only by the paths that act for the owner without a session", () => {
     expect(importersOf("phase1Owner").filter((f) => !OWNER_PATHS.has(f))).toEqual([]);

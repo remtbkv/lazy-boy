@@ -8,7 +8,6 @@ import { cache } from "react";
 import { mintUid, ownerUid, type IdentityVerdict, type Uid } from "@/lib/identity";
 import { markGrantDead } from "@/lib/app-db";
 import { readIdentity, resolveSignIn, signedInUser, signInRedirect } from "@/lib/identity-read";
-import { isOwnerSignIn } from "@/lib/owner";
 import { REQUEST_COOKIE, verifyRequestCookie } from "@/lib/request-cookie";
 import { spotifyScopes } from "@/lib/scopes";
 import { gateJwt, sessionFields, signInClaims } from "@/lib/session-gate";
@@ -170,13 +169,13 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     }),
   ],
   callbacks: {
-    // Runs before jwt, so a refused account never reaches the token write below. The owner
-    // guard (lib/owner.ts) stays until Phase 4a; then the app database decides by Spotify's
-    // account_id (identity-read.ts): a refusal is AccessDenied or a named case on /login.
+    // Runs before jwt, so a refused account never reaches the token write below. The app
+    // database decides by Spotify's account_id (identity-read.ts), under SIGNUPS: the admin's
+    // row, or from Phase 4a an invite the request cookie names; a refusal is AccessDenied or a
+    // named case on /login.
     async signIn({ profile }) {
       if (profile?.id === SPOTIFY_NOT_REGISTERED) return "/login?error=SpotifyNotRegistered";
       if (profile?.id === SPOTIFY_UNAVAILABLE) return "/login?error=SpotifyUnavailable";
-      if (!(await isOwnerSignIn(profile?.id ?? undefined))) return false;
       // Phase 4a: the request this sign-in may claim, from the signed cookie /join left.
       const rid = verifyRequestCookie((await cookies()).get(REQUEST_COOKIE)?.value, Date.now());
       const o = await resolveSignIn(profile ?? {}, Date.now(), rid);

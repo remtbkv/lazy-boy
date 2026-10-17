@@ -301,7 +301,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/auth/session
 
-- File: `src/app/api/auth/[...nextauth]/route.ts`. Gate today: `src/lib/auth.ts:271`.
+- File: `src/app/api/auth/[...nextauth]/route.ts`. Gate today: `src/lib/auth.ts:270`.
 - Does, when allowed: answers the cookie's own session (name, email, expiry, error; never a token) and re-issues the cookie with a fresh 30 days.
 - Calls (from the source): via `Auth.js`.
 - `anon`: D — no cookie → null
@@ -335,13 +335,13 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/auth/callback/spotify
 
-- File: `src/app/api/auth/[...nextauth]/route.ts`. Gate today: `src/lib/auth.ts:179`.
-- Does, when allowed: finishes OAuth: exchanges the code, reads /v1/me uncached-by-design, runs signIn (owner only), writes the token row, sets the session cookie.
+- File: `src/app/api/auth/[...nextauth]/route.ts`. Gate today: `src/lib/auth.ts:181`.
+- Does, when allowed: finishes OAuth: exchanges the code, reads /v1/me uncached-by-design, runs signIn (the app database by account_id, under SIGNUPS), writes the token row, sets the session cookie.
 - Calls (from the source): via `Auth.js`.
 - `anon`: D — a stranger off the dev-mode allowlist: /v1/me 403 → /login?error=SpotifyNotRegistered, nothing written
-- `rem`: A — SPOTIFY_OWNER_ID matches → the token row is written and a cookie set
-- `friendA`, `friendB`: I — owner-only signIn (src/lib/owner.ts) → AccessDenied before the token write; from P4a an invite claim gives them their own uid and row
-- `revoked`: D — owner-only signIn → AccessDenied; from P2 a disabled row is refused with 'ask Rem'
+- `rem`: A — his account_id names the admin row → the token row is written and a cookie set
+- `friendA`, `friendB`: I — resolveSignIn: no row for this account_id and no request cookie → AccessDenied before the token write; with an approved request's cookie and SIGNUPS=invite, the claim gives them their own uid and row (claim-signin.test.ts)
+- `revoked`: D — resolveSignIn: no row for this account_id → AccessDenied; a disabled row is refused with 'ask Rem'
 - `vercelCron`, `zenbookPinger`, `zenbookRecorder`, `cronjobOrg`: D — a callback with no state or PKCE cookie → Auth.js InvalidCheck → /login?error=
 - `staleSecret`, `staleLogout`, `forged`: D — a replayed callback URL with Rem's code but no state cookie → InvalidCheck
 

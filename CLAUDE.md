@@ -96,7 +96,7 @@ src/lib/identity.ts      the uid, the branded Uid, the identity check, phase1Own
                          for the session-less paths); identity-read.ts reads it (and sign-in's
                          account_id link) from the app database, naming the user's database
                          for forUser, and adminStore() reads the admin's row for the paths
-                         with no session (the cron routes, owner.ts); session-gate.ts and
+                         with no session (the cron routes); session-gate.ts and
                          require-user.ts turn it into each entry point's answer. EVERY entry
                          point gates with require*User() before its first read
 src/lib/user-cache.ts    the only caller of unstable_cache (uid + owner stamp); isolation.ts

@@ -79,10 +79,13 @@ cross-user exposure are at the end.
 - **Baseline security headers** in `next.config.ts` (`X-Content-Type-Options`,
   `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`, HSTS).
 - **Secrets are gitignored** (`.env.local`); only `.env.example` is committed.
-- **Owner-only sign-in.** Until Phase 2's app database there is one user, so the `signIn`
-  callback (`src/lib/owner.ts`) refuses every Spotify account but `SPOTIFY_OWNER_ID` (falling
-  back to the owner's stored `me_id`), and every sign-in is refused while `OWNER_UID` is unset.
-  A refused login gets AccessDenied before the token is written.
+- **Who may sign in.** The `signIn` callback asks the app database (`identity-read.ts
+  resolveSignIn`), keyed on Spotify's `account_id`: the admin's row, or, from Phase 4a with
+  `SIGNUPS=invite`, an invite Rem approved, claimed once by the account carrying that request's
+  signed cookie (`request-cookie.ts`). `SIGNUPS=owner` refuses every row but the admin's at
+  sign-in, at every request's identity read and at the cron's claim, so one variable and a
+  redeploy freeze every friend. A refused login gets AccessDenied (or a named case on /login)
+  before the token is written. The owner-only guard `src/lib/owner.ts` was removed in Phase 4a.
 - **Scripts name their user.** Every script that reads or writes a user's database requires
   `--user <uid>`, checked before it opens anything, and refuses a database that names another
   owner (`scripts/script-user.mjs`).

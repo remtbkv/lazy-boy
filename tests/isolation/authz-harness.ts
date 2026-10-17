@@ -232,7 +232,15 @@ async function spotifyFetch(input: RequestInfo | URL, init?: RequestInit): Promi
     return Response.json({ snapshot_id: "snap-after" }, { status: 200 });
   }
   if (path === "/me") {
-    return Response.json({ id: OWNER_OF[owner] ?? owner, display_name: owner, email: null, images: [], product: "premium" });
+    // account_id is the sign-in's link to a users row (Phase 2; probe/me_keys.json: dev mode returns it).
+    return Response.json({
+      id: OWNER_OF[owner] ?? owner,
+      account_id: `${owner.toLowerCase()}-account`,
+      display_name: owner,
+      email: null,
+      images: [],
+      product: "premium",
+    });
   }
   // The player state, per owner, playing from the owner's playlist: /api/now-playing reads it
   // (NOW_PLAYING_2S L2) and goes on to the owner's context-name cache (code review 0156 M4).
