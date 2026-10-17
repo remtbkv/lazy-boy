@@ -7,7 +7,9 @@ const state = vi.hoisted(() => ({
   uid: "aaaaaaaaaaaa",
   calls: [] as string[],
   fail: false,
+  mode: "normal" as "normal" | "economy" | "freeze",
 }));
+vi.mock("@/lib/budget/mode", () => ({ currentMode: async () => state.mode }));
 
 vi.mock("@/lib/auth", () => ({
   auth: async () => ({ user: {}, uid: state.uid, admin: false }),
@@ -35,6 +37,7 @@ beforeEach(() => {
   clearNowPlayingMemo();
   state.calls = [];
   state.fail = false;
+  state.mode = "normal";
   state.uid = "aaaaaaaaaaaa";
   vi.useRealTimers();
 });
@@ -51,6 +54,20 @@ describe("the now-playing memo", () => {
     vi.advanceTimersByTime(NOW_PLAYING_MEMO_MS);
     expect(await track()).toBe("tok-aaaaaaaaaaaa-track");
     expect(state.calls).toEqual(["tok-aaaaaaaaaaaa", "tok-bbbbbbbbbbbb", "tok-aaaaaaaaaaaa"]);
+  });
+
+  // The memo's reply and the fresh one are built in two places in the route, and every later field
+  // has had to be added to both: the budget's floor was dropped from the memo's (lane 34's stitch,
+  // 64d35d6), and lane 13's `u`, which tells a tab its cookie now names someone else (mu/rv-p1
+  // 253ea15), meets this route only at lane 35's fold. A tab must not be able to tell them apart.
+  it("a reply from the memo is the fresh reply, field for field", async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    state.mode = "economy";
+    const fresh = await (await GET()).json();
+    const memoized = await (await GET()).json();
+    expect(state.calls).toHaveLength(1); // the second answer is the memo's
+    expect(fresh.minPollMs).toBe(30_000);
+    expect(memoized).toEqual(fresh);
   });
 
   it("a failure is not remembered", async () => {
