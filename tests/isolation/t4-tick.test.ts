@@ -63,7 +63,7 @@ describe("T4: two users, one tick", () => {
     const { deps } = tickDeps({ now: () => NOW, stores });
     const r = await runTick(deps, ZEN);
     expect(r.status).toBe(200);
-    expect(r.body.steps).toEqual(
+    expect(r.detail!.steps).toEqual(
       expect.arrayContaining([
         { uid: A, outcome: "ok", trigger: "backstop", added: 2 },
         { uid: B, outcome: "ok", trigger: "backstop", added: 2 },
@@ -99,7 +99,7 @@ describe("T4: two users, one tick", () => {
     };
     const { deps } = tickDeps({ now: () => NOW, stores, tokenFor: tokenSource({ [A]: dead }) });
     const r = await runTick(deps, ZEN);
-    const steps = r.body.steps as { uid: string; outcome: string }[];
+    const steps = r.detail!.steps as { uid: string; outcome: string }[];
     expect(steps.find((s) => s.uid === A)?.outcome).toBe("invalid-grant");
     expect(steps.find((s) => s.uid === B)?.outcome).toBe("ok");
     expect((await q("SELECT status FROM users WHERE uid = :u", { u: A }))[0].status).toBe("needs_reconnect");
@@ -166,7 +166,7 @@ describe("T4: two users, one tick", () => {
     const spotify = install({ [`at-${A}`]: healthy(A), [`at-${B}`]: healthy(B) });
     const { deps } = tickDeps({ now: () => NOW, stores, tokenFor: tokenSource({ [A]: () => null }) });
     const r = await runTick(deps, ZEN);
-    const steps = r.body.steps as { uid: string; outcome: string }[];
+    const steps = r.detail!.steps as { uid: string; outcome: string }[];
     expect(steps.find((s) => s.uid === A)?.outcome).toBe("no-token");
     expect(steps.find((s) => s.uid === B)?.outcome).toBe("ok");
     expect(spotify.calls.every((c) => c.bearer === `at-${B}`)).toBe(true);
@@ -177,7 +177,7 @@ describe("T4: two users, one tick", () => {
     install({ [`at-${A}`]: { player: playing(`${A}-now`), recent: 502 }, [`at-${B}`]: healthy(B) });
     const { deps } = tickDeps({ now: () => NOW, stores });
     const r = await runTick(deps, ZEN);
-    const steps = r.body.steps as { uid: string; outcome: string }[];
+    const steps = r.detail!.steps as { uid: string; outcome: string }[];
     expect(steps.find((s) => s.uid === A)?.outcome).toBe("spotify-error");
     expect(steps.find((s) => s.uid === B)?.outcome).toBe("ok");
     expect(await row(A)).toMatchObject({ state: "backoff", failures: 1, last_error: "spotify-error", next_probe_at: NOW + 2 * MIN });
@@ -192,7 +192,7 @@ describe("T4: two users, one tick", () => {
     const { deps } = tickDeps({ now: () => NOW, stores, tokenFor: tokenSource({ [A]: bad }) });
     const before = await row(A);
     const r = await runTick(deps, ZEN);
-    const steps = r.body.steps as { uid: string; outcome: string }[];
+    const steps = r.detail!.steps as { uid: string; outcome: string }[];
     expect(steps.find((s) => s.uid === A)?.outcome).toBe("decrypt");
     expect(steps.find((s) => s.uid === B)?.outcome).toBe("ok");
     const after = await row(A);
@@ -205,7 +205,7 @@ describe("T4: two users, one tick", () => {
     install({ [`at-${A}`]: { player: 403 }, [`at-${B}`]: healthy(B) });
     const { deps } = tickDeps({ now: () => NOW, stores });
     const r = await runTick(deps, ZEN);
-    const steps = r.body.steps as { uid: string; outcome: string }[];
+    const steps = r.detail!.steps as { uid: string; outcome: string }[];
     expect(steps.find((s) => s.uid === A)?.outcome).toBe("spotify-error");
     expect((await q("SELECT status FROM users WHERE uid = :u", { u: A }))[0].status).toBe("active");
   });
@@ -230,7 +230,7 @@ describe("T4: two users, one tick", () => {
   it("…with Spotify's own words, A is removed at its second refusal while B, the admin, keeps working", async () => {
     refuse(A);
     const r = await runTick(tickDeps({ now: () => NOW, stores }).deps, ZEN);
-    const steps = r.body.steps as { uid: string; outcome: string }[];
+    const steps = r.detail!.steps as { uid: string; outcome: string }[];
     expect(steps.find((s) => s.uid === A)?.outcome).toBe("not-registered");
     expect(steps.find((s) => s.uid === B)?.outcome).toBe("ok");
     // One refusal proves nothing about A alone: B's success came in the same moment.
@@ -251,7 +251,7 @@ describe("T4: two users, one tick", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("the user may not be registered", { status: 403 })));
     const { deps } = tickDeps({ now: () => NOW, stores });
     const r = await runTick(deps, ZEN);
-    expect((r.body.steps as { outcome: string }[]).map((s) => s.outcome)).toEqual(["not-registered", "not-registered"]);
+    expect((r.detail!.steps as { outcome: string }[]).map((s) => s.outcome)).toEqual(["not-registered", "not-registered"]);
     expect((await q("SELECT status FROM users ORDER BY uid")).map((x) => x.status)).toEqual(["active", "active"]);
     expect((await q("SELECT state FROM sync_state ORDER BY uid")).map((x) => x.state)).toEqual(["backoff", "backoff"]);
   });
@@ -307,7 +307,7 @@ describe("T4: two users, one tick", () => {
       const took = Date.now() - t0;
       expect(took).toBeLessThan(20_000);
       expect(took).toBeGreaterThanOrEqual(15_000);
-      const steps = r.body.steps as { uid: string; outcome: string }[];
+      const steps = r.detail!.steps as { uid: string; outcome: string }[];
       expect(steps.find((s) => s.uid === A)?.outcome).toBe("timeout");
       expect(steps.find((s) => s.uid === B)?.outcome).toBe("ok");
       expect(await row(A)).toMatchObject({ state: "backoff", last_error: "timeout", lease_owner: null });
@@ -323,7 +323,7 @@ describe("T4: two users, one tick", () => {
     const r = await runTick(deps, ZEN);
     expect(Date.now() - t0).toBeLessThan(400);
     expect(r.body.after).toBe(true);
-    expect((r.body.steps as { uid: string; outcome: string }[]).find((s) => s.uid === A)?.outcome).toBe("pending");
+    expect((r.detail!.steps as { uid: string; outcome: string }[]).find((s) => s.uid === A)?.outcome).toBe("pending");
     expect(afters.length).toBeGreaterThanOrEqual(1);
     await Promise.all(afters);
     expect(await row(A)).toMatchObject({ last_error: "timeout", lease_owner: null });
@@ -348,7 +348,7 @@ describe("T4: the lease and the brake's counter, through the tick", () => {
     };
     const r = await runTick(tickDeps({ now: () => NOW, stores }).deps, ZEN);
     vi.mocked(Date.now).mockRestore();
-    expect((r.body.steps as { uid: string; outcome: string }[]).find((s) => s.uid === A)?.outcome).toBe("ok");
+    expect((r.detail!.steps as { uid: string; outcome: string }[]).find((s) => s.uid === A)?.outcome).toBe("ok");
     expect(await row(A)).toMatchObject({ lease_owner: expect.any(String), next_probe_at: NOW, last_ok_at: null, last_harvest_at: null });
     // After lease_until (NOW + 50 s) the user is due again and the next tick's release lands.
     await runTick(tickDeps({ now: () => NOW + 51_000, stores }).deps, ZEN);
@@ -409,7 +409,7 @@ describe("T4: the rest of the tick", () => {
     const { deps } = tickDeps({ now: () => NOW, stores });
     const r = await runTick(deps, ZEN);
     expect(stores[A].rescans + stores[B].rescans).toBe(1);
-    const who = r.body.rescan as string;
+    const who = r.detail!.rescan as string;
     expect([A, B]).toContain(who);
     expect(Number((await row(who)).next_rescan_at)).toBe(NOW + 30 * MIN);
   });

@@ -5,7 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAppMeta } from "@/lib/app-db";
 import { mintUid, type Uid } from "@/lib/identity";
-import { ownerAlarm, runTick } from "@/lib/sync/tick";
+import { ownerAlarm, runTick, type TickReply } from "@/lib/sync/tick";
 import { freshAppDb, seedUser } from "./harness";
 import { EXT, ZEN, memoryStepStore, stubCronSecrets, tickDeps, tickSpotify, tokenSource, type Script } from "./tick-harness";
 
@@ -13,6 +13,8 @@ const A: Uid = mintUid("aaaaaaaaaaaa");
 const ADMIN: Uid = mintUid("rrrrrrrrrrrr");
 const NOW = Date.UTC(2026, 9, 16, 18, 0);
 const BARE = { status: 200, body: { ok: true } };
+// What the caller hears; `detail` is the tests' own view of the steps and is never sent.
+const said = ({ status, body }: TickReply) => ({ status, body });
 
 let db: ReturnType<typeof freshAppDb>;
 const q = async (sql: string, args: Record<string, string | number | null> = {}) => (await db.raw().execute({ sql, args })).rows;
@@ -65,18 +67,47 @@ describe("T13: the caller, named by its secret", () => {
   });
 
   it("cron-job.org's caller (CRON_SECRET_EXT) does the same work and hears only {\"ok\":true}", async () => {
-    const { deps } = tickDeps({ now: () => NOW, stores });
+    const { deps, afters } = tickDeps({ now: () => NOW, stores });
     expect(await runTick(deps, EXT)).toEqual(BARE);
+    await Promise.all(afters); // its tick runs after the reply
     expect(stores[A].plays.size).toBe(1);
     expect(stores[ADMIN].plays.size).toBe(1);
   });
 });
 
+describe("T13: what each caller's reply can say about anyone's listening (security R14, RULES 11)", () => {
+  it("cron-job.org hears {\"ok\":true} before the tick starts: a step hanging on Spotify does not hold its reply", async () => {
+    spotify = tickSpotify({ [`at-${A}`]: { player: "hang" }, [`at-${ADMIN}`]: healthy(ADMIN) });
+    vi.stubGlobal("fetch", spotify.fetch);
+    const { deps, afters } = tickDeps({ now: () => NOW, stores, config: { stepMs: 300 } });
+    const t0 = Date.now();
+    expect(await runTick(deps, EXT)).toEqual(BARE);
+    expect(Date.now() - t0).toBeLessThan(100);
+    expect(afters.length).toBe(1);
+    await Promise.all(afters);
+    expect(stores[ADMIN].plays.size).toBe(1); // the tick ran in full after the reply
+  });
+
+  it("the Zenbook hears the admin's step in full and a friend's by its code alone", async () => {
+    const { deps } = tickDeps({ now: () => NOW, stores });
+    const r = await runTick(deps, ZEN);
+    expect(r.body.steps).toEqual(
+      expect.arrayContaining([
+        { uid: ADMIN, outcome: "ok", trigger: "backstop", added: 1 },
+        { uid: A, outcome: "ok" },
+      ]),
+    );
+    // The tick did harvest A: only the reply leaves it out.
+    expect(r.detail?.steps).toContainEqual({ uid: A, outcome: "ok", trigger: "backstop", added: 1 });
+  });
+});
+
 describe("T13: the owner alarm, for the Zenbook's caller only", () => {
+
   it("the admin needs to reconnect: the Zenbook hears 503, cron-job.org a bare 200", async () => {
     await q("UPDATE users SET status = 'needs_reconnect' WHERE uid = :u", { u: ADMIN });
     const { deps } = tickDeps({ now: () => NOW, stores });
-    expect(await runTick(deps, ZEN)).toEqual({ status: 503, body: { ok: false, error: "admin-status" } });
+    expect(said(await runTick(deps, ZEN))).toEqual({ status: 503, body: { ok: false, error: "admin-status" } });
     const later = tickDeps({ now: () => NOW + 60_000, stores });
     expect(await runTick(later.deps, EXT)).toEqual(BARE);
   });
@@ -97,9 +128,10 @@ describe("T13: the owner alarm, for the Zenbook's caller only", () => {
     await q("INSERT INTO events (at, uid, code) VALUES (:t, :a, 'decrypt'), (:t, :b, 'decrypt')", { t: NOW + 1, a: A, b: ADMIN });
     const ext = tickDeps({ now: () => NOW, stores, tokenFor: tokenSource({ [A]: bad, [ADMIN]: bad }) });
     expect(await runTick(ext.deps, EXT)).toEqual(BARE);
+    await Promise.all(ext.afters);
     // The Zenbook's tick a minute later answers from them, whichever pinger did the work.
     const zen = tickDeps({ now: () => NOW + 60_000, stores });
-    expect(await runTick(zen.deps, ZEN)).toEqual({ status: 503, body: { ok: false, error: "decrypt" } });
+    expect(said(await runTick(zen.deps, ZEN))).toEqual({ status: 503, body: { ok: false, error: "decrypt" } });
   });
 
   it("…and in its own tick, when the admin's blob fails", async () => {
@@ -108,7 +140,7 @@ describe("T13: the owner alarm, for the Zenbook's caller only", () => {
       throw new DecryptError("bad tag");
     };
     const { deps } = tickDeps({ now: () => NOW, stores, tokenFor: tokenSource({ [ADMIN]: bad }) });
-    expect(await runTick(deps, ZEN)).toEqual({ status: 503, body: { ok: false, error: "decrypt" } });
+    expect(said(await runTick(deps, ZEN))).toEqual({ status: 503, body: { ok: false, error: "decrypt" } });
   });
 
   it("one friend failing to decrypt is not the owner's alarm", async () => {
@@ -134,8 +166,10 @@ describe("T13: the owner alarm, for the Zenbook's caller only", () => {
 
 describe("T13: the stamp", () => {
   it("a burst inside the window does one tick's work, whichever caller sends it", async () => {
-    const { deps } = tickDeps({ now: () => NOW, stores });
+    const { deps, afters } = tickDeps({ now: () => NOW, stores });
     const replies = await Promise.all([ZEN, EXT, ZEN, EXT, ZEN, ZEN, EXT].map((h) => runTick(deps, h)));
+    await Promise.all(afters);
+
     // One probe per user, once.
     expect(spotify.calls.filter((c) => c.path === "/v1/me/player").length).toBe(2);
     const worked = replies.filter((r) => Array.isArray(r.body.steps));

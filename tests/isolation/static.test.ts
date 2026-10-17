@@ -92,11 +92,13 @@ describe("S2: a Uid is minted in one place", () => {
   });
 
   // forUserAt names the database as well as the user: only what read the users row may call it,
-  // with the db_name it read: the identity read and adminStore (identity-read.ts), and Phase 3's
-  // claim. The tests do too.
-  it("forUserAt is imported only by the identity read", () => {
-    expect(importersOf("forUserAt")).toEqual(["src/lib/identity-read.ts"]);
+  // with the db_name it read: Phase 2's identity read and adminStore (identity-read.ts), and
+  // Phase 3's tick, which opens each claimed user's store at the db_name the claim read from the
+  // users row that leased them (src/lib/sync/tick-deps.ts). The tests do too.
+  it("forUserAt is imported only by the identity read and the tick's store lookup", () => {
+    expect(importersOf("forUserAt").sort()).toEqual(["src/lib/identity-read.ts", "src/lib/sync/tick-deps.ts"]);
   });
+
 });
 
 function importersOf(name: string): string[] {

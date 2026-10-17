@@ -13,7 +13,11 @@
 //      database name. If it fails the tick ends.
 //   3. Steps under Promise.allSettled, 15 s each (step.ts), each released from its outcome.
 //   4. At most one library rescan, after the harvests, with at least 10 s of the 20 left.
-//   5. The reply within 20 s; whatever has not finished goes to after().
+//   5. The reply within 20 s; whatever has not finished goes to after(). cron-job.org's caller
+//      hears {"ok":true} before any of it and the whole tick runs in after(): it records each
+//      run's duration, and a reply that waited for the work would say when someone listened.
+//      The Zenbook's reply names the admin's step and gives a friend's its code alone, so the
+//      Zenbook's ping.log holds no record of when a friend listens (RULES 11; PHASE3.md §4.11).
 //   6. The daily chores in after() when `daily_at` is over 26 hours old, under `lock:daily`.
 // Then the bookkeeping only the tick can do: a 403 "not registered" marks a friend `removed` only
 // when it is theirs alone (refused twice, someone else's calls working in between); invalid_grant's confirmation (§5.4 step 2) for at most one
@@ -93,7 +97,9 @@ export type TickDeps = {
   config: TickConfig;
 };
 
-export type TickReply = { status: number; body: Record<string, unknown> };
+export type StepReport = { uid: Uid; outcome: StepCode | "pending"; trigger?: HarvestTrigger; added?: number };
+/** `body` is what the caller hears; `detail` is every step in full, for the tests (never sent). */
+export type TickReply = { status: number; body: Record<string, unknown>; detail?: { steps: StepReport[]; rescan?: string } };
 
 export type OwnerAlarm = "no-admin" | "admin-status" | "no-token" | "decrypt";
 
@@ -311,7 +317,7 @@ async function maybeRescan(deps: TickDeps, served: Served[], now: number, deadli
 }
 
 /** §7.11: the daily chores, when the last run is over 26 hours old, in after(). */
-function maybeDaily(deps: TickDeps, dailyAt: number | null, now: number): "started" | null {
+function maybeDaily(deps: TickDeps, dailyAt: number | null, now: number, after: (work: Promise<unknown>) => void): "started" | null {
   if (dailyAt !== null && now - dailyAt <= DAILY_STALE_MS) return null;
   const run = (async () => {
     const owner = await deps.queue.acquireAppLock("lock:daily", DAILY_LOCK_MS);
@@ -320,11 +326,11 @@ function maybeDaily(deps: TickDeps, dailyAt: number | null, now: number): "start
     await deps.queue.setAppMeta("daily_at", String(deps.now()));
     await deps.queue.releaseAppLock("lock:daily", owner);
   })().catch((e) => console.error(`[tick] daily chores: ${String(e)}`));
-  deps.after(run);
+  after(run);
   return "started";
 }
 
-const stepsBody = (served: Served[]) =>
+const stepReports = (served: Served[]): StepReport[] =>
   served.map((s) => ({
     uid: s.user.uid,
     outcome: s.outcome?.code ?? "pending",
@@ -332,11 +338,28 @@ const stepsBody = (served: Served[]) =>
     ...(s.outcome?.harvestedAt ? { added: s.outcome.added } : {}),
   }));
 
+/** What the Zenbook hears: the admin's step in full, a friend's by its code alone. A trigger or a
+ *  count is when that person listened, and the Zenbook keeps every reply in ping.log. */
+const zenbookSteps = (served: Served[], reports: StepReport[]) =>
+  reports.map((r, i) => (served[i].user.isAdmin ? r : { uid: r.uid, outcome: r.outcome }));
+
 /** `GET /api/cron/sync`. */
 export async function runTick(deps: TickDeps, authorization: string | null): Promise<TickReply> {
   const caller = deps.caller(authorization);
   if (!caller) return { status: 401, body: { ok: false, error: "forbidden" } };
-  const zenbook = caller === "zenbook";
+  if (caller === "zenbook") return tick(deps, true, deps.after);
+  // cron-job.org: the bare reply before any work, the tick and whatever it hands on after it
+  // (security R14). Its reply is never anything else, so the tick's own answer is dropped.
+  const later: Promise<unknown>[] = [];
+  deps.after(
+    tick(deps, false, (w) => later.push(w))
+      .then(() => Promise.allSettled(later))
+      .catch((e) => console.error(`[tick] ${String(e)}`)),
+  );
+  return { status: 200, body: { ok: true } };
+}
+
+async function tick(deps: TickDeps, zenbook: boolean, after: (work: Promise<unknown>) => void): Promise<TickReply> {
   const started = Date.now();
   const now = deps.now();
   const clock = () => now + (Date.now() - started);
@@ -366,7 +389,7 @@ export async function runTick(deps: TickDeps, authorization: string | null): Pro
   } catch {
     return answer({ skipped: "store" });
   }
-  const daily = maybeDaily(deps, claim.dailyAt, now);
+  const daily = maybeDaily(deps, claim.dailyAt, now, after);
 
   const replyAt = started + deps.config.replyMs;
   const served = toServe(deps, claim);
@@ -383,12 +406,18 @@ export async function runTick(deps: TickDeps, authorization: string | null): Pro
     }
   })();
   const done = await withDeadline(work.then(() => true), replyAt, () => false);
-  if (!done) deps.after(work);
+  if (!done) after(work);
 
   // §5.3: two or more users, or the admin, failing to decrypt in this tick, too.
   const decrypts = served.filter((s) => s.outcome?.code === "decrypt");
   if (decrypts.length >= 2 || decrypts.some((s) => s.user.isAdmin)) alarm ??= "decrypt";
-  return answer({ steps: stepsBody(served), ...extra, ...(daily ? { daily } : {}), ...(done ? {} : { after: true }) });
+  const steps = stepReports(served);
+  // A friend's rescan is named nowhere either: its cadence says whether they were active.
+  const rescan = served.some((s) => s.user.isAdmin && s.user.uid === extra.rescan) ? extra : {};
+  return {
+    ...answer({ steps: zenbookSteps(served, steps), ...rescan, ...(daily ? { daily } : {}), ...(done ? {} : { after: true }) }),
+    detail: { steps, ...extra },
+  };
 }
 
 /** `/api/sync` (§7.6): the same step under the same lease, for the signed-in user only. A load or a

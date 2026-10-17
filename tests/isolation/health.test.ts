@@ -7,6 +7,8 @@ import { meterFlush, recordBudgetDay, setBudgetMode } from "@/lib/db";
 import { rawClient, resetStore } from "../adversarial/helpers";
 import { reportIsolation } from "@/lib/isolation";
 import { ownerStore, ownerUid, seedOwnerApp } from "../owner-store";
+import { appDatabaseUrl, setAppMeta } from "@/lib/app-db";
+import { createClient } from "@libsql/client";
 import { FAR } from "./harness";
 
 const healthy = { ok: true, staleForMs: 60_000, reason: null } as const;
@@ -103,7 +105,7 @@ describe("/api/cron/health", () => {
     await seedOwnerApp({ accessToken: "a", refreshToken: "r", expiresAt: FAR });
     const c = await rawClient();
     await c.execute({ sql: "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_sync', ?)", args: [new Date().toISOString()] });
-    await ownerStore().setHealthMark("daily_at", String(Date.now() - 3_600_000));
+    await setAppMeta("daily_at", String(Date.now() - 3_600_000));
     await ownerStore().setHealthMark("quota_pace", JSON.stringify({ at: Date.now() - 3_600_000, ahead: false }));
     await setBudgetMode("normal");
     await meterFlush([{ day: new Date().toISOString().slice(0, 10), route: "/api/cron/sync", uid: "-", invocations: 1, cpuUs: 1, wallMs: 1, bytes: 0 }]);
@@ -141,10 +143,12 @@ describe("/api/cron/health", () => {
 
   it("a daily stamp over 26 hours old is red; none yet is unchecked", async () => {
     await healthy();
-    await ownerStore().setHealthMark("daily_at", String(Date.now() - DAILY_STALE_MS - 60_000));
+    await setAppMeta("daily_at", String(Date.now() - DAILY_STALE_MS - 60_000));
     expect((await (await call("Bearer ext-secret")).json()).reasons).toEqual(["daily"]);
-    const c = await rawClient();
-    await c.execute("DELETE FROM meta WHERE key = 'daily_at'");
+    const app = createClient({ url: appDatabaseUrl(), intMode: "number" });
+    await app.execute("DELETE FROM app_meta WHERE key = 'daily_at'");
+    app.close();
+
     expect((await (await call("Bearer ext-secret")).json()).unchecked).toEqual(["daily"]);
   });
 
