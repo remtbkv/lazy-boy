@@ -157,8 +157,11 @@ http.Server.prototype.emit = function (ev, req, res) {
 // ── The control API (servers only) ─────────────────────────────────────────────────────────
 const port = Number(process.env.REHEARSAL_CONTROL_PORT || 0);
 if (port) {
+  // Each reply closes its connection. The harness blocks for seconds at a time (spawnSync of the
+  // scripts and backup_check.py), past this server's 5-s keep-alive timeout; its next call on the
+  // pooled connection then read ECONNRESET (check 7's first call, right after check 9's backups).
   const send = (res, code, body) => {
-    res.writeHead(code, { "content-type": "application/json" });
+    res.writeHead(code, { "content-type": "application/json", connection: "close" });
     res.end(JSON.stringify(body));
   };
   control = http.createServer(async (req, res) => {

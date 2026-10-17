@@ -978,8 +978,11 @@ async function tickClaims(H) {
 async function check8(H, ev) {
   const jar = { FRIENDA: await H.jarOf(H.profiles.FRIENDA), ADMIN: await H.jarOf(H.profiles.ADMIN) };
   const ask = async (tag) => (await req(H.P, "/api/search/library", { jar: cloneJar(jar[tag]) })).status;
-  // Before: A is served and ticked (the check below fails here, as it must).
+  // Before: A is served and ticked (the check below fails here, as it must). A user who fell behind
+  // rejoins at their own phase, 90-210 s after the tick that saw it (harvest-policy.ts nextDue), so
+  // one 2-minute tick can miss A; the next one reaches it.
   ev.before = { A: await ask("FRIENDA"), admin: await ask("ADMIN"), tick: await tickClaims(H) };
+  if (!ev.before.tick.steps.includes("FRIENDA")) ev.before.tick = await tickClaims(H);
   assert.equal(ev.before.A, 200);
   assert.ok(ev.before.tick.steps.includes("FRIENDA"), "A not claimed before the freeze");
   // The freeze: SIGNUPS=owner and one restart.
