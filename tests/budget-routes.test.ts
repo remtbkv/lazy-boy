@@ -11,6 +11,7 @@ const state = vi.hoisted(() => ({
   playing: null as unknown,
   steps: [] as { load: boolean }[],
   tzWrites: 0,
+  playerCalls: 0,
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -22,7 +23,13 @@ vi.mock("@/lib/spotify", () => ({
     status = 0;
   },
   spotifyCooldownMs: () => 0,
-  spotifyClient: () => ({ currentlyPlaying: async () => state.playing, contextName: async () => null }),
+  spotifyClient: () => ({
+    currentlyPlaying: async () => {
+      state.playerCalls++;
+      return state.playing;
+    },
+    contextName: async () => null,
+  }),
 }));
 vi.mock("@/lib/db", () => ({
   getBudgetMode: async () => {
@@ -55,6 +62,7 @@ vi.mock("@/lib/sync/tick", () => ({
 vi.mock("@/lib/sync/tick-deps", () => ({ liveTickDeps: () => ({}) }));
 
 const { GET: nowPlaying } = await import("@/app/api/now-playing/route");
+const { clearNowPlayingMemo } = await import("@/lib/now-playing-memo");
 const { POST: sync } = await import("@/app/api/sync/route");
 
 const PLAYING = { track: { id: "t1" }, isPlaying: true, progressMs: 1, durationMs: 200_000, context: null };
@@ -66,6 +74,8 @@ beforeEach(() => {
   state.playing = PLAYING;
   state.steps = [];
   state.tzWrites = 0;
+  state.playerCalls = 0;
+  clearNowPlayingMemo(); // Phase 4a's ~5 s per-user memo: each case starts with none
 });
 
 describe("/api/now-playing carries the poll floor", () => {
@@ -77,9 +87,19 @@ describe("/api/now-playing carries the poll floor", () => {
   ])("mode %s: minPollMs %d, playing or not", async (mode, floor) => {
     state.mode = mode;
     expect((await (await nowPlaying()).json()).minPollMs).toBe(floor);
+    clearNowPlayingMemo();
     state.playing = null;
     const idle = await (await nowPlaying()).json();
     expect(idle).toMatchObject({ playing: null, minPollMs: floor });
+  });
+
+  it("a reply from Phase 4a's per-user memo carries the floor too", async () => {
+    state.mode = "economy";
+    const first = await (await nowPlaying()).json();
+    const again = await (await nowPlaying()).json();
+    expect(state.playerCalls).toBe(1); // the second answer is the memo's
+    expect(again).toEqual(first);
+    expect(again.minPollMs).toBe(30_000);
   });
 
   it("a signed-out caller still costs no store read", async () => {

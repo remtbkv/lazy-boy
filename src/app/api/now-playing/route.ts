@@ -48,10 +48,11 @@ export async function GET() {
   const store = forUser(uid);
   // The same user's answer from the last ~5 s, so their tabs share one Spotify call (§6.6).
   const now = Date.now();
-  const memo = memoizedNowPlaying(uid, now);
-  if (memo) return reply(memo.playing, uid);
-  // Read beside the Spotify call, not before it: the mode's cache misses once per 10 minutes.
+  // Read beside the Spotify call, not before it: the mode's cache misses once per 10 minutes. A
+  // memoized answer carries the floor too, or a tab's poller would drop it for one reply.
   const floor = currentMode().then((m) => NOW_PLAYING_MIN_POLL_MS[m]);
+  const memo = memoizedNowPlaying(uid, now);
+  if (memo) return reply(memo.playing, uid, await floor);
   try {
     const sp = spotifyClient(uid, accessToken, false, "now-playing");
     const playing = await sp.currentlyPlaying();
