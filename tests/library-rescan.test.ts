@@ -210,4 +210,25 @@ describe("the client's pages (PLAN §6.6, §7.7)", () => {
     raw.close();
     vi.unstubAllGlobals();
   });
+
+  it("each /me the client re-sends is counted before it is sent too: a 403 retried once is two calls, two counts", async () => {
+    const app = await import("@/lib/app-db");
+    const { createClient } = await import("@libsql/client");
+    await app.getAppMeta("schema_version");
+    const raw = createClient({ url: app.appDatabaseUrl(), intMode: "number" });
+    const uid = ownerUid();
+    await raw.execute({ sql: "DELETE FROM sync_state WHERE uid = ?", args: [uid] });
+    await raw.execute({ sql: "INSERT INTO sync_state (uid, state, next_probe_at) VALUES (?, 'idle', 0)", args: [uid] });
+    const countedBefore: number[] = [];
+    vi.stubGlobal("fetch", async () => {
+      const r = await raw.execute({ sql: "SELECT rp_calls FROM sync_state WHERE uid = ?", args: [uid] });
+      countedBefore.push(Number(r.rows[0].rp_calls));
+      return new Response("forbidden", { status: 403 });
+    });
+    const { spotifyClient } = await import("@/lib/spotify");
+    await spotifyClient(uid, { uid, accessToken: "tok" }, false, "test").resources.me().catch(() => {});
+    expect(countedBefore).toEqual([1, 2]);
+    raw.close();
+    vi.unstubAllGlobals();
+  });
 });
