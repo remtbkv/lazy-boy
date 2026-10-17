@@ -116,7 +116,7 @@ export function ownerAlarm(a: OwnerAlarmRow): OwnerAlarm | null {
 }
 
 const TAB_TAKES_OVER_MS = 5 * 60_000;
-const DAILY_LOCK_MS = 15 * 60_000;
+export const DAILY_LOCK_MS = 15 * 60_000;
 const RESCAN_RETRY_MS = 10 * 60_000;
 const RESCAN_ACTIVE_MS = 30 * 60_000;
 const RESCAN_IDLE_MS = 150 * 60_000;

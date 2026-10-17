@@ -227,9 +227,9 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/cron/daily
 
-- File: `src/app/api/cron/daily/route.ts`. Gate today: `src/app/api/cron/daily/route.ts:25`.
+- File: `src/app/api/cron/daily/route.ts`. Gate today: `src/app/api/cron/daily/route.ts:33`.
 - Does, when allowed: the daily chores: recompute all-time totals, rebuild the Home payload, prune api_log and client_metrics, the played_at check, the usage check.
-- Calls (from the source): via `setAppMeta`, `cronAuthorized`, `runDailyChores`, `adminStore`.
+- Calls (from the source): via `acquireAppLock`, `getAppMeta`, `releaseAppLock`, `setAppMeta`, `cronAuthorized`, `runDailyChores`, `adminStore`.
 - `anon`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; no header → 401
 - `rem`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; Rem's cookie → 401
 - `friendA`, `friendB`, `revoked`, `staleSecret`, `staleLogout`, `forged`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; a cookie → 401

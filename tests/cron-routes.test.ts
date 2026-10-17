@@ -11,10 +11,19 @@ const spy = vi.hoisted(() => {
     (name: string, fail = false) =>
     async () => {
       calls.push(name);
+      if (name === "runBudgetChore" && spy.during) await spy.during();
       if (fail || spy.failing.has(name)) throw new Error(`${name} failed`);
       return name === "runUsageCheck" ? spy.usage : undefined;
     };
-  return { calls, marks, failing: new Set<string>(), chore, usage: { status: 200, body: { ok: true } as Record<string, unknown> } };
+  return {
+    calls,
+    marks,
+    failing: new Set<string>(),
+    chore,
+    usage: { status: 200, body: { ok: true } as Record<string, unknown> },
+    // Runs inside the route's run, mid-chores (the lock case).
+    during: null as null | (() => Promise<void>),
+  };
 });
 
 vi.mock("@/lib/db", () => ({
@@ -53,11 +62,13 @@ const req = (path: string, headers: Record<string, string> = {}) =>
 const authed = { authorization: "Bearer s3cret" };
 
 describe("cron routes", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     spy.calls.length = 0;
     spy.marks.length = 0;
     spy.failing.clear();
     spy.usage = { status: 200, body: { ok: true } };
+    // No run yet today: each case starts as the first delivery of the day.
+    await setAppMeta("daily_at", "0");
   });
 
   it("daily and store-bench answer 401 without the secret, and run nothing", async () => {
@@ -82,6 +93,55 @@ describe("cron routes", () => {
     ];
     for (const c of chores) expect(spy.calls.filter((x) => x === c), c).toHaveLength(1);
     expect(spy.calls).toHaveLength(chores.length);
+  });
+
+  // The two-user rehearsal's daily cycle (docs/multi-user/REHEARSAL.md, check 9) ran the chores
+  // twice in one UTC day both ways below: a tick found daily_at stale at 08:32 and Vercel's cron
+  // came at 09:00, and a second delivery of the cron ran them again.
+  it("runs the chores once a UTC day: a second delivery, or the cron after a tick's run that day, runs none", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.UTC(2026, 9, 20, 9, 0, 30));
+      expect((await daily.GET(req("/api/cron/daily", authed))).status).toBe(200);
+      // The day's run: every chore, once ("daily runs each chore exactly once" pins the list).
+      const ran = [...spy.calls];
+      expect(ran.length).toBeGreaterThan(0);
+      spy.calls.length = 0;
+      const again = await daily.GET(req("/api/cron/daily", authed));
+      expect(again.status).toBe(200);
+      expect(await again.json()).toMatchObject({ ok: true, skipped: "ran today" });
+      expect(spy.calls).toEqual([]);
+      // A tick ran them at 08:32 today; the cron at 09:00 runs none. Yesterday's run leaves today's due.
+      await setAppMeta("daily_at", String(Date.UTC(2026, 9, 20, 8, 32)));
+      expect((await (await daily.GET(req("/api/cron/daily", authed))).json()).skipped).toBe("ran today");
+      expect(spy.calls).toEqual([]);
+      await setAppMeta("daily_at", String(Date.UTC(2026, 9, 19, 9, 0)));
+      expect((await daily.GET(req("/api/cron/daily", authed))).status).toBe(200);
+      expect(spy.calls).toEqual(ran);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds the tick's lock:daily while it runs, so the cron and a tick never run the chores at once", async () => {
+    const { acquireAppLock, releaseAppLock } = await import("@/lib/app-db");
+    // A tick holds it: the cron runs nothing.
+    const tick = await acquireAppLock("lock:daily", 60_000);
+    expect(tick).toBeTruthy();
+    expect(await (await daily.GET(req("/api/cron/daily", authed))).json()).toMatchObject({ ok: true, skipped: "running" });
+    expect(spy.calls).toEqual([]);
+    await releaseAppLock("lock:daily", tick!);
+    // The cron's run holds it: a tick asking mid-run is refused; it is free again afterwards.
+    let midRun: string | null = "not asked";
+    spy.during = async () => {
+      midRun = await acquireAppLock("lock:daily", 60_000);
+    };
+    expect((await daily.GET(req("/api/cron/daily", authed))).status).toBe(200);
+    spy.during = null;
+    expect(midRun).toBeNull();
+    const after = await acquireAppLock("lock:daily", 60_000);
+    expect(after).toBeTruthy();
+    await releaseAppLock("lock:daily", after!);
   });
 
   it("one failing chore does not stop the rest, and the route still answers 200", async () => {
