@@ -145,7 +145,7 @@ export default function PrivacyPage() {
         download your history first if you want a copy, then confirm. Your database, your encrypted
         tokens, your request and your diagnostic logs are deleted, most of it at once and all of it
         within five days; Lazy Boy keeps only your Spotify account ID with a note that the account
-        was deleted, and when, for five days, so a later sign-in can be told.
+        was deleted, and when, for at most five days, so a later sign-in can be told.
         Then remove Lazy Boy at{" "}
         <a href="https://www.spotify.com/account/apps/">spotify.com/account/apps</a> (Manage apps,
         then Remove access): the app cannot do that for you. If you can no longer sign in, email Rem

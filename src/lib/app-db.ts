@@ -453,7 +453,7 @@ export async function dailyCandidates(
   };
 }
 
-/** The sweeps, one write batch: `deleted` rows past five days; token and queue rows (and refresh
+/** The sweeps, one write batch: `deleted` rows older than `deletedRowTtlMs`; token and queue rows (and refresh
  *  locks) whose uid has no users row (security R3); requests still pending after 14 days (they hold
  *  an e-mail); the health check's red records past 30 days. Counts per sweep. */
 export async function dailySweeps(now: number, deletedRowTtlMs: number): Promise<Record<string, number>> {

@@ -12,13 +12,13 @@
 //   - what a deletion leaves behind it, for every friend whose `deleted` row is still kept: the
 //     telemetry rows a request or task in flight wrote after the job's telemetry step, and the
 //     user's entries in Vercel's Data Cache (deletion-runtime.ts purgeDeparted);
-//   - the sweeps: `deleted` rows past five days, orphan token, queue and lock rows, requests still
+//   - the sweeps: `deleted` rows before their fifth day ends, orphan token, queue and lock rows, requests still
 //     pending after 14 days, health records past 30 days;
 //   - re-enabling the two cron-job.org jobs.
 import "server-only";
 import { dailyCandidates, dailySweeps, moveStatus } from "@/lib/app-db";
 import { ensureCronJobsEnabled } from "@/lib/cronjob-jobs";
-import { DELETED_ROW_TTL_MS, LEASE_WINDOW_MS, type DeletionOutcome } from "@/lib/deletion";
+import { DELETED_ROW_SWEEP_MS, LEASE_WINDOW_MS, type DeletionOutcome } from "@/lib/deletion";
 import { deleteAccount, purgeDeparted, withdrawExpiredInvite } from "@/lib/deletion-runtime";
 import { GRANT_WIDE_HOLD_MS, GRANT_WINDOW_MS, REVOKED_DELETE_AFTER_MS } from "@/lib/grant-policy";
 
@@ -88,7 +88,7 @@ export function phase4aChores(deps: DailyDeps = runtime): Chore[] {
         }`;
       },
     ],
-    ["sweeps", async () => JSON.stringify(await dailySweeps(deps.now(), DELETED_ROW_TTL_MS))],
+    ["sweeps", async () => JSON.stringify(await dailySweeps(deps.now(), DELETED_ROW_SWEEP_MS))],
     ["cronJobs", async () => JSON.stringify(await deps.reenableJobs())],
   ];
 }

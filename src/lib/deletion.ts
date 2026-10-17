@@ -17,7 +17,7 @@
 //   5. after the 50-second lease window, the token, queue and lock rows deleted again and checked
 //      gone; the users row becomes `deleted`, keeping only uid, account_id, status and status_at, so a
 //      returning sign-in within five days is told the account was deleted and when (§5.1). The daily
-//      chores delete the row after five days.
+//      chores delete the row at their last run before its fifth day ends (DELETED_ROW_SWEEP_MS).
 //   6. (the page) the person is told to remove Lazy Boy at spotify.com/account/apps.
 
 export type Stmt = { sql: string; args: Record<string, string | number | null> };
@@ -50,8 +50,11 @@ export type DeletionOutcome =
 /** The lease window (app-db.ts LEASE_MS): a step that leased the user before step 1 has finished
  *  writing, or been refused, by then. */
 export const LEASE_WINDOW_MS = 50_000;
-/** A `deleted` row is kept this long, then the daily chores delete it (§12.3 step 5). */
+/** A `deleted` row is kept at most this long (§12.3 step 5; /privacy: five days). */
 export const DELETED_ROW_TTL_MS = 5 * 86_400_000;
+/** The daily chores delete a `deleted` row this old: they run at most 26 hours apart (the tick runs
+ *  them once `daily_at` is that old), so no row waits for a run past DELETED_ROW_TTL_MS. */
+export const DELETED_ROW_SWEEP_MS = DELETED_ROW_TTL_MS - 26 * 3_600_000;
 
 // Every status a deletion may start from. Not provisioning or invited (an unclaimed invite is
 // withdrawn: `withdrawInvite`), and never the admin, whatever his status.

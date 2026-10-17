@@ -156,11 +156,24 @@ describe("what a deletion leaves behind it", () => {
   });
 });
 
+describe("the deleted row's five days", () => {
+  // /privacy: Lazy Boy keeps a departed friend's Spotify account ID for five days. The sweep runs
+  // once a day, up to 26 hours apart (the tick runs the chores when daily_at is that old), so a
+  // row swept only once past five days could stay six; it goes at the last run before day five.
+  it("no deleted row is left past five days by a daily run, whenever the runs fall", async () => {
+    await seedUser(db.raw(), { uid: "bbbbbbbbbbbb", status: "deleted", statusAt: NOW - 4.5 * DAY });
+    await seedUser(db.raw(), { uid: "cccccccccccc", status: "deleted", statusAt: NOW - 3.5 * DAY });
+    await runPhase4aChores(deps());
+    // The next run may come 26 hours on: bbbb would then be 5 days 2 hours old.
+    expect((await q("SELECT uid FROM users WHERE status = 'deleted' ORDER BY uid")).map((r) => r.uid)).toEqual(["cccccccccccc"]);
+  });
+});
+
 describe("the sweeps", () => {
   it("removes old deleted rows, orphan token, queue and lock rows, stale pending requests and old health records; keeps the rest", async () => {
     await seedUser(db.raw(), { uid: "aaaaaaaaaaaa", status: "active", admin: true });
     await seedUser(db.raw(), { uid: "bbbbbbbbbbbb", status: "deleted", statusAt: NOW - 6 * DAY });
-    await seedUser(db.raw(), { uid: "cccccccccccc", status: "deleted", statusAt: NOW - 4 * DAY });
+    await seedUser(db.raw(), { uid: "cccccccccccc", status: "deleted", statusAt: NOW - 3 * DAY });
     for (const u of ["aaaaaaaaaaaa", "zzzzzzzzzzzz"]) {
       await q("INSERT INTO user_tokens (uid, blob, expires_at, granted_at) VALUES (:u, 'b', 0, 0)", { u });
       await q("INSERT INTO sync_state (uid, state, next_probe_at) VALUES (:u, 'idle', 0)", { u });
