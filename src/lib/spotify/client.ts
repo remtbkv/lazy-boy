@@ -142,11 +142,12 @@ export class HttpClient {
     // The fair-share brake's counter (multi-user PLAN §7.5): every /me call increments its
     // user's count for the quota day, awaited before the call, so a lost write cannot
     // undercount (a re-sent one overcounts, the safe side). /me shares recently-played's
-    // bucket; the cron's step counts its own harvests the same way (sync/step.ts). A count
-    // that cannot be written (no queue row yet) is logged, never fatal.
-    if (this.owner && bucketOf(path) === "recently-played" && !path.includes("recently-played")) {
-      await countRpCall(this.owner, quotaDay(Date.now())).catch((e) => console.error(`[spotify] brake count: ${String(e)}`));
-    }
+    // bucket; the cron's step counts each harvest's first send itself (sync/step.ts), and every
+    // send this loop repeats (a 403's retry, a rate limit's, a network error's) is counted here,
+    // since each may reach Spotify. A count that cannot be written (no queue row yet) is logged,
+    // never fatal.
+    const counted = this.owner !== null && bucketOf(path) === "recently-played" ? this.owner : null;
+    let sends = 0;
     let rateLimited = 0; // 429s get their own generous budget
     let transient = 0; // network errors / timeouts
     let forbidden = 0; // 403s — retried once (see FORBIDDEN_RETRIES)
@@ -175,6 +176,10 @@ export class HttpClient {
       }
       // Outside the try: a token that names someone else is not a network error to retry.
       const bearer = await this.bearer();
+      if (counted !== null && (sends > 0 || !path.includes("recently-played"))) {
+        await countRpCall(counted, quotaDay(Date.now())).catch((e) => console.error(`[spotify] brake count: ${String(e)}`));
+      }
+      sends++;
       let res: Response;
       try {
         res = await fetch(url, {

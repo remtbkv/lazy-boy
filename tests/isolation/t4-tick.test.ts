@@ -418,6 +418,16 @@ describe("T4: the lease and the brake's counter, through the tick", () => {
       [B, 1],
     ]);
   });
+
+  it("a harvest the client re-sends is counted before each send: a 403 retried once is two calls, two counts (§7.5 item 1)", async () => {
+    const spotify = install({ [`at-${A}`]: { player: playing(`${A}-now`), recent: 403 }, [`at-${B}`]: healthy(B) });
+    await runTick(tickDeps({ now: () => NOW, stores }).deps, ZEN);
+    expect(spotify.calls.filter((c) => c.bearer === `at-${A}` && c.path.endsWith("/recently-played")).length).toBe(2);
+    expect((await q("SELECT uid, rp_calls FROM sync_state ORDER BY uid")).map((x) => [x.uid, x.rp_calls])).toEqual([
+      [A, 2],
+      [B, 1],
+    ]);
+  });
 });
 
 describe("T4: the rest of the tick", () => {
