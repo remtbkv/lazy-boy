@@ -229,6 +229,56 @@ class BackupTest(unittest.TestCase):
         self.assertEqual(sorted(set(self.turso.dumped)), ["lazyboy", "lazyboy-app"])
         self.assertIn("check ok", self.log)
 
+    def plant(self, path, age_days, body=b"x"):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with gzip.open(path, "wb") as f:
+            f.write(body)
+        t = time.time() - age_days * 86400
+        os.utime(path, (t, t))
+        return path
+
+    def test_a_file_naming_a_friends_database_is_deleted_wherever_it_is_and_at_any_age(self):
+        # Not only the per-database directories the job writes: any file or directory whose name
+        # holds a friend's database, in every tree the deletion check reads, fresh or a year old.
+        local = os.path.join(self.home, "lazyboy-backup")
+        remote = os.path.join(self.remote, "onedrive-backup")
+        planted = [
+            self.plant(os.path.join(local, "turso", FRIEND_DB + "-20261016-0400.db.gz"), 0),
+            self.plant(os.path.join(local, "snapshots", FRIEND_DB + "-20261016-0400.db.gz"), 0),
+            self.plant(os.path.join(local, "turso/lazyboy", FRIEND_DB + "-copy.db.gz"), 0),
+            self.plant(os.path.join(remote, "lazyboy-turso", FRIEND_DB + "-20261016-0400.db.gz"), 0),
+            self.plant(os.path.join(remote, "lazyboy-db", FRIEND_DB, "zenbook-20251001-0840.db.gz"), 400),
+            self.plant(os.path.join(remote, "lazyboy-backstop", FRIEND_DB + ".db.gz"), 0),
+        ]
+        self.assertEqual(self.run_backup(), 0, self.log)
+        self.assertEqual([p for p in planted if os.path.exists(p)], [])
+        self.assertFalse(any(FRIEND_DB in p for p in self.all_names()), "a file still names the friend's database")
+        self.assertIn("check ok", self.log)
+
+    def test_rems_copies_keep_their_60_days_and_a_renamed_admin_database_is_left_alone(self):
+        # Rem's retention is untouched by the friends' prune: 60 days on OneDrive for every copy, 14
+        # on the Zenbook; a directory under another name than lb-u- (Rem's database after a
+        # restore renamed it) is never pruned as a friend's.
+        remote = os.path.join(self.remote, "onedrive-backup")
+        local = os.path.join(self.home, "lazyboy-backup")
+        kept = [
+            self.plant(os.path.join(remote, "lazyboy-turso/lazyboy/lazyboy-20260917-0840.db.gz"), 30),
+            self.plant(os.path.join(remote, "lazyboy-turso/lazyboy/lazyboy-20260818-0840.db.gz"), 59),
+            self.plant(os.path.join(remote, "lazyboy-turso/lazyboy-app/lazyboy-app-20260818-0840.db.gz"), 59),
+            self.plant(os.path.join(remote, "lazyboy-turso/lazyboy-r1016/lazyboy-r1016-20261001-0840.db.gz"), 30),
+            self.plant(os.path.join(remote, "lazyboy-db/zenbook-20260818-0840.db.gz"), 59),
+            self.plant(os.path.join(remote, "lazyboy-backstop/backstop-20260818-0840.db.gz"), 59),
+            self.plant(os.path.join(local, "turso/lazyboy/lazyboy-20261006-0840.db.gz"), 10),
+        ]
+        aged = [
+            self.plant(os.path.join(remote, "lazyboy-turso/lazyboy/lazyboy-20260815-0840.db.gz"), 61),
+            self.plant(os.path.join(remote, "lazyboy-db/zenbook-20260815-0840.db.gz"), 61),
+            self.plant(os.path.join(local, "turso/lazyboy/lazyboy-20260926-0840.db.gz"), 20),
+        ]
+        self.assertEqual(self.run_backup(), 0, self.log)
+        self.assertEqual([p for p in kept if not os.path.exists(p)], [])
+        self.assertEqual([p for p in aged if os.path.exists(p)], [])
+
     def test_the_app_copy_keeps_only_the_admins_rows(self):
         self.assertEqual(self.run_backup(), 0, self.log)
         raw = self.uploaded("lazyboy-turso/lazyboy-app")

@@ -7,8 +7,9 @@ replaces PLAN.md section 12.4's four-day copies of friends). So, every night:
 
 1. The prune runs first and unconditionally, before anything is read or dumped: every backup file
    of a database that is not the admin's is deleted at any age, here and on OneDrive. That is every
-   `lb-u-<uid>`: a friend's database has that name by construction and the admin's never does, so
-   the prune needs no store to answer. Then each target's age prune as before.
+   file or directory whose name holds `lb-u-`, wherever it sits in ~/lazyboy-backup or the three
+   remotes (the paths step 3 checks): a friend's database has that name by construction and the
+   admin's never does, so the prune needs no store to answer. Then each target's age prune as before.
 2. Copies, each checked and stripped of `meta`'s `spotify_tokens%` and `lock:%` rows, then VACUUMed
    (no free page keeps a deleted row) before it is compressed and uploaded:
    - the admin's database (`users` row with is_admin = 1, so the name is read, not assumed), its
@@ -69,27 +70,46 @@ def not_found(r):
 
 
 def prune_friends():
-    """Every backup of a friend's database, deleted at any age, here and on OneDrive. A database
-    that is not the admin's is a friend's `lb-u-<uid>` by construction (invite.mjs creates them,
-    and the deletion job refuses any other name), so this needs nothing read first: it runs even
-    when no store answers. Any other name (Rem's, under a name a restore gave it) is left alone."""
+    """Every backup of a friend's database, deleted at any age, here and on OneDrive: each file or
+    directory whose name holds `lb-u-`, anywhere under ~/lazyboy-backup and the three remotes, the
+    same paths the deletion check looks for. A database that is not the admin's is a friend's
+    `lb-u-<uid>` by construction (invite.mjs creates them, and the deletion job refuses any other
+    name), so this needs nothing read first: it runs even when no store answers. Any other name
+    (Rem's, under a name a restore gave it) is left alone."""
     gone, failed = [], []
-    if os.path.isdir(TURSO_ROOT):
-        for n in sorted(os.listdir(TURSO_ROOT)):
-            if n.startswith(FRIEND_DB):
-                shutil.rmtree(os.path.join(TURSO_ROOT, n), ignore_errors=True)
-                gone.append("local:" + n)
-    r = rclone("lsf", "--dirs-only", TURSO_REMOTE)
-    if r.returncode != 0 and not not_found(r):
-        failed.append("lsf rc=%d %s" % (r.returncode, r.stderr.strip()[:200]))
-    for n in ([] if r.returncode != 0 else [x.rstrip("/") for x in r.stdout.split()]):
-        if not n.startswith(FRIEND_DB):
+    for dp, ds, fs in os.walk(HOME):
+        for n in [d for d in ds if FRIEND_DB in d]:
+            ds.remove(n)  # gone with its directory; not walked
+            try:
+                shutil.rmtree(os.path.join(dp, n))
+                gone.append("local:" + os.path.relpath(os.path.join(dp, n), HOME))
+            except OSError as e:
+                failed.append("rm %s %s" % (n, e))
+        for n in fs:
+            if FRIEND_DB in n:
+                try:
+                    os.remove(os.path.join(dp, n))
+                    gone.append("local:" + os.path.relpath(os.path.join(dp, n), HOME))
+                except OSError as e:
+                    failed.append("rm %s %s" % (n, e))
+    for rem in (TURSO_REMOTE, ZENBOOK_REMOTE, BACKSTOP_REMOTE):
+        r = rclone("lsf", "-R", rem)
+        if r.returncode != 0:
+            if not not_found(r):
+                failed.append("lsf %s rc=%d %s" % (rem, r.returncode, r.stderr.strip()[:200]))
             continue
-        p = rclone("purge", "%s/%s" % (TURSO_REMOTE, n))
-        if p.returncode == 0:
-            gone.append("remote:" + n)
-        else:
-            failed.append("purge %s rc=%d %s" % (n, p.returncode, p.stderr.strip()[:200]))
+        # The outermost entries naming a friend, shallowest first: a directory takes what is in it.
+        picked = []
+        for e in sorted(r.stdout.split(), key=lambda x: x.rstrip("/").count("/")):
+            if FRIEND_DB in e.rstrip("/").rsplit("/", 1)[-1] and not any(e.startswith(p) for p in picked if p.endswith("/")):
+                picked.append(e)
+        for e in picked:
+            target = "%s/%s" % (rem, e.rstrip("/"))
+            p = rclone("purge" if e.endswith("/") else "deletefile", target)
+            if p.returncode == 0:
+                gone.append("remote:" + target.split(":", 1)[1])
+            else:
+                failed.append("%s rc=%d %s" % (target, p.returncode, p.stderr.strip()[:200]))
     log("prune friends: %d removed%s%s" % (len(gone), (" (" + ", ".join(gone) + ")") if gone else "",
                                             (" FAILED " + "; ".join(failed)) if failed else ""))
 

@@ -39,6 +39,12 @@ elif cmd == "delete":
             p = os.path.join(dirpath, n)
             if time.time() - os.path.getmtime(p) >= days * 86400:
                 os.remove(p)
+elif cmd == "deletefile":
+    p = local(args[1])
+    if not os.path.isfile(p):
+        sys.stderr.write("ERROR : %s: object not found\n" % p)
+        sys.exit(4)
+    os.remove(p)
 elif cmd == "purge":
     d = local(args[1])
     if not os.path.isdir(d):

@@ -17,10 +17,11 @@ Rem, Oct 15, 6:21 PM: "Backups keep only Rem's rows" (RULINGS.md), because `/pri
 friend's data is not backed up and a departed friend's is gone within five days. So, every night:
 
 1. **The prune runs first and unconditionally.** Every backup of a database that is not the admin's
-   (every `lb-u-<uid>`: a friend's database has that name by construction, the admin's never) is
-   deleted at any age, in `~/lazyboy-backup/turso/` and in `onedrive-backup:lazyboy-turso/`, before
-   any store is read, so it runs even on a night nothing answers. Any other name (Rem's database
-   under a name a restore gave it) is left alone.
+   (every file or directory whose name holds `lb-u-`: a friend's database has that name by
+   construction, the admin's never) is deleted at any age, anywhere in `~/lazyboy-backup/` and in
+   the three remotes (`onedrive-backup:lazyboy-turso`, `:lazyboy-db`, `:lazyboy-backstop`), the
+   paths step 3 checks, before any store is read, so it runs even on a night nothing answers. Any
+   other name (Rem's database under a name a restore gave it) is left alone.
 2. **Copies of Rem's rows only.** The admin's database (named by his `users` row, checked by its
    `meta.owner_uid`), `lazyboy-app` filtered to his rows (unknown tables fail the copy), the
    Zenbook's telemetry file filtered to his uid and NULL (rows from before Phase 1 tagged them), and
@@ -46,7 +47,7 @@ ssh ubuntu 'chmod 700 ~/lazyboy-backup/backup.py'
 Two new variables in `~/lazyboy-backup/env`: `LAZYBOY_APP_URL` (`https://lazyboy-app-<org>.turso.io`)
 and `LAZYBOY_APP_RO_TOKEN`, a read-only token for `lazyboy-app` minted inside the pipe that writes it,
 never printed (`turso db tokens create lazyboy-app --read-only`). Then one run by hand,
-`ssh ubuntu systemctl --user start lazyboy-backup.service`, and `tail -8 ~/lazyboy-backup/backup.log`:
-`prune others`, `ok turso:lazyboy`, `ok turso:lazyboy-app … users=1 …`, `ok zenbook`, `ok backstop`,
+`ssh ubuntu systemctl --user start lazyboy-backup.service`, and `tail -10 ~/lazyboy-backup/backup.log` (one line per step, ten in all):
+`prune friends`, `ok turso:lazyboy`, `ok turso:lazyboy-app … users=1 …`, `ok zenbook`, `ok backstop`,
 `check ok`. Rollback: `cp -p ~/lazyboy-backup/backup.py.pre-4a ~/lazyboy-backup/backup.py` (it backs up
 no friend only while no friend exists).
