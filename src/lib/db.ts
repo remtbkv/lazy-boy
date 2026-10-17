@@ -24,7 +24,8 @@ import {
   type Row,
   type TransactionMode,
 } from "@libsql/client";
-import { newUid, phase1Owner, type Uid } from "@/lib/identity";
+import { getAppMeta, setAppMeta } from "@/lib/app-db";
+import { newUid, type Uid } from "@/lib/identity";
 import { reportIsolation } from "@/lib/isolation";
 import { userCache } from "@/lib/user-cache";
 import type { Track } from "@/lib/spotify/types";
@@ -2889,8 +2890,9 @@ async function writeProbe(u: UserDb, p: ProbeState): Promise<void> {
   await setMeta(u, "probe", JSON.stringify(p));
 }
 
-// The app-wide budget mode (src/lib/budget/, CAPACITY §6), in the admin's database. The daily
-// chores write it; the hot paths read it through a per-process memo of at
+// The app-wide budget mode (src/lib/budget/, CAPACITY §6), in the app database's app_meta
+// beside the cooldowns (multi-user PLAN §4.2: app-wide state is the app's, not a user's). The
+// daily chores write it; the hot paths read it through a per-process memo of at
 // most 10 minutes, so a change reaches every instance within 10 minutes for one meta read per
 // instance per 10 minutes. Meta only: no marker bump.
 const BUDGET_MODE_KEY = "budget_mode";
@@ -2902,7 +2904,7 @@ export async function getBudgetMode(maxAgeMs = BUDGET_MODE_MEMO_MS): Promise<Mod
   const memo = g.__lbBudgetMode;
   if (memo && maxAgeMs > 0 && Date.now() - memo.at < maxAgeMs) return memo.mode;
   try {
-    const v = await getMeta(adminDb(), BUDGET_MODE_KEY);
+    const v = await getAppMeta(BUDGET_MODE_KEY);
     const mode = isMode(v) ? v : null;
     g.__lbBudgetMode = { at: Date.now(), mode };
     return mode;
@@ -2913,7 +2915,7 @@ export async function getBudgetMode(maxAgeMs = BUDGET_MODE_MEMO_MS): Promise<Mod
   }
 }
 export async function setBudgetMode(mode: Mode): Promise<void> {
-  await setMeta(adminDb(), BUDGET_MODE_KEY, mode);
+  await setAppMeta(BUDGET_MODE_KEY, mode);
   g.__lbBudgetMode = { at: Date.now(), mode };
 }
 
@@ -3984,14 +3986,6 @@ export function forUser(uid: Uid): UserStore {
  *  db_name, and what the tests use for their per-user files. It records the name for forUser,
  *  rebuilding the entry when the name changed. The open's owner check is what stands between a
  *  wrong name and someone else's data. */
-/** The admin's database, for the one app-wide row still kept there (the budget mode); the
- *  Spotify cooldown moved to app_meta at Phase 3's turn. Throws when OWNER_UID is unset. */
-function adminDb(): UserDb {
-  const owner = phase1Owner();
-  if (!owner) throw new Error("OWNER_UID is unset: there is no admin database");
-  return userDb(owner, PRIMARY_DB);
-}
-
 export function forUserAt(uid: Uid, dbName: string): UserStore {
   const names = userDbNames();
   const was = names.get(uid);

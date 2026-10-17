@@ -314,7 +314,7 @@ itself and backs off before a limit (docs/multi-user/CAPACITY.md §6).
 - **The daily record** (`daily.ts`). The daily chores (`/api/cron/daily`, `runBudgetChore`) read
   the meter's month-to-date and Turso's (`fetchOrgUsage`, the usage check's platform read), write
   one `budget_days` row per dimension (telemetry; `/usage` shows the latest day) and the app-wide
-  mode to `meta.budget_mode` in the admin's database, which the hot paths read through a
+  mode to `app_meta.budget_mode` in the app database (the admin's `meta` before Phase 3's turn), which the hot paths read through a
   10-minute per-process memo (`getBudgetMode`, `currentMode`).
 - **The modes** (`modes.ts`, CAPACITY §6's app-wide column). Now-playing replies carry
   `minPollMs` (0, 30 s, 60 s), a floor under every scheduled poll (`planNextPoll`); `/api/sync`

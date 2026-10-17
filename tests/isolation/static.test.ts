@@ -84,9 +84,9 @@ describe("S2: a Uid is minted in one place", () => {
   // phase1Owner() mints Rem's uid from OWNER_UID for the paths that act for him with no
   // session: identity-read.ts's adminStore (the cron, the daily chores, the health check, the
   // store bench, the sign-in's owner guard and token-move.ts's plaintext row, until Phase 3's
-  // claim), which reads his users row
-  // for his database; and db.ts's app-wide row (the cooldown) until it moves to app_meta.
-  const OWNER_PATHS = new Set(["src/lib/db.ts", "src/lib/identity-read.ts"]);
+  // claim), which reads his users row for his database. db.ts no longer does: its app-wide rows
+  // (the cooldown, the budget mode) are app_meta's from Phase 3's turn.
+  const OWNER_PATHS = new Set(["src/lib/identity-read.ts"]);
   it("phase1Owner is imported only by the paths that act for the owner without a session", () => {
     expect(importersOf("phase1Owner").filter((f) => !OWNER_PATHS.has(f))).toEqual([]);
   });
@@ -118,7 +118,7 @@ function importersOf(name: string): string[] {
 describe("S3: db.ts exports no per-user function", () => {
   // Every value db.ts exports, as a snapshot a reviewer sees change: forUser and forUserAt (the
   // only way to a user's data), the telemetry store's functions (no user's database), the
-  // app-wide budget mode (the admin's database), and pure helpers and constants. (The app-wide
+  // app-wide budget mode (app_meta's `budget_mode`), and pure helpers and constants. (The app-wide
   // cooldown left for app_meta's `cooldown:<bucket>` at Phase 3's turn.) A per-user function
   // exported here could run against a database without naming its user (PLAN.md §6.2 layer 3).
   const EXPORTS = [
