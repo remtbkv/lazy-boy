@@ -629,9 +629,16 @@ ARCHITECTURE.md "The budget" has the design. What bites:
   `next start`, Oct 16). `tests/budget-meter.test.ts` re-imports the module to hold this.
 - **The meter errs high on purpose.** Overlapping requests on one Fluid instance each count the
   CPU they shared; bytes are the uncompressed body; a flush whose answer was lost after the
-  store committed is counted again. It errs low in two places: work before the gate, and the
-  routes that pass no choke point (`/api/build`, Auth.js's own routes, `/login`, the legal pages).
-  The calibration factor in `budget.ts` is where lane 05's dashboard reading corrects both.
+  store committed is counted again. A request's own row cannot hold its `after()` work: Next
+  starts every `after()` callback at once when the reply closes, the meter's (registered at the
+  gate, so first) reads the CPU before the others run, so cron-job.org's tick and the
+  background scans were missing from every row. Each finish now tops the rows up to the
+  process's own CPU total as `(unattributed)`, short of the oldest request still in flight, so
+  that work, the CPU before each gate and the routes that pass no choke point (`/api/build`,
+  Auth.js's own routes, `/login`, the legal pages) are counted by the next finish on the same
+  instance; their invocations are not, and an instance retired straight after its last request
+  takes that request's `after()` CPU with it. The calibration factor in `budget.ts` is where lane 05's
+  dashboard reading corrects what is left.
 - **The month is the UTC calendar month.** Turso resets on it. Whether Vercel Hobby counts a
   calendar month or a rolling 30 days is not settled here; lane 05 reads it off the dashboard.
 - **Economy and freeze do not touch track changes.** The now-playing floor holds scheduled polls

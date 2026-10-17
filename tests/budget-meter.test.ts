@@ -49,6 +49,11 @@ function burnCpu(ms: number): number {
     if ((d.user + d.system) / 1000 >= ms) return x;
   }
 }
+/** As if every CPU microsecond this process has spent so far were already in a row. */
+function rebase(): void {
+  const c = process.cpuUsage();
+  (globalThis as unknown as { __lbMeter: { bookedUs: number } }).__lbMeter.bookedUs = c.user + c.system;
+}
 const today = () => new Date().toISOString().slice(0, 10);
 const row = (route: string, uid = "-") =>
   appMeter.rows().find((r) => r.route === route && r.uid === uid);
@@ -59,6 +64,7 @@ beforeEach(async () => {
   await resetStore();
   // As if a flush just ran: the requests below stay in the aggregate, where the tests read them.
   appMeter.reset(Date.now());
+  rebase();
 });
 
 describe("the request meter", () => {
@@ -84,7 +90,10 @@ describe("the request meter", () => {
     expect(copy.meterRequest).not.toBe(meterRequest);
     await inRequest(scope("/home"), async () => copy.meterRequest(copy.meterStart(), "u1"));
     await drainAfter();
-    expect(appMeter.rows().map((r) => [r.route, r.uid])).toEqual([["/home", "u1"]]);
+    // Loading the copy is CPU outside any request: "(unattributed)" holds it.
+    expect(appMeter.rows().filter((r) => r.route !== "(unattributed)").map((r) => [r.route, r.uid])).toEqual([
+      ["/home", "u1"],
+    ]);
     expect(copy.appMeter).toBe(appMeter);
   });
 
@@ -143,6 +152,43 @@ describe("the request meter", () => {
     expect(meteredBody("outside a request: counted nowhere")).toBe("outside a request: counted nowhere");
     await drainAfter();
     expect(row("/api/search/history", "u1")!.bytes).toBe(10);
+  });
+
+  it("CPU spent in a route's own after() work is counted: cron-job.org's tick runs there", async () => {
+    rebase();
+    await inRequest(scope("/api/cron/sync"), async () => {
+      meterRequest(meterStart(), null);
+      // The route's after(() => tick(caller)), registered after the gate's: in Next both start
+      // when the reply closes, the meter's first, so the meter reads the CPU before the tick.
+      hooks.tasks.push(() => burnCpu(50));
+    });
+    await drainAfter();
+    // The instance's next request books what the process spent outside every request.
+    await inRequest(scope("/api/now-playing"), async () => meterRequest(meterStart(), "u1"));
+    await drainAfter();
+    const totalMs = appMeter.rows().reduce((s, r) => s + r.cpuUs, 0) / 1000;
+    expect(totalMs).toBeGreaterThan(40);
+    expect(row("(unattributed)")!.invocations).toBe(0);
+  });
+
+  it("CPU of a request still in flight is left to its own record, never booked twice", async () => {
+    rebase();
+    const a = scope("/api/cron/sync");
+    let releaseA!: () => void;
+    const aDone = inRequest(a, async () => {
+      meterRequest(meterStart(), null);
+      burnCpu(30);
+      await new Promise<void>((r) => (releaseA = r));
+    });
+    // B starts and ends while A is out: B's record must not book A's 30 ms as unattributed.
+    await inRequest(scope("/api/now-playing"), async () => meterRequest(meterStart(), "u1"));
+    await hooks.tasks.pop()!();
+    releaseA();
+    await aDone;
+    await drainAfter();
+    const totalMs = appMeter.rows().reduce((s, r) => s + r.cpuUs, 0) / 1000;
+    expect(totalMs).toBeGreaterThan(25);
+    expect(totalMs).toBeLessThan(50);
   });
 
   it("the gates are the choke points: requireUser and the cron secret check", async () => {

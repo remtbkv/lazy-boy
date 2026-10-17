@@ -7,8 +7,8 @@
 // requireUser() (require-user.ts: every page, gated route and server action) and the cron
 // secret check (cron-auth.ts: every /api/cron/* route). Not metered: /api/build, Auth.js's own
 // routes, /login and the legal pages, which pass neither; CAPACITY counts them as ~10 ms each.
-// The meter starts its clock where the hook runs, so work before the gate is not counted; the
-// calibration factor (budget.ts) is where lane 05's dashboard comparison absorbs both.
+// A request's own row starts its clock where the hook runs; the CPU before it, and theirs, lands
+// in "(unattributed)" (below), so their invocations are uncounted but not their CPU.
 //
 // Under Fluid compute one instance serves overlapping requests, and process CPU cannot be split
 // between them: each counts all the CPU spent while it ran, so overlap is counted twice. That
@@ -35,17 +35,41 @@ type Open = { route: string; uid: string; start: MeterStart; bytes: number };
 // bundle gets its own copy of this module, so module-level state would mean one aggregate per
 // bundle and a second "(boot)" row, re-counting all the process's CPU so far, the first time a
 // page ran after a route (seen on a local `next start`, Oct 16).
+//
+// `bookedUs` is how much of the process's CPU (process.cpuUsage()'s running total) some row
+// already holds, and `inflight` the requests metered but not yet finished. Each finish tops the
+// rows up to the process's own total as "(unattributed)": CPU no request's window held. The
+// largest part is after() work, which starts beside the meter's own after() and so after its
+// reading (cron-job.org's tick, background scans), then routes no gate meters and work between
+// requests. The top-up stops where the oldest in-flight request began, whose own record will
+// hold what follows; so the rows never hold less than the process spent, and the top-up never
+// counts a microsecond a request's record also counts.
 type MeterGlobals = {
-  __lbMeter?: { meter: MeterAggregate; open: WeakMap<object, Open>; booted: boolean };
+  __lbMeter?: {
+    meter: MeterAggregate;
+    open: WeakMap<object, Open>;
+    booted: boolean;
+    bookedUs: number;
+    inflight: Set<Open>;
+  };
 };
 const g = globalThis as unknown as MeterGlobals;
-const shared = (g.__lbMeter ??= { meter: new MeterAggregate(), open: new WeakMap(), booted: false });
+const shared = (g.__lbMeter ??= {
+  meter: new MeterAggregate(),
+  open: new WeakMap(),
+  booted: false,
+  bookedUs: 0,
+  inflight: new Set(),
+});
 /** This process's counts since its last flush. */
 export const appMeter = shared.meter;
 // Per in-flight request, keyed by Next's request scope object (gone with the request).
 const open = shared.open;
 
 const utcDay = (at: number) => new Date(at).toISOString().slice(0, 10);
+const cpuTotal = (c: NodeJS.CpuUsage) => c.user + c.system;
+/** Vercel Hobby's longest function run (CAPACITY §2.2). */
+const MAX_FUNCTION_MS = 300_000;
 
 /** The clock reading a hook takes first, before the gate's own work. */
 export function meterStart(): MeterStart {
@@ -79,14 +103,16 @@ export function meterRequest(start: MeterStart, uid: string | null): void {
         route: "(boot)",
         uid: "-",
         invocations: 0,
-        cpuUs: start.cpu.user + start.cpu.system,
+        cpuUs: cpuTotal(start.cpu),
         wallMs: 0,
         bytes: 0,
       });
+      shared.bookedUs = Math.max(shared.bookedUs, cpuTotal(start.cpu));
     }
     const action = actionAsyncStorage.getStore()?.isAction === true;
     const rec: Open = { route: action ? `${scope.route} (action)` : scope.route, uid: uid ?? "-", start, bytes: 0 };
     open.set(scope, rec);
+    shared.inflight.add(rec);
     after(() => finish(rec));
   } catch {
     /* the meter never costs a request */
@@ -108,19 +134,38 @@ export function meteredBody(body: string): string {
 
 async function finish(rec: Open): Promise<void> {
   try {
-    const cpu = process.cpuUsage(rec.start.cpu);
+    shared.inflight.delete(rec);
+    const total = cpuTotal(process.cpuUsage());
+    const cpuUs = total - cpuTotal(rec.start.cpu);
     const now = Date.now();
+    const day = utcDay(now);
     appMeter.record({
-      day: utcDay(now),
+      day,
       route: rec.route,
       uid: rec.uid,
       invocations: 1,
-      cpuUs: cpu.user + cpu.system,
+      cpuUs,
       wallMs: Math.round(performance.now() - rec.start.at),
       bytes: rec.bytes,
     });
+    shared.bookedUs += cpuUs;
+    topUp(day, total);
     if (appMeter.due(now)) await appMeter.flush(meterFlush, now);
   } catch {
     /* counts that could not be taken are lost; the request is long answered */
   }
+}
+
+/** The rows up to the process's CPU `total`, short of the oldest request still in flight (see
+ *  `bookedUs` above). A request older than a function may run never finished; it stops counting. */
+function topUp(day: string, total: number): void {
+  let upTo = total;
+  const at = performance.now();
+  for (const r of shared.inflight) {
+    if (at - r.start.at > MAX_FUNCTION_MS) shared.inflight.delete(r);
+    else upTo = Math.min(upTo, cpuTotal(r.start.cpu));
+  }
+  if (upTo <= shared.bookedUs) return;
+  appMeter.record({ day, route: "(unattributed)", uid: "-", invocations: 0, cpuUs: upTo - shared.bookedUs, wallMs: 0, bytes: 0 });
+  shared.bookedUs = upTo;
 }
