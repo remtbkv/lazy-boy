@@ -60,6 +60,7 @@ const FIXTURES: Record<string, Fixture> = {
   getStoredPlaylist: { kind: "marker", call: (s) => s.getStoredPlaylist("pl-1") },
   getStoredPlaylists: { kind: "marker", call: (s) => s.getStoredPlaylists() },
   getUniqueSongCount: { kind: "read", call: (s) => s.getUniqueSongCount() },
+  getUserTz: { kind: "read", call: (s) => s.getUserTz() },
   getUserTzOffset: { kind: "read", call: (s) => s.getUserTzOffset() },
   hasHomePayload: { kind: "read", call: (s) => s.hasHomePayload() },
   hasPlaysBeforeDay: { kind: "read", call: (s) => s.hasPlaysBeforeDay("2030-01-01", 0) },
@@ -84,6 +85,7 @@ const FIXTURES: Record<string, Fixture> = {
 
   setLibrarySyncedAt: { kind: "write", call: (s) => s.setLibrarySyncedAt() },
   setSpotifyTokens: { kind: "write", call: (s, t) => s.setSpotifyTokens({ accessToken: `${t}-only-at2`, refreshToken: `${t}-only-rt2`, expiresAt: 1 }) },
+  setUserTz: { kind: "write", call: (s) => s.setUserTz("America/Chicago") },
   setUserTzOffset: { kind: "write", call: (s) => s.setUserTzOffset(-300) },
   storePlaylists: { kind: "write", call: (s, t) => s.storePlaylists([playlistOf(t, "pl-2")], `${t}-only-me`) },
   storePlaylistTracks: { kind: "write", call: (s, t) => s.storePlaylistTracks("pl-1", [trackOf(t, 6)], `${t}-only-snap2`) },

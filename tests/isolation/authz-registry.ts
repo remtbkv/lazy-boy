@@ -287,7 +287,7 @@ export const ENTRIES: Entry[] = [
     file: "src/app/api/sync/route.ts",
     kind: "route",
     gate: "const user = await requireRouteUser();",
-    does: "harvests recently-played with Rem's grant into plays/tracks; writes meta user_tz from the tzoffset cookie and the sync stamps",
+    does: "the cron's step for the session's user under the cron's lease (PLAN §7.6): /me/player with their grant, a recently-played harvest into their plays when the policy says so; meta user_tz_offset and user_tz from the cookies, only when they change",
     cells: userCells("requireRouteUser: no session → 401 with the signed-out marker before any read"),
     invoke: async () => (await route("@/app/api/sync/route", "POST")())(),
   },
