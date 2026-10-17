@@ -98,9 +98,9 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/now-playing
 
-- File: `src/app/api/now-playing/route.ts`. Gate today: `src/app/api/now-playing/route.ts:32`.
+- File: `src/app/api/now-playing/route.ts`. Gate today: `src/app/api/now-playing/route.ts:33`.
 - Does, when allowed: reads Spotify's player state (/me/player) with Rem's grant; reads and writes the context-name cache (contexts).
-- Calls (from the source): store `forUser`; Spotify `currentlyPlaying`, `contextName`; via `spotifyAccessTokenFor`, `requireUser`, `spotifyClient`, `spotifyCooldownMs`, `currentMode`, `meteredBody`.
+- Calls (from the source): store `forUser`; Spotify `currentlyPlaying`, `contextName`; via `spotifyAccessTokenFor`, `requireUser`, `spotifyClient`, `spotifyCooldownMs`, `currentMode`, `meteredBody`, `memoizedNowPlaying`, `rememberNowPlaying`.
 - `anon`: D — requireUser refused → 200 {playing:null} with no store read (deliberately not 401: polled every 6 s)
 - `rem`: A — the owner's session: the identity check allows OWNER_UID, Phase 1's one user (src/lib/identity.ts)
 - `friendA`, `friendB`: I — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
@@ -264,7 +264,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/auth/session
 
-- File: `src/app/api/auth/[...nextauth]/route.ts`. Gate today: `src/lib/auth.ts:282`.
+- File: `src/app/api/auth/[...nextauth]/route.ts`. Gate today: `src/lib/auth.ts:271`.
 - Does, when allowed: answers the cookie's own session (name, email, expiry, error; never a token) and re-issues the cookie with a fresh 30 days.
 - Calls (from the source): via `Auth.js`.
 - `anon`: D — no cookie → null
@@ -298,7 +298,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/auth/callback/spotify
 
-- File: `src/app/api/auth/[...nextauth]/route.ts`. Gate today: `src/lib/auth.ts:190`.
+- File: `src/app/api/auth/[...nextauth]/route.ts`. Gate today: `src/lib/auth.ts:179`.
 - Does, when allowed: finishes OAuth: exchanges the code, reads /v1/me uncached-by-design, runs signIn (owner only), writes the token row, sets the session cookie.
 - Calls (from the source): via `Auth.js`.
 - `anon`: D — a stranger off the dev-mode allowlist: /v1/me 403 → /login?error=SpotifyNotRegistered, nothing written

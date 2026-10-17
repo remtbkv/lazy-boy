@@ -5,6 +5,7 @@ import { forUser } from "@/lib/db";
 import { currentMode } from "@/lib/budget/mode";
 import { NOW_PLAYING_MIN_POLL_MS } from "@/lib/budget/modes";
 import { meteredBody } from "@/lib/budget/request-meter";
+import { memoizedNowPlaying, rememberNowPlaying } from "@/lib/now-playing-memo";
 
 // Live "what's playing right now". Returns { playing: null } when nothing is
 // actively playing or there's no active device — never stale/last-played data —
@@ -45,12 +46,19 @@ export async function GET() {
   const uid = user.gate.uid;
   if (!accessToken) return reply(null, uid);
   const store = forUser(uid);
+  // The same user's answer from the last ~5 s, so their tabs share one Spotify call (§6.6).
+  const now = Date.now();
+  const memo = memoizedNowPlaying(uid, now);
+  if (memo) return reply(memo.playing, uid);
   // Read beside the Spotify call, not before it: the mode's cache misses once per 10 minutes.
   const floor = currentMode().then((m) => NOW_PLAYING_MIN_POLL_MS[m]);
   try {
     const sp = spotifyClient(uid, accessToken, false, "now-playing");
     const playing = await sp.currentlyPlaying();
-    if (!playing) return reply(null, uid, await floor);
+    if (!playing) {
+      rememberNowPlaying(uid, now, null);
+      return reply(null, uid, await floor);
+    }
 
     let context: { name: string; type: string } | null = null;
     if (playing.context) {
@@ -79,6 +87,7 @@ export async function GET() {
 
     // Spread first, then overwrite the raw {type,uri} context with the resolved
     // {name,type} one (later keys win).
+    rememberNowPlaying(uid, now, { ...playing, context });
     return reply({ ...playing, context }, uid, await floor);
   } catch (e) {
     // Rate-limited: say so, with how long to wait, so the poller backs off for that long

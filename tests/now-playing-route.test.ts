@@ -48,6 +48,7 @@ vi.mock("@/lib/db", () => ({
 }));
 
 const { GET } = await import("@/app/api/now-playing/route");
+const { clearNowPlayingMemo } = await import("@/lib/now-playing-memo");
 
 const PLAYING = {
   track: { id: "t1", name: "Song" },
@@ -58,6 +59,7 @@ const PLAYING = {
 };
 
 beforeEach(() => {
+  clearNowPlayingMemo();
   state.signedIn = true;
   state.unavailable = false;
   state.currentlyPlaying = async () => null;
