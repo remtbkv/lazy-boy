@@ -15,10 +15,9 @@
 //     write fails after the record's); neither recorded yet = unchecked;
 //   - the CPU meter: red when it has written nothing for six hours, or never (every cron tick
 //     is metered, so a healthy meter writes every few minutes); telemetry down = unchecked.
-// The owner's capture uses capture-health.ts's rule (no token row, or no harvest in two
-// hours). PLAN.md says 30 minutes since his last successful tick; before Phase 3 there is no
-// per-tick stamp, and `last_sync` moves only on a harvest, which the harvest gate holds back
-// for up to an hour, so 30 minutes would turn red on a quiet evening.
+// The owner's capture uses capture-health.ts's rule over his sync_state row (capture-read.ts):
+// red when he has no usable grant, or when his last successful cron step is over 30 minutes
+// old. Each step stamps `last_ok_at` whether or not it harvested, so a quiet evening stays green.
 import type { CaptureHealth } from "@/lib/capture-health";
 import type { Mode } from "@/lib/budget/modes";
 

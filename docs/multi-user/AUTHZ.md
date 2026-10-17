@@ -252,9 +252,9 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### GET /api/cron/health
 
-- File: `src/app/api/cron/health/route.ts`. Gate today: `src/app/api/cron/health/route.ts:15`.
+- File: `src/app/api/cron/health/route.ts`. Gate today: `src/app/api/cron/health/route.ts:16`.
 - Does, when allowed: the hourly health check: the owner's capture health, the daily stamp, the pace verdict, isolation events; replies ok/reasons/unchecked and nothing about anyone's listening.
-- Calls (from the source): store `getBudgetMode`, `readBudgetDay`, `readMeter`; via `getAppMeta`, `markEventsAlarmed`, `unreportedEvents`, `worstMode`, `cronCaller`, `healthVerdict`, `adminStore`.
+- Calls (from the source): store `getBudgetMode`, `readBudgetDay`, `readMeter`; via `getAppMeta`, `markEventsAlarmed`, `unreportedEvents`, `readCapture`, `worstMode`, `cronCaller`, `healthVerdict`, `adminStore`.
 - `anon`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; no header → 401
 - `rem`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; Rem's cookie → 401
 - `friendA`, `friendB`, `revoked`, `staleSecret`, `staleLogout`, `forged`: D — cronAuthorized() (src/lib/cron-auth.ts) reads only `Authorization: Bearer $CRON_SECRET`, timing-safe, an unset secret matching nobody; a cookie is not a secret; a cookie → 401
@@ -620,9 +620,9 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### page /home
 
-- File: `src/app/(app)/home/page.tsx`. Gate today: `src/app/(app)/home/page.tsx:71`.
+- File: `src/app/(app)/home/page.tsx`. Gate today: `src/app/(app)/home/page.tsx:72`.
 - Does, when allowed: renders the day strip, all-time card and the opening day's rows from the Home payload.
-- Calls (from the source): store `forUser`, `getSpotifyCooldownUntil`; via `requirePageUser`, `tzOffsetMinutes`.
+- Calls (from the source): store `forUser`; via `readCapture`, `requirePageUser`, `tzOffsetMinutes`.
 - `anon`: D — requirePageUser: no session → redirect('/login') before any read
 - `rem`: A — the owner's session: the identity check allows OWNER_UID, Phase 1's one user (src/lib/identity.ts)
 - `friendA`, `friendB`: I — requireUser: Phase 1's identity check knows one uid, OWNER_UID, so this cookie's uid is refused (the jwt callback signs it out) before any read
@@ -659,9 +659,9 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### page /usage
 
-- File: `src/app/(app)/usage/page.tsx`. Gate today: `src/app/(app)/usage/page.tsx:251`.
+- File: `src/app/(app)/usage/page.tsx`. Gate today: `src/app/(app)/usage/page.tsx:252`.
 - Does, when allowed: renders the admin's page: per-page timings, the rows-read ledger, the Spotify call breakdown, capture health.
-- Calls (from the source): store `forUser`; via `captureHealthMessage`, `requirePageUser`, `tzOffsetMinutes`.
+- Calls (from the source): store `forUser`; via `captureHealthMessage`, `readCapture`, `requirePageUser`, `tzOffsetMinutes`.
 - `anon`: D — requirePageUser: no session → redirect('/login') before any read
 - `rem`: A — the owner's session: the identity check allows OWNER_UID, Phase 1's one user (src/lib/identity.ts)
 - `friendA`, `friendB`: D — requirePageUser refuses a uid that is not OWNER_UID; past it, /usage is the admin's (notFound() otherwise)

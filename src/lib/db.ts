@@ -24,7 +24,6 @@ import {
   type Row,
   type TransactionMode,
 } from "@libsql/client";
-import { readTokenRow } from "@/lib/app-db";
 import { newUid, phase1Owner, type Uid } from "@/lib/identity";
 import { reportIsolation } from "@/lib/isolation";
 import { userCache } from "@/lib/user-cache";
@@ -37,7 +36,6 @@ import {
   playedAtConvention,
   type AllTimeStats,
 } from "@/lib/skip-rule";
-import { captureHealth, type CaptureHealth } from "@/lib/capture-health";
 import type { ProbeState } from "@/lib/harvest-policy";
 import { makeStoreFetch } from "@/lib/store-fetch";
 import { HISTORY_INDEX_SHAPE, LIBRARY_INDEX_SHAPE } from "@/lib/search-shape";
@@ -2204,14 +2202,6 @@ async function getLastSync(u: UserDb): Promise<string | null> {
   return getMeta(u, "last_sync");
 }
 
-/** Whether history is still being captured (capture-health.ts): the last harvest's age and
- *  whether the user has a token row: `user_tokens` in the app database, the token of record
- *  from multi-user Phase 2 (the plaintext `meta` row is only token-move.ts's rollback copy). */
-async function getCaptureHealth(u: UserDb): Promise<CaptureHealth> {
-  const [lastSync, tokens] = await Promise.all([getLastSync(u), readTokenRow(u.uid)]);
-  return captureHealth(Date.now(), lastSync, tokens !== null);
-}
-
 // The hourly health check's own mark (multi-user PLAN §7.10), in the admin's database: the
 // last Turso pace verdict the daily chores recorded (`quota_pace`, {at, ahead}). Meta only: no
 // marker bump. Which isolation events a check has reported is the app database's
@@ -3901,7 +3891,6 @@ const USER_FNS = {
   findTrackWithPlaylists,
   getAllTimePlays,
   getAllTimeStats,
-  getCaptureHealth,
   getHealthMarks,
   getCleanBackupPref,
   getContextName,
