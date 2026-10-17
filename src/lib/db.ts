@@ -1726,11 +1726,12 @@ export const HOME_PAYLOAD_SHAPE = "v1";
 const HOME_PAYLOAD_KEY = "home_payload";
 // The strip width Home renders on first paint; it extends on demand from dailyStatsAction.
 const HOME_DAILY_DAYS = 14;
-// The user's zone, fixed. The payload is built on the WRITE path, where there is no browser
-// and therefore no `tzoffset` cookie — tzOffsetMinutes() returns 0 (UTC) in a cron context,
-// which would bucket days wrong for every read of the payload. This app is single-user and
-// that user is in New York, so the zone is a constant; the OFFSET is not, and is computed
-// per rebuild below rather than pinned to whichever of −240/−300 was true when this shipped.
+// The zone a user who has not published one yet is assumed to be in. The payload is built on
+// the WRITE path, where there is no browser and therefore no `tzoffset` cookie —
+// tzOffsetMinutes() returns 0 (UTC) in a cron context, which would bucket days wrong for every
+// read of the payload. Each user's browser publishes its IANA zone (`user_tz`); until one has,
+// New York, Rem's. The OFFSET is computed per rebuild below from the zone, never pinned to
+// whichever of −240/−300 was true when this shipped.
 const HOME_TZ = "America/New_York";
 
 export type HomePayload = {
@@ -1781,7 +1782,8 @@ async function rebuildHomePayload(u: UserDb): Promise<HomePayload> {
   // the tz cookie), the fixed home zone otherwise. The hardcoded zone alone meant the
   // payload's buckets and every cookie-driven read on the same page could disagree the
   // moment the user wasn't in NY (audit 2026-08-19, T2.20).
-  const tzOffsetMinutes = payloadTzOffset(await getUserTzOffset(u), zoneOffsetMinutes(HOME_TZ));
+  const [storedOffset, zone] = await Promise.all([getUserTzOffset(u), getUserTz(u)]);
+  const tzOffsetMinutes = payloadTzOffset(storedOffset, zoneOffsetMinutes(zone ?? HOME_TZ));
   const [daily, allTime] = await Promise.all([
     readDailyStats(u, tzOffsetMinutes, HOME_DAILY_DAYS),
     // Already a single meta read off the primary, refreshed on write by recordPlays.
@@ -2837,8 +2839,31 @@ async function getUserTzOffset(u: UserDb): Promise<number | null> {
   const n = v === null ? NaN : Number(v);
   return Number.isFinite(n) ? Math.max(-720, Math.min(840, Math.round(n))) : null;
 }
-async function setUserTzOffset(u: UserDb, offsetMin: number): Promise<void> {
-  await setMeta(u, "user_tz_offset", String(Math.round(offsetMin)));
+/** Written only when it changes (multi-user PLAN §4.3): /api/sync publishes it on every call,
+ *  and an unchanged value writes no row. True when it wrote. */
+async function setUserTzOffset(u: UserDb, offsetMin: number): Promise<boolean> {
+  return setMetaIfChanged(u, "user_tz_offset", String(Math.round(offsetMin)));
+}
+
+/** The browser's IANA zone (`user_tz`, PLAN §4.3, design C §3.3), published beside the offset:
+ *  the Home payload buckets days in it and runs its DST check against it, so a friend in
+ *  Chicago is not read as New York an hour off. Null until a browser has published one. */
+async function getUserTz(u: UserDb): Promise<string | null> {
+  const v = await getMeta(u, "user_tz").catch(() => null);
+  return v && isZone(v) ? v : null;
+}
+/** Written only when it changes; a zone this runtime does not know is never stored. */
+async function setUserTz(u: UserDb, zone: string): Promise<boolean> {
+  return isZone(zone) && setMetaIfChanged(u, "user_tz", zone);
+}
+function isZone(z: string): boolean {
+  if (z.length > 64) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: z });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // What the cron's /me/player probe last saw (multi-user PLAN §7.3, harvest-policy.ts), written
@@ -3093,6 +3118,17 @@ function metaStmt(key: string, value: string): InStatement {
           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     args: { k: key, v: value },
   };
+}
+
+/** setMeta that writes no row when the value is already there. True when it wrote. */
+async function setMetaIfChanged(u: UserDb, key: string, value: string): Promise<boolean> {
+  const client = await u.client();
+  const r = await client.execute({
+    sql: `INSERT INTO meta (key, value) VALUES (?, ?)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE meta.value IS NOT excluded.value`,
+    args: [key, value],
+  });
+  return r.rowsAffected > 0;
 }
 
 // No write marker here: nothing cached is derived from `meta` (write-marker note).
@@ -3916,6 +3952,7 @@ const USER_FNS = {
   getStoredPlaylist,
   getStoredPlaylists,
   getUniqueSongCount,
+  getUserTz,
   getUserTzOffset,
   hasHomePayload,
   hasPlaysBeforeDay,
@@ -3935,6 +3972,7 @@ const USER_FNS = {
   setHealthMark,
   setLibrarySyncedAt,
   setSpotifyTokens,
+  setUserTz,
   setUserTzOffset,
   storePlaylists,
   storePlaylistTracks,
