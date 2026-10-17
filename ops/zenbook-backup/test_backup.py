@@ -133,6 +133,9 @@ TELEMETRY_SCHEMA = [
     "CREATE TABLE client_metrics (id INTEGER PRIMARY KEY, ts TEXT NOT NULL, page TEXT, meta TEXT, user_id TEXT)",
     "CREATE TABLE usage_ledger (day TEXT NOT NULL, reader TEXT NOT NULL, calls INTEGER, PRIMARY KEY (day, reader))",
     "CREATE TABLE lifecycle_log (id INTEGER PRIMARY KEY, at INTEGER NOT NULL, uid TEXT NOT NULL, action TEXT NOT NULL, by TEXT NOT NULL)",
+    # The capacity meter's table (src/lib/db.ts TELEMETRY_SCHEMA): every invocation by day, route and user.
+    "CREATE TABLE cpu_meter (day TEXT NOT NULL, route TEXT NOT NULL, user_id TEXT NOT NULL, invocations INTEGER, PRIMARY KEY (day, route, user_id))",
+    "INSERT INTO cpu_meter VALUES ('2026-10-15', '/home', '%s', 4), ('2026-10-15', '/FRIEND-route', '%s', 9)" % (ADMIN, FRIEND),
     "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)",
     "INSERT INTO api_log (ts, path, user_id) VALUES (1, '/me/player', '%s'), (2, '/playlists/FRIEND-pl', '%s'), (3, '/old', NULL)" % (ADMIN, FRIEND),
     "INSERT INTO client_metrics (ts, page, meta, user_id) VALUES ('t', '/home', 'pv:a', '%s'), ('t', '/home', 'FRIEND-only', '%s'), ('t', '/home', 'pv:o', NULL)" % (ADMIN, FRIEND),
@@ -299,6 +302,7 @@ class BackupTest(unittest.TestCase):
         self.assertEqual(rows(raw, "SELECT path, user_id FROM api_log ORDER BY id"), [("/me/player", ADMIN), ("/old", None)])
         self.assertEqual(rows(raw, "SELECT meta, user_id FROM client_metrics ORDER BY id"), [("pv:a", ADMIN), ("pv:o", None)])
         self.assertEqual(rows(raw, "SELECT count(*) FROM lifecycle_log"), [(0,)])
+        self.assertEqual(rows(raw, "SELECT route, user_id FROM cpu_meter"), [("/home", ADMIN)])
         self.assertEqual(rows(raw, "SELECT count(*) FROM usage_ledger"), [(1,)])
         self.assertEqual(rows(raw, "SELECT count(*) FROM meta WHERE key LIKE 'spotify_tokens%'"), [(0,)])
         with open(raw, "rb") as f:
