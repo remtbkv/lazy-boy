@@ -137,6 +137,12 @@ export async function signOutTokens(uid: Uid): Promise<void> {
   publishTokens(uid, null);
 }
 
+/** The cron tick's token read (PLAN.md §5.4, §7.2): src/lib/sync/tick.ts's token getter. Unlike
+ *  getValidAccessTokenFor it throws every failure and never clears a dead grant (token-core.ts). */
+export function tokenForTick(uid: Uid): Promise<UserTokens | null> {
+  return core.tokenForTick(uid);
+}
+
 export const { handlers, signIn, signOut, auth } = NextAuth({
   // We serve on the loopback IP (127.0.0.1) and wrap the route handler, a non-standard
   // host setup. Trust it explicitly so Auth.js never refuses the host with a generic
