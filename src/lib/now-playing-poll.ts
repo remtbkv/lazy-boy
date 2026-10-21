@@ -99,6 +99,9 @@ export function planNextPoll(
  *  second empty answer comes at least this long after the first. Home finishes the shown song
  *  on "nothing playing", and Spotify's player endpoints have answered empty mid-playback. */
 export const EMPTY_CONFIRM_MS = 500;
+/** A held empty answer older than this confirms nothing: the tab that held it stopped polling
+ *  (leadership moved) before asking again, so the next empty answer is a new first one. */
+export const EMPTY_STALE_MS = 5_000;
 /** A return to the song that just ended, within this long of the change and within
  *  BOUNDARY_SLACK_MS of its end, is Spotify catching up (A → B → A at its end → B), ignored. A
  *  return near its start is a real "previous". */
@@ -120,7 +123,7 @@ export function screenAnswer(
 ): { action: "apply" | "ignore"; mem: ScreenMemory } | { action: "hold"; retryInMs: number; mem: ScreenMemory } {
   if (!incoming) {
     if (!shown) return { action: "apply", mem: { ...mem, emptySince: null } };
-    const since = mem.emptySince ?? now;
+    const since = mem.emptySince !== null && now - mem.emptySince <= EMPTY_STALE_MS ? mem.emptySince : now;
     if (now - since >= EMPTY_CONFIRM_MS) return { action: "apply", mem: { ...mem, emptySince: null } };
     return { action: "hold", retryInMs: EMPTY_CONFIRM_MS - (now - since) + 100, mem: { ...mem, emptySince: since } };
   }

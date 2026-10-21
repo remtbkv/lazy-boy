@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   agePlaying,
   EMPTY_CONFIRM_MS,
+  EMPTY_STALE_MS,
   FLIP_BACK_MS,
   HOLD_MAX_MS,
   holdWhile,
@@ -40,6 +41,14 @@ describe("screenAnswer: nothing playing is confirmed by a second answer", () => 
     const back = screenAnswer(song("A", 60_000), song("A", 61_000), T + 600, first.mem);
     expect(back.action).toBe("apply");
     expect(screenAnswer(song("A", 61_000), null, T + 700, back.mem).action).toBe("hold");
+  });
+
+  it("L-b: a held empty answer never followed up in this tab goes stale; a later lone empty is held again", () => {
+    // The first empty was held, then leadership moved and this tab saw no screened answer for a
+    // minute: the next empty answer is a new first one, not its confirmation.
+    const first = screenAnswer(song("A", 60_000), null, T, NO_SCREEN_MEMORY);
+    expect(screenAnswer(song("A", 60_000), null, T + EMPTY_STALE_MS + 1, first.mem).action).toBe("hold");
+    expect(screenAnswer(song("A", 60_000), null, T + EMPTY_STALE_MS, first.mem).action).toBe("apply");
   });
 
   it("nothing shown: an empty answer applies at once", () => {
