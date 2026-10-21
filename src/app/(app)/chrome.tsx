@@ -18,6 +18,9 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { announceTabReset } from "@/lib/tab-reset";
+import { clearStored, idbKV } from "@/lib/search-cache";
+import { clearThisBrowser, userStorageName } from "@/lib/user-storage";
+import { useUid } from "@/components/user-context";
 
 // App chrome: ONE top bar, both sizes (the mobile bottom tab bar is gone — two bars ate
 // too much of a phone screen; Rem, 2026-08-12). Mark, quiet nav (Home / Playlists /
@@ -199,7 +202,6 @@ export function DenChrome({ name, image }: { name: string; image: string | null 
 }
 
 const RING_FALLBACK = "rgb(150, 150, 158)";
-const RING_CACHE = "lb-ring:";
 
 // The account control from the live header, carried over: pfp with a ring tinted to
 // its average colour, enlarging on hover, opening a menu with log out.
@@ -210,6 +212,9 @@ const RING_CACHE = "lb-ring:";
 // the flash. The colour is memoised per image URL and re-applied in a layout effect (before
 // paint), so a remount starts already-correct and there is nothing left to animate.
 function AccountMenu({ name, image }: { name: string; image: string | null }) {
+  // The ring cache is per user (userStorageName(uid, "lb-ring:") + the image URL): an image URL
+  // is a person's profile picture.
+  const uid = useUid();
   const [ringColor, setRingColor] = useState(RING_FALLBACK);
   const [hover, setHover] = useState(false);
 
@@ -219,12 +224,12 @@ function AccountMenu({ name, image }: { name: string; image: string | null }) {
   useIsoLayoutEffect(() => {
     if (!image) return;
     try {
-      const cached = sessionStorage.getItem(RING_CACHE + image);
+      const cached = sessionStorage.getItem(userStorageName(uid, "lb-ring:") + image);
       if (cached) setRingColor(cached);
     } catch {
       /* storage unavailable — fall through and compute */
     }
-  }, [image]);
+  }, [image, uid]);
 
   useEffect(() => {
     if (!image) return;
@@ -252,7 +257,7 @@ function AccountMenu({ name, image }: { name: string; image: string | null }) {
           const c = `rgb(${Math.round(r / n)}, ${Math.round(g / n)}, ${Math.round(b / n)})`;
           setRingColor(c);
           try {
-            sessionStorage.setItem(RING_CACHE + image, c);
+            sessionStorage.setItem(userStorageName(uid, "lb-ring:") + image, c);
           } catch {
             /* quota / unavailable — recomputing next time is harmless */
           }
@@ -265,7 +270,7 @@ function AccountMenu({ name, image }: { name: string; image: string | null }) {
     return () => {
       cancelled = true;
     };
-  }, [image]);
+  }, [image, uid]);
 
   // Hover-open with a short close delay to bridge trigger → menu (Base UI's Menu has
   // no openOnHover) — same mechanism as the live header.
@@ -332,7 +337,16 @@ function AccountMenu({ name, image }: { name: string; image: string | null }) {
             <p className="truncate text-sm font-medium text-foreground">{name}</p>
           </div>
           <DropdownMenuSeparator className="bg-border/60" />
-          <form action={logout}>
+          {/* Sign-out clears this browser's copy of the user's data before the action runs: the
+              action's response cannot carry Clear-Site-Data (multi-user PLAN §6.2 layer 6). The
+              browser's copy of the search payloads (search-cache.ts) goes with it. */}
+          <form
+            action={logout}
+            onSubmit={() => {
+              clearThisBrowser(uid);
+              void clearStored(idbKV(uid));
+            }}
+          >
             <DropdownMenuItem
               nativeButton
               render={<button type="submit" />}

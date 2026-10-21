@@ -12,14 +12,10 @@
 // delivered in any arrival order, must converge to the same verdicts and the same reader
 // answers. That is the property below.
 import { beforeEach, describe, expect, it } from "vitest";
-import {
-  getAllTimePlays,
-  getDailyStats,
-  getPlaysByDay,
-  recomputeAllTimeStats,
-  recordPlays,
-} from "@/lib/db";
+import { ownerStore } from "../owner-store";
 import { DAY_MS, iso, play, resetStore, verdicts } from "./helpers";
+
+const store = ownerStore();
 
 // 10:00 UTC, three days ago — recent enough that every windowed reader (readDailyStats's
 // `now - (days+2)` cutoff) covers it, old enough that "today" can't drift into it mid-run.
@@ -67,7 +63,7 @@ const ORDERS: Order[] = [
 ];
 
 async function feed(order: Order): Promise<void> {
-  for (const batch of order.batches) await recordPlays(batch.map((i) => PLAYS[i]));
+  for (const batch of order.batches) await store.recordPlays(batch.map((i) => PLAYS[i]));
 }
 
 describe("recordPlays — arrival order must not change the timeline's verdicts", () => {
@@ -80,7 +76,7 @@ describe("recordPlays — arrival order must not change the timeline's verdicts"
 
   it.each(ORDERS)("$name → the same all-time totals", async (order) => {
     await feed(order);
-    const stats = await recomputeAllTimeStats();
+    const stats = await store.recomputeAllTimeStats();
     expect(stats.plays).toBe(COUNTED);
     expect(stats.uniqueTracks).toBe(COUNTED);
     expect(stats.durationMs).toBe(LISTENED_MS);
@@ -89,11 +85,11 @@ describe("recordPlays — arrival order must not change the timeline's verdicts"
 
   it.each(ORDERS)("$name → the same day strip and the same all-time list", async (order) => {
     await feed(order);
-    const daily = await getDailyStats(0, 400);
+    const daily = await store.getDailyStats(0, 400);
     expect(daily.map((d) => [d.day, d.plays, d.uniqueTracks, d.durationMs])).toEqual([
       [iso(BASE).slice(0, 10), COUNTED, COUNTED, LISTENED_MS],
     ]);
-    const list = await getAllTimePlays(500);
+    const list = await store.getAllTimePlays(500);
     expect(list.reduce((n, t) => n + t.plays, 0)).toBe(COUNTED);
   });
 });
@@ -102,28 +98,28 @@ describe("recordPlays — idempotency", () => {
   beforeEach(resetStore);
 
   it("re-recording the whole batch, and every prefix, changes nothing", async () => {
-    await recordPlays(PLAYS);
+    await store.recordPlays(PLAYS);
     const before = await verdicts();
-    const stats = await recomputeAllTimeStats();
+    const stats = await store.recomputeAllTimeStats();
 
-    expect(await recordPlays(PLAYS)).toBe(0);
+    expect(await store.recordPlays(PLAYS)).toBe(0);
     for (let n = 1; n <= PLAYS.length; n++) {
-      expect(await recordPlays(PLAYS.slice(0, n))).toBe(0);
+      expect(await store.recordPlays(PLAYS.slice(0, n))).toBe(0);
     }
     // Same plays delivered as a reversed batch is still the same set.
-    expect(await recordPlays([...PLAYS].reverse())).toBe(0);
+    expect(await store.recordPlays([...PLAYS].reverse())).toBe(0);
 
     expect(await verdicts()).toEqual(before);
-    expect(await recomputeAllTimeStats()).toEqual(stats);
+    expect(await store.recomputeAllTimeStats()).toEqual(stats);
   });
 
   it("returns the count of plays that were actually new, not of rows offered", async () => {
-    expect(await recordPlays(PLAYS.slice(0, 4))).toBe(4);
-    expect(await recordPlays(PLAYS.slice(2, 7))).toBe(3);
-    expect(await recordPlays([])).toBe(0);
+    expect(await store.recordPlays(PLAYS.slice(0, 4))).toBe(4);
+    expect(await store.recordPlays(PLAYS.slice(2, 7))).toBe(3);
+    expect(await store.recordPlays([])).toBe(0);
     // The same (track, played_at) offered twice inside ONE batch is one play.
     const dup = play("dup", iso(BASE + 9_000_000), 200_000);
-    expect(await recordPlays([dup, { ...dup }])).toBe(1);
+    expect(await store.recordPlays([dup, { ...dup }])).toBe(1);
   });
 });
 
@@ -139,12 +135,12 @@ describe("cross-reader invariants", () => {
         rows.push(play(`d${d}h${h}`, iso(BASE - d * DAY_MS + (h - 10) * 3_600_000), null));
       }
     }
-    await recordPlays(rows);
+    await store.recordPlays(rows);
     for (const offset of [0, -240, 330]) {
-      const daily = await getDailyStats(offset, 400);
+      const daily = await store.getDailyStats(offset, 400);
       expect(daily.length).toBeGreaterThan(0);
       for (const card of daily) {
-        const view = await getPlaysByDay(card.day, offset);
+        const view = await store.getPlaysByDay(card.day, offset);
         expect({ day: card.day, plays: view.reduce((n, t) => n + t.plays, 0) }).toEqual({
           day: card.day,
           plays: card.plays,
@@ -155,9 +151,9 @@ describe("cross-reader invariants", () => {
   });
 
   it("the day strip's total equals the recomputed all-time play count", async () => {
-    await recordPlays(PLAYS);
-    const daily = await getDailyStats(0, 400);
-    const stats = await recomputeAllTimeStats();
+    await store.recordPlays(PLAYS);
+    const daily = await store.getDailyStats(0, 400);
+    const stats = await store.recomputeAllTimeStats();
     expect(daily.reduce((n, d) => n + d.plays, 0)).toBe(stats.plays);
     expect(daily.reduce((n, d) => n + d.durationMs, 0)).toBe(stats.durationMs);
   });
@@ -167,9 +163,9 @@ describe("timezone bucketing", () => {
   beforeEach(resetStore);
 
   it("conserves the play count across every offset the clamp allows", async () => {
-    await recordPlays(PLAYS);
+    await store.recordPlays(PLAYS);
     for (const offset of [-720, -300, 0, 330, 840]) {
-      const daily = await getDailyStats(offset, 400);
+      const daily = await store.getDailyStats(offset, 400);
       expect({ offset, total: daily.reduce((n, d) => n + d.plays, 0) }).toEqual({
         offset,
         total: COUNTED,
@@ -185,19 +181,19 @@ describe("timezone bucketing", () => {
     const localMidnight = dayStart + 240 * 60_000; // 00:00 local == 04:00 UTC
     const day = iso(dayStart).slice(0, 10);
     const prevDay = iso(dayStart - DAY_MS).slice(0, 10);
-    await recordPlays([
+    await store.recordPlays([
       play("before", iso(localMidnight - 1), null),
       play("at", iso(localMidnight), null),
       play("after", iso(localMidnight + 12 * 3_600_000), null),
     ]);
 
-    const daily = await getDailyStats(offset, 400);
+    const daily = await store.getDailyStats(offset, 400);
     const byDay = Object.fromEntries(daily.map((d) => [d.day, d.plays]));
     expect(byDay).toEqual({ [prevDay]: 1, [day]: 2 });
 
-    const midnightDay = await getPlaysByDay(day, offset);
+    const midnightDay = await store.getPlaysByDay(day, offset);
     expect(midnightDay.map((t) => t.id).sort()).toEqual(["after", "at"]);
-    const earlier = await getPlaysByDay(prevDay, offset);
+    const earlier = await store.getPlaysByDay(prevDay, offset);
     expect(earlier.map((t) => t.id)).toEqual(["before"]);
   });
 });

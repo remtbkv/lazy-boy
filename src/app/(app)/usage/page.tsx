@@ -1,18 +1,10 @@
-import { redirect } from "next/navigation";
-import { auth } from "@/lib/auth";
+import { notFound } from "next/navigation";
 import { captureHealthMessage } from "@/lib/capture-health";
-import {
-  getCaptureHealth,
-  getClientLoadSpeed,
-  getRecentlyPlayedQuotaWindows,
-  getSpotifyCallBreakdown,
-  readLedger,
-  type ClientMetricsPage,
-  type MetricStat,
-  type PageOpen,
-} from "@/lib/db";
+import { forUser, type ClientMetricsPage, type MetricStat, type PageOpen } from "@/lib/db";
+import { requirePageUser } from "@/lib/require-user";
 import { tzOffsetMinutes } from "@/lib/tz";
 import { LedgerDays } from "./ledger-days";
+import { loadUsageTelemetry } from "./telemetry";
 
 // The instrument panel for this app's two costs: the seconds it spends on the reader (top) and
 // the rows it spends on the store (bottom).
@@ -33,7 +25,8 @@ import { LedgerDays } from "./ledger-days";
 //
 // Auth is gated HERE, not left to the (app) layout: Next renders layout and page in
 // parallel, so the layout's redirect alone still flushes the page's data into the 307
-// body (docs/SECURITY.md).
+// body (docs/SECURITY.md). The page is the admin's: it reads the telemetry of every user,
+// so anyone else gets a 404 before any read (multi-user PLAN §6.2 layer 7).
 export const dynamic = "force-dynamic";
 
 const DAYS = 14;
@@ -64,6 +57,8 @@ const STORIES: { page: string; title: string; parts: Part[] }[] = [
       // One mark, three visible things: the home payload is a single materialized read, so the
       // day strip, the all-time card and the opening day's song list cannot be timed apart.
       { event: "data-rendered", label: "page data · day cards, all-time, song list", col: "data" },
+      // Only on a visit that found the browser's copy, and only when it beat the network.
+      { event: "index-idb", label: "search from this browser's copy", col: "idb" },
       { event: "history-ready", label: "history in memory · day sliding stops asking", col: "history" },
       { event: "now-playing-ready", label: "now playing answered", col: "playing" },
       { event: "dock-ready", label: "dock library", col: "dock" },
@@ -241,18 +236,28 @@ function LoadStory({
   );
 }
 
+/** A log section whose read failed: the telemetry store (the Zenbook) did not answer. */
+function Unavailable() {
+  return (
+    <p className="mt-3 text-sm text-muted-foreground">
+      Unavailable — the log store did not answer.
+    </p>
+  );
+}
+
 export default async function UsagePage() {
-  const session = await auth();
-  if (!session || session.error) redirect("/login");
-  const [ledger, counters, client, tz, spotifyCalls, quotaWindows, capture] = await Promise.all([
-    readLedger(DAYS),
+  const user = await requirePageUser();
+  if (!user.admin) notFound();
+  const store = forUser(user.uid);
+  // The log sections read the telemetry store and never reject (telemetry.ts): a dead one
+  // empties its own section, not the page.
+  const [telemetry, counters, tz, capture] = await Promise.all([
+    loadUsageTelemetry(DAYS),
     liveCounters(),
-    getClientLoadSpeed(),
-    tzOffsetMinutes(),
-    getSpotifyCallBreakdown(24),
-    getRecentlyPlayedQuotaWindows(),
-    getCaptureHealth().catch(() => null),
+    tzOffsetMinutes(store),
+    store.getCaptureHealth().catch(() => null),
   ]);
+  const { ledger, client, spotifyCalls, quotaWindows, down } = telemetry;
   const summaryByPage = new Map(client.pages.map((p) => [p.page, p]));
 
   return (
@@ -279,7 +284,9 @@ export default async function UsagePage() {
           <p className="text-sm text-muted-foreground">last 7 days · typical / slow</p>
         </div>
 
-        {client.pages.length === 0 ? (
+        {down.client ? (
+          <Unavailable />
+        ) : client.pages.length === 0 ? (
           <p className="mt-3 text-sm text-muted-foreground">
             Nothing measured yet — no browser has reported a page open.
           </p>
@@ -368,7 +375,9 @@ export default async function UsagePage() {
           <h2 className="font-mono text-sm">spotify calls</h2>
           <p className="text-sm text-muted-foreground">last 24h · by source</p>
         </div>
-        {spotifyCalls.length === 0 ? (
+        {down.spotifyCalls ? (
+          <Unavailable />
+        ) : spotifyCalls.length === 0 ? (
           <p className="mt-3 text-sm text-muted-foreground">No Spotify calls recorded.</p>
         ) : (
           <div className="overflow-x-auto">
@@ -418,7 +427,9 @@ export default async function UsagePage() {
           past &ldquo;banned at&rdquo; values means the model is wrong, not just the traffic —
           and the source split names who overran.
         </p>
-        {quotaWindows.length === 0 ? (
+        {down.quotaWindows ? (
+          <Unavailable />
+        ) : quotaWindows.length === 0 ? (
           <p className="mt-3 text-sm text-muted-foreground">No calls recorded yet.</p>
         ) : (
           <div className="overflow-x-auto">
@@ -489,7 +500,7 @@ export default async function UsagePage() {
           </ul>
         )}
 
-        <LedgerDays ledger={ledger} />
+        {down.ledger ? <Unavailable /> : <LedgerDays ledger={ledger} />}
       </section>
     </main>
   );

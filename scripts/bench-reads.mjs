@@ -10,8 +10,11 @@ import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
 import { execFileSync } from "node:child_process";
+import { checkScriptDb, scriptUserOrExit, withoutUser } from "./script-user.mjs";
 
-const MODE = process.argv[2] || "main";
+const USER = scriptUserOrExit(process.argv.slice(2));
+const ARGS = withoutUser(process.argv.slice(2));
+const MODE = ARGS[0] || "main";
 const URL_PRIMARY = process.env.TURSO_DATABASE_URL;
 const AUTH = process.env.TURSO_AUTH_TOKEN;
 if (!URL_PRIMARY) throw new Error("TURSO_DATABASE_URL missing");
@@ -186,6 +189,11 @@ async function idxDropTest(mkCopy, trackId, n = 9, warmup = 3) {
 
 function mkPrimary() {
   return createClient({ url: URL_PRIMARY, authToken: AUTH, intMode: "number" });
+}
+{
+  const c = mkPrimary();
+  await checkScriptDb(c, USER, URL_PRIMARY);
+  c.close();
 }
 
 // ── modes ──────────────────────────────────────────────────────────────────────────────
@@ -414,9 +422,9 @@ async function modeMain() {
  *    EQUALITY  every local day in the store, old rows vs new rows, byte-compared. This is the
  *              known-answer half — the range bound is only allowed to exist because it changes
  *              nothing. Exits non-zero on any mismatch.
- *  `node --env-file=.env.local scripts/bench-reads.mjs day [offsetMin]` (default −240, NY summer). */
+ *  `node --env-file=.env.local scripts/bench-reads.mjs day [offsetMin] --user <OWNER_UID>` (default −240, NY summer). */
 async function modeDay() {
-  const offsetMin = Number(process.argv[3] ?? -240);
+  const offsetMin = Number(ARGS[1] ?? -240);
   const m = Math.max(-720, Math.min(840, Math.round(offsetMin) || 0));
   const localDay = (col) => `date(${col}, '${m >= 0 ? "+" : ""}${m} minutes')`;
   // db.ts getPlaysByDay, before and after.
@@ -487,7 +495,7 @@ async function modeDay() {
  *              played on the client's identity join (the id join, which is what an obvious
  *              implementation would do, is reported next to it and is expected to MISS).
  *              Exits non-zero on a miss.
- *  `node --env-file=.env.local scripts/bench-reads.mjs search` */
+ *  `node --env-file=.env.local scripts/bench-reads.mjs search --user <OWNER_UID>` */
 async function modeSearch() {
   // SQL copied from db.ts readLibraryIndex / readHistoryIndex.
   const LIB_MEMBERS = `SELECT pt.playlist_id AS pid, t.name AS name, t.artist AS artist,

@@ -30,9 +30,17 @@ const ATTEMPTS = 3;
 
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
+/** The ladder's shape. The core store keeps the defaults; the telemetry store (db.ts,
+ *  getTelemetryClient) runs one attempt under a 4 s timeout, because nothing a user waits on
+ *  should sit behind a log write to a frozen host. */
+export type StoreFetchOptions = { attempts?: number; attemptTimeoutMs?: number };
+
 /** Build the store fetch. `doFetch` is injected so the retry ladder can be tested without a
  *  network (tests/store-fetch.test.ts); production passes nothing and gets global fetch. */
-export function makeStoreFetch(doFetch: FetchLike = fetch): FetchLike {
+export function makeStoreFetch(
+  doFetch: FetchLike = fetch,
+  { attempts = ATTEMPTS, attemptTimeoutMs = ATTEMPT_TIMEOUT_MS }: StoreFetchOptions = {},
+): FetchLike {
   return async (input, init) => {
     // Normalize once: after this, `send()` can be called as many times as the ladder needs.
     const req = new Request(input as RequestInfo, init);
@@ -53,7 +61,7 @@ export function makeStoreFetch(doFetch: FetchLike = fetch): FetchLike {
         headers,
         body,
         redirect: req.redirect,
-        signal: init?.signal ?? AbortSignal.timeout(ATTEMPT_TIMEOUT_MS),
+        signal: init?.signal ?? AbortSignal.timeout(attemptTimeoutMs),
       });
 
     // Some Vercel invocations intermittently fail to RESOLVE the funnel hostname
@@ -70,7 +78,7 @@ export function makeStoreFetch(doFetch: FetchLike = fetch): FetchLike {
         // request almost certainly never executed, so a retry is safe even for writes.
         // A 500 is sqld itself and is NOT retried: it may have executed.
         if (
-          attempt < ATTEMPTS - 1 &&
+          attempt < attempts - 1 &&
           (res.status === 502 || res.status === 503 || res.status === 504)
         ) {
           await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
@@ -78,7 +86,7 @@ export function makeStoreFetch(doFetch: FetchLike = fetch): FetchLike {
         }
         return res;
       } catch (e) {
-        if (attempt >= ATTEMPTS - 1) throw e;
+        if (attempt >= attempts - 1) throw e;
         await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
       }
     }

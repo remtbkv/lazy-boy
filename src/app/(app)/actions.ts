@@ -3,36 +3,23 @@
 import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 import { unstable_rethrow } from "next/navigation";
-import { auth, signIn, signOut, getValidAccessToken, spotifyAccessToken } from "@/lib/auth";
+import { signIn, signOut, getValidAccessTokenFor, spotifyAccessTokenFor } from "@/lib/auth";
+import type { Uid } from "@/lib/identity";
+import { requireActionUser } from "@/lib/require-user";
 import { getSpotify } from "@/lib/session";
-import { spotifyClient, SpotifyError, type Track } from "@/lib/spotify";
+import { spotifyClient, SpotifyError, type OwnedToken, type Track } from "@/lib/spotify";
 import { intersect, keyOf, reinsertPositions, subtract } from "@/lib/spotify/domain";
 import { runTask, taskDone } from "@/lib/tasks/registry";
 import { cleanPhase1, reconcileClean } from "@/lib/clean/run";
 import { syncLibrary } from "@/lib/sync/library";
-import {
-  acquireLock,
-  clearSpotifyTokens,
-  deletePlaylistFromDb,
-  releaseLock,
-  findTrackWithPlaylists,
-  getCleanBackupPref,
-  getMeId,
-  getPlaylistSnapshot,
-  getPlaylistTracks,
-  getPlaylistTrackOrder,
-  playedTracksInContext,
-  removeCachedPlaylistTrack,
-  storePlaylistTracks,
-  upsertStoredPlaylist,
-} from "@/lib/db";
+import { forUser, type UserStore } from "@/lib/db";
 
 export type ActionResult<T = object> =
   | ({ ok: true } & T)
   | { ok: false; error: string };
 
 function fail(e: unknown): { ok: false; error: string } {
-  // getSpotify("action:action") redirects to /login on a dead session by THROWING Next's control-flow
+  // getSpotify(uid, "action:…") redirects to /login on a dead token row by THROWING Next's control-flow
   // error; mapping it to a result would show the user a literal "NEXT_REDIRECT" toast
   // instead of logging them out. Rethrow Next's internals, map only real errors.
   unstable_rethrow(e);
@@ -42,13 +29,14 @@ function fail(e: unknown): { ok: false; error: string } {
 // A token getter for background tasks (clean reconcile, library sync) that can outlive
 // the ~1h access token. It refreshes through the shared cross-instance lock and caches
 // briefly, so a long run never dies on a mid-run 401 yet doesn't re-hit the DB per call.
-// (getValidAccessToken only returns a token with ≥60s headroom, so a sub-60s cache is safe.)
-function refreshingToken(): () => Promise<string> {
-  let cached = "";
+// (getValidAccessTokenFor only returns a token with ≥60s headroom, so a sub-60s cache is safe.)
+// Bound to one user at creation: the task never asks whose token it holds (PLAN §5.2).
+function refreshingToken(uid: Uid): () => Promise<OwnedToken> {
+  let cached: OwnedToken | null = null;
   let until = 0;
   return async () => {
     if (cached && Date.now() < until) return cached;
-    const t = await getValidAccessToken();
+    const t = await getValidAccessTokenFor(uid);
     if (!t) throw new Error("Spotify session expired — log out and back in.");
     cached = t;
     until = Date.now() + 55_000;
@@ -61,10 +49,14 @@ export async function login() {
   await signIn("spotify", { redirectTo: "/home" });
 }
 export async function logout() {
+  // Only a signed-in user's own token row is cleared: anyone could post this action, and it
+  // used to clear the one global row for whoever asked (AUTHZ.md F4). A refused or
+  // unavailable session still gets its cookie cleared below.
+  const user = await requireActionUser();
   // Defer the token wipe off the redirect path so logout returns immediately. It still runs
   // (after the response is sent) so the background cron can't keep syncing post-logout — it
   // just no longer blocks the user on a remote DB write.
-  after(() => clearSpotifyTokens().catch(() => {}));
+  if ("uid" in user) after(() => forUser(user.uid).clearSpotifyTokens().catch(() => {}));
   await signOut({ redirectTo: "/login" });
 }
 
@@ -74,10 +66,10 @@ export async function logout() {
 // until the next full library sync (up to 15 min) unless we insert its row now. The
 // next sync fills in the mosaic image and true position. Best-effort: the playlist
 // exists on Spotify either way, so store upkeep must never fail the action.
-async function recordNewPlaylist(id: string, name: string, trackCount: number): Promise<void> {
+async function recordNewPlaylist(store: UserStore, id: string, name: string, trackCount: number): Promise<void> {
   try {
-    const me = await getMeId();
-    await upsertStoredPlaylist({ id, name, ownerId: me, image: null, trackCount });
+    const me = await store.getMeId();
+    await store.upsertStoredPlaylist({ id, name, ownerId: me, image: null, trackCount });
   } catch {
     /* next sync picks it up */
   }
@@ -88,9 +80,11 @@ export async function mergeAction(
 ): Promise<ActionResult<{ name: string; count: number; id: string }>> {
   try {
     if (sourceIds.length < 2) throw new Error("Pick at least two playlists.");
-    const sp = await getSpotify("action:merge");
+    const user = await requireActionUser();
+    if ("ok" in user) return user;
+    const sp = await getSpotify(user.uid, "action:merge");
     const r = await sp.mergePlaylists(sourceIds);
-    await recordNewPlaylist(r.id, r.name, r.count);
+    await recordNewPlaylist(forUser(user.uid), r.id, r.name, r.count);
     revalidatePath("/playlists");
     return { ok: true, ...r };
   } catch (e) {
@@ -116,36 +110,43 @@ export async function startCleanAction(
   }>
 > {
   try {
-    const session = await auth();
-    if (!session || session.error || !(await spotifyAccessToken())) {
-      throw new Error("Not authenticated");
-    }
+    const user = await requireActionUser();
+    if ("ok" in user) return user;
+    if (!(await spotifyAccessTokenFor(user.uid))) throw new Error("Not authenticated");
+    const store = forUser(user.uid);
     // Background bulk work can outlive the access token → refreshing getter, not a fixed
     // string (a 1h+ clean would otherwise 401 mid-run). Patient: ride out rate limits.
-    const token = refreshingToken();
+    const token = refreshingToken(user.uid);
     // Server-side double-submit guard: two clicks landing before React commits the
     // disabled state used to run TWO cleans — two identically-named playlists, two
     // backups (audit 2026-08-19 wave 2, A8). The lock outlives Phase 1 comfortably and
     // expires on its own; no release needed on the error path.
-    const lock = await acquireLock(`clean:${playlistId}`, 5 * 60 * 1000);
+    const lock = await store.acquireLock(`clean:${playlistId}`, 5 * 60 * 1000);
     if (!lock) throw new Error("A clean of this playlist is already running.");
     // RELEASED on every exit — the first cut relied on TTL expiry alone, which blocked a
     // legitimate re-clean for 5 minutes after a finished one and leaked a permanent
     // lock:clean:<id> meta row per playlist (wave-3 adversarial review, A1). The lock's
     // job is only the Phase-1 double-submit window.
     try {
-      const useBackup = backup ?? (await getCleanBackupPref());
-      const { result, ctx } = await cleanPhase1(spotifyClient(token, true, "action:clean"), playlistId, useBackup);
+      const useBackup = backup ?? (await store.getCleanBackupPref());
+      const { result, ctx } = await cleanPhase1(
+        spotifyClient(user.uid, token, true, "action:clean"),
+        store,
+        playlistId,
+        useBackup,
+      );
       // Nothing removed → no playlist created, nothing to reconcile.
       if (!ctx || result.unique) {
         return { ok: true, name: result.name, kept: result.kept, removed: 0, unique: true };
       }
       // The new playlists show in the grid right away (reconcile's syncLibrary would
       // also get there, but only after the whole background pass).
-      if (result.id) await recordNewPlaylist(result.id, result.name, result.kept);
-      if (ctx.backupId) await recordNewPlaylist(ctx.backupId, ctx.backupName, result.removed);
-      const task = runTask("clean-reconcile", () =>
-        reconcileClean(spotifyClient(token, true, "action:clean"), ctx),
+      if (result.id) await recordNewPlaylist(store, result.id, result.name, result.kept);
+      if (ctx.backupId) await recordNewPlaylist(store, ctx.backupId, ctx.backupName, result.removed);
+      const task = runTask(
+        "clean-reconcile",
+        () => reconcileClean(spotifyClient(user.uid, token, true, "action:clean"), store, ctx),
+        user.uid,
       );
       // Keep the invocation alive for the detached reconcile (serverless may freeze it
       // once the action returns).
@@ -153,7 +154,7 @@ export async function startCleanAction(
       revalidatePath("/playlists");
       return { ok: true, name: result.name, kept: result.kept, removed: result.removed, deduped: result.deduped, taskId: task.id };
     } finally {
-      await releaseLock(`clean:${playlistId}`, lock).catch(() => {});
+      await store.releaseLock(`clean:${playlistId}`, lock).catch(() => {});
     }
   } catch (e) {
     return fail(e);
@@ -176,26 +177,28 @@ export async function deletePlaylistAction(
   playlistId: string,
 ): Promise<ActionResult<{ alreadyGone?: boolean }>> {
   try {
-    const session = await auth();
-    if (!session || session.error || !(await spotifyAccessToken())) {
-      throw new Error("Not authenticated");
-    }
+    const user = await requireActionUser();
+    if ("ok" in user) return user;
+    if (!(await spotifyAccessTokenFor(user.uid))) throw new Error("Not authenticated");
+    const store = forUser(user.uid);
     // Getter, not a fixed string: the delete is quick, but the fire-and-forget resync
     // below can outlive the token.
-    const token = refreshingToken();
+    const token = refreshingToken(user.uid);
     let alreadyGone = false;
     try {
-      await spotifyClient(token, false, "action:deletePlaylist").deletePlaylist(playlistId);
+      await spotifyClient(user.uid, token, false, "action:deletePlaylist").deletePlaylist(playlistId);
     } catch (e) {
       if (e instanceof SpotifyError && e.status === 404) alreadyGone = true;
       else throw e;
     }
-    await deletePlaylistFromDb(playlistId);
+    await store.deletePlaylistFromDb(playlistId);
     revalidatePath("/playlists");
     if (alreadyGone) {
       // Background resync; after() keeps the invocation alive until it finishes.
-      const t = runTask("sync-backend", (onProgress) =>
-        syncLibrary(spotifyClient(token, true, "action:library-scan"), onProgress),
+      const t = runTask(
+        "sync-backend",
+        (onProgress) => syncLibrary(spotifyClient(user.uid, token, true, "action:library-scan"), store, onProgress),
+        user.uid,
       );
       after(taskDone(t.id));
     }
@@ -209,9 +212,11 @@ export async function saveQueueAction(): Promise<
   ActionResult<{ name: string; count: number }>
 > {
   try {
-    const sp = await getSpotify("action:saveQueue");
+    const user = await requireActionUser();
+    if ("ok" in user) return user;
+    const sp = await getSpotify(user.uid, "action:saveQueue");
     const r = await sp.saveQueue();
-    await recordNewPlaylist(r.id, r.name, r.count);
+    await recordNewPlaylist(forUser(user.uid), r.id, r.name, r.count);
     revalidatePath("/playlists");
     return { ok: true, name: r.name, count: r.count };
   } catch (e) {
@@ -236,12 +241,13 @@ export type SubtractTrack = {
 // when the playlist has never been synced. Same pattern as resumePlaylistAction.
 async function playlistTracksCached(
   sp: Awaited<ReturnType<typeof getSpotify>>,
+  store: UserStore,
   id: string,
 ): Promise<Track[]> {
-  const cached = await getPlaylistTracks(id);
+  const cached = await store.getPlaylistTracks(id);
   if (cached.length) return cached;
   const live = await sp.playlistTracks(id);
-  if (live.length) void storePlaylistTracks(id, live).catch(() => {});
+  if (live.length) void store.storePlaylistTracks(id, live).catch(() => {});
   return live;
 }
 
@@ -255,10 +261,13 @@ export async function subtractPreviewAction(
 ): Promise<ActionResult<{ kept: SubtractTrack[]; overlap: SubtractTrack[] }>> {
   try {
     if (others.length === 0) throw new Error("Pick at least one playlist to subtract.");
-    const sp = await getSpotify("action:subtractPreview");
+    const user = await requireActionUser();
+    if ("ok" in user) return user;
+    const sp = await getSpotify(user.uid, "action:subtractPreview");
+    const store = forUser(user.uid);
     const [baseTracks, ...otherLists] = await Promise.all([
-      playlistTracksCached(sp, baseId),
-      ...others.map((o) => playlistTracksCached(sp, o.id)),
+      playlistTracksCached(sp, store, baseId),
+      ...others.map((o) => playlistTracksCached(sp, store, o.id)),
     ]);
     // Which subtracted playlist "claims" each song — the first one containing it.
     const sourceByKey = new Map<string, string>();
@@ -296,9 +305,11 @@ export async function saveCompareDiffAction(
 ): Promise<ActionResult<{ count: number }>> {
   try {
     if (uris.length === 0) throw new Error("Nothing to save.");
-    const sp = await getSpotify("action:saveCompareDiff");
+    const user = await requireActionUser();
+    if ("ok" in user) return user;
+    const sp = await getSpotify(user.uid, "action:saveCompareDiff");
     const r = await sp.createFromUris(name, uris);
-    await recordNewPlaylist(r.id, name, r.count);
+    await recordNewPlaylist(forUser(user.uid), r.id, name, r.count);
     revalidatePath("/playlists");
     return { ok: true, count: r.count };
   } catch (e) {
@@ -309,7 +320,9 @@ export async function saveCompareDiffAction(
 // ---- player (web-player simulation) ----
 export async function addToQueueAction(uri: string): Promise<ActionResult> {
   try {
-    const sp = await getSpotify("action:addToQueue");
+    const user = await requireActionUser();
+    if ("ok" in user) return user;
+    const sp = await getSpotify(user.uid, "action:addToQueue");
     await sp.addToQueue(uri);
     return { ok: true };
   } catch (e) {
@@ -324,7 +337,9 @@ export async function addToQueueAction(uri: string): Promise<ActionResult> {
 /** Play one track now, no context (e.g. from a search row). */
 export async function playTrackAction(uri: string): Promise<ActionResult> {
   try {
-    const sp = await getSpotify("action:playTrack");
+    const user = await requireActionUser();
+    if ("ok" in user) return user;
+    const sp = await getSpotify(user.uid, "action:playTrack");
     await sp.playTracks([uri]);
     return { ok: true };
   } catch (e) {
@@ -343,7 +358,9 @@ export async function playFromPlaylistAction(
   trackUri: string,
 ): Promise<ActionResult> {
   try {
-    const sp = await getSpotify("action:playFromPlaylist");
+    const user = await requireActionUser();
+    if ("ok" in user) return user;
+    const sp = await getSpotify(user.uid, "action:playFromPlaylist");
     await sp.playContext(`spotify:playlist:${playlistId}`, trackUri);
     return { ok: true };
   } catch (e) {
@@ -366,10 +383,10 @@ export async function trackMenuAction(
     playlists: { id: string; name: string }[];
   }>
 > {
-  const session = await auth();
-  if (!session || session.error) return { ok: false, error: "Not signed in." };
+  const user = await requireActionUser();
+  if ("ok" in user) return user;
   try {
-    const { track, playlists } = await findTrackWithPlaylists(name, artist);
+    const { track, playlists } = await forUser(user.uid).findTrackWithPlaylists(name, artist);
     if (!track) return { ok: false, error: "This song isn't in the library yet." };
     return {
       ok: true,
@@ -392,7 +409,9 @@ export async function trackMenuAction(
 
 export async function saveToLikedAction(trackId: string): Promise<ActionResult> {
   try {
-    const sp = await getSpotify("action:saveToLiked");
+    const user = await requireActionUser();
+    if ("ok" in user) return user;
+    const sp = await getSpotify(user.uid, "action:saveToLiked");
     await sp.saveTrack(trackId);
     return { ok: true };
   } catch (e) {
@@ -413,11 +432,14 @@ export async function removeFromPlaylistAction(
   position: number,
 ): Promise<ActionResult> {
   try {
-    const sp = await getSpotify("action:removeFromPlaylist");
+    const user = await requireActionUser();
+    if ("ok" in user) return user;
+    const sp = await getSpotify(user.uid, "action:removeFromPlaylist");
+    const store = forUser(user.uid);
     // Spotify's DELETE takes EVERY occurrence of a uri. When the playlist holds this song
     // more than once, remove all and put the other copies back where they were (burn
     // lazyboy-review 2026-10-03, P1) — but only against the list the user is looking at.
-    const order = (await getPlaylistTrackOrder(playlistId)).map((t) => t.uri);
+    const order = (await store.getPlaylistTrackOrder(playlistId)).map((t) => t.uri);
     const copies = order.filter((u) => u === uri).length;
     let keep: number[] = [];
     if (copies > 1) {
@@ -428,7 +450,7 @@ export async function removeFromPlaylistAction(
       }
       const [live, cachedSnap] = await Promise.all([
         sp.playlist(playlistId),
-        getPlaylistSnapshot(playlistId),
+        store.getPlaylistSnapshot(playlistId),
       ]);
       // The cache drops local files and episodes, so its positions are not Spotify's.
       if (live.trackCount !== order.length) {
@@ -442,7 +464,7 @@ export async function removeFromPlaylistAction(
       if (!cachedSnap || live.snapshot !== cachedSnap) {
         const tracks = await sp.playlistTracks(playlistId);
         if (tracks.length !== order.length || tracks.some((t, i) => t.uri !== order[i])) {
-          await storePlaylistTracks(playlistId, tracks, live.snapshot);
+          await store.storePlaylistTracks(playlistId, tracks, live.snapshot);
           revalidatePath(`/playlists/${playlistId}`);
           return { ok: false, error: changed };
         }
@@ -453,7 +475,7 @@ export async function removeFromPlaylistAction(
     try {
       for (const at of keep) await sp.addItemsAt(playlistId, [uri], at);
     } catch {
-      await removeCachedPlaylistTrack(playlistId, uri).catch(() => {});
+      await store.removeCachedPlaylistTrack(playlistId, uri).catch(() => {});
       revalidatePath(`/playlists/${playlistId}`);
       return {
         ok: false,
@@ -462,7 +484,7 @@ export async function removeFromPlaylistAction(
     }
     // Keep the cache in step. Spotify has already removed it, so a failed cache write must
     // not report the removal as failed; the next library sync heals the row.
-    await removeCachedPlaylistTrack(playlistId, uri, keep.length ? position : undefined).catch(
+    await store.removeCachedPlaylistTrack(playlistId, uri, keep.length ? position : undefined).catch(
       () => {},
     );
     revalidatePath(`/playlists/${playlistId}`);
@@ -511,7 +533,9 @@ async function playerControl(
   fn: (sp: Awaited<ReturnType<typeof getSpotify>>) => Promise<void>,
 ): Promise<ActionResult> {
   try {
-    const sp = await getSpotify(source);
+    const user = await requireActionUser();
+    if ("ok" in user) return user;
+    const sp = await getSpotify(user.uid, source);
     await fn(sp);
     return { ok: true };
   } catch (e) {
@@ -563,15 +587,18 @@ export async function resumePlaylistAction(
     // the gate, or a dead session still pays (and exposes) the reads before the redirect
     // throws (the rule the pages document; audit 2026-08-19 wave 2, C5). The reads are
     // instant either way; only cold (never-cached) playlists fall back to a live fetch.
-    const sp = await getSpotify("action:resumePlaylist");
+    const user = await requireActionUser();
+    if ("ok" in user) return user;
+    const sp = await getSpotify(user.uid, "action:resumePlaylist");
+    const store = forUser(user.uid);
     const [cached, plays] = await Promise.all([
-      getPlaylistTrackOrder(playlistId),
-      playedTracksInContext(uri),
+      store.getPlaylistTrackOrder(playlistId),
+      store.playedTracksInContext(uri),
     ]);
     let tracks = cached;
     if (tracks.length === 0) {
       tracks = await sp.playlistTracks(playlistId);
-      if (tracks.length > 0) void storePlaylistTracks(playlistId, tracks).catch(() => {});
+      if (tracks.length > 0) void store.storePlaylistTracks(playlistId, tracks).catch(() => {});
     }
     if (tracks.length === 0) throw new Error("This playlist has no playable tracks.");
 

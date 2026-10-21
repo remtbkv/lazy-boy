@@ -1,7 +1,7 @@
 // The fetch every store query rides. Both properties here were production bugs on
 // 2026-08-22: brotli on the Zenbook's CPU (26s for the history payload) and a retry ladder
 // that threw on the second attempt instead of retrying.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { makeStoreFetch } from "@/lib/store-fetch";
 
 /** What hrana hands the fetch: a Request whose body is a one-shot stream. */
@@ -109,5 +109,58 @@ describe("makeStoreFetch", () => {
     await f(new Request("https://store.example/health"));
     expect(seen!.body).toBeUndefined();
     expect(seen!.method).toBe("GET");
+  });
+
+  it("options: one attempt surfaces the first failure, rejected or gateway", async () => {
+    let calls = 0;
+    const once = makeStoreFetch(
+      async () => {
+        calls++;
+        throw new TypeError("fetch failed");
+      },
+      { attempts: 1 },
+    );
+    await expect(once(hranaRequest())).rejects.toThrow("fetch failed");
+    expect(calls).toBe(1);
+
+    let gw = 0;
+    const onceGateway = makeStoreFetch(
+      async () => {
+        gw++;
+        return new Response("", { status: 503 });
+      },
+      { attempts: 1 },
+    );
+    expect((await onceGateway(hranaRequest())).status).toBe(503);
+    expect(gw).toBe(1);
+  });
+
+  it("defaults: each attempt's deadline is 15 s (the core store's), an option overrides it", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    try {
+      await makeStoreFetch(async () => ok())(hranaRequest());
+      expect(timeout.mock.calls).toEqual([[15_000]]);
+      timeout.mockClear();
+      await makeStoreFetch(async () => ok(), { attempts: 1, attemptTimeoutMs: 4_000 })(hranaRequest());
+      expect(timeout.mock.calls).toEqual([[4_000]]);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it("options: attemptTimeoutMs bounds a fetch that never answers", async () => {
+    // A frozen host: the connection is accepted and nothing comes back. Only the signal ends it.
+    const hang = makeStoreFetch(
+      (_u, init) =>
+        new Promise<Response>((_res, rej) => {
+          init?.signal?.addEventListener("abort", () => rej(init.signal!.reason));
+        }),
+      { attempts: 1, attemptTimeoutMs: 50 },
+    );
+    const t0 = Date.now();
+    await expect(hang(hranaRequest())).rejects.toThrow();
+    const took = Date.now() - t0;
+    expect(took).toBeGreaterThanOrEqual(40);
+    expect(took).toBeLessThan(1_000);
   });
 });

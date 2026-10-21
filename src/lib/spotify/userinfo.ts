@@ -28,6 +28,9 @@ export async function spotifyUserinfo({
 }): Promise<SpotifyProfile> {
   const res = await fetch("https://api.spotify.com/v1/me", {
     headers: { Authorization: `Bearer ${tokens.access_token}` },
+    // Never from a cache: a cached profile would bind one person's sign-in to another's
+    // account (multi-user PLAN.md §5.1; static check S5).
+    cache: "no-store",
   });
   const body = await res.text();
   if (!res.ok) {

@@ -8,8 +8,8 @@
 // of Streaming_History_Audio_*.json files.
 //
 // Usage (dry-run on a snapshot copy first, then against the primary):
-//   node scripts/import-extended-history.mjs "<unzipped export dir>" --db file:/tmp/copy.db
-//   node --env-file=.env.local scripts/import-extended-history.mjs "<unzipped export dir>"
+//   node scripts/import-extended-history.mjs "<unzipped export dir>" --user <uid> --db file:/tmp/copy.db
+//   node --env-file=.env.local scripts/import-extended-history.mjs "<unzipped export dir>" --user <OWNER_UID>
 // Arguments are export files or directories (a directory contributes its
 // Streaming_History_Audio_*.json files). `--window <start>/<end>` (repeatable, ISO instants)
 // replaces the default gap windows below — add one for any other span neither the store nor
@@ -32,6 +32,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createClient } from "@libsql/client";
+import { checkScriptDb, scriptUserOrExit, withoutUser } from "./script-user.mjs";
 import { importTailStmts, insertedRuns } from "./import-tail.mjs";
 
 // The gaps neither store captured (journald on the Zenbook, lazyboy-review D2): bounded by
@@ -44,7 +45,8 @@ const DEFAULT_WINDOWS = [
 const MIN_MS_PLAYED = 30_000;
 const SAME_PLAY_MS = 5_000;
 
-const args = process.argv.slice(2);
+const USER = scriptUserOrExit(process.argv.slice(2));
+const args = withoutUser(process.argv.slice(2));
 let dbUrl = process.env.TURSO_DATABASE_URL;
 const windowArgs = [];
 const inputs = [];
@@ -63,7 +65,7 @@ const windows = (windowArgs.length ? windowArgs : DEFAULT_WINDOWS).map((w) => {
 });
 if (inputs.length === 0 || !dbUrl) {
   console.error(
-    "usage: import-extended-history.mjs <export dir or file>... [--window <start>/<end>]... [--db <url>]",
+    "usage: import-extended-history.mjs <export dir or file>... --user <uid> [--window <start>/<end>]... [--db <url>]",
   );
   process.exit(2);
 }
@@ -101,6 +103,7 @@ const client = createClient({
   authToken: dbUrl.startsWith("file:") ? undefined : process.env.TURSO_AUTH_TOKEN,
   intMode: "number",
 });
+await checkScriptDb(client, USER, dbUrl);
 
 // Read only the plays the windows (plus the dedupe margin) can touch, not the whole table.
 const lo = new Date(Math.min(...windows.map((w) => w.start)) - SAME_PLAY_MS).toISOString();

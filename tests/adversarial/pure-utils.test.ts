@@ -24,7 +24,6 @@ import {
   diffPositions,
   diffPlaylistList,
   diffKeyed,
-  needsFullOrphanPass,
   newPlays,
   playKey,
   type TrackFields,
@@ -473,37 +472,23 @@ describe("store-diff.ts diffPlaylistList", () => {
   });
 
   it("idSetChanged is true when the ID SETS differ, even with equal lengths", () => {
-    // "Do the cached and incoming ID SETS differ? This — not 'did anything change' — is what
-    //  says playlist MEMBERSHIP could have moved, and it gates the full orphan pass."
-    // (store-diff.ts:109-112)
+    // "Do the cached and incoming ID SETS differ?" (store-diff.ts, PlaylistListDiff)
     expect(diffPlaylistList([pl({ id: "p1" }), pl({ id: "p3" })], [pl({ id: "p1" }), pl({ id: "p2" })]).idSetChanged).toBe(
       true,
     );
   });
 
   it("idSetChanged is true when a duplicated id masks a removal", () => {
-    // Incoming set {p1}, cached set {p1, p2}: p2 is gone, so membership moved. A paginated
-    // /me/playlists race that repeats an entry across pages produces exactly this shape, and
-    // needsFullOrphanPass then skips the pass for "a playlist removed whose tracks were never
-    // cached" — the case store-diff.ts:195-198 says idSetChanged exists to cover.
+    // Incoming set {p1}, cached set {p1, p2}: p2 is gone. A paginated /me/playlists race that
+    // repeats an entry across pages produces exactly this shape.
     const d = diffPlaylistList([pl({ id: "p1" }), pl({ id: "p1" })], [pl({ id: "p1" }), pl({ id: "p2" })]);
     expect(d.idSetChanged).toBe(true);
-    expect(needsFullOrphanPass(d.idSetChanged, 0)).toBe(true);
   });
 
   it("both empty is unchanged; empty incoming against a cache is a rewrite", () => {
     expect(diffPlaylistList([], []).tier).toBe("unchanged");
     expect(diffPlaylistList([], [pl()]).tier).toBe("rewrite");
     expect(diffPlaylistList([], [pl()]).idSetChanged).toBe(true);
-  });
-});
-
-describe("store-diff.ts needsFullOrphanPass", () => {
-  it("fires on either condition, not both", () => {
-    expect(needsFullOrphanPass(false, 0)).toBe(false);
-    expect(needsFullOrphanPass(true, 0)).toBe(true);
-    expect(needsFullOrphanPass(false, 1)).toBe(true);
-    expect(needsFullOrphanPass(true, 1)).toBe(true);
   });
 });
 

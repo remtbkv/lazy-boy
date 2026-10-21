@@ -30,8 +30,9 @@ export function searchPerfEnabled(): boolean {
   return enabled;
 }
 
-/** Where the query was answered from, as the search box saw it at the keystroke. */
-export type IndexStatus = "memory" | "fetching" | "fallback";
+/** Where the query was answered from, as the search box saw it at the keystroke. `idb` = the
+ *  set built from the browser's stored copy, before the fresh pair landed (search-cache.ts). */
+export type IndexStatus = "memory" | "idb" | "fetching" | "fallback";
 
 /** Time one query, from the keystroke that produced it to the moment its rows, art and stats
  *  are on screen, then log a single line.

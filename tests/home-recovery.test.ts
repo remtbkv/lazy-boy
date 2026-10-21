@@ -6,6 +6,7 @@ import {
   settleAction,
   settleDayFetch,
   settlePayloads,
+  settleWithStored,
 } from "@/lib/home-recovery";
 
 const lib = { tracks: [["a"]] };
@@ -118,5 +119,37 @@ describe("persistableDay (U2)", () => {
   });
   it("the all-time view is never persisted", () => {
     expect(persistableDay("all", now, ny)).toBe(false);
+  });
+});
+
+// Phase E (STORE_MIGRATION §10): the browser's copy answers a half the network failed to deliver;
+// the retry rules stay the network's.
+describe("settleWithStored (the network pair, with the browser's copy behind it)", () => {
+  const storedLib = { tracks: [["a-old"]] };
+  const storedHist = { tracks: [["b-old"]] };
+  it("both halves fresh: the network pair, nothing cleared", () => {
+    const s = settleWithStored(lib, hist, storedLib, storedHist);
+    expect(s).toMatchObject({ status: "memory", build: true, playsKnown: true, armRetry: false });
+    expect([s.lib, s.hist]).toEqual([lib, hist]);
+  });
+  it("a failed history half is answered by the stored one, and still retried", () => {
+    const s = settleWithStored(lib, null, storedLib, storedHist);
+    expect(s).toMatchObject({ status: "memory", build: true, playsKnown: true, clearHist: true, armRetry: true });
+    expect([s.lib, s.hist]).toEqual([lib, storedHist]);
+  });
+  it("both failed with a stored pair: the stored set, status idb, both retried", () => {
+    const s = settleWithStored(null, null, storedLib, storedHist);
+    expect(s).toMatchObject({ status: "idb", build: true, clearLib: true, clearHist: true, armRetry: true });
+    expect([s.lib, s.hist]).toEqual([storedLib, storedHist]);
+  });
+  it("nothing stored: exactly settlePayloads", () => {
+    expect(settleWithStored(null, null, null, null)).toMatchObject({ status: "fallback", build: false });
+    expect(settleWithStored(lib, null, null, null)).toMatchObject({ build: true, playsKnown: false });
+  });
+  it("an EMPTY network pair is the server's answer, not a failure: no stored stand-in", () => {
+    expect(settleWithStored(empty, empty, storedLib, storedHist)).toMatchObject({
+      status: "fallback",
+      build: false,
+    });
   });
 });

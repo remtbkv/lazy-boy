@@ -27,7 +27,7 @@ import { onCLS, onFCP, onINP, onLCP, onTTFB } from "web-vitals";
 //                               song list render" unreadable the moment you arrived from
 //                               another page. Generic on purpose: app code emits marks, this
 //                               file never has to know which ones exist (currently
-//                               lb:data-rendered, lb:history-ready, lb:dock-ready,
+//                               lb:data-rendered, lb:index-idb, lb:history-ready, lb:dock-ready,
 //                               lb:playlists-rendered, lb:now-playing-ready).
 //   visit-ms                    time the view spent VISIBLE, accumulated across
 //                               visibilitychange, closed out on navigation and on pagehide

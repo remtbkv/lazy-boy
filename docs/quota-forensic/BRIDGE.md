@@ -19,6 +19,17 @@ procedure is written down below *before* it is needed.
 > "with `LAZYBOY_NO_REPLICA=1`" below are still measurements of what production runs. Nothing
 > else in this document changed.
 
+> **2026-10-16: the app's data moved off the Zenbook** (docs/STORE_MIGRATION.md). The core tables
+> (`tracks`, `plays`, `contexts`, `meta`, `playlists`, `playlist_tracks`, `saved_tracks`) live on
+> Turso `lazyboy` (aws-us-east-1) since 07:52 UTC. The Zenbook's sqld, still behind the meter and
+> this Funnel, is now the **telemetry store** (`api_log`, `client_metrics`, `usage_ledger`) and
+> keeps a frozen pre-cutover core copy until lane 1909 archives and drops it; while
+> `~/lazyboy-sqld/FENCE_CORE` exists the meter answers 503 to any core statement (GOTCHAS, "The
+> meter's core fence"). The Zenbook also runs the 2-min cron pinger, the backstop recorder and the
+> nightly backups of **both** stores (below, "The nightly snapshot"). "The revert" below describes
+> the August move back to Turso, which is now done; the way back to the Zenbook is the contract's
+> section 8, "Rollback".
+
 ## Architecture
 
 ```
@@ -41,6 +52,13 @@ logs the `rows_read` / `rows_written` / `query_duration_ms` sqld reports for eac
 the path: stop `lazyboy-meter`, restore `~/lazyboy-sqld/lazyboy-sqld.service.pre-meter`
 (port 8090), `daemon-reload`, restart `lazyboy-sqld`. The funnel line below is unchanged —
 it still points at 8090.
+
+The meter also carries the **core fence** (docs/STORE_MIGRATION.md §6.8, GOTCHAS.md "The
+meter's core fence"): while `~/lazyboy-sqld/FENCE_CORE` exists it answers 503 to any request
+naming a core table and logs it as `fenced`; telemetry passes. `touch` on, `rm` off, no
+restart. The source is `ops/zenbook-meter/meter-proxy.mjs` in the repo, with its test beside it
+(`node --test ops/zenbook-meter/meter-proxy.test.mjs`, part of `npm test`); deploy by copying
+it over `~/lazyboy-sqld/meter-proxy.mjs` and restarting `lazyboy-meter`.
 
 - The app is unchanged. `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` are just pointed somewhere
   else; `@libsql/client` speaks the same Hrana-over-HTTP protocol to `sqld` that it speaks to
@@ -382,6 +400,33 @@ just as an upload — the file was pulled back down from OneDrive, decompressed,
 Three copies of the listen history now exist and none of them is Turso: the live store, the
 nightly offsite snapshot, and `lazyboy-recorder`'s independent capture.
 
+**Since 2026-10-16 the same job backs up both stores** (STORE_MIGRATION section 9; the
+pre-change script is `backup.py.pre-1904` beside it). Same timer, three targets, each pruned
+first and unconditionally (14 days local, a per-target remote `--min-age`), each failing alone:
+
+| target | how | remote | kept |
+|---|---|---|---|
+| Turso `lazyboy` (core) | `GET <url>/dump` with a read-only database token, must end in `COMMIT;`; loaded into a fresh SQLite file; `count(*)` per table on Turso before and after the dump, and the loaded copy must sit between them | `onedrive-backup:lazyboy-turso/lazyboy` | 60 days |
+| the Zenbook sqld file (telemetry, plus the frozen core copy until lane 1909) | online backup API, as before; counts within 50 rows of the live file | `onedrive-backup:lazyboy-db` (`zenbook-*.db.gz`; the older `lazyboy-*.db.gz` are the pre-cutover full store) | 60 days |
+| `~/lazyboy-recorder/backstop.db` | online backup API | `onedrive-backup:lazyboy-backstop` | 60 days |
+
+The Turso list is `TURSO_DBS = [("lazyboy", 60)]` at the top of `backup.py`; a new database is
+one more pair. The URL and token come from `~/lazyboy-backup/env` (mode 600), which the unit
+loads through the drop-in `~/.config/systemd/user/lazyboy-backup.service.d/env.conf`.
+**Every copy has `meta`'s `spotify_tokens%` and `lock:%` rows deleted, then `VACUUM`, before it
+is compressed**, so no backup holds a Spotify credential. The price: restoring `lazyboy` from a
+backup brings back no token, capture stops until Rem signs in again (the recorder covers him
+meanwhile), and the restored `meta` count is short by the stripped rows. Restoring into Turso:
+`turso db create --from-file` refuses a file not in WAL mode (lane 1903), so run
+`PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE);` on the restored copy first. The job
+also removes the `-wal`/`-shm` files earlier versions left beside every snapshot (132 of them on
+Oct 16).
+
+Restore drill, 2026-10-16 09:07 UTC: the Turso snapshot pulled back from OneDrive, gunzipped,
+`integrity ok`, every table equal to Turso's live count (plays 22,249, tracks 15,872,
+playlist_tracks 7,482, playlists 115, contexts 118, saved_tracks 49) except `meta`, 243 against
+245 (the two token rows), and no `refreshToken` byte anywhere in the file.
+
 ### So why keep Turso at all
 
 For durability, we do not — the snapshot covers that. What the free Turso database still buys
@@ -392,6 +437,9 @@ is worth keeping only because it costs nothing and its quota resets Sep 1. No ni
 into Turso is built; a restore into it would be a one-shot, done on the day it is needed.
 
 ## The revert (now the fallback procedure, not a Sep 1 event)
+
+(History since 2026-10-16: the core data is on Turso `lazyboy`, not `lazy-boy`, and the way back
+to the Zenbook is STORE_MIGRATION section 8, "Rollback".)
 
 Written down before the switch was made. Every step is one command. Run this if the Zenbook is
 lost or self-hosting stops being worth it — not on a date.

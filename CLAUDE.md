@@ -31,7 +31,8 @@ src/app/(auth)/          login page (unauthenticated shell; its consent line lin
 src/app/(legal)/         /privacy and /terms, public, no session or data reads: the privacy policy
                          and end-user agreement Spotify's Developer Terms §V require. Every line
                          must stay true of the code; change what the app stores, change /privacy
-src/app/(app)/           authed shell: layout calls auth() + owns the chrome (chrome.tsx,
+src/app/(app)/           authed shell: layout gates (requirePageUser), renders the uid for the
+                         browser (components/user-context.tsx) + owns the chrome (chrome.tsx,
                          den.css skin, now-playing provider); pages bring their own <main>
                          home/ (greeting, action dock, day strip, song table), playlists/,
                          playlists/[id]/, friends/, usage/ (per-page load speed, then the
@@ -41,32 +42,55 @@ src/app/api/auth/        Auth.js route handler (NextAuth catch-all)
 src/app/api/tasks/       background-task progress polling endpoint
 src/app/api/playlists/sync  one full library scan → DB, as a background task (the cron tick
                          keeps the store fresh; the client only fires this on a cold/empty store)
-src/app/api/search/       the two payloads Home filters in the browser (authed, private,
-                         ETag'd): library/ = every track in a playlist or Liked Songs,
+src/app/api/search/       the two payloads Home filters in the browser (gated; private,
+                         no-store; the uid in the ETag and as `u` in the body): library/ = every track in a playlist or Liked Songs,
                          history/ = every played track + every play. Both load on idle after
                          Home paints; the history half also feeds the day list, which is
-                         grouped out of it client-side instead of fetched per day
+                         grouped out of it client-side instead of fetched per day. The last
+                         good body of each sits in IndexedDB (lib/search-cache.ts) so a repeat
+                         visit searches before the network answers
 src/app/api/now-playing/ live "what's playing"; null when idle (never stale)
 src/app/api/build/       this deployment's build id, unauthenticated, no DB — fetched with
                          credentials omitted so it escapes Vercel's deployment pinning
 src/app/api/sync/        on-load listen-history sync (POST; debounced server-side)
-src/app/api/cron/sync/   scheduled history sync (the Zenbook's 2-min timer; daily Vercel cron
-                         backstop) + the library rescan, self-gated to every 30 min
-src/app/api/cron/usage-check/  DORMANT Turso quota guard: real usage vs month pace, 500 on
-                         breach (daily cron-job.org job e-mails on failure). Only relevant if
-                         production ever falls back to Turso — the store is self-hosted and
-                         meters nothing. Its reconciliation still feeds /usage. docs/READ_QUOTA.md
-src/lib/auth.ts          Auth.js config + Spotify token refresh (centralized)
-src/lib/session.ts       getSpotify(): server-only authed Spotify client
+src/app/api/cron/sync/   scheduled history sync (the Zenbook's 2-min timer; Vercel cron at
+                         07:00 UTC as the last-resort backstop) + the library rescan, self-gated
+                         to every 30 min
+src/app/api/cron/daily/  the daily chores (Vercel cron, 09:00 UTC): all-time heal + Home payload
+                         rebuild, api_log/client_metrics prunes, the played_at convention check,
+                         the usage check. Each isolated; answers 200; notifies nobody
+src/app/api/cron/usage-check/  Turso quota guard (logic in lib/usage-check.ts): real usage vs
+                         month pace, 500 on breach. Its reconciliation feeds /usage; the daily
+                         route runs it every day. docs/READ_QUOTA.md
+src/app/api/cron/store-bench/  store round-trip timings from a production function (?store=
+                         core|telemetry; STORE_MIGRATION R1). All cron routes: lib/cron-auth.ts
+src/app/api/cron/health/ the hourly health check (cron-job.org, failure e-mail): the owner's
+                         capture, isolation events, the daily stamp, Turso's pace (lib/health.ts)
+src/lib/auth.ts          Auth.js config; the session names a uid (multi-user Phase 1)
+src/lib/token-core.ts    Spotify token refresh (centralized), keyed by uid; token-store-owner.ts
+                         is Phase 1's store (the owner's meta row)
+src/lib/identity.ts      the uid, the branded Uid, the identity check, phase1Owner() (the owner
+                         for the session-less paths); session-gate.ts and require-user.ts turn
+                         it into each entry point's answer. EVERY entry point gates with
+                         require*User() before its first read
+src/lib/user-cache.ts    the only caller of unstable_cache (uid + owner stamp); isolation.ts
+                         records an event when a check catches a cross-user value
+src/lib/session.ts       getSpotify(uid): server-only Spotify client for the gated user
+src/lib/user-storage.ts  per-user browser storage names, sign-out clearing, the signed-out 401
 src/lib/spotify/         client.ts (fetch+pagination+429/403), resources.ts, domain.ts, types.ts
 src/lib/tasks/           in-memory task registry (clean-playlist progress); swappable iface
-src/lib/db.ts            libSQL store (listen-history + tokens) — self-hosted sqld on the
-                         Zenbook over a Tailscale Funnel; async; file: fallback in dev. ONE
-                         client, getClient(): every read, every write, all of `meta`. The
-                         embedded replica is gone (2026-08-11). GOTCHAS.md
+src/lib/db.ts            libSQL store (listen-history + tokens); async; file: fallback in dev.
+                         A DATABASE PER USER: forUser(uid) is the only way to a user's data
+                         (Phase 1: OWNER_UID -> `lazyboy`, on Turso since 2026-10-16); its
+                         first open checks the database's owner_uid and schema version.
+                         getTelemetryClient() holds api_log, client_metrics and usage_ledger
+                         (sqld on the Zenbook over the Funnel), never awaited on a user path.
+                         Unset TELEMETRY_DATABASE_URL = the log tables in Rem's database.
+                         docs/multi-user/PHASE1.md, STORE_MIGRATION.md, GOTCHAS.md
 src/lib/store-fetch.ts   the fetch every store query rides: pins accept-encoding to gzip
                          (brotli on the Zenbook's CPU cost the history payload 26s) and owns
-                         the retry ladder, rebuilding the Request per attempt. GOTCHAS.md
+                         the retry ladder, rebuilding the Request per attempt (core: 3 x 15 s;
+                         telemetry: 1 x 4 s). GOTCHAS.md
 src/lib/han-fold.ts      traditional → simplified Han folding for name MATCHING (search,
                          fuzzyFilter). GENERATED by scripts/gen-han-fold.py — GOTCHAS.md
 src/lib/read-costs.ts    the MODELED rows-read cost of every named read path + the residual
@@ -83,16 +107,23 @@ src/components/          app components + shared: album-thumb, playlist-thumb, s
                          (the playlists grid is app/(app)/playlists/playlists-grid.tsx; the
                          bottom search pill is app/(app)/search-island.tsx)
 docs/                    ARCHITECTURE, FEATURES, ROADMAP, CONVENTIONS, GOTCHAS, SECURITY,
-                         READ_QUOTA (the read-cost ledger + the retired Turso quota's forensics),
-                         STORE_MIGRATION (the planned move of the app's data to Turso: the
-                         contract the 19xx lanes work from)
+                         READ_QUOTA (the read-cost ledger, the Turso quota guard + August's forensics),
+                         STORE_MIGRATION (the app's data moved to Turso on 2026-10-16: the
+                         contract the 19xx lanes work from, and their outcomes in section 12)
 ops/zenbook-meter/       the store meter deployed on the Zenbook (proxy on 8090 in front of
-                         sqld on 8092; exact per-statement rows read/written). READ_QUOTA.md
+                         sqld on 8092; exact per-statement rows read/written; telemetry only
+                         since the move) + the core fence (503 for core statements while
+                         ~/lazyboy-sqld/FENCE_CORE exists; on since 2026-10-16).
+                         READ_QUOTA.md, GOTCHAS.md. Nightly backups of both stores:
+                         ~/lazyboy-backup/backup.py on the Zenbook, quota-forensic/BRIDGE.md
 scripts/backfill-from-backstop.mjs  replay the Zenbook backstop recorder's captured plays
                          into the primary (the loss-repair path; recorder lives on the
                          Zenbook at ~/lazyboy-recorder, lazyboy-recorder.timer, every 15 min)
 scripts/import-extended-history.mjs  refill outage gaps from Spotify's Extended Streaming
                          History export; both importers close with scripts/import-tail.mjs
+scripts/script-user.mjs  every store script's required --user <uid> (OWNER_UID in Phase 1)
+scripts/phase1-meta-keys.mjs  writes owner_uid, schema_version, min_reader, store_epoch into a
+                         database's meta (Phase 1's deploy step on Rem's `lazyboy`)
 ```
 
 **Reuse before adding:** formatting → `lib/format.ts`; name search → `lib/filter.ts` (which
@@ -111,7 +142,8 @@ art → `album-thumb`; sort dropdown → `sort-menu`; bottom search pill → `se
    The interface is swappable for a DB/queue later (ROADMAP: persist tasks across refresh).
 5. **Mutations are server actions or route handlers.** The Spotify access token stays
    server-side and is never sent to the browser: server code gets it from
-   `spotifyAccessToken()` (`src/lib/auth.ts`), called **after** `auth()` in the same request.
+   `spotifyAccessTokenFor(uid)` (`src/lib/auth.ts`), called **after** the gate in the same
+   request.
    It is deliberately not a field on the session — anything on the `Session` interface is
    serialized to the browser at `GET /api/auth/session`. See `docs/SECURITY.md`.
 6. **Agents stay off friends' rows.** No agent session reads another user's rows from
@@ -125,8 +157,8 @@ art → `album-thumb`; sort dropdown → `sort-menu`; bottom search pill → `se
 - `cookies()` and `headers()` are **async** — `await cookies()`.
 - Route handler 2nd arg: `{ params }: { params: Promise<{ id: string }> }`.
 - Middleware is renamed **Proxy** (`src/proxy.ts`). We avoid it: route protection is done
-  server-side **in each page** via `auth()` + `redirect()`, before that page's first read. The
-  `(app)` layout also calls `auth()`, but a layout is NOT a gate — it renders in parallel with
+  server-side **in each page** via `requirePageUser()`, before that page's first read. The
+  `(app)` layout gates too, but a layout is NOT a gate — it renders in parallel with
   its page, so the page's payload ships inside the layout's 307 (docs/SECURITY.md).
   Host canonicalization (`localhost` →
   `127.0.0.1`, needed so the Spotify OAuth round-trip + cookies stay on one host) is done
@@ -144,7 +176,7 @@ npm test         # MUST pass before declaring done — the simulated environment
                  # real lib code against a throwaway local SQLite file + a scripted fetch
                  # standing in for Spotify. Touches NO real store, NO Spotify, NO Vercel.
                  # Every audit-class bug fix gets a regression test here (vitest), plus the
-                 # node:test known-answer suites (store-diff, build-skew, ledger).
+                 # node:test known-answer suites (store-diff, build-skew, ledger, meter fence).
 ```
 
 Spotify redirect URI registered in the dashboard. Local default:

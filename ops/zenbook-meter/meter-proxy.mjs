@@ -10,17 +10,78 @@
 //   LISTEN (default 127.0.0.1:8090)  <- funnel + local scripts
 //   UPSTREAM (default 127.0.0.1:8092) -> sqld
 //   LOG_DIR  (default ~/lazyboy-sqld/querylog), one JSONL file per UTC day
+//   FENCE_FILE (default ~/lazyboy-sqld/FENCE_CORE), the core fence's switch (below)
+//
+// THE CORE FENCE (docs/STORE_MIGRATION.md §6.8). Once production's core data lives on Turso,
+// this sqld keeps only the telemetry tables (api_log, client_metrics, usage_ledger) plus a
+// frozen copy of the old core tables. Anything still writing core rows here — an old
+// deployment a pinned tab talks to, a dev server on an old .env.local, a forgotten script —
+// would put plays, or a rotated Spotify token, where nobody reads them. So while FENCE_FILE
+// exists, a request carrying any statement that names a core table (after FROM, JOIN, INTO,
+// UPDATE, TABLE, ON or `table_info(`, stored SQL resolved) is answered 503 and never reaches
+// sqld; it fails loudly instead. Off when the file is absent. `touch` it on, `rm` it off: the
+// check is a stat per request, no restart. meter-proxy.test.mjs pins the classifier on every
+// SQL statement in src/lib/db.ts.
 import http from "node:http";
 import zlib from "node:zlib";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 const [LHOST, LPORT] = (process.env.LISTEN ?? "127.0.0.1:8090").split(":");
 const [UHOST, UPORT] = (process.env.UPSTREAM ?? "127.0.0.1:8092").split(":");
 const LOG_DIR = process.env.LOG_DIR ?? path.join(os.homedir(), "lazyboy-sqld", "querylog");
-fs.mkdirSync(LOG_DIR, { recursive: true });
+const FENCE_FILE = process.env.FENCE_FILE ?? path.join(os.homedir(), "lazyboy-sqld", "FENCE_CORE");
+
+const CORE_TABLES = ["tracks", "plays", "contexts", "meta", "playlists", "playlist_tracks", "saved_tracks"];
+// A core table right after one of the fence's keywords (optionally `IF [NOT] EXISTS`, a
+// `main.` schema and a quote), or inside `table_info(`. `\b` after the name keeps `metadata`
+// and `tracks_archive` out; client_metrics' `meta` COLUMN never follows a keyword.
+const CORE_RE = new RegExp(
+  String.raw`(?:\b(?:FROM|JOIN|INTO|UPDATE|TABLE|ON)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?|\btable_info\(\s*)` +
+    String.raw`(?:main\.)?["'\`\[]?(${CORE_TABLES.join("|")})\b`,
+  "i",
+);
+
+/** The core table a statement names, or null. Comments are stripped first. */
+export function namesCoreTable(sql) {
+  const code = String(sql ?? "")
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/--[^\n]*/g, " ");
+  return code.match(CORE_RE)?.[1] ?? null;
+}
+
+/** The first statement in a hrana request body that names a core table, or null. Covers
+ *  execute, batch (and /v3/cursor) steps, sequence (executeMultiple) and describe, with
+ *  store_sql ids resolved within the request, plus the legacy `{statements}` body. A sql_id
+ *  the request never defined can't be read, so it counts as core: fail closed. */
+export function coreStatement(body) {
+  const stored = new Map();
+  for (const r of body?.requests ?? []) if (r?.type === "store_sql") stored.set(r.sql_id, r.sql);
+  const texts = [];
+  const take = (x) => {
+    if (!x) return;
+    if (typeof x.sql === "string") texts.push(x.sql);
+    else if (x.sql_id != null) texts.push(stored.has(x.sql_id) ? stored.get(x.sql_id) : null);
+  };
+  for (const r of body?.requests ?? []) {
+    if (r?.type === "execute") take(r.stmt);
+    else if (r?.type === "batch") for (const st of r.batch?.steps ?? []) take(st?.stmt);
+    else if (r?.type === "sequence" || r?.type === "describe") take(r);
+  }
+  for (const st of body?.batch?.steps ?? []) take(st?.stmt);
+  for (const st of Array.isArray(body?.statements) ? body.statements : []) {
+    texts.push(typeof st === "string" ? st : String(st?.q ?? ""));
+  }
+  for (const t of texts) {
+    if (t === null) return "(a sql_id this request did not store)";
+    // A sequence is several statements in one string; a match anywhere in it fences it.
+    if (namesCoreTable(t)) return t;
+  }
+  return null;
+}
 
 const agent = new http.Agent({ keepAlive: true, maxSockets: 64 });
 
@@ -106,6 +167,17 @@ function decode(buf, enc) {
   return buf;
 }
 
+function fenced(req, reqBuf) {
+  if (req.method !== "POST" || !fs.existsSync(FENCE_FILE)) return null;
+  let body;
+  try {
+    body = JSON.parse(reqBuf.toString("utf8"));
+  } catch {
+    return null; // not a statement; sqld answers it as it would anyway
+  }
+  return coreStatement(body);
+}
+
 const server = http.createServer((req, res) => {
   const t0 = performance.now();
   const ts = new Date().toISOString();
@@ -113,6 +185,17 @@ const server = http.createServer((req, res) => {
   req.on("data", (c) => reqChunks.push(c));
   req.on("end", () => {
     const reqBuf = Buffer.concat(reqChunks);
+    const hit = fenced(req, reqBuf);
+    if (hit) {
+      res.writeHead(503, { "content-type": "text/plain" });
+      res.end(
+        `meter-proxy: core fence is on (${FENCE_FILE}). The app's core data lives on Turso now; ` +
+          `this caller still points core statements at the Zenbook. docs/STORE_MIGRATION.md §6.8`,
+      );
+      const { fp, sql } = fingerprint(hit);
+      logLine({ ts, path: req.url, status: 503, ms: Math.round(performance.now() - t0), fenced: { fp, sql } });
+      return;
+    }
     const up = http.request(
       { host: UHOST, port: UPORT, method: req.method, path: req.url, headers: req.headers, agent },
       (ures) => {
@@ -158,4 +241,13 @@ const server = http.createServer((req, res) => {
   });
 });
 server.keepAliveTimeout = 65_000;
-server.listen(Number(LPORT), LHOST, () => console.log(`meter-proxy ${LHOST}:${LPORT} -> ${UHOST}:${UPORT}, log ${LOG_DIR}`));
+
+// Run as a service, not when the test imports the classifier.
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url))) {
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+  server.listen(Number(LPORT), LHOST, () =>
+    console.log(
+      `meter-proxy ${LHOST}:${server.address().port} -> ${UHOST}:${UPORT}, log ${LOG_DIR}, fence ${FENCE_FILE}`,
+    ),
+  );
+}

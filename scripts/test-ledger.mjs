@@ -22,8 +22,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  LEDGER_READERS,
   RESIDUAL_FLOOR_ROWS,
   RESIDUAL_MIN_PLATFORM_ROWS,
+  orphanFullPassRows,
+  orphanPurgePassRows,
   residualVerdict,
 } from "../src/lib/read-costs.ts";
 
@@ -224,6 +227,28 @@ try {
     true,
   );
   check("a fully explained day is quiet", residualVerdict(8_000_000, 8_000_000).alarm, false);
+
+  // ── the orphan passes after L10 (identity-first predicate, purge-scoped rewrite) ─────
+  console.log("orphan pass model");
+  check("full pass is linear in plays: 10 rows a play at 21,950 plays", orphanFullPassRows(21_950), 219_500);
+  check(
+    "purge pass: purged playlists x average plays per playlist x 10",
+    orphanPurgePassRows(2, 18_000, 180),
+    2_000,
+  );
+  check(
+    "one purged playlist at 21,950 plays and 115 playlists stays under 0.05% of the old full pass",
+    orphanPurgePassRows(1, 21_950, 115) < 5_102_733 * 0.0005,
+    true,
+  );
+  check("nothing purged costs nothing", orphanPurgePassRows(0, 21_950), 0);
+  check(
+    "priced at the user's own store: 1 of 2 playlists at 6 plays (db.ts storePlaylists passes both)",
+    orphanPurgePassRows(1, 6, 2),
+    30,
+  );
+  check("a purge of every playlist models the full pass", orphanPurgePassRows(5, 21_950, 5), orphanFullPassRows(21_950));
+  check("the purge pass has its own /usage line", LEDGER_READERS.includes("orphan_purge_pass"), true);
 } finally {
   client.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });

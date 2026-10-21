@@ -8,13 +8,15 @@
 // failed nearly every hour. The full branch then billed ~640 rows_written for a delete-all +
 // reinsert and ~2.5M rows_read for the unscoped `recomputeOrphanFlags()` that followed it,
 // every hour, for weeks (docs/quota-forensic/PREREG.md, "The burst decomposition"). The tiers
-// and the orphan-pass gate are what stop that, so both need known answers.
+// and the orphan-pass scope are what stop that, so both need known answers. Since L10 (lane
+// 1910b) the pass after a rewrite covers only the playlists the purge deleted rows of
+// (`RETURNING playlist_id`); tests/orphan-scope.test.ts checks its verdicts against a full pass.
 //
 // Verified the same way as scripts/test-ledger.mjs, and split the same way:
 //
-//   • The DECISIONS — `diffPlaylistList` (which tier) and `needsFullOrphanPass` (does the
-//     expensive pass run) — are imported from src/lib/store-diff.ts, so what is tested is
-//     exactly what ships. That file is dependency-free for this reason; keep it that way.
+//   • The DECISION — `diffPlaylistList` (which tier) — is imported from src/lib/store-diff.ts,
+//     so what is tested is exactly what ships. That file is dependency-free for this reason;
+//     keep it that way. The orphan pass's scope is the purge's RETURNING rows, copied below.
 //   • The STATEMENTS cannot be imported (src/lib/db.ts pulls in `server-only`, `next/cache`
 //     and React), so the SQL below is a COPY carrying the same obligation as the copies in
 //     test-ledger.mjs and verify-derived.mjs: it MUST MATCH db.ts. A divergence is caught by
@@ -36,7 +38,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { diffPlaylistList, needsFullOrphanPass } from "../src/lib/store-diff.ts";
+import { diffPlaylistList } from "../src/lib/store-diff.ts";
 
 // ── MUST MATCH src/lib/db.ts ───────────────────────────────────────────────────────────
 // The schema this path touches (db.ts init(), plus the ctx_orphan column its migration adds).
@@ -70,7 +72,8 @@ const IMAGE_UPDATE_SQL = "UPDATE playlists SET image = :image WHERE id = :id";
 const DELETE_ALL_SQL = "DELETE FROM playlists";
 const INSERT_SQL = `INSERT INTO playlists (id, name, owner_id, image, track_count, position)
             VALUES (:id, :name, :ownerId, :image, :trackCount, :position)`;
-const PURGE_SQL = "DELETE FROM playlist_tracks WHERE playlist_id NOT IN (SELECT id FROM playlists)";
+const PURGE_SQL = `DELETE FROM playlist_tracks WHERE playlist_id NOT IN (SELECT id FROM playlists)
+          RETURNING playlist_id`;
 const PLSNAP_PURGE_SQL = `DELETE FROM meta WHERE key LIKE 'plsnap:%'
           AND substr(key, 8) NOT IN (SELECT id FROM playlists)`;
 const PLTRACKS_AT_PURGE_SQL = `DELETE FROM meta WHERE key LIKE 'pltracks_at:%'
@@ -91,19 +94,21 @@ const WRITE_SEQ_SQL = `INSERT INTO meta (key, value) VALUES ('write_seq', '1')
 const LIBRARY_SEQ_SQL = `INSERT INTO meta (key, value) VALUES ('library_seq', '1')
           ON CONFLICT(key) DO UPDATE SET value = CAST(meta.value AS INTEGER) + 1`;
 
-// db.ts ORPHAN_PREDICATE + recomputeOrphanFlags({}) — the unscoped pass, the ~2.5M term.
+// db.ts ORPHAN_PREDICATE + recomputeOrphanFlags({ playlistIds }) — the purge-scoped pass.
 const ORPHAN_PREDICATE = `
   CASE WHEN p.context_type = 'playlist' AND p.context_uri IS NOT NULL
             AND EXISTS (SELECT 1 FROM playlist_tracks pl
                         WHERE pl.playlist_id = replace(p.context_uri, 'spotify:playlist:', ''))
             AND NOT EXISTS (
-              SELECT 1 FROM playlist_tracks plm JOIN tracks tm ON tm.id = plm.track_id
-              WHERE plm.playlist_id = replace(p.context_uri, 'spotify:playlist:', '')
-                AND lower(tm.artist) = (SELECT lower(artist) FROM tracks WHERE id = p.track_id)
-                AND lower(tm.name) = (SELECT lower(name) FROM tracks WHERE id = p.track_id))
+              SELECT 1 FROM tracks me CROSS JOIN tracks tm CROSS JOIN playlist_tracks plm
+              WHERE me.id = p.track_id
+                AND lower(tm.artist) = lower(me.artist) AND lower(tm.name) = lower(me.name)
+                AND plm.track_id = tm.id
+                AND plm.playlist_id = replace(p.context_uri, 'spotify:playlist:', ''))
        THEN 1 ELSE 0 END`;
-const ORPHAN_FULL_SQL = `UPDATE plays AS p SET ctx_orphan = (${ORPHAN_PREDICATE})
-  WHERE (p.ctx_orphan IS NULL OR p.ctx_orphan <> (${ORPHAN_PREDICATE}))`;
+const orphanScopedSql = (n) => `UPDATE plays AS p SET ctx_orphan = (${ORPHAN_PREDICATE})
+  WHERE (p.ctx_orphan IS NULL OR p.ctx_orphan <> (${ORPHAN_PREDICATE}))
+    AND p.context_uri IN (${Array(n).fill("?").join(", ")})`;
 
 // ── the path under test, assembled from the imported decisions + the copied SQL ─────────
 async function storePlaylists(client, rows, meId) {
@@ -114,7 +119,7 @@ async function storePlaylists(client, rows, meId) {
   if (diff.tier === "unchanged") {
     await client.execute({ sql: SET_META_SQL, args: ["playlists_synced_at", now] });
     if (meId) await client.execute({ sql: SET_META_SQL, args: ["me_id", meId] });
-    return { diff, fullPass: false, purged: 0 };
+    return { diff, purgedIds: [] };
   }
 
   const stamps = [{ sql: SYNCED_AT_SQL, args: { v: now } }];
@@ -127,7 +132,7 @@ async function storePlaylists(client, rows, meId) {
     }));
     stmts.push(...stamps, { sql: WRITE_SEQ_SQL, args: [] });
     await client.batch(stmts, "write");
-    return { diff, fullPass: false, purged: 0 };
+    return { diff, purgedIds: [] };
   }
 
   const stmts = [{ sql: DELETE_ALL_SQL, args: [] }];
@@ -151,10 +156,14 @@ async function storePlaylists(client, rows, meId) {
   stmts.push(...stamps);
   stmts.push({ sql: WRITE_SEQ_SQL, args: [] }, { sql: LIBRARY_SEQ_SQL, args: [] });
   const results = await client.batch(stmts, "write");
-  const purged = Number(results[purgeAt]?.rowsAffected ?? 0);
-  const fullPass = needsFullOrphanPass(diff.idSetChanged, purged);
-  if (fullPass) await client.execute(ORPHAN_FULL_SQL);
-  return { diff, fullPass, purged };
+  const purgedIds = [...new Set(results[purgeAt].rows.map((r) => String(r.playlist_id)))];
+  if (purgedIds.length > 0) {
+    await client.execute({
+      sql: orphanScopedSql(purgedIds.length),
+      args: purgedIds.map((id) => `spotify:playlist:${id}`),
+    });
+  }
+  return { diff, purgedIds };
 }
 
 // ── harness ───────────────────────────────────────────────────────────────────────────
@@ -193,9 +202,9 @@ const SEED_POSITIONS = [5, 9, 12];
  *  rewrite with an unchanged id set can still have moved membership.
  *
  *  The seeded play is the orphan-pass witness: it played track t2 from playlist p1, whose
- *  cached membership is {t1}, so its TRUE verdict is 1 (orphan) — but it is stored as 0. The
- *  unscoped pass is the only thing in this path that would fix it, so `ctx_orphan` after the
- *  call says whether the pass ran, without trusting anything the code reports. */
+ *  cached membership is {t1}, so its TRUE verdict is 1 (orphan) — but it is stored as 0. p1 is
+ *  never purged, so only an UNSCOPED pass would fix it: `ctx_orphan` after the call says
+ *  whether the pass stayed inside its scope, without trusting anything the code reports. */
 async function seed({ staleMembership = false } = {}) {
   await client.executeMultiple(
     "DELETE FROM playlists; DELETE FROM playlist_tracks; DELETE FROM tracks; DELETE FROM plays; DELETE FROM meta;",
@@ -285,7 +294,7 @@ try {
   check("no purge: even the stale membership survives", (await memberships()).length, 3);
   check("no orphan pass: the stale flag survives", await orphanFlag(), 0);
 
-  // ── tier 3a: the id set moved → rewrite + purge + the full pass ──────────────────────
+  // ── tier 3a: the id set moved → rewrite + purge + a pass over the purged playlist ────
   console.log("\nid-set change (a playlist disappeared)");
   await seed();
   const r3 = await storePlaylists(client, [P1, P3], "me");
@@ -297,12 +306,12 @@ try {
     ["p3", 1],
   ]);
   check("the purge dropped the departed playlist's members", await memberships(), [{ pid: "p1", tid: "t1" }]);
-  check("the purge reported the rows it deleted", r3.purged, 1);
+  check("the purge returned the playlist it deleted rows of", r3.purgedIds, ["p2"]);
   check("write_seq moves", await meta("write_seq"), "6");
   check("library_seq moves", await meta("library_seq"), "4");
-  check("the full pass RAN: the stale flag was corrected", await orphanFlag(), 1);
+  check("the pass is scoped to p2: p1's stale flag survives", await orphanFlag(), 0);
 
-  // ── tier 3b: a rewrite that cannot have moved membership → no full pass ──────────────
+  // ── tier 3b: a rewrite whose purge deleted nothing → no pass ─────────────────────────
   console.log("\nreorder only, same id set");
   await seed();
   const r4 = await storePlaylists(client, [P2, P1, P3], "me");
@@ -322,27 +331,21 @@ try {
   ]);
   check("write_seq moves", await meta("write_seq"), "6");
   check("library_seq moves", await meta("library_seq"), "4");
-  check("the purge deleted nothing", r4.purged, 0);
+  check("the purge deleted nothing", r4.purgedIds, []);
   check("memberships are untouched", (await memberships()).length, 2);
-  check("the full pass did NOT run: the stale flag survives", await orphanFlag(), 0);
+  check("no pass ran: the stale flag survives", await orphanFlag(), 0);
 
-  // ── tier 3c: same id set, but the purge bit → the pass runs after all ────────────────
+  // ── tier 3c: same id set, but the purge bit → a pass over what it deleted ────────────
   console.log("\nreorder with a leftover membership the purge bites");
   await seed({ staleMembership: true });
   const r5 = await storePlaylists(client, [P2, P1, P3], "me");
   check("the id set did NOT move", r5.diff.idSetChanged, false);
-  check("the purge dropped the leftover", r5.purged, 1);
+  check("the purge dropped the leftover", r5.purgedIds, ["gone"]);
   check("memberships after the purge", await memberships(), [
     { pid: "p1", tid: "t1" },
     { pid: "p2", tid: "t1" },
   ]);
-  check("the full pass RAN anyway: the stale flag was corrected", await orphanFlag(), 1);
-
-  // ── the gate itself, on both sides ───────────────────────────────────────────────────
-  console.log("\nneedsFullOrphanPass");
-  check("id set moved, purge quiet → runs", needsFullOrphanPass(true, 0), true);
-  check("id set stable, purge bit → runs", needsFullOrphanPass(false, 3), true);
-  check("neither → skipped", needsFullOrphanPass(false, 0), false);
+  check("the pass is scoped to `gone`: p1's stale flag survives", await orphanFlag(), 0);
 } finally {
   client.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });

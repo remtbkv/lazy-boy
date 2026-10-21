@@ -10,8 +10,8 @@
 // Runs against the PRIMARY (TURSO_DATABASE_URL) — the source of truth, and the client
 // db.ts itself uses for every `meta` read. Read-only unless --demo is passed.
 //
-//   node --env-file=.env.local scripts/verify-derived.mjs          # verify (read-only)
-//   node --env-file=.env.local scripts/verify-derived.mjs --demo    # prove it catches corruption
+//   node --env-file=.env.local scripts/verify-derived.mjs --user <OWNER_UID>          # verify (read-only)
+//   node --env-file=.env.local scripts/verify-derived.mjs --user <OWNER_UID> --demo    # prove it catches corruption
 //
 // --demo deliberately corrupts each stored value ON THE LIVE PRIMARY for a few seconds and
 // checks that the verifier fails on it, then restores the saved original (in a finally, so a
@@ -19,6 +19,9 @@
 // its own: the bar is BOTH sides — fail on every injected corruption AND pass on clean data.
 // A verifier that always passes, or always fails, meets neither half.
 import { createClient } from "@libsql/client";
+import { checkScriptDb, scriptUserOrExit } from "./script-user.mjs";
+
+const USER = scriptUserOrExit(process.argv.slice(2));
 
 const URL_PRIMARY = process.env.TURSO_DATABASE_URL;
 const AUTH = process.env.TURSO_AUTH_TOKEN;
@@ -59,15 +62,17 @@ const ORPHAN_PREDICATE = `
             AND EXISTS (SELECT 1 FROM playlist_tracks pl
                         WHERE pl.playlist_id = replace(p.context_uri, 'spotify:playlist:', ''))
             AND NOT EXISTS (
-              SELECT 1 FROM playlist_tracks plm JOIN tracks tm ON tm.id = plm.track_id
-              WHERE plm.playlist_id = replace(p.context_uri, 'spotify:playlist:', '')
-                AND lower(tm.artist) = (SELECT lower(artist) FROM tracks WHERE id = p.track_id)
-                AND lower(tm.name) = (SELECT lower(name) FROM tracks WHERE id = p.track_id))
+              SELECT 1 FROM tracks me CROSS JOIN tracks tm CROSS JOIN playlist_tracks plm
+              WHERE me.id = p.track_id
+                AND lower(tm.artist) = lower(me.artist) AND lower(tm.name) = lower(me.name)
+                AND plm.track_id = tm.id
+                AND plm.playlist_id = replace(p.context_uri, 'spotify:playlist:', ''))
        THEN 1 ELSE 0 END`;
 
 
 // ── plumbing ──────────────────────────────────────────────────────────────────────────
 const client = createClient({ url: URL_PRIMARY, authToken: AUTH, intMode: "number" });
+await checkScriptDb(client, USER, URL_PRIMARY);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rows = (res) => res.rows.map((r) => ({ ...r }));
 

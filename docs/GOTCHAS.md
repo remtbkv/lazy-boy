@@ -35,7 +35,8 @@ instead of re-investigating. (Pairs with `CLAUDE.md`, `AGENTS.md`, and the other
   token **rotates on every use**: with tokens in the cookie, a page refresh fires
   several concurrent requests that each refresh with the same (soon-invalidated)
   token, and the losers get `invalid_grant` → forced re-login. Now an in-process
-  lock (`refreshShared`) coordinates one refresh, writes the new tokens to the DB,
+  lock (`refreshShared`, in `src/lib/token-core.ts`, one per user since multi-user Phase 1)
+  coordinates one refresh, writes the new tokens to the DB,
   and everyone reads the latest from there. Within one request that read is deduped
   through a `cache()` promise box (`readTokensShared` in `auth.ts`) — layout + page
   `auth()` calls and both callbacks share a single primary read (measured 4 → 1 per
@@ -212,14 +213,24 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   if synced <60 s ago — so an open tab is effectively live, and the home history view also
   refreshes each minute); and the **app-closed coverage** path — an **external pinger**
   hitting `/api/cron/sync` with the stored token every 2 min (the Zenbook's user timer
-  `lazyboy-cron-sync.timer`; the cron-job.org job that preceded it has 401'd on a stale
-  secret since 2026-08-10), with a daily **Vercel Cron** (`vercel.json`) as the backstop. Every scheduled hit carries `Authorization: Bearer $CRON_SECRET`
-  (fail-closed: an unset secret rejects all callers). A GitHub Actions cron drove this at
+  `lazyboy-cron-sync.timer`, and the cron-job.org job with its own secret; next bullet), with a daily **Vercel Cron** (`vercel.json`) as the backstop. Every scheduled hit carries `Authorization: Bearer $CRON_SECRET`
+  or, from cron-job.org, `Bearer $CRON_SECRET_EXT` (fail-closed: an unset secret rejects all callers; `src/lib/cron-auth.ts`). A GitHub Actions cron drove this at
   first but was removed — GitHub schedules best-effort and real spacing stretched to hours,
   which loses plays against the 50-play window; a dedicated pinger holds a tight cadence.
   A rotation of `CRON_SECRET` must update every copy listed in `docs/SECURITY.md`; a pinger
   left holding the old one fails with a 401 that nothing reports (both the cron-job.org job
   and the Zenbook's root `lazyboy-sync.timer` sat failing that way for months).
+- **Two pingers share one tick per 90 s, so most of their calls do nothing, and cron-job.org's
+  history says nothing.** `/api/cron/sync` stamps the `meta` row `lock:tick` before any work
+  (`acquireLock("tick", 90_000)`); a call inside the window answers 200 `skipped: "recent tick"`.
+  So calling the route twice to test it runs one tick, and a reply with `skipped` is health, not a
+  fault. A failed stamp skips the tick too (`skipped: "store unavailable"`): nothing gets past the
+  guard without it, or a leaked secret in a loop would reach Spotify. `CRON_SECRET_EXT`
+  (cron-job.org) opens `/api/cron/sync` only and always gets a bare `{"ok":true}` at once, before its
+  tick runs in `after()`, even when capture is broken: the owner alarm (503 "no token") answers `CRON_SECRET` alone, read before the stamp so
+  it does not depend on which pinger ticked. To see what ticks did, read the Zenbook's `ping.log`,
+  never cron-job.org's execution history. Never fold `CRON_SECRET_EXT` into `cronAuthorized()`: that
+  would open the daily chores, the store bench and the usage check to a third party (PLAN §5.5).
 - **Day buckets use the user's timezone, sent from the browser — never `'localtime'`.**
   Turso runs in UTC, so `date(played_at, 'localtime')` would bucket by UTC and plays after
   UTC-midnight show up on "tomorrow." Spotify's API has no user timezone, so `TimezoneCookie`
@@ -239,13 +250,36 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   counts **zero** (`LISTEN_MIN_MS`). A play after an idle stretch (previous play more than a
   song-length earlier) is assumed to have run in full — the best estimate available, since
   Spotify reports *when* a play ended, never *how long* it ran. Spotify has flipped this
-  convention before, so the daily cron block runs `checkPlayedAtConvention()` and logs an
+  convention before, so `/api/cron/daily` runs `checkPlayedAtConvention()` and logs an
   error if gaps start matching the EARLIER play. Plays are always the real count; this only
   shapes the "listened" totals. Whole-table totals (`alltime_stats`) are cached in `meta` and
   recomputed on write; per-day totals compute live. Verdicts stored before the fix were
   re-ruled by `scripts/migrate-skip-rule.mjs`.
-- **There is ONE client and no replica — `getClient()` is every read, every write and all of
-  `meta`.** Row-scanning reads used to be served by a libSQL embedded replica behind a
+- **The daily chores have their own route, `/api/cron/daily` — never route by a header.**
+  They sat in `/api/cron/sync` behind `if (req.headers.get("x-vercel-cron"))`, a header Vercel
+  does not send (it sends `x-vercel-cron-schedule`), so the all-time heal, the prunes and the
+  convention check did not run from Aug 10 to Oct 15, 2026: `api_log` kept ~80K rows past its
+  30-day TTL, and nothing failed. The fix needs no sniffing at all: a separate path in
+  `vercel.json` (`0 9 * * *`) behind the same `CRON_SECRET` check, which proves a test
+  (`tests/cron-routes.test.ts`) can call it. 09:00 UTC, not sync's 07:00: the Zenbook reboots
+  around 07:00 UTC and the prunes and ledger rows go to the telemetry store on it. Each chore
+  is isolated, and the route answers 200 with each outcome: it notifies nobody. It does not
+  re-enable the cron-job.org job (the old block's `ensureCronJobEnabled`): that job holds a
+  stale secret, so re-enabling it only bought a daily "disabled automatically" e-mail.
+- **Two clients — a user's database and telemetry — and no replica. The user's database
+  (`forUser(uid)`, multi-user Phase 1) is every read, every write and all of that user's
+  `meta`; `getTelemetryClient()` is `api_log`, `client_metrics` and `usage_ledger` and nothing
+  else** (`docs/STORE_MIGRATION.md`). Never put a log-table statement on a user's database or
+  in its batch, and never await a telemetry call on a user path (static check S7): the telemetry store is the Zenbook behind the Funnel, which stalls, and its fetch gives
+  up after one 4 s attempt so a stall costs a log row. `tests/telemetry-down.test.ts` holds
+  the sync and the Home payload read to their normal time with that store hanging or refusing.
+  Since 2026-10-16 core is Turso `lazyboy` and telemetry the Zenbook. **A `void` telemetry call
+  can be lost when the function returns first**: after the cutover, `api_log` rows from the
+  2-min cron ticks fell from 12-17 per 10 min to 0 while every tick answered 200 (lane 1903).
+  On one store the insert rode the connection the awaited core writes were using; on its own
+  client the response goes out before the insert is sent and Vercel suspends the function. Wrap
+  such calls in `after()` (as `/api/metrics` does) rather than awaiting them on the user path.
+  Row-scanning reads used to be served by a libSQL embedded replica behind a
   per-request freshness gate; that machinery was switched off in production on 2026-08-03 and
   deleted on 2026-08-11 (see "Retired: the embedded replica" below). What keeps reads cheap now
   is that the render paths barely read: Home paints from a payload materialized into `meta` on
@@ -351,9 +385,10 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   a table that grows with history; bound it to the batch in hand (`unseenContexts()`: a new
   context can only arrive via the incoming plays, so check those ≤50 URIs; the full scan
   survives as a once-a-day pass for the 30-day negative-cache recheck); (3) the guard is
-  `/api/cron/usage-check` + a daily cron-job.org job with failure e-mail, now dormant against a
-  database production no longer uses — the real counter, checked mechanically, not a convention
-  about benchmarks.
+  `/api/cron/usage-check` (run daily by `/api/cron/daily`), live again since the 2026-10-16 move
+  to Turso `lazyboy` — the real counter, checked mechanically, not a convention about
+  benchmarks. Its per-day reconciliation records `_platform_error` every day until its parser
+  matches the usage endpoint's shape (READ_QUOTA.md, "The reconciliation").
 - **If a query is slow, count the rows it SCANS, not the rows it returns.** Both bad ones
   returned little. `searchHistory` is `LIKE '%q%'`, unindexable by construction, so it scans
   `tracks` — ~6 ms against a local SQLite copy but 1,904 ms median (1,383–3,133, n=7,
@@ -376,19 +411,28 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   playlist — used to be two correlated `playlist_tracks` subqueries per *output row*, which
   was ~90 % of `getAllTimePlays`. It was also the wrong shape: the answer only changes when a
   playlist is synced, but the expression re-derived it on every render. Now
-  `recomputeOrphanFlags()` refreshes the flag exactly when membership can have moved —
-  `{newOnly}` for plays just recorded, `{playlistId}` when one playlist's tracks change,
-  unscoped for the backfill and for a library-list rewrite that actually dropped memberships
-  (`needsFullOrphanPass`: the playlist id set moved, or the purge deleted rows — the unscoped
-  pass bills ~2.5M rows, so a rename or a reorder must not trigger it) — and writes only rows whose
+  `recomputeOrphanFlags()` refreshes the flag exactly when an input of the verdict was
+  written, scoped to the plays that write can flip — `{newOnly}` for plays just recorded,
+  `{playlistIds}` for playlists whose memberships changed (`storePlaylistTracks`,
+  `removeCachedPlaylistTrack`, `deletePlaylistFromDb`, and the library-list rewrite's purge,
+  scoped to the ids its `DELETE … RETURNING playlist_id` hands back: the purge also drops
+  rows of a playlist in neither the old nor the new list, so the list diff is not the scope),
+  `{identities}` when a `tracks` row's name or artist changes (`identityChanges`: the plays
+  sharing its old or new identity, from any playlist). Nothing purged runs nothing. No write
+  path runs the unscoped pass any more (it read 5,102,733 rows at 21,950 plays; it stays for
+  the backfill). The predicate starts from the song (own row → `idx_tracks_artist_name` →
+  `idx_pltracks_track`, order pinned by `CROSS JOIN`) instead of walking the playlist's
+  members. It writes only rows whose
   verdict actually flips, so a steady-state sync writes zero rows. Measured on the live DB
   (medians, n=5): all-time list 63 ms → 8.9 ms and history search 36 ms → 5.7 ms against a
   local SQLite copy, rows identical, 0 mismatches against the old expression across all 6,644
   plays. Against **Turso's primary** the same change was only 903 ms → 705 ms and 546 ms →
   344 ms, and one day's plays did not improve at all (41 ms either way) — the win is real on
   local-speed storage and marginal-to-absent where the backend's own variance swamps it.
-  **If you add a way for playlist membership to change, call `recomputeOrphanFlags` from it**
-  — that is the one thing that can now go stale. A `NULL` flag reads as non-orphan, which is
+  **If you add a way for playlist membership or a track's name/artist to change, call
+  `recomputeOrphanFlags` from it, scoped** — no full pass sweeps up a missed one any more.
+  With RETURNING, count the returned `rows`: the file client reports `rowsAffected` 0 for any
+  statement that returns rows. A `NULL` flag reads as non-orphan, which is
   the same answer the old expression gave for a playlist it couldn't verify, so a missed
   recompute degrades to "shows the playlist name" and self-heals on the next sync.
 - **Resume picks up where you left off in a playlist** (`resumePlaylistAction`): it scopes
@@ -399,7 +443,8 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   (`getPlaylistTracks`) + run in parallel with auth; the only network write is the Spotify
   play call.
 - **`db.ts` query conventions (follow them for new queries — they're in the file header).**
-  Everything goes through `getClient()`; there is no second client. Keep a scan off every
+  Everything goes through the user's database (`u.client()` inside db.ts, `forUser(uid)`
+  outside it); there is no second client for user data. Keep a scan off every
   render path — Home reads its materialized `meta` payload and the browser filters the search
   payloads, so a new render-path read should join one of those rather than add a scan. Keep
   `INNER JOIN` for `lower(artist)`/`lower(name)` identity lookups so the planner uses
@@ -410,6 +455,36 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   `dropWriteSeqCache()`. Serial reads stack (~20-30ms each against Turso, more over the
   funnel), so dedupe or `Promise.all` them. Never turn a single-session timing against a remote
   store into a rule.
+
+## Multi-user Phase 1: the owner check, the keys, `--user`
+
+- **A database names its owner, and the app checks it on open.** The first use of a database
+  for a uid in a process reads `meta.owner_uid`, `schema_version`, `min_reader` and
+  `store_epoch` (db.ts, "Clients"). A remote database without them is refused: Rem's `lazyboy`
+  needs `scripts/phase1-meta-keys.mjs --user <OWNER_UID> --apply` BEFORE the first deploy of
+  this code, or every request fails with "the database has no owner_uid or store_epoch". A
+  local file without them is provisioned for whoever opens it first.
+- **`.env.local`'s `OWNER_UID` must be production's** when it points at Rem's database. A dev
+  server with another uid is refused there ("this database belongs to another user") and
+  records an `isolation` event; if `.env.local` also points telemetry at the Zenbook, that
+  event lands where the hourly health check reads it and turns it red.
+- **A branch's schema never reaches Rem's database from a dev server.** An additive step is
+  applied only by production code (`VERCEL_ENV=production`) or on a local file; a dev server
+  or a test pointed at a remote database refuses with "waits for the production deploy".
+- **Every store script needs `--user <OWNER_UID>`** (`scripts/script-user.mjs`), checked before
+  it opens anything, and refuses a database whose `owner_uid` names someone else. The
+  backstop replay runs for the admin alone.
+- **`OWNER_UID` unset** refuses every sign-in, and the cron, the daily chores, the bench and
+  the health check answer 503/500 "no owner".
+- **The per-user cache boxes and memos are keyed by (uid, db_name)**: `seqBox`, the ordered
+  plays box, the unique-song throttle, the store-size memo. A new per-request box or module
+  memo in db.ts takes the same key, or static check S4 names it.
+- **The open's verdict is cached per (uid, db_name) for the life of the process.** A restore
+  that writes a new `store_epoch` reaches warm instances only when they restart (a deploy);
+  Phase 2 moves a restored user to a new db_name, which is checked afresh.
+- **Tests:** `tests/setup.ts` sets `OWNER_UID`; `tests/owner-store.ts` is the owner's store;
+  per-user files come from `tests/isolation/user-dbs.ts` (`STORE_URL_TEMPLATE`). A reset keeps
+  the four open keys (`resetStore`), since they say whose file it is.
 
 ## Measuring a search from the browser (`lb-perf`)
 
@@ -426,11 +501,36 @@ All times are from the **last keystroke** (each keystroke supersedes the previou
 burst of typing reports the wait after you stopped). `paint` = rows on screen, `art1` / `artAll`
 = first and last album image of the VISIBLE rows (off-screen rows are `loading="lazy"` and never
 fetch at all), `stats` = play counts and times filled in, `index` = where the query was answered
-(`memory` / `fetching` / `fallback`). A dash means it never arrived — `stats=—` is a failed
+(`memory` / `idb` / `fetching` / `fallback`; `idb` = the set built from the browser's stored
+copy, before the fresh pair landed). A dash means it never arrived — `stats=—` is a failed
 hydration, which is reported rather than waited out. Everything is behind one boolean read, so
 with the flag off the readout costs nothing. Implementation: `src/lib/search-perf.ts`, which is
 the ablation harness that measured the album-art variants, so its numbers are comparable with
 the ones quoted in the commit history.
+
+## The browser's copy of the search payloads (IndexedDB)
+
+Home keeps the last good body of `/api/search/library` and `/api/search/history` in IndexedDB
+(`lb-search@<uid>`, `src/lib/search-cache.ts`) and builds the search set from it on mount, then swaps in
+the network pair (`lb:index-idb` on /usage when the stored copy got there first). Five rules that
+are easy to break:
+- **It feeds search, never the day list.** The stored history can be hours old; a day derived from
+  it could replace a fresher day the page holds. `setHistory` takes network bodies only.
+- **The key carries the shape** (`search-shape.ts`, the same token as the Data Cache key and the
+  ETag), so a deploy that bumps a shape makes every stored body a miss, deleted on read. Bump the
+  token, never reuse it. A stored body also passes the network path's validators or is deleted.
+- **It is per user.** Each user has their own database, named by `userStorageName`; records are
+  keyed and stamped with the uid the `(app)` layout renders (`useUid()`), another key clears the
+  store, and a body whose `u` is not the page's user is dropped like a network one. The sign-out
+  form, and the signed-out 401, delete every user's database (`clearThisBrowser`; the server
+  action's response can't), and the form's `clearStored` also ends storing for the page load: a
+  payload still in flight lands after it and would put the copy back.
+- **Every network-built set sets `fresh`.** The mount read can resolve seconds late (a slow or busy
+  IndexedDB), and it yields only to `fresh`. The refresh's patch path once set `entries` without it
+  (the pair's handler bails when the history ref is replaced), so a late read replaced the patched
+  set with the stored one (L6 review, 2026-10-16).
+- **Storage failures are silent misses** (private mode, quota, no IndexedDB): the page then behaves
+  exactly as before the copy existed. Sizes and main-thread cost are in the module header.
 
 ## Verifying UI with Playwright
 
@@ -480,11 +580,11 @@ process*, not across a multi-instance deploy (e.g. Vercel):
   cross-instance gap needs the Redis/DB swap in ROADMAP Phase 3.)
 - **Spotify rate-limit cooldown** (`lib/spotify/client.ts`, `cooldownUntil`) — a 429 only
   backs off requests on the same instance.
-- **Playlist cache** (`lib/spotify/resources.ts`) — one process-wide entry (intentionally
-  not keyed by access token, which only caused a guaranteed miss + leak on each hourly token
-  rotation); each instance has its own.
+- **Playlist cache** — deleted (multi-user Phase 1): one process-wide entry would have served
+  one user's library to the next. Any new module-scope state must go on the reviewed list in
+  `tests/isolation/static.test.ts` (S4), saying how it is keyed.
 
-All three are acceptable for local/single-instance use. What genuinely *coordinates* across
+The remaining two are acceptable for local/single-instance use. What genuinely *coordinates* across
 instances is anything that goes through the DB — notably the token-refresh lock (`meta`
 table). When something must be correct multi-instance, put it in the DB, not module scope.
 
@@ -504,6 +604,33 @@ turns that redirect into a literal `"NEXT_REDIRECT"` error toast. Every catch th
 `getSpotify()` (or anything else that may `redirect()`) starts with
 `unstable_rethrow(e)` from `next/navigation` — see `fail()` in `(app)/actions.ts`. Keep
 that line first in any new action's catch.
+
+## The meter's core fence (`ops/zenbook-meter/meter-proxy.mjs`)
+
+Once the app's data lives on Turso, the Zenbook's sqld keeps the telemetry tables and a frozen
+copy of the old core tables. Anything still pointing core statements at it — a tab pinned to an
+old deployment, a dev server on an old `.env.local`, a script — would write plays or a rotated
+Spotify token where nobody reads them, silently. While `~/lazyboy-sqld/FENCE_CORE` exists the
+meter answers **503** to any request carrying a statement that names a core table after
+`FROM`, `JOIN`, `INTO`, `UPDATE`, `TABLE`, `ON` or `table_info(` (stored SQL resolved, comments
+stripped; an unresolvable `sql_id` is fenced too) and logs it as `fenced` in the query log.
+Telemetry passes; `client_metrics.meta` is a column and never follows a keyword. `touch` turns
+it on, `rm` off, no restart (`FENCE_FILE` overrides the path). A 503 from the store, surfacing as
+a store error in something that should not talk to the Zenbook any more, is this fence working:
+repoint the caller, don't remove the file. Adding a table: put it in `CORE_TABLES` there if it
+is core data, and `meter-proxy.test.mjs` (in `npm test`) re-checks every SQL statement in
+`db.ts` against the classifier. **The fence is ON** since 2026-10-16 07:50 UTC (lane 1903).
+
+## Backups hold no Spotify token
+
+`~/lazyboy-backup/backup.py` on the Zenbook backs up Turso `lazyboy` (its `/dump`, with a
+read-only token), the Zenbook's sqld file and the backstop recorder every night at 04:40 New
+York time (quota-forensic/BRIDGE.md, "The nightly snapshot"). Every copy has `meta`'s
+`spotify_tokens%` and `lock:%` rows deleted before it is compressed. A store restored from a
+backup therefore has no token: the cron answers 503 "no token" and capture stops until Rem signs
+in, and the restored `meta` count is short by those rows. That is the design, not a broken
+restore. `turso db create --from-file` refuses a SQLite file that is not in WAL mode; set
+`journal_mode=WAL` and checkpoint the restored copy first.
 
 ## Never let the store compress with brotli (the 26-second query)
 
@@ -584,6 +711,16 @@ viewport-relative) and zeroes the clearance. Keep fixed-position extras (back-to
 
 ## Deployment skew + stale tabs
 
+**No pinning in production today** (multi-user PLAN §10.2, security §5). Skew Protection is a
+Vercel Pro feature and the team is on Hobby; production shows no pinning (no `dpl=` marker in
+`/login`, no `__vdpl` cookie). So after a deploy an open tab's requests reach the NEW
+deployment, and old deployments answer only on their protected deployment URLs. The probe
+below still matters (it is what would catch pinning if it ever came back, and it bounds how
+long an old bundle keeps calling new routes), but a hit from an "old deployment" in the
+meter's log, or a fence 503, means someone reached a protected deployment URL or a dev server
+or script on an old `.env.local`: worth a look, not a wait. The pinned-tab case described here
+is the mechanism as it was measured on Aug 7-8, under a pinning setup production does not run.
+
 A deploy does not reach an open tab until that tab reloads, so a tab left open keeps
 executing the old bundle — and calling whatever the old code called — indefinitely. That is
 what the Aug 7→8 burn was: one always-on tab on a pre-fix build, refreshing ~2×/min at a flat
@@ -614,6 +751,11 @@ the stale tab (its pinned poll and its recent pre-deploy probe both report its o
 makes the receiving tab probe for itself, and only once its own probe has seen a mismatch do
 relayed mismatches feed the streak (`relayedReading`).
 
+Note (2026-10-16, multi-user PLAN §10.2): Skew Protection is a Pro feature and the team is on
+Hobby; production showed no pinning at the store cutover. On Hobby an old tab's requests reach
+the newest deployment, and an old deployment answers only on its own protected URL. The
+pinned-tab handling above is kept for a plan that pins.
+
 The three brakes each cover a different failure, so don't tighten them casually: a mismatch
 must hold **continuously for 3 min**, because a deploy mid-propagation serves old and new
 replies alternately and a *fresh* tab seeing that flap must not reload; **one reload per
@@ -643,8 +785,9 @@ breadcrumb a phantom row is undiagnosable from the store.
 
 ## Production security
 
-See `docs/SECURITY.md` before any public deploy. Biggest item: the listen-history DB is
-**not user-scoped** (single-user). `/api/cron/sync` is **fail-closed** — it requires
+See `docs/SECURITY.md` before any public deploy. The data is a database per user, reached only
+through `forUser(uid)` after `requireUser()` (multi-user Phase 1); until Phase 2's app database,
+the one user it knows is `OWNER_UID`. `/api/cron/sync` is **fail-closed** — it requires
 `CRON_SECRET` to be set (and matched); an unset secret rejects every caller, so the schedulers
 won't run until it's configured. Baseline security headers are in `next.config.ts`.
 

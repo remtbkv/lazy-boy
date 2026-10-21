@@ -1,5 +1,15 @@
 # The read-cost ledger, and the Turso rows-read quota it was built for
 
+**Status, 2026-10-16: the quota is live again.** The app's data moved to Turso `lazyboy` that
+morning (docs/STORE_MIGRATION.md); only `api_log`, `client_metrics` and `usage_ledger` stay on
+the Zenbook. So the meter (below) now sees telemetry traffic only, and Turso's usage comes from
+two places: the guard, `/api/cron/usage-check`, which `/api/cron/daily` runs every day at 09:00
+UTC against `TURSO_DATABASE_NAME=lazyboy` (Production), and `turso plan show` /
+`turso db show lazyboy` by hand. The guard's pace check reports the org's month-to-date usage,
+which is `lazyboy`'s (the old `lazy-boy` reads 0); its first call on 2026-10-16 09:08 UTC read
+5,209,457 rows read (1.0% of 500M), 24 written. Its per-day reconciliation does **not** work
+yet: see "The reconciliation" below. The August status that follows is history.
+
 **Status, 2026-08-11.** Two halves, and they have different lifespans. **The ledger lives on**:
 `usage_ledger` + `src/lib/read-costs.ts` still charge every named read path its modeled cost on
 every call, and `/usage` still renders it — it is the only instrument that says which path a
@@ -128,9 +138,15 @@ choice; post-fix a tick costs ~160 rows so cadence stopped mattering), the rende
 caching (already keyed on the write marker), and the replica (stayed off, and was deleted on
 2026-08-11 — see ARCHITECTURE for the read architecture).
 
-## The guard (a mechanism, not a convention) — DORMANT since 2026-08-08
+## The guard (a mechanism, not a convention) — DORMANT 2026-08-08 to 2026-10-16, live again
 
-The pace check below now runs against Turso, which production no longer uses; it is kept armed
+Since 2026-10-16 production runs on Turso `lazyboy` and this guard watches it, run daily by
+`/api/cron/daily` (which records the result and notifies nobody, STORE_MIGRATION R6). The
+cron-job.org job described below has not called it since 2026-08-10 (the last `usage_check`
+ledger row before Oct 16); its `CRONJOB_API_KEY` is a sensitive Vercel variable and does not
+pull, so whether the job still exists is unknown (Rem's, burn review Z2). A breach therefore
+shows on `/usage` and in the ledger, and e-mails nobody. Until Oct 16 the paragraph below held:
+the pace check ran against Turso, which production no longer used; it was kept armed
 because it is the guard the fallback would need immediately, and because its second half (the
 reconciliation, below) is what writes the platform total and the residual into the ledger that
 `/usage` renders. Read the rest of this section as the design, not as a live alarm.
@@ -146,6 +162,11 @@ below current usage) is part of its acceptance test — a guard that has never f
 guard that does not work.
 
 ## Measured reads (the meter) — LIVE since 2026-10-12
+
+**Since 2026-10-16 07:52 UTC the meter sees telemetry only**: the core tables are on Turso, and
+the meter's core fence answers 503 to any core statement that still reaches it. The figures
+below for Oct 12-15 are the whole app's reads on the Zenbook; for Turso's reads use the guard
+and `turso db show lazyboy`, not this meter.
 
 The ledger below MODELS reads; this measures them. sqld returns `rows_read`, `rows_written` and
 `query_duration_ms` on every statement result (the counters Turso bills on), and the meter in
@@ -202,7 +223,8 @@ so a cache HIT costs nothing and is counted as nothing. The readers:
 | `search_fallback` | `searchHistory`'s LIKE path (not the bounded empty-query branch) |
 | `contexts_full_pass` | the once-a-day `unresolvedContextUris` scan |
 | `unique_song_count` | `recomputeUniqueSongCount` |
-| `orphan_full_pass` | the UNSCOPED `recomputeOrphanFlags()` — the ~2.5M term; the two bounded scopes are not ledgered |
+| `orphan_full_pass` | the UNSCOPED `recomputeOrphanFlags()` — once the ~2.5M term (5.1M at 21,950 plays); no write path runs it since L10, so it is the backfill or a manual repair |
+| `orphan_purge_pass` | the pass after a list rewrite, scoped to the playlists its purge deleted rows of; modeled as purged playlists × average plays per playlist × 10 (`orphanPurgePassRows`). The other scopes are bounded and not ledgered |
 | `playlist_rewrite` | `storePlaylists`' delete-all + reinsert branch (its read side: the probe and the purge) |
 | `usage_check` | the daily guard's own reads |
 
@@ -221,6 +243,14 @@ trains you to ignore the one email that matters. `fetchPlatformDayUsage` is isol
 marked swappable for the same reason: if the windowed endpoint proves unreliable, the
 replacement strategy behind the same signature is differencing daily snapshots of the
 month-to-date total.
+
+**Broken as of 2026-10-16: the parser does not match the endpoint's shape.**
+`fetchPlatformDayUsage` (`src/lib/usage-check.ts`) reads `database.total.rows_read`, else sums
+`database.instances` as a map of counters. The endpoint (checked 2026-10-16 for `lazyboy`, HTTP
+200) returns the sum at the top level, `total.rows_read`, plus `database.usage.rows_read`, and
+`database.instances` is an array of `{uuid, usage}`. Neither branch finds a number, so every
+day records `_platform_error` and no `_platform_total`/`_residual` (the Oct 16 call did exactly
+that for Oct 15). The pace check is unaffected.
 
 **The thresholds are provisional.** They are sized to catch a burn of the shape that actually
 happened — millions of unattributed rows — not calibrated against a measured distribution of
@@ -256,7 +286,8 @@ returns; **linear-rare** = full scan but only on real change, cost named; **fixe
 | `recomputeOrphanFlags({newOnly})` | was `SCAN plays` per landing tick | **fixed** → bounded (partial index) |
 | `recomputeAllTimeStats` | full plays scan + tracks probes (~14.4K) | **fixed** → throttled 10 min; linear growth remains, queued lever: incremental accumulator |
 | `recomputeOrphanFlags({})` full pass | predicate over every play × its playlist's members. Estimated here at ≈1.3M rows; **measured at 2,544,558** (Aug 7 12:15–12:20 PM ET, windowed usage endpoint — the estimate was ~2× low, see `orphanFullPassRows`) | ~~linear-rare (`library_seq` = 5 lifetime)~~ **FALSIFIED.** It was not rare and it was not cold: it ran on the hourly cron sync for weeks, and it is the single largest term of the whole crisis (~60M/day). The change-probe was never keeping it cold, because a rotating artwork URL counted as a list change. **Now:** the rewrite branch runs it only when membership can actually have moved — the playlist ID SET changed, or the `playlist_tracks` purge reported `rowsAffected > 0` (`needsFullOrphanPass`). A rename, a reorder or a count drift rewrites the list and skips it. Ledgered as `orphan_full_pass`, so a return to hourly is now visible on `/usage` instead of only in the platform counter |
-| `recomputeOrphanFlags({playlistId})` | indexed by `idx_plays_context` + predicate over that playlist's plays | bounded per changed playlist |
+| `recomputeOrphanFlags({playlistIds})` | indexed by `idx_plays_context` + predicate over those playlists' plays | bounded per changed playlist |
+| L10 (lane 1910b, Oct 16) | the rewrite's pass scoped to the purge's `RETURNING playlist_id` (none purged → no pass); renamed tracks re-ruled by `{identities}`; identity-first predicate, ~10 rows a judged play from its plan against ~2 × the playlist's size before (`ORPHAN_ROWS_PER_PLAY`, an estimate) | **fixed** → bounded by the plays from the purged playlists |
 | `readHistoryIndex` (search payload) | full plays scan ×3 probes ≈ 21.6K, once per `write_seq` change | linear-rare: ~15/day ≈ 0.3M/day; grows with history — same queued lever class |
 | `readLibraryIndex` | playlist_tracks scan + probes ≈ 30K, once per `library_seq` change | linear-rare: `library_seq` moved 5× ever |
 | `readDailyStats` | indexed 16-day window (~1.7K + probes) per bump | bounded by window |

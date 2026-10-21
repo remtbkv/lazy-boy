@@ -10,11 +10,20 @@ declare module "next-auth" {
   interface Session {
     error?: "RefreshAccessTokenError";
     user: DefaultSession["user"];
+    // Multi-user Phase 1 (docs/multi-user/PLAN.md §5.1): the user the request runs as, set only
+    // when the identity check allowed it. Not a credential. `idUnavailable` means the check
+    // could not run; requireUser() answers that with a retryable error, never a sign-out.
+    uid?: string;
+    admin?: boolean;
+    idUnavailable?: true;
   }
 }
 
 declare module "next-auth/jwt" {
   interface JWT {
+    uid?: string;
+    ep?: number;
+    auth_time?: number;
     accessToken?: string;
     refreshToken?: string;
     expiresAt?: number;
