@@ -52,7 +52,9 @@ describe("judgeHandoff — the phantom vectors", () => {
 
 // Production, Oct 15-21 (lane 0136): Home listed these at 99-100% of the furthest position it
 // saw (seeked near their end); the store ruled them skips from their played_at stamps. Start and
-// end are the store's own stamps here: the previous play's end and this play's.
+// end are the store's own stamps here: the previous play's end and this play's. Given the same
+// instants the two rules agree by construction, so these pin the rule only; whether Home derives
+// those instants from its polls is tests/handoff-fold.test.ts (code review 0156 M3).
 describe("one verdict: the store's rule on the instants", () => {
   const cases = [
     { name: "一路生花", prev: "2026-10-15T16:50:45.649Z", at: "2026-10-15T16:50:57.751Z", d: 256_250 },

@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 import { shouldHarvest, HARVEST_BACKSTOP_MS, type HarvestGate } from "@/lib/harvest-gate";
 import {
+  handoffRun,
   judgeHandoff,
   HANDOFF_STALE_MS,
   HANDOFF_SKIP_FRACTION,
@@ -135,6 +136,51 @@ describe("judgeHandoff — exhaustive enumeration", () => {
     const p: HandoffObservation = { seenAt: NOW, sawPlaying: true, startAt: NOW - 80_000, durationMs: 200_000 };
     expect(judgeHandoff(p, NOW, NOW, true)).toBe("pending");
     expect(judgeHandoff({ ...p, startAt: NOW - 81_501 }, NOW, NOW, true)).toBe("commit");
+  });
+
+  // The explicit cases the one-verdict rewrite dropped (code review 0156 M3), and known answers
+  // computed by hand at a duration the matrix does not use, so a wrong rule fails here even
+  // when `expected` above drifts with it.
+  it("exactly HANDOFF_STALE_MS old is NOT stale", () => {
+    const p: HandoffObservation = { seenAt: NOW - HANDOFF_STALE_MS, sawPlaying: true, startAt: NOW - DUR, durationMs: DUR };
+    expect(judgeHandoff(p, NOW, NOW, true)).toBe("commit");
+    expect(judgeHandoff({ ...p, seenAt: NOW - HANDOFF_STALE_MS - 1 }, NOW, NOW, true)).toBe("stale");
+  });
+
+  it("staleness outranks every other reason", () => {
+    const p: HandoffObservation = {
+      seenAt: NOW - HANDOFF_STALE_MS - 1,
+      sawPlaying: false,
+      startAt: NOW,
+      durationMs: 0,
+      privateSession: true,
+    };
+    expect(judgeHandoff(p, NOW, NOW, false)).toBe("stale");
+  });
+
+  for (const durationMs of [0, -1, Number.NaN]) {
+    it(`durationMs=${String(durationMs)} falls back to the 30 s floor, uncapped`, () => {
+      const base: HandoffObservation = { seenAt: NOW, sawPlaying: true, startAt: NOW, durationMs };
+      const at = (ran: number) => judgeHandoff({ ...base, startAt: NOW - ran }, NOW, NOW, true);
+      expect(at(HANDOFF_UNKNOWN_DURATION_FLOOR_MS - 1)).toBe("skip");
+      expect(at(HANDOFF_UNKNOWN_DURATION_FLOOR_MS)).toBe("commit");
+      expect(handoffRun({ startAt: NOW - 3_600_000, durationMs }, NOW)).toBe(3_600_000);
+    });
+  }
+
+  it("a clock that jumped backwards does not read as stale", () => {
+    const p: HandoffObservation = { seenAt: NOW + 2 * HANDOFF_STALE_MS, sawPlaying: true, startAt: NOW - DUR, durationMs: DUR };
+    expect(judgeHandoff(p, NOW, NOW, true)).toBe("commit");
+  });
+
+  it("Faint's length (162.106 s), by hand: bar 64.8424 s, band ±1.5 s", () => {
+    const D = 162_106;
+    const at = (ran: number) => judgeHandoff({ seenAt: NOW, sawPlaying: true, startAt: NOW - ran, durationMs: D }, NOW, NOW, true);
+    expect(at(63_342)).toBe("skip"); // 1.5004 s under the bar
+    expect(at(63_343)).toBe("pending");
+    expect(at(66_342)).toBe("pending"); // 1.4996 s over
+    expect(at(66_343)).toBe("commit");
+    expect(at(10 * D)).toBe("commit"); // capped at the song
   });
 });
 
