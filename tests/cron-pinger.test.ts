@@ -3,7 +3,7 @@
 // the owner alarm answers the Zenbook's caller only; cron-job.org always gets a bare
 // {"ok":true}; and a 90-second stamp lets one tick's work through per window, whoever calls.
 // Real db.ts on the throwaway store (the owner's, through forUser), the real Spotify client
-// against a scripted fetch; one tick's work is one currently-playing call.
+// against a scripted fetch; one tick's work is one player-state call.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const ZEN = "zen-s3cret";
@@ -69,12 +69,11 @@ vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
   if (url.origin !== "https://api.spotify.com") throw new Error(`unexpected fetch ${url}`);
   spotify.paths.push(url.pathname);
   if (spotify.hold) await spotify.hold;
-  if (url.pathname === "/v1/me/player/currently-playing") {
+  // currentlyPlaying() reads /me/player alone (NOW_PLAYING_2S L2); 204 = no active device.
+  if (url.pathname === "/v1/me/player") {
     if (!spotify.playing) return new Response(null, { status: 204 });
     return Response.json({ is_playing: true, progress_ms: 1000, item: TRACK, context: null, currently_playing_type: "track" });
   }
-  // currentlyPlaying()'s fallback when the first read is empty: no active device.
-  if (url.pathname === "/v1/me/player") return new Response(null, { status: 204 });
   if (url.pathname === "/v1/me/player/recently-played") {
     return Response.json({
       items: [{ track: TRACK, played_at: new Date(Date.now() - 60_000).toISOString(), context: null }],
@@ -97,7 +96,7 @@ const ext = async () => {
   await flushAfter();
   return res;
 };
-const ticks = () => spotify.paths.filter((p) => p === "/v1/me/player/currently-playing").length;
+const ticks = () => spotify.paths.filter((p) => p === "/v1/me/player").length;
 
 // Each test starts an hour after the last, so no stamp carries over; the clock moves only when
 // a test moves it.
@@ -114,13 +113,13 @@ beforeEach(async () => {
   spotify.hold = null;
   await db.setSpotifyTokens({ accessToken: "at-rem", refreshToken: "rt-rem", expiresAt: base + 3_600_000 });
   // An idle tick: nothing playing, harvested just now, library fresh. Its work is the
-  // currently-playing check.
+  // player check.
   await db.setHarvestGate({ lastActive: 0, lastHarvest: base });
   await db.setLibrarySyncedAt();
 });
 
 // The route swallows a failed player check, so an unscripted call would pass unseen.
-const SCRIPTED = new Set(["/v1/me/player/currently-playing", "/v1/me/player", "/v1/me/player/recently-played"]);
+const SCRIPTED = new Set(["/v1/me/player", "/v1/me/player/recently-played"]);
 afterEach(() => {
   expect(spotify.paths.filter((p) => !SCRIPTED.has(p))).toEqual([]);
 });

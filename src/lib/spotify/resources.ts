@@ -224,33 +224,34 @@ export class Resources {
 
   // ---- player ----
   /** The track playing RIGHT NOW, or null if nothing is actively playing / there
-   *  is no active device. The endpoint returns 204 (→ undefined) when idle, so we
-   *  never surface stale "last played" data here. */
+   *  is no active device. `/me/player` returns 204 (→ undefined) when there is no active
+   *  device, so we never surface stale "last played" data here. */
   async currentlyPlaying(): Promise<{
     track: Track;
     isPlaying: boolean;
     progressMs: number;
     durationMs: number;
     context: { type: string; uri: string } | null;
+    /** Spotify's playback-state `timestamp`, epoch ms on Spotify's clock (a cross-check). */
+    timestamp?: number;
+    /** The device is in a private session: Spotify lists none of its plays. */
+    privateSession: boolean;
   } | null> {
     type PlayerState = {
       is_playing?: boolean;
       item?: RawTrack | null;
       currently_playing_type?: string;
       progress_ms?: number;
+      timestamp?: number;
+      device?: { is_private_session?: boolean } | null;
       context?: { type?: string; uri?: string } | null;
     };
-    let data = await this.http.get<PlayerState | undefined>("/me/player/currently-playing");
-    // `/me/player/currently-playing` returns 204 (→ undefined) not only when idle
-    // but intermittently *during* active playback (right after a track change, or
-    // when the desktop client is slow to report) — that's the "not recognizing my
-    // player" bug. Fall back to the full player-state endpoint, which still reports
-    // the active device's current track when currently-playing comes back empty.
-    // `/me/player` also returns 204 when there's genuinely no active device, so this
-    // stays live and never shows stale/last-played data.
-    if (!data?.item) {
-      data = await this.http.get<PlayerState | undefined>("/me/player");
-    }
+    // `/me/player` alone, one call (NOW_PLAYING_2S.md L2). `/me/player/currently-playing`
+    // intermittently 204s DURING playback (right after a track change, a slow desktop client),
+    // so this used to ask it first and fall back here: two calls on every idle poll. This
+    // endpoint reports the active device's track in that window, 204s only when there is no
+    // active device, and also carries the device's private-session flag and `timestamp`.
+    const data = await this.http.get<PlayerState | undefined>("/me/player");
     // normTrack rejects episodes/local files; require a real track item. We no
     // longer gate on currently_playing_type === "track" because /me/player reports
     // it as "unknown" while paused, which would hide a legitimately-loaded track.
@@ -268,6 +269,8 @@ export class Resources {
       context: data.context?.uri
         ? { type: data.context.type ?? "", uri: data.context.uri }
         : null,
+      ...(typeof data.timestamp === "number" ? { timestamp: data.timestamp } : {}),
+      privateSession: data.device?.is_private_session === true,
     };
   }
 

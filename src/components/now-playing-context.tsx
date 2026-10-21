@@ -20,9 +20,12 @@ import {
 } from "@/lib/build-skew";
 import {
   leaderElection,
+  NO_SCREEN_MEMORY,
   PollLoop,
+  screenAnswer,
   STEADY_MS,
   type PollOutcome,
+  type ScreenMemory,
 } from "@/lib/now-playing-poll";
 import { leaveForAnotherUser, namesAnotherUser, userStorageName } from "@/lib/user-storage";
 import { useUid } from "@/components/user-context";
@@ -44,6 +47,10 @@ export type Playing = {
   progressMs: number;
   durationMs: number;
   context: { name: string; type: string } | null;
+  /** Spotify's playback-state `timestamp` (epoch ms on Spotify's clock): a cross-check only. */
+  timestamp?: number;
+  /** The device is in a private session: Spotify lists none of its plays, so Home mints none. */
+  privateSession?: boolean;
 } | null;
 
 type NowPlayingValue = {
@@ -137,6 +144,8 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
 
   // Monotonic guard for our own fetches: a slow older response must not overwrite a newer one.
   const refreshSeq = useRef(0);
+  // screenAnswer's memory: a held empty answer, and the last change (for the flip-back rule).
+  const screenRef = useRef<ScreenMemory>(NO_SCREEN_MEMORY);
 
   // Stale-build detection. The poll's reply carries the server's build id; a tab whose own
   // id no longer matches is running a bundle the deploy left behind and must reload itself
@@ -299,6 +308,12 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       // tab's code, not about what's playing, and a superseded reply reports it just as well.
       checkSkew(data.build, "poll");
       if (aliveRef.current && seq === refreshSeq.current && Date.now() >= suppressUntil.current) {
+        // A lone empty answer is asked again before Home finishes the song on it, and a flip back
+        // to the song that just ended is ignored (now-playing-poll.ts screenAnswer).
+        const screened = screenAnswer(playingRef.current, data.playing, Date.now(), screenRef.current);
+        screenRef.current = screened.mem;
+        if (screened.action === "hold") return { kind: "skipped", retryInMs: screened.retryInMs };
+        if (screened.action === "ignore") return { kind: "ok", playing: playingRef.current };
         const at = Date.now();
         lastAppliedAt.current = at;
         setPlaying(data.playing);

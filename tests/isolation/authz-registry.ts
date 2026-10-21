@@ -277,7 +277,7 @@ export const ENTRIES: Entry[] = [
     file: "src/app/api/now-playing/route.ts",
     kind: "route",
     gate: "const user = await requireUser();",
-    does: "reads Spotify's currently-playing with Rem's grant; reads and writes the context-name cache (contexts)",
+    does: "reads Spotify's player state (/me/player) with Rem's grant; reads and writes the context-name cache (contexts)",
     cells: userCells("requireUser refused → 200 {playing:null} with no store read (deliberately not 401: polled every 6 s)"),
     refused: nowPlayingRefused,
     invoke: async () => (await route("@/app/api/now-playing/route", "GET")())(),

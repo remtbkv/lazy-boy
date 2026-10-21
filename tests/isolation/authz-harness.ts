@@ -225,17 +225,10 @@ async function spotifyFetch(input: RequestInfo | URL, init?: RequestInit): Promi
     return Response.json({ id: OWNER_OF[owner] ?? owner, display_name: owner, email: null, images: [], product: "premium" });
   }
   // No device for the playback-state read: saveQueue's skip-through walk stops at its first
-  // call instead of stalling 15 s on a queue that never moves.
+  // call instead of stalling 15 s on a queue that never moves. /api/now-playing reads the same
+  // endpoint since NOW_PLAYING_2S L2 (currently-playing is no longer called), so here it answers
+  // "nothing playing"; its context-cache path is covered by tests/now-playing-route.test.ts.
   if (path === "/me/player") return new Response(null, { status: 204 });
-  if (path === "/me/player/currently-playing") {
-    return Response.json({
-      is_playing: true,
-      progress_ms: 1000,
-      item: trackJson(owner, 1),
-      context: { type: "playlist", uri: `spotify:playlist:${owner.toLowerCase()}-pl-1` },
-      currently_playing_type: "track",
-    });
-  }
   if (path === "/me/player/recently-played") {
     return Response.json({
       items: [{ track: trackJson(owner, 9), played_at: new Date(Date.now() - 60_000).toISOString(), context: null }],

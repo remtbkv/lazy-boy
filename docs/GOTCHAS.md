@@ -543,12 +543,15 @@ are easy to break:
 ## Player simulation (now-playing + track menu)
 
 - **Now-playing must never show stale data.** Use live player state, NOT `recently-played`
-  (that's history). `currentlyPlaying()` reads `/me/player/currently-playing` (204 → `null`
-  when idle), then **falls back to `/me/player`** when that returns 204 — the
-  currently-playing endpoint intermittently 204s *during* active playback (right after a
-  track change / slow desktop client), which read as "the site doesn't recognize my player."
-  `/me/player` still reports the active device's track in that window and itself 204s when
-  there's truly no active device, so the fallback stays live. The bar (`now-playing.tsx`,
+  (that's history). `currentlyPlaying()` reads `/me/player` alone (204 → `null` when there is
+  no active device). It used to read `/me/player/currently-playing` first, which
+  intermittently 204s *during* active playback (right after a track change / slow desktop
+  client) and read as "the site doesn't recognize my player"; the `/me/player` fallback still
+  reported the track in that window, so since NOW_PLAYING_2S L2 it is the only call (one per
+  poll instead of two when idle). It also carries `device.is_private_session` (Spotify lists
+  no private-session plays, so Home mints none) and `timestamp`. Whether `/me/player` itself
+  ever answers empty mid-playback is unmeasured, so the provider confirms "nothing playing"
+  with a second poll before Home finishes the song (REVIEW M3). The bar (`now-playing.tsx`,
   mounted in the `(app)` layout) renders only when a track comes back.
 - **A faster steady poll is not how a song change shows fast.** A natural end is predictable
   (duration − progress), so the leader's poll is timed to it and bursts until Spotify moves

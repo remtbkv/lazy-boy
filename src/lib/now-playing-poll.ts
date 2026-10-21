@@ -94,6 +94,53 @@ export function planNextPoll(
   return { delay: steady, state: calm };
 }
 
+// ── What reaches the bar (NOW_PLAYING_2S.md L2; its review, M3) ─────────────────────────────
+/** A lone empty answer while a song is shown is held: asked again, and applied only when a
+ *  second empty answer comes at least this long after the first. Home finishes the shown song
+ *  on "nothing playing", and Spotify's player endpoints have answered empty mid-playback. */
+export const EMPTY_CONFIRM_MS = 500;
+/** A return to the song that just ended, within this long of the change and within
+ *  BOUNDARY_SLACK_MS of its end, is Spotify catching up (A → B → A at its end → B), ignored. A
+ *  return near its start is a real "previous". */
+export const FLIP_BACK_MS = 3_000;
+
+export type ScreenMemory = {
+  /** When the first of a run of empty answers came, or null. */
+  emptySince: number | null;
+  /** The last change applied: the song it left and when. */
+  lastChange: { fromId: string; at: number } | null;
+};
+export const NO_SCREEN_MEMORY: ScreenMemory = { emptySince: null, lastChange: null };
+
+export function screenAnswer(
+  shown: PolledPlaying,
+  incoming: PolledPlaying,
+  now: number,
+  mem: ScreenMemory,
+): { action: "apply" | "ignore"; mem: ScreenMemory } | { action: "hold"; retryInMs: number; mem: ScreenMemory } {
+  if (!incoming) {
+    if (!shown) return { action: "apply", mem: { ...mem, emptySince: null } };
+    const since = mem.emptySince ?? now;
+    if (now - since >= EMPTY_CONFIRM_MS) return { action: "apply", mem: { ...mem, emptySince: null } };
+    return { action: "hold", retryInMs: EMPTY_CONFIRM_MS - (now - since) + 100, mem: { ...mem, emptySince: since } };
+  }
+  const calm = { ...mem, emptySince: null };
+  const back = mem.lastChange;
+  if (
+    shown &&
+    back &&
+    incoming.track.id === back.fromId &&
+    shown.track.id !== incoming.track.id &&
+    now - back.at < FLIP_BACK_MS &&
+    incoming.durationMs > 0 &&
+    incoming.durationMs - incoming.progressMs <= BOUNDARY_SLACK_MS
+  ) {
+    return { action: "ignore", mem: calm };
+  }
+  const changed = shown && shown.track.id !== incoming.track.id;
+  return { action: "apply", mem: changed ? { ...calm, lastChange: { fromId: shown.track.id, at: now } } : calm };
+}
+
 /** One timer, at most one request in flight. `kick()` polls now — or, if a request is already
  *  out, once more right after it lands (its answer may predate whatever prompted the kick). */
 export class PollLoop {
