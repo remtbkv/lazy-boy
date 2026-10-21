@@ -8,7 +8,14 @@ import { cn } from "@/lib/utils";
 import { searchPerfEnabled, startSearchProbe, type IndexStatus } from "@/lib/search-perf";
 import { patchHistoryPayload } from "@/lib/history-patch";
 import { buildDays, iso, type HistoryPayload } from "@/lib/history-days";
-import { foldHandoff, handoffRun, judgeFinished, type HandoffTrack } from "@/lib/handoff";
+import {
+  foldHandoff,
+  handoffBeaconMeta,
+  handoffPredToken,
+  handoffRun,
+  judgeFinished,
+  type HandoffTrack,
+} from "@/lib/handoff";
 import { hanFold } from "@/lib/han-fold";
 import { useTabReset } from "@/lib/tab-reset";
 import {
@@ -972,24 +979,14 @@ export function DenHome({
       // guards judged.
       const vsEnd = p.endAt === null ? undefined : Date.now() - p.endAt;
       const verdict = (v: string) =>
-        recordAppEvent(
-          "handoff",
-          // The machine fields lead (meta is cut at 180 characters): `id` and `at` (the
-          // instant it stopped, epoch ms on this tab's clock) let scripts/np-latency.mjs find
-          // the store's row for the play and compare verdicts; `pred` is the song before it
-          // here, so a play whose predecessor Spotify never listed is excluded (REVIEW M7).
-          `${v}|id=${p.id}|run=${ran === null ? "?" : `${(ran / 1000).toFixed(1)}s`}|at=${endedAt}|pred=${predId ?? ""}|gap=${Math.round((Date.now() - p.seenAt) / 1000)}s|prog=${
-            p.durationMs > 0 ? `${Math.round((p.maxProgress / p.durationMs) * 100)}%` : "?"
-          }|end=${vsEnd === undefined ? "?" : `${(vsEnd / 1000).toFixed(1)}s`}|${p.artist} — ${p.title}|from=${p.source ?? ""}`,
-          vsEnd,
-        );
+        recordAppEvent("handoff", handoffBeaconMeta(v, p, { ran, endedAt, pred: predId, now: Date.now(), vsEndMs: vsEnd }), vsEnd);
       // The guards live in src/lib/handoff.ts (pure, known-answer tested — they killed
       // three separate phantom-play bugs and must never regress silently again).
       const localToday = new Date(Date.now() - new Date().getTimezoneOffset() * 60000)
         .toISOString()
         .slice(0, 10);
       const predId = predIdRef.current;
-      predIdRef.current = p.id;
+      predIdRef.current = handoffPredToken(p);
       const ruled = judgeFinished({ p, endedAt }, Date.now(), daily[0]?.day === localToday);
       if (ruled !== "commit" && ruled !== "pending") return verdict(ruled);
       // Only mint while the TODAY view is actually on screen: that's the one universe

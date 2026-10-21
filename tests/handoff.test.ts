@@ -2,7 +2,7 @@
 // one-verdict rule (NOW_PLAYING_2S.md L2): Home judges how long the song was current, as the
 // store does, from the instants it started and stopped.
 import { describe, expect, it } from "vitest";
-import { judgeHandoff, type HandoffObservation } from "@/lib/handoff";
+import { handoffBeaconMeta, handoffPredToken, judgeHandoff, type HandoffObservation } from "@/lib/handoff";
 import { isSkip } from "@/lib/skip-rule";
 
 const T = Date.parse("2026-08-19T21:37:00Z");
@@ -87,5 +87,46 @@ describe("one verdict: the store's rule on the instants", () => {
 
   it("a pending play outside today's view is the sync's, like a commit", () => {
     expect(judgeHandoff(obs({ startAt: T - 72_000 }), T, T, false)).toBe("no-today");
+  });
+});
+
+// The beacon's meta (client_metrics "handoff"): the track by its Spotify ID, never its name,
+// artist or playlist (multi-user PLAN §13.1, Phase 4a's rule), and for a private-session song
+// not even the ID (code review 0156 M2): the user asked Spotify not to record that listen.
+describe("handoffBeaconMeta", () => {
+  const p = {
+    id: "4uLU6hMCjMI75M1A2tKUQC",
+    title: "Faint",
+    artist: "Linkin Park",
+    source: "Gym",
+    seenAt: T - 6_000,
+    maxProgress: 90_000,
+    durationMs: 180_000,
+    privateSession: false,
+  };
+  const i = { ran: 150_000, endedAt: T, pred: "prev1", now: T, vsEndMs: 1_500 };
+
+  it("carries the verdict, the ids and the timings; no song name, artist or playlist", () => {
+    expect(handoffBeaconMeta("commit", p, i)).toBe(
+      `commit|id=4uLU6hMCjMI75M1A2tKUQC|run=150.0s|at=${T}|pred=prev1|gap=6s|prog=50%|end=1.5s`,
+    );
+  });
+
+  it("a private-session song is filed as private with its run only", () => {
+    expect(handoffBeaconMeta("private", { ...p, privateSession: true }, i)).toBe("private|run=150.0s");
+    // ...and the song after it names no ID as its predecessor (np-latency still excludes it).
+    expect(handoffPredToken({ ...p, privateSession: true })).toBe("private");
+    expect(handoffPredToken(p)).toBe(p.id);
+  });
+
+  it("scripts/np-latency.mjs joins what it builds", async () => {
+    const { joinVerdicts } = await import("../scripts/np-latency.mjs");
+    const at = Date.parse("2026-10-21T06:40:07.900Z");
+    const meta = handoffBeaconMeta("skip", p, { ...i, endedAt: at, pred: "prev1" });
+    const plays = [
+      { played_at: "2026-10-21T06:39:44.158Z", track_id: "prev1", skipped: 0 },
+      { played_at: "2026-10-21T06:40:07.550Z", track_id: p.id, skipped: 1 },
+    ];
+    expect(joinVerdicts([{ meta: `pv:ab12cd34|${meta}` }], plays)).toMatchObject({ judged: 1, agree: 1 });
   });
 });

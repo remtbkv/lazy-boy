@@ -212,3 +212,29 @@ export function judgeFinished(
 ): HandoffVerdict {
   return judgeHandoff({ ...f.p, startAt: f.p.startAt ?? f.endedAt }, f.endedAt, now, dailyHeadIsToday);
 }
+
+/** The handoff beacon's meta (client_metrics "handoff"). The machine fields lead (meta is cut
+ *  at 180 characters): `id` and `at` (the instant it stopped, epoch ms on this tab's clock) let
+ *  scripts/np-latency.mjs find the store's row for the play and compare verdicts; `pred` is the
+ *  song before it here, so a play whose predecessor Spotify never listed is excluded (REVIEW M7).
+ *  The track by its id, never its name, artist or playlist (multi-user PLAN §13.1): telemetry is
+ *  what agents read while debugging, and from the first friend it is theirs too. A song played in
+ *  a private session is filed with its run alone: the user asked Spotify not to record that
+ *  listen (code review 0156 M2). /privacy's diagnostic-logs line says exactly this. */
+export function handoffBeaconMeta(
+  verdict: string,
+  p: Pick<HandoffTrack, "id" | "seenAt" | "maxProgress" | "durationMs" | "privateSession">,
+  i: { ran: number | null; endedAt: number; pred: string | null; now: number; vsEndMs: number | undefined },
+): string {
+  const run = i.ran === null ? "?" : `${(i.ran / 1000).toFixed(1)}s`;
+  if (p.privateSession) return `private|run=${run}`;
+  const prog = p.durationMs > 0 ? `${Math.round((p.maxProgress / p.durationMs) * 100)}%` : "?";
+  const end = i.vsEndMs === undefined ? "?" : `${(i.vsEndMs / 1000).toFixed(1)}s`;
+  return `${verdict}|id=${p.id}|run=${run}|at=${i.endedAt}|pred=${i.pred ?? ""}|gap=${Math.round((i.now - p.seenAt) / 1000)}s|prog=${prog}|end=${end}`;
+}
+
+/** What the next song's beacon names as its `pred`: a private-session song by no id, which
+ *  np-latency still reads as "not the store's predecessor" and excludes. */
+export function handoffPredToken(p: Pick<HandoffTrack, "id" | "privateSession">): string {
+  return p.privateSession ? "private" : p.id;
+}

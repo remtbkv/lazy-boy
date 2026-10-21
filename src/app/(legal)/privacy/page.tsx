@@ -40,7 +40,9 @@ export default function PrivacyPage() {
         <li>
           diagnostic logs: each call the app makes to Spotify (time, address and result), page
           load timings your browser reports, how long a song change took to show, and, when a song
-          ends while Home is open, which song it was and how Home judged it.
+          ends while Home is open, the Spotify IDs of that song and the one before it, when it
+          ended, how long it played and how Home judged it; for a song played in a private
+          session, only that it was private and how long it played.
         </li>
       </ul>
       <p>
