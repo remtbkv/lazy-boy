@@ -9,7 +9,7 @@ export default function PrivacyPage() {
   return (
     <>
       <h1>Privacy Policy</h1>
-      <p>Last updated October 15, 2026.</p>
+      <p>Last updated October 21, 2026.</p>
       <p>
         Lazy Boy is a free, non-commercial app that Rem Turatbekov runs for himself and a few
         friends. This page says what it does with your data. Lazy Boy collects and uses your data
