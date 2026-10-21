@@ -38,8 +38,9 @@ export default function PrivacyPage() {
         </li>
         <li>your timezone offset, so your days start at your midnight;</li>
         <li>
-          diagnostic logs: each call the app makes to Spotify (time, address and result), and page
-          load timings your browser reports.
+          diagnostic logs: each call the app makes to Spotify (time, address and result), page
+          load timings your browser reports, how long a song change took to show, and, when a song
+          ends while Home is open, which song it was and how Home judged it.
         </li>
       </ul>
       <p>

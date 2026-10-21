@@ -98,6 +98,9 @@ src/lib/read-costs.ts    the MODELED rows-read cost of every named read path + t
 src/lib/build-skew.ts    when a tab running an old bundle reloads itself (debounce/throttle/
                          defer). The unpinned /api/build probe overrules the cheaper
                          now-playing beacon, which a pinned tab can fake. GOTCHAS.md
+src/lib/np-change.ts     the np-change beacon (change → render bound per song change, NOW_PLAYING_2S
+                         §4.1) and playThenShow for in-app plays; handoff.ts is Home's verdict on a
+                         finished song (how long it was current, the store's rule)
 src/lib/format.ts        duration/time/day formatting (shared)
 src/lib/filter.ts        fuzzyFilter — substring+prefix name search (shared)
 src/components/ui/       UI primitives — Base UI under the hood, NOT Radix (see GOTCHAS.md)
@@ -121,6 +124,8 @@ scripts/backfill-from-backstop.mjs  replay the Zenbook backstop recorder's captu
                          Zenbook at ~/lazyboy-recorder, lazyboy-recorder.timer, every 15 min)
 scripts/import-extended-history.mjs  refill outage gaps from Spotify's Extended Streaming
                          History export; both importers close with scripts/import-tail.mjs
+scripts/np-latency.mjs   read-only: np-change percentiles by path and kind, Home's verdicts joined to
+                         the store's plays (NOW_PLAYING_2S §4.4)
 scripts/script-user.mjs  every store script's required --user <uid> (OWNER_UID in Phase 1)
 scripts/phase1-meta-keys.mjs  writes owner_uid, schema_version, min_reader, store_epoch into a
                          database's meta (Phase 1's deploy step on Rem's `lazyboy`)
