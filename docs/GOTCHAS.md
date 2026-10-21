@@ -246,7 +246,7 @@ The `src/components/ui/*` components are generated against **`@base-ui/react`**
   as the start until then). So each play counts the gap since your *previous* play, capped at
   the track length, and a song you skip part-way counts only the seconds it actually ran
   (`src/lib/skip-rule.ts`, used by `recomputeSkipFlags` / `getDailyStats` / `alltime_stats`).
-  The same run time drives the skip verdict (< 35% of the song). A play that ran under 5 s
+  The same run time drives the skip verdict (< 40% of the song; 35% before Oct 21, 2026). A play that ran under 5 s
   counts **zero** (`LISTEN_MIN_MS`). A play after an idle stretch (previous play more than a
   song-length earlier) is assumed to have run in full — the best estimate available, since
   Spotify reports *when* a play ended, never *how long* it ran. Spotify has flipped this

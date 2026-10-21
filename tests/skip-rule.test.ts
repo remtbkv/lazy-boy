@@ -16,9 +16,9 @@ describe("isSkip — from the previous play", () => {
   it("no predecessor → the play ran in full", () => {
     expect(isSkip(null, at(0), 200_000)).toBe(0);
   });
-  it("35% exactly is a listen, one ms under is a skip", () => {
-    expect(isSkip(at(0), at(35_000), 100_000)).toBe(0);
-    expect(isSkip(at(0), at(34_999), 100_000)).toBe(1);
+  it("40% exactly is a listen, one ms under is a skip (D2, Rem 2026-10-21)", () => {
+    expect(isSkip(at(0), at(40_000), 100_000)).toBe(0);
+    expect(isSkip(at(0), at(39_999), 100_000)).toBe(1);
   });
   it("unknown or zero duration and a negative gap are permissive", () => {
     expect(isSkip(at(0), at(1), null)).toBe(0);

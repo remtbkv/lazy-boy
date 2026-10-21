@@ -88,7 +88,7 @@ describe("shouldHarvest — exhaustive enumeration", () => {
 describe("judgeHandoff — exhaustive enumeration", () => {
   const NOW = 1_000_000_000;
   const DUR = 200_000;
-  const need = DUR * HANDOFF_SKIP_FRACTION; // 70_000
+  const need = DUR * HANDOFF_SKIP_FRACTION; // 80_000
 
   // The contract, transcribed from handoff.ts:31-40, in precedence order.
   const expected = (p: HandoffObservation, now: number, head: boolean): HandoffVerdict => {
@@ -122,11 +122,11 @@ describe("judgeHandoff — exhaustive enumeration", () => {
     }
   }
 
-  it("exactly 35% of a known duration commits (the bar is not exclusive)", () => {
+  it("exactly 40% of a known duration commits (the bar is not exclusive)", () => {
     const p: HandoffObservation = {
       seenAt: NOW,
       sawPlaying: true,
-      maxProgress: 70_000,
+      maxProgress: 80_000,
       durationMs: 200_000,
     };
     expect(judgeHandoff(p, NOW, true)).toBe("commit");
@@ -189,16 +189,16 @@ describe("judgeHandoff — exhaustive enumeration", () => {
   });
 });
 
-describe("the 0.35 bar lives in ONE place", () => {
+describe("the 0.40 bar lives in ONE place", () => {
   it("db.ts consumes the shared constant instead of re-declaring the literal", async () => {
-    // handoff.ts:4-5: "Keep the constants in ONE place — the 0.35 bar is the same
+    // handoff.ts:4-5: "Keep the constants in ONE place — the 0.40 bar is the same
     // SKIP_FRACTION the store applies in recomputeSkipFlags (db.ts)."
     const { readFileSync } = await import("node:fs");
     const db = readFileSync(new URL("../../src/lib/db.ts", import.meta.url), "utf8");
-    expect(db).not.toMatch(/const\s+SKIP_FRACTION\s*=\s*0\.35/);
+    expect(db).not.toMatch(/const\s+SKIP_FRACTION\s*=\s*0\.[0-9]+/);
   });
 
   it("if it IS re-declared, the two values at least agree", () => {
-    expect(HANDOFF_SKIP_FRACTION).toBe(0.35);
+    expect(HANDOFF_SKIP_FRACTION).toBe(0.4);
   });
 });

@@ -33,13 +33,13 @@ describe("judgeHandoff — the phantom vectors", () => {
     );
   });
 
-  it("spam-click (2026-08-16): under 35% observed is a SKIP", () => {
+  it("spam-click (2026-08-16): under 40% observed is a SKIP", () => {
     expect(judgeHandoff(obs({ maxProgress: 10_000 }), T, true)).toBe("skip");
   });
 
-  it("35% boundary: exactly at the bar commits, just under skips", () => {
-    expect(judgeHandoff(obs({ maxProgress: 63_000 }), T, true)).toBe("commit");
-    expect(judgeHandoff(obs({ maxProgress: 62_999 }), T, true)).toBe("skip");
+  it("40% boundary (D2, Rem 2026-10-21): exactly at the bar commits, just under skips", () => {
+    expect(judgeHandoff(obs({ maxProgress: 72_000 }), T, true)).toBe("commit");
+    expect(judgeHandoff(obs({ maxProgress: 71_999 }), T, true)).toBe("skip");
   });
 
   it("unknown duration uses the 30s floor", () => {

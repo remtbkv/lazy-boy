@@ -154,7 +154,7 @@ describe("skip verdicts and listened time come from the previous play (C1)", () 
     expect(await verdicts()).toEqual({
       [`k1@${new Date(T).toISOString()}`]: 0, // first play: no predecessor → ran in full
       [`k2@${new Date(T + 200_000).toISOString()}`]: 0, // ran 200 of 200 s
-      [`k3@${new Date(T + 230_000).toISOString()}`]: 1, // ran 30 of 180 s < 35%
+      [`k3@${new Date(T + 230_000).toISOString()}`]: 1, // ran 30 of 180 s < 40%
     });
     const all = await store.recomputeAllTimeStats();
     expect(all.plays).toBe(2);

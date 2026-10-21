@@ -2,7 +2,7 @@
 // survives hostile text.
 //
 // Documented contract, quoted:
-//   db.ts — "A play with less than 35% of the song actually listened is a SKIP … Listened
+//   db.ts — "A play with less than 40% of the song actually listened is a SKIP … Listened
 //     time is estimated exactly as the hours are: the run from the PREVIOUS play's end to
 //     this play's end, capped at song length" (played_at is an END stamp, C1).
 //   db.ts recomputeSkipFlags — "No predecessor, unknown duration or a clock-weird negative
@@ -18,7 +18,7 @@ import { DAY_MS, iso, play, resetStore, verdicts } from "./helpers";
 const store = ownerStore();
 
 const BASE = Math.floor((Date.now() - 3 * DAY_MS) / DAY_MS) * DAY_MS + 10 * 3_600_000;
-const DUR = 100_000; // 35% = 35_000 exactly
+const DUR = 100_000; // 40% = 40_000 exactly
 
 /** Record `a`, then `b` ending `gapMs` later, and return b's stored verdict. */
 async function verdictOf(gapMs: number, durationMs: number | null): Promise<number | null> {
@@ -29,19 +29,19 @@ async function verdictOf(gapMs: number, durationMs: number | null): Promise<numb
   return (await verdicts())[`b@${iso(BASE + gapMs)}`];
 }
 
-describe("the 35% skip boundary", () => {
+describe("the 40% skip boundary", () => {
   beforeEach(resetStore);
 
-  it("listened exactly 35% of the song is NOT a skip (the rule is strictly <)", async () => {
-    expect(await verdictOf(35_000, DUR)).toBe(0);
+  it("listened exactly 40% of the song is NOT a skip (the rule is strictly <)", async () => {
+    expect(await verdictOf(40_000, DUR)).toBe(0);
   });
 
-  it("one millisecond under 35% IS a skip", async () => {
-    expect(await verdictOf(34_999, DUR)).toBe(1);
+  it("one millisecond under 40% IS a skip", async () => {
+    expect(await verdictOf(39_999, DUR)).toBe(1);
   });
 
-  it("one millisecond over 35% is not a skip", async () => {
-    expect(await verdictOf(35_001, DUR)).toBe(0);
+  it("one millisecond over 40% is not a skip", async () => {
+    expect(await verdictOf(40_001, DUR)).toBe(0);
   });
 
   it("a gap longer than the song is capped at song length → not a skip", async () => {

@@ -12,9 +12,11 @@
 // is why playedAtConvention() below exists.
 
 // A play with less than this fraction of the song actually listened is a SKIP — spam-clicking
-// through tracks must not read as listening (Rem, 2026-08-16). handoff.ts's client-side gate
-// applies the same bar.
-export const SKIP_FRACTION = 0.35;
+// through tracks must not read as listening (Rem, 2026-08-16). 0.35 until Oct 21, 2026, when Rem
+// set 40% (NOW_PLAYING_2S.md decision D2: "if you listen to over 40% of the song, that means you
+// definitely listen to the song"); scripts/migrate-skip-rule.mjs re-rules the stored history.
+// handoff.ts's client-side gate applies the same bar.
+export const SKIP_FRACTION = 0.4;
 // Listened time for a track whose duration is unknown.
 export const LISTEN_FALLBACK_MS = 600000;
 // A play that ran under this adds 0 to listened-time totals (it still counts as a play

@@ -611,7 +611,7 @@ async function migrateCore(client: Client): Promise<void> {
     await client.execute("ALTER TABLE plays ADD COLUMN ctx_orphan INTEGER");
   }
   // plays.skipped: the listened-fraction verdict per play (Rem, 2026-08-16 — a play with
-  // less than 35% of the song actually listened is a SKIP: not listed, not counted).
+  // less than 40% of the song actually listened is a SKIP: not listed, not counted).
   // NULL = pending: inserted (or re-opened by an out-of-order insert) and not yet ruled;
   // treated as not-skipped until recomputeSkipFlags() rules on it, which the same write does.
   if (!playsCols.has("skipped")) {
@@ -1176,7 +1176,7 @@ async function recomputeOrphanFlags(
 // history, source labels, the all-time list).
 const NOT_BACKFILL = `(p.context_type IS NULL OR p.context_type <> 'backfill')`;
 
-// A play with less than 35% of the song actually listened is a SKIP (src/lib/skip-rule.ts
+// A play with less than 40% of the song actually listened is a SKIP (src/lib/skip-rule.ts
 // owns the rule and the fraction). Listened time is estimated exactly as the hours are: the
 // run from the PREVIOUS play's end to this play's end, capped at song length — Spotify's
 // played_at is the END of a play (C1, burn lazyboy-review 2026-10-03). The verdict is
@@ -1185,7 +1185,7 @@ const NOT_BACKFILL = `(p.context_type IS NULL OR p.context_type <> 'backfill')`;
 const NOT_SKIPPED = `(p.skipped IS NULL OR p.skipped = 0)`;
 
 /** Rule on every pending (skipped IS NULL) real play from its PREDECESSOR: ran =
- *  min(gap from the previous play, duration); skipped = ran < 35% of duration. No
+ *  min(gap from the previous play, duration); skipped = ran < 40% of duration. No
  *  predecessor, unknown duration or a clock-weird negative gap counts as not-skipped (be
  *  permissive). A play is ruled the moment it lands — its predecessor is already stored.
  *  Runs after each sync that inserted plays; the pending set is tiny (idx_plays_skip_null).

@@ -2,7 +2,7 @@
 //
 // The documented contract this file tests, quoted from source:
 //   db.ts recomputeSkipFlags — "Rule on every pending (skipped IS NULL) real play from its
-//     PREDECESSOR: ran = min(gap from the previous play, duration); skipped = ran < 35% of
+//     PREDECESSOR: ran = min(gap from the previous play, duration); skipped = ran < 40% of
 //     duration. No predecessor, unknown duration or a clock-weird negative gap counts as
 //     not-skipped (be permissive). A play is ruled the moment it lands."
 //   db.ts recordPlays — an out-of-order insert "makes the row immediately AFTER it wrong …
@@ -22,17 +22,17 @@ const store = ownerStore();
 const BASE = Math.floor((Date.now() - 3 * DAY_MS) / DAY_MS) * DAY_MS + 10 * 3_600_000;
 
 // Each row's `expect` is derived from the rule quoted above, by hand:
-//   ran = min(gap from the previous play, duration); skipped iff ran < 0.35 * duration.
+//   ran = min(gap from the previous play, duration); skipped iff ran < 0.40 * duration.
 const TIMELINE = [
   { id: "t0", off: 0, dur: 200_000, skip: 0 }, //       first play: no predecessor → ran in full
-  { id: "t1", off: 30_000, dur: 200_000, skip: 1 }, //   gap 30_000 < 70_000
+  { id: "t1", off: 30_000, dur: 200_000, skip: 1 }, //   gap 30_000 < 80_000
   { id: "t2", off: 230_000, dur: 200_000, skip: 0 }, //  gap 200_000 == duration
-  { id: "t3", off: 265_000, dur: 100_000, skip: 0 }, //  gap 35_000 == 35% exactly → NOT a skip
-  { id: "t4", off: 299_999, dur: 100_000, skip: 1 }, //  gap 34_999, one ms under the line
+  { id: "t3", off: 270_000, dur: 100_000, skip: 0 }, //  gap 40_000 == 40% exactly → NOT a skip
+  { id: "t4", off: 309_999, dur: 100_000, skip: 1 }, //  gap 39_999, one ms under the line
   { id: "t5", off: 400_000, dur: null, skip: 0 }, //     unknown duration → permissive
-  { id: "t6", off: 500_000, dur: 240_000, skip: 0 }, //  gap 100_000 ≥ 84_000
+  { id: "t6", off: 500_000, dur: 240_000, skip: 0 }, //  gap 100_000 ≥ 96_000
   { id: "t7", off: 4_100_000, dur: 240_000, skip: 0 }, // gap 3_600_000 capped at duration
-  { id: "t8", off: 4_101_000, dur: 240_000, skip: 1 }, // gap 1_000 < 84_000
+  { id: "t8", off: 4_101_000, dur: 240_000, skip: 1 }, // gap 1_000 < 96_000
   { id: "t9", off: 4_341_000, dur: 300_000, skip: 0 }, // newest: ruled on arrival, gap 240_000
 ] as const;
 
@@ -43,9 +43,9 @@ const EXPECTED_VERDICTS: Record<string, number | null> = Object.fromEntries(
 // Seven plays survive the skip filter (t1, t4, t8 are skips).
 const COUNTED = TIMELINE.filter((r) => r.skip !== 1).length;
 // skip-rule.ts allTimeStats: gaps over the FULL chain, then skips drop out.
-//   t0 200_000 (no predecessor → the whole duration) + t2 200_000 + t3 35_000
-//   + t5 100_001 (10-min fallback, capped by the gap) + t6 100_000 + t7 240_000 + t9 240_000
-const LISTENED_MS = 200_000 + 200_000 + 35_000 + 100_001 + 100_000 + 240_000 + 240_000;
+//   t0 200_000 (no predecessor → the whole duration) + t2 200_000 + t3 40_000
+//   + t5 90_001 (10-min fallback, capped by the gap) + t6 100_000 + t7 240_000 + t9 240_000
+const LISTENED_MS = 200_000 + 200_000 + 40_000 + 90_001 + 100_000 + 240_000 + 240_000;
 // t0 survives the filter, so it is `since`.
 const SINCE = iso(BASE);
 

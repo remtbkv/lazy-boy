@@ -1,7 +1,7 @@
 // The instant-handoff verdict, extracted from den-home so the guards that killed three
 // separate phantom-play bugs (Abracadabra 2026-08-16, the cache seed and the paused-state
 // launder 2026-08-19) are a pure, known-answer-tested function. den-home supplies the
-// observation state; this decides. Keep the constants in ONE place — the 0.35 bar is the
+// observation state; this decides. Keep the constants in ONE place — the 0.40 bar is the
 // same SKIP_FRACTION the store applies in recomputeSkipFlags (skip-rule.ts owns it).
 import { SKIP_FRACTION } from "@/lib/skip-rule";
 
