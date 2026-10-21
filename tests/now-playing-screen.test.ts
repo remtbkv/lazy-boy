@@ -11,7 +11,9 @@ import {
   HOLD_MAX_MS,
   holdWhile,
   NO_SCREEN_MEMORY,
+  NO_SUPPRESSION,
   screenAnswer,
+  suppress,
   type PolledPlaying,
 } from "@/lib/now-playing-poll";
 
@@ -86,6 +88,27 @@ describe("holdWhile: no poll during a Save Queue walk", () => {
     holds.length = 0;
     await expect(holdWhile(async () => { throw new Error("walk failed"); }, (u) => holds.push(u), () => 2_000)).rejects.toThrow("walk failed");
     expect(holds).toEqual([2_000 + HOLD_MAX_MS, 0]);
+  });
+});
+
+// A click during the walk must not end the hold in that tab, and a failed toggle must not zero it
+// (code review 0156 L-c).
+describe("suppress: an action's window never cuts a Save Queue hold short", () => {
+  const held = suppress(NO_SUPPRESSION, { kind: "hold", until: T + HOLD_MAX_MS });
+
+  it("a play or toggle during the walk keeps the hold", () => {
+    expect(suppress(held, { kind: "action", until: T + 2_000 }).until).toBe(T + HOLD_MAX_MS);
+  });
+
+  it("a failed toggle during the walk falls back to the hold, and to nothing without one", () => {
+    const clicked = suppress(held, { kind: "action", until: T + 2_000 });
+    expect(suppress(clicked, { kind: "failed" }).until).toBe(T + HOLD_MAX_MS);
+    expect(suppress(suppress(NO_SUPPRESSION, { kind: "action", until: T + 2_000 }), { kind: "failed" }).until).toBe(0);
+  });
+
+  it("outside a hold an action suppresses for its window, and the release ends the hold", () => {
+    expect(suppress(NO_SUPPRESSION, { kind: "action", until: T + 2_000 }).until).toBe(T + 2_000);
+    expect(suppress(held, { kind: "hold", until: 0 })).toEqual(NO_SUPPRESSION);
   });
 });
 

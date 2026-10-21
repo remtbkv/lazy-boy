@@ -28,8 +28,10 @@ import {
   PollLoop,
   screenAnswer,
   STEADY_MS,
+  suppress,
   type PollOutcome,
   type ScreenMemory,
+  type SuppressionEvent,
 } from "@/lib/now-playing-poll";
 import { leaveForAnotherUser, namesAnotherUser, userStorageName } from "@/lib/user-storage";
 import { useUid } from "@/components/user-context";
@@ -118,6 +120,13 @@ let markedNowPlayingReady = false;
 // The np-change beacon's per-tab sequence number: a batch lost on its way to the telemetry
 // store shows as a gap (NOW_PLAYING_2S.md REVIEW H4.3).
 let npChangeSeq = 0;
+// The provider's poll suppression lives in two refs; now-playing-poll.ts's `suppress` moves them,
+// so an action's window never cuts a Save Queue hold short (code review 0156 L-c).
+function moveSuppression(until: { current: number }, hold: { current: number }, e: SuppressionEvent): void {
+  const s = suppress({ until: until.current, hold: hold.current }, e);
+  until.current = s.until;
+  hold.current = s.hold;
+}
 function markNowPlayingReady(): void {
   if (markedNowPlayingReady) return;
   markedNowPlayingReady = true;
@@ -142,6 +151,8 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
   // After an optimistic change, ignore poll results briefly so a mid-flight 6s poll
   // (carrying the pre-change state) can't clobber it and cause a visible flicker.
   const suppressUntil = useRef(0);
+  // The Save Queue hold within it (0 = none): a failed action falls back to it, not to 0.
+  const holdUntil = useRef(0);
   // Timestamp of the newest state we've applied — so an older broadcast (or a slow poll)
   // can never overwrite a newer one, across tabs.
   const lastAppliedAt = useRef(0);
@@ -477,13 +488,13 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       } else if (msg.type === "optimistic") {
         // A user action elsewhere — apply it and match its suppression so neither this tab's
         // view nor the leader's next poll clobbers it before Spotify catches up.
-        suppressUntil.current = Math.max(suppressUntil.current, msg.until);
+        moveSuppression(suppressUntil, holdUntil, { kind: "action", until: msg.until });
         if (msg.at > lastAppliedAt.current) {
           lastAppliedAt.current = msg.at;
           if (aliveRef.current) setPlaying(msg.playing);
         }
       } else if (msg.type === "hold") {
-        suppressUntil.current = msg.until;
+        moveSuppression(suppressUntil, holdUntil, { kind: "hold", until: msg.until });
         if (msg.until === 0 && isLeaderRef.current) loop.kick();
       } else if (msg.type === "request" && isLeaderRef.current) {
         // Only the leader answers a newcomer — and only with state fresh enough to trust.
@@ -551,7 +562,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
   const playOptimistic = useCallback(
     (track: NowPlayingTrack, durationMs = 0, startedAt?: number) => {
       const until = Date.now() + 2000;
-      suppressUntil.current = until;
+      moveSuppression(suppressUntil, holdUntil, { kind: "action", until });
       const next: Playing = { track, isPlaying: true, progressMs: 0, durationMs, context: null };
       const at = Date.now();
       lastAppliedAt.current = at;
@@ -573,7 +584,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
   const holdDuring = useCallback(
     <T,>(work: () => Promise<T>): Promise<T> =>
       holdWhile(work, (until) => {
-        suppressUntil.current = until;
+        moveSuppression(suppressUntil, holdUntil, { kind: "hold", until });
         broadcast({ type: "hold", until });
         if (until === 0) refresh();
       }),
@@ -589,7 +600,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       if (!cur) return { ok: true };
       const nextPlaying = !cur.isPlaying;
       const until = Date.now() + 2000;
-      suppressUntil.current = until;
+      moveSuppression(suppressUntil, holdUntil, { kind: "action", until });
       const optimistic: Playing = {
         ...cur,
         isPlaying: nextPlaying,
@@ -601,7 +612,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       broadcast({ type: "optimistic", playing: optimistic, until, at });
       const r = await playerSetPlayingAction(nextPlaying);
       if (!r.ok) {
-        suppressUntil.current = 0; // failed → drop the optimistic flip, show real state
+        moveSuppression(suppressUntil, holdUntil, { kind: "failed" }); // failed → drop the optimistic flip, show real state (a hold stays)
         refresh();
       }
       return r;

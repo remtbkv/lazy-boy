@@ -157,6 +157,27 @@ export function agePlaying<P extends PolledPlaying>(p: P, at: number, now: numbe
  *  after 15 s stuck); past it the polls resume even if the action never answers. */
 export const HOLD_MAX_MS = 3 * 60_000;
 
+/** The provider's poll suppression: `until` = no poll applies before it; `hold` = the Save Queue
+ *  hold it carries, if any (0 = none). */
+export type Suppression = { until: number; hold: number };
+export const NO_SUPPRESSION: Suppression = { until: 0, hold: 0 };
+export type SuppressionEvent =
+  /** An in-app action's optimistic window (play, toggle). */
+  | { kind: "action"; until: number }
+  /** That action failed: show the real state at once. */
+  | { kind: "failed" }
+  /** A Save Queue hold, from this tab or another (0 = released). */
+  | { kind: "hold"; until: number };
+
+/** An action's window only ever lengthens the suppression and a failed action falls back to the
+ *  hold, so a click during Save Queue's walk does not let a poll see the walk (review 0156 L-c).
+ *  A hold sets both, shortening included: that is how its release reaches every tab. */
+export function suppress(s: Suppression, e: SuppressionEvent): Suppression {
+  if (e.kind === "action") return { ...s, until: Math.max(s.until, e.until) };
+  if (e.kind === "failed") return { ...s, until: s.hold };
+  return { until: e.until, hold: e.until };
+}
+
 /** Hold the polls for the length of `work` (Save Queue's walk: it skips through the queue and
  *  comes back to the song, and every song it passes would otherwise "end" on Home), then release
  *  them, whether the work succeeded or not. `hold(until)` sets the provider's suppression; 0
