@@ -95,11 +95,18 @@ describe("/api/now-playing carries the poll floor", () => {
 
   it("a reply from Phase 4a's per-user memo carries the floor too", async () => {
     state.mode = "economy";
-    const first = await (await nowPlaying()).json();
-    const again = await (await nowPlaying()).json();
-    expect(state.playerCalls).toBe(1); // the second answer is the memo's
-    expect(again).toEqual(first);
-    expect(again.minPollMs).toBe(30_000);
+    // The memo ages a playing answer's progress by the time since its sample (lane L0): hold the
+    // clock so the two replies can be compared whole.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const first = await (await nowPlaying()).json();
+      const again = await (await nowPlaying()).json();
+      expect(state.playerCalls).toBe(1); // the second answer is the memo's
+      expect(again).toEqual(first);
+      expect(again.minPollMs).toBe(30_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a signed-out caller still costs no store read", async () => {

@@ -8,6 +8,7 @@ const state = vi.hoisted(() => ({
   calls: [] as string[],
   fail: false,
   mode: "normal" as "normal" | "economy" | "freeze",
+  player: { isPlaying: true, progressMs: 1_000, durationMs: 200_000 },
 }));
 vi.mock("@/lib/budget/mode", () => ({ currentMode: async () => state.mode }));
 
@@ -22,7 +23,7 @@ vi.mock("@/lib/spotify", () => ({
     currentlyPlaying: async () => {
       state.calls.push(token);
       if (state.fail) throw new Error("429");
-      return { track: { id: `${token}-track`, name: "x" }, isPlaying: true, progressMs: 1, durationMs: 2, context: null };
+      return { track: { id: `${token}-track`, name: "x" }, ...state.player, context: null };
     },
     contextName: async () => null,
   }),
@@ -39,12 +40,14 @@ beforeEach(() => {
   state.fail = false;
   state.mode = "normal";
   state.uid = "aaaaaaaaaaaa";
+  state.player = { isPlaying: true, progressMs: 1_000, durationMs: 200_000 };
   vi.useRealTimers();
 });
 
 describe("the now-playing memo", () => {
   it("one Spotify call per user per window; each user their own answer on their own bearer", async () => {
     vi.useFakeTimers({ now: 1_800_000_000_000 });
+    state.player = { isPlaying: true, progressMs: 1_000, durationMs: 200_000 };
     expect(await track()).toBe("tok-aaaaaaaaaaaa-track");
     expect(await track()).toBe("tok-aaaaaaaaaaaa-track");
     state.uid = "bbbbbbbbbbbb";
@@ -76,5 +79,40 @@ describe("the now-playing memo", () => {
     state.fail = false;
     expect(await track()).toBe("tok-aaaaaaaaaaaa-track");
     expect(state.calls).toHaveLength(2);
+  });
+});
+
+// NOW_PLAYING_2S.md §0 item 1, lane L0: a flat 5 s memo answered the poll timed to a song's end with the
+// song that just ended, at the progress it had up to 5 s earlier, so the change waited for the next
+// poll (natural-end p95 2.1 -> 6.3 s in the replay). The memo lives min(5 s, what was left of the song)
+// and ages the progress it replays.
+describe("the memo at a song's end", () => {
+  const progress = async () => (await (await GET()).json()).playing?.progressMs as number;
+
+  it("an answer sampled 2 s before the song ends is not replayed after it ends", async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    state.player = { isPlaying: true, progressMs: 198_000, durationMs: 200_000 };
+    await GET();
+    vi.advanceTimersByTime(2_300); // the poll timed to the end: predicted end + 300 ms
+    await GET();
+    expect(state.calls).toHaveLength(2);
+  });
+
+  it("a hit 3 s after the sample reports the progress 3 s on", async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    state.player = { isPlaying: true, progressMs: 60_000, durationMs: 200_000 };
+    expect(await progress()).toBe(60_000);
+    vi.advanceTimersByTime(3_000);
+    expect(await progress()).toBe(63_000);
+    expect(state.calls).toHaveLength(1);
+  });
+
+  it("a paused answer keeps its progress for the whole window", async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    state.player = { isPlaying: false, progressMs: 198_000, durationMs: 200_000 };
+    expect(await progress()).toBe(198_000);
+    vi.advanceTimersByTime(4_000);
+    expect(await progress()).toBe(198_000);
+    expect(state.calls).toHaveLength(1);
   });
 });
