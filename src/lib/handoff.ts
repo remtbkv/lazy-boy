@@ -89,6 +89,9 @@ export type HandoffTrack = Omit<HandoffObservation, "startAt" | "privateSession"
   /** When the song became current; null until it is seen playing. */
   startAt: number | null;
   privateSession: boolean;
+  /** The receipt of the last answer that showed this song, paused included: it was still
+   *  current then, so the next song cannot have started earlier (review 0156 H1). */
+  lastObservedAt: number;
 };
 
 /** One answer as the provider hands it to Home (now-playing-context's Playing). */
@@ -138,7 +141,7 @@ export function foldHandoff(
     receivedAt >= prev.endAt - 2_000 &&
     playing.progressMs < 3_000;
   if (prev && prev.id === playing.track.id && !restarted) {
-    const next = { ...prev, source: playing.context?.name ?? prev.source };
+    const next = { ...prev, source: playing.context?.name ?? prev.source, lastObservedAt: receivedAt };
     if (playing.privateSession) next.privateSession = true;
     // Only a PLAYING observation refreshes the liveness stamp and earns progress — a paused
     // chip re-observed every 6s must not keep a dead song "fresh".
@@ -153,7 +156,10 @@ export function foldHandoff(
   }
   let finished: HandoffFold["finished"] = null;
   if (prev) {
-    const endedAt = stop(prev, receivedAt - playing.progressMs);
+    // The new song's progress dates the change, but a seek before this first look moves that
+    // date back, past the moment the previous song was last seen current (review 0156 H1: the
+    // previous song's run went to the new one). Bounded by it, the error is one poll interval.
+    const endedAt = stop(prev, Math.max(receivedAt - playing.progressMs, prev.lastObservedAt));
     finished = { p: prev, endedAt };
     lastChangeAt = endedAt;
   }
@@ -169,6 +175,7 @@ export function foldHandoff(
     // before this tab was watching.
     maxProgress: playing.isPlaying ? playing.progressMs : 0,
     seenAt: receivedAt,
+    lastObservedAt: receivedAt,
     sawPlaying: !!playing.isPlaying,
     endAt: playing.isPlaying && playing.durationMs > 0 ? receivedAt + playing.durationMs - playing.progressMs : null,
     // Never before the previous song stopped: a seek before our first look would otherwise

@@ -89,6 +89,33 @@ describe("foldHandoff on poll sequences", () => {
     expect(replay(polls)).toEqual([{ id: "A", verdict: "private", ran: 200 }]);
   });
 
+  it("H1: a seek before Home's first look at a song does not move the previous song's run onto it", () => {
+    // A (200 s) seen at 120 s; the user skips to B and drags B to 190 s within the next 6 s;
+    // the next poll sees B at 196 s, and B runs out 4 s later. The store: A ran 120 s (listen),
+    // B about 10 s (skip). A was still current when this tab last saw it, at T + 120 s.
+    const polls: Poll[] = [
+      ...playing("A", T, T + 6 * S, T + 120 * S),
+      [T + 126 * S, song("B", 196 * S)],
+      [T + 132 * S, song("C", 2 * S)],
+    ];
+    const verdicts = replay(polls);
+    expect(verdicts[0]).toEqual({ id: "A", verdict: "commit", ran: 120 });
+    expect(verdicts[1].id).toBe("B");
+    expect(verdicts[1].verdict).toBe("skip");
+    expect(verdicts[1].ran).toBeLessThanOrEqual(10);
+  });
+
+  it("H1: a paused observation still bounds the change (the song was current when seen paused)", () => {
+    const polls: Poll[] = [
+      ...playing("A", T, T, T + 90 * S),
+      [T + 96 * S, song("A", 95 * S, 200 * S, false)],
+      [T + 102 * S, song("A", 95 * S, 200 * S, false)],
+      [T + 108 * S, song("B", 100 * S)], // resumed, skipped to B and seeked, all inside 6 s
+    ];
+    const verdicts = replay(polls);
+    expect(verdicts[0]).toEqual({ id: "A", verdict: "commit", ran: 102 });
+  });
+
   it("nothing playing ends the song at the receipt", () => {
     const polls: Poll[] = [...playing("A", T, T, T + 120 * S), [T + 126 * S, null]];
     expect(replay(polls)).toEqual([{ id: "A", verdict: "commit", ran: 126 }]);
