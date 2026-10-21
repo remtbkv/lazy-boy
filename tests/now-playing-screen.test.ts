@@ -4,6 +4,7 @@
 // song that just ended, pinned at its end, is Spotify catching up, not a change.
 import { describe, expect, it } from "vitest";
 import {
+  agePlaying,
   EMPTY_CONFIRM_MS,
   FLIP_BACK_MS,
   HOLD_MAX_MS,
@@ -76,5 +77,20 @@ describe("holdWhile: no poll during a Save Queue walk", () => {
     holds.length = 0;
     await expect(holdWhile(async () => { throw new Error("walk failed"); }, (u) => holds.push(u), () => 2_000)).rejects.toThrow("walk failed");
     expect(holds).toEqual([2_000 + HOLD_MAX_MS, 0]);
+  });
+});
+
+// A state painted from the localStorage cache (≤ 30 s old) or relayed by another tab carries
+// the progress its sender saw then. Home dates a song's start as receipt − progress, so an
+// unaged state made the song look up to 30 s younger (and its run that much shorter).
+describe("agePlaying: a relayed state's progress is moved on by its age", () => {
+  it("playing: progress + age, capped at the song", () => {
+    expect(agePlaying(song("A", 60_000), T - 20_000, T)?.progressMs).toBe(80_000);
+    expect(agePlaying(song("A", 195_000), T - 20_000, T)?.progressMs).toBe(200_000);
+  });
+  it("paused or nothing: unchanged", () => {
+    const paused = { ...song("A", 60_000), isPlaying: false };
+    expect(agePlaying(paused, T - 20_000, T)).toBe(paused);
+    expect(agePlaying(null, T - 20_000, T)).toBeNull();
   });
 });

@@ -21,6 +21,7 @@ import {
 import { recordAppEvent } from "@/lib/metrics-client";
 import { npChange, npChangeMeta } from "@/lib/np-change";
 import {
+  agePlaying,
   holdWhile,
   leaderElection,
   NO_SCREEN_MEMORY,
@@ -286,7 +287,8 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     if (Date.now() < suppressUntil.current) return;
     if (at <= lastAppliedAt.current) return;
     lastAppliedAt.current = at;
-    if (aliveRef.current) setPlaying(p);
+    // Its progress is as old as `at`: move it on, or Home dates the song's start late.
+    if (aliveRef.current) setPlaying(agePlaying(p, at, Date.now()));
   }, []);
 
   // One network poll (the leader's PollLoop, a follower's rescue, ad-hoc refresh()). On

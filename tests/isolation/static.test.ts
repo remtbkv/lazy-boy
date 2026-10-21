@@ -193,6 +193,7 @@ describe("S4: module-scope state is on a reviewed list", () => {
     "src/lib/spotify/client.ts: cooldownUntil": "app-wide on purpose: Spotify's rate limit is per app (PLAN.md §4.3)",
     "src/app/(app)/use-search-mode.ts: lastKbHeight": BROWSER,
     "src/components/now-playing-context.tsx: markedNowPlayingReady": BROWSER,
+    "src/components/now-playing-context.tsx: npChangeSeq": BROWSER,
     "src/components/playlist-tracks-sync.tsx: lastAttempt": BROWSER,
     "src/components/playlists-sync.tsx: inFlight": BROWSER,
     "src/components/playlists-sync.tsx: lastAttempt": BROWSER,

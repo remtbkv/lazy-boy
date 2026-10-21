@@ -141,6 +141,15 @@ export function screenAnswer(
   return { action: "apply", mem: changed ? { ...calm, lastChange: { fromId: shown.track.id, at: now } } : calm };
 }
 
+/** A state received `at` (a relayed broadcast, the localStorage cache) with a playing song's
+ *  progress moved on to `now`, capped at the song. Home dates a song's start as receipt minus
+ *  progress, so an unaged 30-second-old cache paint made the song look 30 s younger. */
+export function agePlaying<P extends PolledPlaying>(p: P, at: number, now: number): P {
+  if (!p || !p.isPlaying || now <= at) return p;
+  const progressMs = p.progressMs + (now - at);
+  return { ...p, progressMs: p.durationMs > 0 ? Math.min(p.durationMs, progressMs) : progressMs };
+}
+
 /** The longest a Save Queue walk holds the polls (it walks ≤ ~105 steps at ~0.3-0.8 s and gives up
  *  after 15 s stuck); past it the polls resume even if the action never answers. */
 export const HOLD_MAX_MS = 3 * 60_000;
