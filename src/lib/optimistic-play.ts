@@ -64,7 +64,9 @@ export function addPlay(rows: PlayRow[], prov: PlayRow): PlayRow[] {
         ? prov.lastPlayed
         : merged[at].lastPlayed,
     source: prov.source ?? merged[at].source,
-    ...(prov.pending ? { pending: true } : {}),
+    // A pending play joins an existing row undimmed: the row is the song's whole day, and
+    // dimming it greyed out plays the store had already listed (review 0156 L-d). A row that is
+    // itself pending stays so through the spread above.
   };
   return merged;
 }

@@ -221,9 +221,17 @@ describe("a pending provisional waits for the store", () => {
     expect(addPlay([], pending.row)[0].pending).toBe(true);
   });
 
-  it("a pending bump on an existing row marks that row pending", () => {
+  // Code review 0156 L-d: the row is the song's whole day; dimming it for one uncertain play
+  // greyed out plays the store had already listed.
+  it("a pending bump on a row with listed plays counts it but does not dim the row", () => {
     const [merged] = addPlay([row({ name: "Near the bar", plays: 2 })], pending.row);
-    expect(merged).toMatchObject({ plays: 3, pending: true });
+    expect(merged).toMatchObject({ plays: 3 });
+    expect(merged.pending).toBeFalsy();
+  });
+
+  it("a bump on a row that is itself pending keeps it pending", () => {
+    const [merged] = addPlay(addPlay([], pending.row), pending.row);
+    expect(merged).toMatchObject({ plays: 2, pending: true });
   });
 
   it("unconfirmed, it is re-applied as pending; once the store counts it, the store's row stands", () => {
