@@ -10,6 +10,8 @@ const state = vi.hoisted(() => ({
   mode: "normal" as "normal" | "economy" | "freeze",
   player: { isPlaying: true, progressMs: 1_000, durationMs: 200_000 },
   callMs: 0,
+  trackId: null as string | null,
+  empty: false,
 }));
 vi.mock("@/lib/budget/mode", () => ({ currentMode: async () => state.mode }));
 
@@ -25,7 +27,8 @@ vi.mock("@/lib/spotify", () => ({
       state.calls.push(token);
       if (state.fail) throw new Error("429");
       if (state.callMs) vi.setSystemTime(Date.now() + state.callMs);
-      return { track: { id: `${token}-track`, name: "x" }, ...state.player, context: null };
+      if (state.empty) return null;
+      return { track: { id: state.trackId ?? `${token}-track`, name: "x" }, ...state.player, context: null };
     },
     contextName: async () => null,
   }),
@@ -42,6 +45,8 @@ beforeEach(() => {
   state.fail = false;
   state.mode = "normal";
   state.callMs = 0;
+  state.trackId = null;
+  state.empty = false;
   state.uid = "aaaaaaaaaaaa";
   state.player = { isPlaying: true, progressMs: 1_000, durationMs: 200_000 };
   vi.useRealTimers();
@@ -129,5 +134,50 @@ describe("the memo at a song's end", () => {
     vi.advanceTimersByTime(4_000);
     expect(await progress()).toBe(198_000);
     expect(state.calls).toHaveLength(1);
+  });
+});
+
+// Code review 0156 H2: merged with L1/L2, the memo answered the poll that follows an in-app play
+// with the song from before the click (the bar flipped back, Home finished the new song as a 2 s
+// skip, the np-change beacon filed a bogus change), and answered M3's confirming re-ask of an
+// empty answer with that same empty sample, so the confirmation always passed. The poll after an
+// in-app action and the re-ask send ?fresh=1, which skips the memo's read (it still writes), and
+// an empty answer is not memoized.
+describe("the memo around an in-app action and an empty answer", () => {
+  const req = (fresh: boolean) => new Request(`http://127.0.0.1:3000/api/now-playing${fresh ? "?fresh=1" : ""}`);
+  const id = async (fresh: boolean) => ((await (await GET(req(fresh))).json()).playing?.track?.id ?? null) as string | null;
+
+  it("the poll after a Play (fresh) reaches Spotify inside the window and gets the new song", async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    state.trackId = "A";
+    expect(await id(false)).toBe("A");
+    state.trackId = "B"; // the user played B in the app
+    vi.advanceTimersByTime(2_050); // playOptimistic's 2 s suppression, then the kicked poll
+    expect(await id(true)).toBe("B");
+    expect(state.calls).toHaveLength(2);
+    // ...and writes: another tab's plain poll in the window shares B.
+    expect(await id(false)).toBe("B");
+    expect(state.calls).toHaveLength(2);
+  });
+
+  it("a plain poll inside the window still shares the call", async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    state.trackId = "A";
+    await id(false);
+    state.trackId = "B";
+    vi.advanceTimersByTime(2_050);
+    expect(await id(false)).toBe("A");
+    expect(state.calls).toHaveLength(1);
+  });
+
+  it("an empty answer is not replayed: the re-ask 600 ms later asks Spotify again", async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    state.trackId = "A";
+    state.empty = true;
+    expect(await id(false)).toBeNull();
+    state.empty = false; // the empty answer was transient
+    vi.advanceTimersByTime(600);
+    expect(await id(true)).toBe("A");
+    expect(state.calls).toHaveLength(2);
   });
 });

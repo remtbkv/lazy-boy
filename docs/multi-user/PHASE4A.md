@@ -106,7 +106,7 @@ Numbered as the brief's items.
 11. **`/v1/me`**: only a 403 is "not registered"; a 429, 5xx or 401 is `SPOTIFY_UNAVAILABLE` →
     `/login?error=SpotifyUnavailable`. The scopes: `src/lib/scopes.ts DROP_PROFILE_SCOPES` (false).
 12. **Now-playing**: the per-user memo, 5 s or what is left of the song if less, with the replayed progress aged by
-    the time since the sample (NOW_PLAYING_2S.md lane L0), keyed by uid, 200s only (`src/lib/now-playing-memo.ts`). The 15-second
+    the time since the sample (NOW_PLAYING_2S.md lane L0), keyed by uid, 200s with a song only (an empty answer is not kept), read past by `?fresh=1` on the poll after an in-app action and on the re-ask that confirms an empty answer (code review 0156 H2; `src/lib/now-playing-memo.ts`). The 15-second
     mid-track polling is in `now-playing-context.tsx`, outside this lane's files (§4).
 13. **`/privacy` and `/terms`** true of the above: the request's e-mail and name and why; account id; tokens
     encrypted; logs tagged with the random id; a database of one's own on Turso, the accounts database there,

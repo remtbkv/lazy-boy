@@ -125,11 +125,19 @@ let markedNowPlayingReady = false;
 // store shows as a gap (NOW_PLAYING_2S.md REVIEW H4.3).
 let npChangeSeq = 0;
 // The provider's poll suppression lives in two refs; now-playing-poll.ts's `suppress` moves them,
-// so an action's window never cuts a Save Queue hold short (code review 0156 L-c).
-function moveSuppression(until: { current: number }, hold: { current: number }, e: SuppressionEvent): void {
+// so an action's window never cuts a Save Queue hold short (code review 0156 L-c). Every such
+// event (a play, a pause, a failure, a walk's hold or release, here or relayed) marks the next
+// poll fresh: the server's memo holds an answer from before it (review 0156 H2).
+function moveSuppression(
+  until: { current: number },
+  hold: { current: number },
+  fresh: { current: boolean },
+  e: SuppressionEvent,
+): void {
   const s = suppress({ until: until.current, hold: hold.current }, e);
   until.current = s.until;
   hold.current = s.hold;
+  fresh.current = true;
 }
 function markNowPlayingReady(): void {
   if (markedNowPlayingReady) return;
@@ -168,6 +176,9 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
   // kind=return (np-change.ts).
   const hiddenAtRef = useRef<number | null>(null);
   const visibleAtRef = useRef<number | null>(null);
+  // The next poll asks /api/now-playing?fresh=1, past the server's memo (moveSuppression, and the
+  // re-ask that confirms an empty answer).
+  const freshRef = useRef(false);
   useEffect(() => {
     playingRef.current = playing; // keep the ref current for toggle() without reading state in render
   }, [playing]);
@@ -330,10 +341,13 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     // probe at all (review K1). Other tabs get the reading off this tab's broadcast.
     if (probeDue(Date.now(), lastProbeAtRef.current)) void probeCurrentBuild();
     const seq = ++refreshSeq.current;
+    const fresh = freshRef.current;
+    freshRef.current = false;
     try {
       const sentAt = Date.now();
-      const res = await fetch("/api/now-playing", { cache: "no-store" });
+      const res = await fetch(fresh ? "/api/now-playing?fresh=1" : "/api/now-playing", { cache: "no-store" });
       if (!res.ok) {
+        if (fresh) freshRef.current = true; // the retry still has to get past the memo
         const retryAfterS = res.status === 429 ? Number(res.headers.get("Retry-After")) : NaN;
         return Number.isFinite(retryAfterS) && retryAfterS > 0
           ? { kind: "error", retryAfterMs: retryAfterS * 1000 }
@@ -358,7 +372,10 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
         // to the song that just ended is ignored (now-playing-poll.ts screenAnswer).
         const screened = screenAnswer(playingRef.current, data.playing, Date.now(), screenRef.current);
         screenRef.current = screened.mem;
-        if (screened.action === "hold") return { kind: "skipped", retryInMs: screened.retryInMs };
+        if (screened.action === "hold") {
+          freshRef.current = true; // the confirming re-ask must reach Spotify (review 0156 H2)
+          return { kind: "skipped", retryInMs: screened.retryInMs };
+        }
         if (screened.action === "ignore") return { kind: "ok", playing: playingRef.current, minPollMs: data.minPollMs };
         const shown = playingRef.current;
         const shownAt = lastAppliedAt.current;
@@ -387,6 +404,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       return { kind: "ok", playing: data.playing, minPollMs: data.minPollMs };
     } catch {
       /* transient — keep the last known state rather than flicker */
+      if (fresh) freshRef.current = true;
       return { kind: "error" };
     }
   }, [broadcast, checkSkew, probeCurrentBuild, uid]);
@@ -498,13 +516,13 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       } else if (msg.type === "optimistic") {
         // A user action elsewhere — apply it and match its suppression so neither this tab's
         // view nor the leader's next poll clobbers it before Spotify catches up.
-        moveSuppression(suppressUntil, holdUntil, { kind: "action", until: msg.until });
+        moveSuppression(suppressUntil, holdUntil, freshRef, { kind: "action", until: msg.until });
         if (msg.at > lastAppliedAt.current) {
           lastAppliedAt.current = msg.at;
           if (aliveRef.current) setPlaying(msg.playing);
         }
       } else if (msg.type === "hold") {
-        moveSuppression(suppressUntil, holdUntil, { kind: "hold", until: msg.until });
+        moveSuppression(suppressUntil, holdUntil, freshRef, { kind: "hold", until: msg.until });
         if (msg.until === 0 && isLeaderRef.current) loop.kick();
       } else if (msg.type === "request" && isLeaderRef.current) {
         // Only the leader answers a newcomer — and only with state fresh enough to trust.
@@ -572,7 +590,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
   const playOptimistic = useCallback(
     (track: NowPlayingTrack, durationMs = 0, startedAt?: number) => {
       const until = Date.now() + 2000;
-      moveSuppression(suppressUntil, holdUntil, { kind: "action", until });
+      moveSuppression(suppressUntil, holdUntil, freshRef, { kind: "action", until });
       const next: Playing = { track, isPlaying: true, progressMs: 0, durationMs, context: null };
       const at = Date.now();
       lastAppliedAt.current = at;
@@ -594,7 +612,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
   const holdDuring = useCallback(
     <T,>(work: () => Promise<T>): Promise<T> =>
       holdWhile(work, (until) => {
-        moveSuppression(suppressUntil, holdUntil, { kind: "hold", until });
+        moveSuppression(suppressUntil, holdUntil, freshRef, { kind: "hold", until });
         broadcast({ type: "hold", until });
         if (until === 0) refresh();
       }),
@@ -610,7 +628,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       if (!cur) return { ok: true };
       const nextPlaying = !cur.isPlaying;
       const until = Date.now() + 2000;
-      moveSuppression(suppressUntil, holdUntil, { kind: "action", until });
+      moveSuppression(suppressUntil, holdUntil, freshRef, { kind: "action", until });
       const optimistic: Playing = {
         ...cur,
         isPlaying: nextPlaying,
@@ -622,7 +640,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       broadcast({ type: "optimistic", playing: optimistic, until, at });
       const r = await playerSetPlayingAction(nextPlaying);
       if (!r.ok) {
-        moveSuppression(suppressUntil, holdUntil, { kind: "failed" }); // failed → drop the optimistic flip, show real state (a hold stays)
+        moveSuppression(suppressUntil, holdUntil, freshRef, { kind: "failed" }); // failed → drop the optimistic flip, show real state (a hold stays)
         refresh();
       }
       return r;

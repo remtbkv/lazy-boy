@@ -29,7 +29,7 @@ const reply = (playing: unknown, u?: string, minPollMs = 0) =>
     { headers: { "Content-Type": "application/json" } },
   );
 
-export async function GET() {
+export async function GET(req?: Request) {
   const user = await requireUser();
   // The identity check could not run: "could not tell" (a non-200 the poll ignores), never
   // "nothing playing", which would make Home finish the current song.
@@ -51,7 +51,11 @@ export async function GET() {
   // Read beside the Spotify call, not before it: the mode's cache misses once per 10 minutes. A
   // memoized answer carries the floor too, or a tab's poller would drop it for one reply.
   const floor = currentMode().then((m) => NOW_PLAYING_MIN_POLL_MS[m]);
-  const memo = memoizedNowPlaying(uid, now);
+  // `?fresh=1`: the poll after an in-app play, pause or Save Queue walk, and the re-ask that
+  // confirms an empty answer. The memo's answer predates what the tab is checking, so it reads
+  // Spotify (and still writes the memo). Bounded by user actions (code review 0156 H2).
+  const fresh = !!req && new URL(req.url).searchParams.get("fresh") === "1";
+  const memo = fresh ? null : memoizedNowPlaying(uid, now);
   if (memo) return reply(memo.playing, uid, await floor);
   try {
     const sp = spotifyClient(uid, accessToken, false, "now-playing");
@@ -59,10 +63,9 @@ export async function GET() {
     // The sample is as old as the answer, not as the request: stamped with `now`, a replay ran the
     // call's latency ahead (code review 0156 L-f).
     const sampledAt = Date.now();
-    if (!playing) {
-      rememberNowPlaying(uid, sampledAt, null);
-      return reply(null, uid, await floor);
-    }
+    // An empty answer is not memoized: Spotify's player has answered empty mid-playback, and the
+    // tab confirms one by asking again, which a replay of the same sample would always pass.
+    if (!playing) return reply(null, uid, await floor);
 
     let context: { name: string; type: string } | null = null;
     if (playing.context) {
