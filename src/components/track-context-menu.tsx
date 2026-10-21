@@ -11,6 +11,8 @@ import {
   saveToLikedAction,
 } from "@/app/(app)/actions";
 import type { Track } from "@/lib/spotify";
+import { useNowPlaying } from "@/components/now-playing-context";
+import { playThenShow } from "@/lib/np-change";
 
 // "Play from <playlist>" lists at most this many before it stops being a menu.
 const PLAY_FROM_MAX = 3;
@@ -46,6 +48,18 @@ export function TrackContextMenu({
   playFrom?: { id: string; name: string }[];
 }) {
   const [pending, start] = useTransition();
+  const { playOptimistic, refresh } = useNowPlaying();
+  // A Play that succeeded shows the song on the bar when the action returns, then the poll
+  // confirms it (NOW_PLAYING_2S.md L1); before, the bar waited for the next poll.
+  const playAndShow = (action: () => Promise<{ ok: boolean; error?: string }>) => () =>
+    playThenShow(action, (startedAt) => {
+      playOptimistic(
+        { id: track.id, title: track.title, artist: track.artist, albumImage: track.albumImage ?? null, album: track.album ?? null },
+        track.durationMs ?? 0,
+        startedAt,
+      );
+      refresh();
+    });
 
   useEffect(() => {
     const close = () => onClose();
@@ -130,7 +144,7 @@ export function TrackContextMenu({
           icon={<Play className="size-4" />}
           label="Play now"
           disabled={pending}
-          onClick={() => run(() => playTrackAction(track.uri), `Playing ${track.title}`)}
+          onClick={() => run(playAndShow(() => playTrackAction(track.uri)), `Playing ${track.title}`)}
         />
       ) : null}
       {(playFrom ?? []).slice(0, PLAY_FROM_MAX).map((p) => (
@@ -140,7 +154,7 @@ export function TrackContextMenu({
           label={`Play from ${p.name}`}
           disabled={pending}
           onClick={() =>
-            run(() => playFromPlaylistAction(p.id, track.uri), `Playing from ${p.name}`)
+            run(playAndShow(() => playFromPlaylistAction(p.id, track.uri)), `Playing from ${p.name}`)
           }
         />
       ))}

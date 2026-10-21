@@ -11,6 +11,7 @@ import { SortMenu } from "@/components/sort-menu";
 import { TrackContextMenu } from "@/components/track-context-menu";
 import { Badge } from "@/components/ui/badge";
 import { formatDuration } from "@/lib/format";
+import { playThenShow } from "@/lib/np-change";
 import type { Track } from "@/lib/spotify";
 
 type Sort = "original" | "title" | "artist" | "album" | "recent";
@@ -89,16 +90,18 @@ export function TrackList({
   function play(t: Track) {
     if (!playlistId) return;
     window.getSelection?.()?.removeAllRanges();
-    playPlaylistTrackAction(playlistId, t.uri).then((r) => {
-      if (!r.ok) {
-        toast.error(r.error);
-        return;
-      }
-      // Show the now-playing highlight on this row right away; the poll confirms.
-      playOptimistic(
-        { id: t.id, title: t.title, artist: t.artist, albumImage: t.albumImage ?? null },
-        t.durationMs ?? 0,
-      );
+    // On success, show the now-playing highlight on this row right away; the poll confirms.
+    // playThenShow stamps when the action went out, for the np-change beacon's click → render.
+    void playThenShow(
+      () => playPlaylistTrackAction(playlistId, t.uri),
+      (startedAt) =>
+        playOptimistic(
+          { id: t.id, title: t.title, artist: t.artist, albumImage: t.albumImage ?? null },
+          t.durationMs ?? 0,
+          startedAt,
+        ),
+    ).then((r) => {
+      if (!r.ok) toast.error(r.error);
     });
   }
 

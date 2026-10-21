@@ -18,7 +18,10 @@ import {
   type SkewSource,
   type SkewStreak,
 } from "@/lib/build-skew";
+import { recordAppEvent } from "@/lib/metrics-client";
+import { npChange, npChangeMeta } from "@/lib/np-change";
 import {
+  holdWhile,
   leaderElection,
   NO_SCREEN_MEMORY,
   PollLoop,
@@ -61,7 +64,11 @@ type NowPlayingValue = {
    *  chip passes its interpolated position so the bar doesn't jump back to the last
    *  polled value). Resolves with the action result so callers can toast failures. */
   toggle: (progressMs?: number) => Promise<{ ok: boolean; error?: string }>;
-  playOptimistic: (track: NowPlayingTrack, durationMs?: number) => void;
+  /** Show a song as playing now. `startedAt` = when the in-app action behind it went out: the
+   *  np-change beacon times click → render from it. */
+  playOptimistic: (track: NowPlayingTrack, durationMs?: number, startedAt?: number) => void;
+  /** Hold every tab's polls while `work` runs (Save Queue's walk), then poll at once. */
+  holdDuring: <T>(work: () => Promise<T>) => Promise<T>;
 };
 
 const Ctx = createContext<NowPlayingValue | null>(null);
@@ -72,6 +79,9 @@ type NPMessage =
   // keeps its own age instead of looking fresh on receipt (src/lib/build-skew.ts).
   | { type: "state"; playing: Playing; at: number; build?: string; authBuild?: string; authAt?: number }
   | { type: "optimistic"; playing: Playing; until: number; at: number } // a user action
+  // Save Queue's walk: no tab polls until `until` (0 = released). Unlike `optimistic`, it may
+  // shorten the suppression, which is how the release reaches the other tabs.
+  | { type: "hold"; until: number }
   | { type: "request" }; // a new tab asking the leader for the current state
 
 // The channel, the cache key and the leader lock are per user: userStorageName(uid,
@@ -104,6 +114,9 @@ const POLL_MS = STEADY_MS;
 // ready when you arrive — a second mark would be measuring the 6s poll cadence, not a wait.
 // Module scope is exactly the right lifetime for that: one document load, one mark.
 let markedNowPlayingReady = false;
+// The np-change beacon's per-tab sequence number: a batch lost on its way to the telemetry
+// store shows as a gap (NOW_PLAYING_2S.md REVIEW H4.3).
+let npChangeSeq = 0;
 function markNowPlayingReady(): void {
   if (markedNowPlayingReady) return;
   markedNowPlayingReady = true;
@@ -133,6 +146,8 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
   const lastAppliedAt = useRef(0);
   const bcRef = useRef<BroadcastChannel | null>(null);
   const isLeaderRef = useRef(false);
+  // When the last in-app play went out (the beacon's "in-app" kind), or null.
+  const inAppAtRef = useRef<number | null>(null);
   useEffect(() => {
     playingRef.current = playing; // keep the ref current for toggle() without reading state in render
   }, [playing]);
@@ -248,7 +263,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     } catch {
       /* channel closed */
     }
-    if (msg.type !== "request") {
+    if (msg.type === "state" || msg.type === "optimistic") {
       try {
         localStorage.setItem(
           userStorageName(uid, "lb-nowplaying"),
@@ -287,6 +302,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     if (probeDue(Date.now(), lastProbeAtRef.current)) void probeCurrentBuild();
     const seq = ++refreshSeq.current;
     try {
+      const sentAt = Date.now();
       const res = await fetch("/api/now-playing", { cache: "no-store" });
       if (!res.ok) {
         const retryAfterS = res.status === 429 ? Number(res.headers.get("Retry-After")) : NaN;
@@ -295,6 +311,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
           : { kind: "error" };
       }
       const data = (await res.json()) as { playing: Playing; build?: string; u?: string };
+      const receivedAt = Date.now();
       // The browser's cookie names someone else now (a sign-in in another tab): this answer is
       // theirs, so it is neither shown, cached nor relayed, and the page reloads as theirs.
       if (namesAnotherUser(data, uid)) {
@@ -314,9 +331,20 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
         screenRef.current = screened.mem;
         if (screened.action === "hold") return { kind: "skipped", retryInMs: screened.retryInMs };
         if (screened.action === "ignore") return { kind: "ok", playing: playingRef.current };
+        const shown = playingRef.current;
+        const shownAt = lastAppliedAt.current;
         const at = Date.now();
         lastAppliedAt.current = at;
         setPlaying(data.playing);
+        // np-change: an upper bound on change → render for a song change this visible tab shows
+        // (lib/np-change.ts). The frame after the state is set stands in for the render.
+        const next = data.playing;
+        if (next && document.visibilityState === "visible") {
+          requestAnimationFrame(() => {
+            const c = npChange({ shown, shownAt, next, sentAt, receivedAt, renderedAt: Date.now(), inAppAt: inAppAtRef.current });
+            if (c) recordAppEvent("np-change", npChangeMeta(c, "poll", ++npChangeSeq), c.value);
+          });
+        }
         broadcast({
           type: "state",
           playing: data.playing,
@@ -443,6 +471,9 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
           lastAppliedAt.current = msg.at;
           if (aliveRef.current) setPlaying(msg.playing);
         }
+      } else if (msg.type === "hold") {
+        suppressUntil.current = msg.until;
+        if (msg.until === 0 && isLeaderRef.current) loop.kick();
       } else if (msg.type === "request" && isLeaderRef.current) {
         // Only the leader answers a newcomer — and only with state fresh enough to trust.
         // A hidden leader answering with hours-old state was the request-path phantom
@@ -507,7 +538,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
 
   // Show a track as playing immediately (e.g. double-click a song); the next poll confirms.
   const playOptimistic = useCallback(
-    (track: NowPlayingTrack, durationMs = 0) => {
+    (track: NowPlayingTrack, durationMs = 0, startedAt?: number) => {
       const until = Date.now() + 2000;
       suppressUntil.current = until;
       const next: Playing = { track, isPlaying: true, progressMs: 0, durationMs, context: null };
@@ -515,8 +546,28 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       lastAppliedAt.current = at;
       setPlaying(next);
       broadcast({ type: "optimistic", playing: next, until, at });
+      if (startedAt === undefined) return;
+      inAppAtRef.current = startedAt;
+      // The in-app path's beacon: click → render, the action's round trip included.
+      if (document.visibilityState === "visible") {
+        requestAnimationFrame(() => {
+          const renderedAt = Date.now();
+          const c = { value: renderedAt - startedAt, kind: "in-app" as const, pNew: 0, rtt: at - startedAt, render: renderedAt - at, lagHint: 0 };
+          recordAppEvent("np-change", npChangeMeta(c, "in-app", ++npChangeSeq), c.value);
+        });
+      }
     },
     [broadcast],
+  );
+
+  const holdDuring = useCallback(
+    <T,>(work: () => Promise<T>): Promise<T> =>
+      holdWhile(work, (until) => {
+        suppressUntil.current = until;
+        broadcast({ type: "hold", until });
+        if (until === 0) refresh();
+      }),
+    [broadcast, refresh],
   );
 
   // Toggle play/pause for whatever's playing (track-list row button + header chip).
@@ -549,7 +600,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
   );
 
   return (
-    <Ctx.Provider value={{ playing, refresh, setPlaying, toggle, playOptimistic }}>
+    <Ctx.Provider value={{ playing, refresh, setPlaying, toggle, playOptimistic, holdDuring }}>
       {children}
     </Ctx.Provider>
   );
@@ -565,6 +616,7 @@ export function useNowPlaying(): NowPlayingValue {
       setPlaying: () => {},
       toggle: async () => ({ ok: true }),
       playOptimistic: () => {},
+      holdDuring: (work) => work(),
     }
   );
 }

@@ -14,6 +14,8 @@ import {
 import { PlaylistsSync } from "@/components/playlists-sync";
 import { writeCleanActive } from "@/lib/clean-progress";
 import { useUid } from "@/components/user-context";
+import { useNowPlaying } from "@/components/now-playing-context";
+import { playThenShow } from "@/lib/np-change";
 import { settleAction } from "@/lib/home-recovery";
 import { toast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
@@ -162,6 +164,7 @@ function QueuePopover({
   onClose: () => void;
 }) {
   const [pending, start] = useTransition();
+  const { holdDuring } = useNowPlaying();
   const [closing, setClosing] = useState(false);
   const dismiss = () => {
     if (closing) return;
@@ -181,7 +184,9 @@ function QueuePopover({
       // settleAction: a transport failure (deploy skew, dropped connection, a platform timeout
       // on the 1–2 min walk) rejects, and a rejection inside a transition replaced the whole
       // of Home with the error boundary (burn review 2026-10-03, U1). It becomes a toast.
-      const r = await settleAction(saveQueueAction());
+      // The walk skips through the queue and back: no tab polls meanwhile, or Home would see
+      // every song it passes "end" and list it (NOW_PLAYING_2S §1.3).
+      const r = await holdDuring(() => settleAction(saveQueueAction()));
       if (r.ok) toast.success(`Saved to "${r.name}"`);
       else toast.error(r.error);
       dismiss();
@@ -238,6 +243,7 @@ function ActionSheet({
   const [others, setOthers] = useState<string[]>([]);
   const [group, setGroup] = useState<"base" | "subtract">("base");
   const [pending, start] = useTransition();
+  const { playOptimistic, refresh, holdDuring } = useNowPlaying();
   // Subtract answers a question before it does anything, so it gets a second step in the
   // same sheet: the picker becomes the result (unique vs. shared), with the save as the
   // follow-up. Every other action commits straight from the picker.
@@ -316,7 +322,14 @@ function ActionSheet({
     start(async () => {
       switch (action.key) {
         case "resume": {
-          const r = await settleAction(resumePlaylistAction(picked[0]));
+          // The bar shows the song Resume started when the action returns (NOW_PLAYING_2S L1).
+          const r = await playThenShow(
+            () => settleAction(resumePlaylistAction(picked[0])),
+            (startedAt, done) => {
+              if (done.ok) playOptimistic({ ...done.started, albumImage: null }, 0, startedAt);
+              refresh();
+            },
+          );
           if (r.ok) toast.success(`Resuming "${nameOf(picked[0])}"`);
           else toast.error(r.error);
           break;
@@ -339,7 +352,7 @@ function ActionSheet({
           break;
         }
         case "queue": {
-          const r = await settleAction(saveQueueAction());
+          const r = await holdDuring(() => settleAction(saveQueueAction()));
           if (r.ok) toast.success(`Saved to "${r.name}"`);
           else toast.error(r.error);
           break;

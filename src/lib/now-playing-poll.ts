@@ -141,6 +141,27 @@ export function screenAnswer(
   return { action: "apply", mem: changed ? { ...calm, lastChange: { fromId: shown.track.id, at: now } } : calm };
 }
 
+/** The longest a Save Queue walk holds the polls (it walks ≤ ~105 steps at ~0.3-0.8 s and gives up
+ *  after 15 s stuck); past it the polls resume even if the action never answers. */
+export const HOLD_MAX_MS = 3 * 60_000;
+
+/** Hold the polls for the length of `work` (Save Queue's walk: it skips through the queue and
+ *  comes back to the song, and every song it passes would otherwise "end" on Home), then release
+ *  them, whether the work succeeded or not. `hold(until)` sets the provider's suppression; 0
+ *  releases it. */
+export async function holdWhile<T>(
+  work: () => Promise<T>,
+  hold: (until: number) => void,
+  now: () => number = Date.now,
+): Promise<T> {
+  hold(now() + HOLD_MAX_MS);
+  try {
+    return await work();
+  } finally {
+    hold(0);
+  }
+}
+
 /** One timer, at most one request in flight. `kick()` polls now — or, if a request is already
  *  out, once more right after it lands (its answer may predate whatever prompted the kick). */
 export class PollLoop {

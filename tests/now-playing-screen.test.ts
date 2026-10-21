@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 import {
   EMPTY_CONFIRM_MS,
   FLIP_BACK_MS,
+  HOLD_MAX_MS,
+  holdWhile,
   NO_SCREEN_MEMORY,
   screenAnswer,
   type PolledPlaying,
@@ -60,5 +62,19 @@ describe("screenAnswer: flip-back", () => {
   it("A at its end more than 3 s after the change is applied (not a flip-back)", () => {
     const toB = screenAnswer(song("A", 199_000), song("B", 400), T, NO_SCREEN_MEMORY);
     expect(screenAnswer(song("B", 400), song("A", 199_200), T + FLIP_BACK_MS, toB.mem).action).toBe("apply");
+  });
+});
+
+// Save Queue walks the queue with `next` (~300 ms a step) and comes back to the song: the polls
+// in between would see songs "leave" and Home would mint rows for them. The provider holds its
+// polls for the walk (NOW_PLAYING_2S.md §1.3, L1; REVIEW M5).
+describe("holdWhile: no poll during a Save Queue walk", () => {
+  it("holds before the walk and releases after it, success or failure", async () => {
+    const holds: number[] = [];
+    await holdWhile(async () => { expect(holds).toEqual([1_000 + HOLD_MAX_MS]); return 1; }, (u) => holds.push(u), () => 1_000);
+    expect(holds).toEqual([1_000 + HOLD_MAX_MS, 0]);
+    holds.length = 0;
+    await expect(holdWhile(async () => { throw new Error("walk failed"); }, (u) => holds.push(u), () => 2_000)).rejects.toThrow("walk failed");
+    expect(holds).toEqual([2_000 + HOLD_MAX_MS, 0]);
   });
 });

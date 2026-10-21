@@ -580,7 +580,7 @@ export async function playPlaylistTrackAction(
 // No history for that playlist → start from the top. Needs an active device + Premium.
 export async function resumePlaylistAction(
   playlistId: string,
-): Promise<ActionResult<{ track: string; fromTop: boolean }>> {
+): Promise<ActionResult<{ track: string; fromTop: boolean; started: { id: string; title: string; artist: string } }>> {
   try {
     const uri = `spotify:playlist:${playlistId}`;
     // Auth FIRST, then the two store reads in parallel — never in one Promise.all with
@@ -679,7 +679,9 @@ export async function resumePlaylistAction(
     const startIdx = fromTop ? 0 : bestEnd + 1;
     const start = tracks[startIdx];
     await sp.playContext(uri, start.uri);
-    return { ok: true, track: start.title, fromTop };
+    // The song it started, so the bar shows it when the action returns instead of at the next
+    // poll (NOW_PLAYING_2S.md L1).
+    return { ok: true, track: start.title, fromTop, started: { id: start.id, title: start.title, artist: start.artist } };
   } catch (e) {
     unstable_rethrow(e);
     if (e instanceof SpotifyError && (e.status === 404 || e.status === 403)) {
