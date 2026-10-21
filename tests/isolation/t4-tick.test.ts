@@ -51,6 +51,7 @@ beforeEach(async () => {
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 afterEach(() => {
+  vi.useRealTimers();
   db.close();
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
@@ -429,6 +430,9 @@ describe("T4: the lease and the brake's counter, through the tick", () => {
   });
 
   it("a harvest the client re-sends is counted before each send: a 403 retried once is two calls, two counts (§7.5 item 1)", async () => {
+    // The client counts its re-send in the quota day of the wall clock (client.ts), the step in NOW's:
+    // pin the clock to NOW, or the two land in different days once the real date passes NOW's quota day.
+    vi.useFakeTimers({ now: NOW, toFake: ["Date"] });
     const spotify = install({ [`at-${A}`]: { player: playing(`${A}-now`), recent: 403 }, [`at-${B}`]: healthy(B) });
     await runTick(tickDeps({ now: () => NOW, stores }).deps, ZEN);
     expect(spotify.calls.filter((c) => c.bearer === `at-${A}` && c.path.endsWith("/recently-played")).length).toBe(2);
