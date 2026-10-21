@@ -3,7 +3,7 @@
 // p_new ms before Spotify sampled (the new song's own progress), the sample lies inside the
 // request, so latency ≤ p_new + (reply received − request sent) + (render − received).
 import { describe, expect, it } from "vitest";
-import { npChange, npChangeMeta, playThenShow } from "@/lib/np-change";
+import { npChange, npChangeMeta, npInApp, playThenShow } from "@/lib/np-change";
 
 const T = 1_000_000;
 const song = (id: string, progressMs: number, durationMs = 200_000, isPlaying = true) => ({
@@ -50,6 +50,32 @@ describe("npChange", () => {
     // B began 2 s before this reply landed; the previous reply (the old song) landed 1 s before it.
     const c = npChange({ shown: song("A", 100_000), shownAt: T - 1_000, next: song("B", 2_000), sentAt: T, receivedAt: T + 300, renderedAt: T + 310, inAppAt: null });
     expect(c?.lagHint).toBe(700);
+  });
+});
+
+// A tab that was hidden at any point between the state it showed and the frame that painted the
+// change did not watch the change happen: its bound is the time away, not the app's latency, so
+// the row is filed as kind=return and reported apart (code review 0156 M5).
+describe("a tab coming back is not a song change's latency", () => {
+  const base = { shown: song("A", 60_000), shownAt: T - 600_000, next: song("B", 590_000, 900_000), sentAt: T, receivedAt: T + 300, renderedAt: T + 330, inAppAt: null };
+
+  it("hidden for 10 minutes since it last showed a song: kind=return", () => {
+    expect(npChange({ ...base, hiddenAt: T - 590_000 })?.kind).toBe("return");
+  });
+
+  it("hidden between the receipt and the frame (requestAnimationFrame waited): kind=return", () => {
+    const c = npChange({ ...base, shownAt: T - 6_000, next: song("B", 400), renderedAt: T + 120_000, hiddenAt: T + 310 });
+    expect(c?.kind).toBe("return");
+  });
+
+  it("hidden only before the state it showed: an ordinary change", () => {
+    const c = npChange({ ...base, shownAt: T - 6_000, next: song("B", 400), hiddenAt: T - 60_000 });
+    expect(c?.kind).toBe("skip");
+  });
+
+  it("in-app: a click → render that spans a hidden spell is kind=return", () => {
+    expect(npInApp({ startedAt: T, shownAt: T + 600, renderedAt: T + 90_000, hiddenAt: T + 650 }).kind).toBe("return");
+    expect(npInApp({ startedAt: T, shownAt: T + 600, renderedAt: T + 630, hiddenAt: T - 1 })).toMatchObject({ kind: "in-app", value: 630, rtt: 600, render: 30 });
   });
 });
 

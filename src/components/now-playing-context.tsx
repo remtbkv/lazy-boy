@@ -19,7 +19,7 @@ import {
   type SkewStreak,
 } from "@/lib/build-skew";
 import { recordAppEvent } from "@/lib/metrics-client";
-import { npChange, npChangeMeta } from "@/lib/np-change";
+import { npChange, npChangeMeta, npInApp } from "@/lib/np-change";
 import {
   agePlaying,
   holdWhile,
@@ -149,9 +149,18 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
   const isLeaderRef = useRef(false);
   // When the last in-app play went out (the beacon's "in-app" kind), or null.
   const inAppAtRef = useRef<number | null>(null);
+  // When this tab last went hidden: an np-change spanning it is filed as kind=return (np-change.ts).
+  const hiddenAtRef = useRef<number | null>(null);
   useEffect(() => {
     playingRef.current = playing; // keep the ref current for toggle() without reading state in render
   }, [playing]);
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === "hidden") hiddenAtRef.current = Date.now();
+    };
+    document.addEventListener("visibilitychange", onHide);
+    return () => document.removeEventListener("visibilitychange", onHide);
+  }, []);
 
   // The leader's poll loop (null while this tab follows), and a ref-indirection to pollOnce for
   // the BroadcastChannel handlers and the rescue timer, which outlive any one pollOnce.
@@ -343,7 +352,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
         const next = data.playing;
         if (next && document.visibilityState === "visible") {
           requestAnimationFrame(() => {
-            const c = npChange({ shown, shownAt, next, sentAt, receivedAt, renderedAt: Date.now(), inAppAt: inAppAtRef.current });
+            const c = npChange({ shown, shownAt, next, sentAt, receivedAt, renderedAt: Date.now(), inAppAt: inAppAtRef.current, hiddenAt: hiddenAtRef.current });
             if (c) recordAppEvent("np-change", npChangeMeta(c, "poll", ++npChangeSeq), c.value);
           });
         }
@@ -553,8 +562,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       // The in-app path's beacon: click → render, the action's round trip included.
       if (document.visibilityState === "visible") {
         requestAnimationFrame(() => {
-          const renderedAt = Date.now();
-          const c = { value: renderedAt - startedAt, kind: "in-app" as const, pNew: 0, rtt: at - startedAt, render: renderedAt - at, lagHint: 0 };
+          const c = npInApp({ startedAt, shownAt: at, renderedAt: Date.now(), hiddenAt: hiddenAtRef.current });
           recordAppEvent("np-change", npChangeMeta(c, "in-app", ++npChangeSeq), c.value);
         });
       }

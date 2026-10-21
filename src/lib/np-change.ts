@@ -11,7 +11,7 @@
 
 type Answer = { track: { id: string }; isPlaying: boolean; progressMs: number; durationMs: number; timestamp?: number };
 
-export type NpChangeKind = "natural" | "skip" | "in-app" | "start";
+export type NpChangeKind = "natural" | "skip" | "in-app" | "start" | "return";
 
 export type NpChange = {
   /** The bound, ms. */
@@ -30,6 +30,10 @@ export type NpChange = {
 const NATURAL_SLACK_MS = 2_000;
 /** A change this soon after an in-app play is that play landing. */
 const IN_APP_MS = 5_000;
+/** The tab went hidden at or after `since`: it did not watch the change happen (a tab coming
+ *  back finds the change minutes late; requestAnimationFrame waits while hidden), so the bound
+ *  measures the time away and the row is filed as kind=return, reported apart (review 0156 M5). */
+const away = (hiddenAt: number | null | undefined, since: number) => hiddenAt != null && hiddenAt >= since;
 
 export function npChange(i: {
   /** What the bar showed before this answer, and when that was received. */
@@ -41,6 +45,8 @@ export function npChange(i: {
   renderedAt: number;
   /** When the last in-app play (double-click, menu Play, Resume) went out, or null. */
   inAppAt: number | null;
+  /** When the tab last went hidden, or null. */
+  hiddenAt?: number | null;
 }): NpChange | null {
   const { shown, next } = i;
   if (shown && shown.track.id === next.track.id) return null;
@@ -49,7 +55,8 @@ export function npChange(i: {
   const render = Math.max(0, Math.round(i.renderedAt - i.receivedAt));
   const changeAt = i.receivedAt - pNew;
   let kind: NpChangeKind;
-  if (!shown || !shown.isPlaying) kind = "start";
+  if (away(i.hiddenAt, i.shownAt)) kind = "return";
+  else if (!shown || !shown.isPlaying) kind = "start";
   else if (i.inAppAt !== null && i.receivedAt - i.inAppAt < IN_APP_MS) kind = "in-app";
   else {
     const leftAtChange = shown.durationMs - (shown.progressMs + (changeAt - i.shownAt));
@@ -63,6 +70,19 @@ export function npChange(i: {
     render,
     lagHint: shown ? Math.max(0, Math.round(i.shownAt - changeAt)) : 0,
     ...(typeof next.timestamp === "number" ? { tsDelta: Math.round(changeAt - next.timestamp) } : {}),
+  };
+}
+
+/** The in-app path's bound: click → render, the action's round trip included. `shownAt` is when
+ *  the provider applied the song. */
+export function npInApp(i: { startedAt: number; shownAt: number; renderedAt: number; hiddenAt?: number | null }): NpChange {
+  return {
+    value: i.renderedAt - i.startedAt,
+    kind: away(i.hiddenAt, i.startedAt) ? "return" : "in-app",
+    pNew: 0,
+    rtt: i.shownAt - i.startedAt,
+    render: i.renderedAt - i.shownAt,
+    lagHint: 0,
   };
 }
 
