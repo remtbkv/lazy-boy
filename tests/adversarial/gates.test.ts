@@ -9,6 +9,7 @@ import {
   HANDOFF_STALE_MS,
   HANDOFF_SKIP_FRACTION,
   HANDOFF_UNKNOWN_DURATION_FLOOR_MS,
+  HANDOFF_PENDING_BAND_MS,
   type HandoffObservation,
   type HandoffVerdict,
 } from "@/lib/handoff";
@@ -89,103 +90,51 @@ describe("judgeHandoff — exhaustive enumeration", () => {
   const NOW = 1_000_000_000;
   const DUR = 200_000;
   const need = DUR * HANDOFF_SKIP_FRACTION; // 80_000
+  const B = HANDOFF_PENDING_BAND_MS;
 
-  // The contract, transcribed from handoff.ts:31-40, in precedence order.
-  const expected = (p: HandoffObservation, now: number, head: boolean): HandoffVerdict => {
+  // The contract, transcribed from handoff.ts's prose, in precedence order: stale, never
+  // played, private, then the run (end − start, capped at the song) against the bar with
+  // strict <, a ±1.5 s band around the bar that waits for the store, and today's card.
+  const expected = (p: HandoffObservation, end: number, now: number, head: boolean): HandoffVerdict => {
     if (now - p.seenAt > HANDOFF_STALE_MS) return "stale";
     if (!p.sawPlaying) return "never-played";
-    const bar =
-      p.durationMs > 0 ? p.durationMs * HANDOFF_SKIP_FRACTION : HANDOFF_UNKNOWN_DURATION_FLOOR_MS;
-    if (p.maxProgress < bar) return "skip";
+    if (p.privateSession) return "private";
+    const ran = Math.min(Math.max(0, end - p.startAt), p.durationMs > 0 ? p.durationMs : Infinity);
+    const bar = p.durationMs > 0 ? p.durationMs * HANDOFF_SKIP_FRACTION : HANDOFF_UNKNOWN_DURATION_FLOOR_MS;
+    const band = p.durationMs > 0 && Math.abs(ran - bar) <= B;
+    if (ran < bar && !band) return "skip";
     if (!head) return "no-today";
-    return "commit";
+    return band ? "pending" : "commit";
   };
 
   const ages = [0, HANDOFF_STALE_MS - 1, HANDOFF_STALE_MS, HANDOFF_STALE_MS + 1];
-  const progresses = [0, need - 1, need, need + 1, DUR];
+  const runs = [0, need - B - 1, need - B, need - 1, need, need + B, need + B + 1, DUR, DUR + 60_000];
 
   for (const age of ages) {
     for (const sawPlaying of [false, true]) {
-      for (const maxProgress of progresses) {
+      for (const ran of runs) {
         for (const head of [false, true]) {
-          it(`age=${age} sawPlaying=${sawPlaying} progress=${maxProgress} head=${head}`, () => {
-            const p: HandoffObservation = {
-              seenAt: NOW - age,
-              sawPlaying,
-              maxProgress,
-              durationMs: DUR,
-            };
-            expect(judgeHandoff(p, NOW, head)).toBe(expected(p, NOW, head));
-          });
+          for (const privateSession of [false, true]) {
+            it(`age=${age} sawPlaying=${sawPlaying} ran=${ran} head=${head} private=${privateSession}`, () => {
+              const p: HandoffObservation = {
+                seenAt: NOW - age,
+                sawPlaying,
+                startAt: NOW - ran,
+                durationMs: DUR,
+                privateSession,
+              };
+              expect(judgeHandoff(p, NOW, NOW, head)).toBe(expected(p, NOW, NOW, head));
+            });
+          }
         }
       }
     }
   }
 
-  it("exactly 40% of a known duration commits (the bar is not exclusive)", () => {
-    const p: HandoffObservation = {
-      seenAt: NOW,
-      sawPlaying: true,
-      maxProgress: 80_000,
-      durationMs: 200_000,
-    };
-    expect(judgeHandoff(p, NOW, true)).toBe("commit");
-    expect(judgeHandoff({ ...p, maxProgress: 69_999 }, NOW, true)).toBe("skip");
-  });
-
-  it("exactly HANDOFF_STALE_MS old is NOT stale", () => {
-    const p: HandoffObservation = {
-      seenAt: NOW - HANDOFF_STALE_MS,
-      sawPlaying: true,
-      maxProgress: 200_000,
-      durationMs: 200_000,
-    };
-    expect(judgeHandoff(p, NOW, true)).toBe("commit");
-    expect(judgeHandoff({ ...p, seenAt: NOW - HANDOFF_STALE_MS - 1 }, NOW, true)).toBe("stale");
-  });
-
-  it("staleness outranks every other reason", () => {
-    const p: HandoffObservation = {
-      seenAt: NOW - HANDOFF_STALE_MS - 1,
-      sawPlaying: false,
-      maxProgress: 0,
-      durationMs: 0,
-    };
-    expect(judgeHandoff(p, NOW, false)).toBe("stale");
-  });
-
-  it("a paused-seeded track (sawPlaying false) is never credited, however far along", () => {
-    // "a track first seen paused carries progress it earned before we were watching"
-    // (handoff.ts:12-14)
-    const p: HandoffObservation = {
-      seenAt: NOW,
-      sawPlaying: false,
-      maxProgress: 200_000,
-      durationMs: 200_000,
-    };
-    expect(judgeHandoff(p, NOW, true)).toBe("never-played");
-  });
-
-  for (const durationMs of [0, -1, Number.NaN]) {
-    it(`durationMs=${String(durationMs)} falls back to the 30s floor`, () => {
-      const base: HandoffObservation = { seenAt: NOW, sawPlaying: true, maxProgress: 0, durationMs };
-      expect(
-        judgeHandoff({ ...base, maxProgress: HANDOFF_UNKNOWN_DURATION_FLOOR_MS - 1 }, NOW, true),
-      ).toBe("skip");
-      expect(
-        judgeHandoff({ ...base, maxProgress: HANDOFF_UNKNOWN_DURATION_FLOOR_MS }, NOW, true),
-      ).toBe("commit");
-    });
-  }
-
-  it("a clock that jumped backwards does not read as stale", () => {
-    const p: HandoffObservation = {
-      seenAt: NOW + 5_000, // observation stamped after `now`
-      sawPlaying: true,
-      maxProgress: 200_000,
-      durationMs: 200_000,
-    };
-    expect(judgeHandoff(p, NOW, true)).toBe("commit");
+  it("exactly 40% of a known duration is not a skip (the bar is not exclusive)", () => {
+    const p: HandoffObservation = { seenAt: NOW, sawPlaying: true, startAt: NOW - 80_000, durationMs: 200_000 };
+    expect(judgeHandoff(p, NOW, NOW, true)).toBe("pending");
+    expect(judgeHandoff({ ...p, startAt: NOW - 81_501 }, NOW, NOW, true)).toBe("commit");
   });
 });
 

@@ -205,3 +205,33 @@ describe("reconcilePlays — confirmation (count-based, ADJUDICATED 2026-08-20)"
   });
 });
 
+
+// NOW_PLAYING_2S.md L2: a play Home cannot tell apart from the bar (its run within ±1.5 s of
+// 40%) shows as pending until the store lists it; the store's count going up confirms it.
+describe("a pending provisional waits for the store", () => {
+  const T = Date.parse("2026-10-21T20:00:00.000Z");
+  const pending: Provisional = {
+    row: row({ name: "Near the bar", pending: true }),
+    at: T,
+    day: "2026-10-21",
+    basePlays: 0,
+  };
+
+  it("a new song's row from a pending play is marked pending", () => {
+    expect(addPlay([], pending.row)[0].pending).toBe(true);
+  });
+
+  it("a pending bump on an existing row marks that row pending", () => {
+    const [merged] = addPlay([row({ name: "Near the bar", plays: 2 })], pending.row);
+    expect(merged).toMatchObject({ plays: 3, pending: true });
+  });
+
+  it("unconfirmed, it is re-applied as pending; once the store counts it, the store's row stands", () => {
+    const waiting = reconcilePlays([], [pending], T + 60_000);
+    expect(waiting.rows).toEqual([expect.objectContaining({ name: "Near the bar", pending: true })]);
+    expect(waiting.remaining).toEqual([pending]);
+    const listed = reconcilePlays([row({ name: "Near the bar", plays: 1 })], [pending], T + 120_000);
+    expect(listed.rows).toEqual([row({ name: "Near the bar", plays: 1 })]);
+    expect(listed.remaining).toEqual([]);
+  });
+});

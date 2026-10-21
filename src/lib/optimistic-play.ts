@@ -22,6 +22,9 @@ export type PlayRow = {
   lastPlayed: string;
   firstPlayed: string;
   source: string | null;
+  /** Home could not tell this play from the skip bar (its run within ±1.5 s of it,
+   *  handoff.ts): shown as pending until the store lists the play or it expires. */
+  pending?: boolean;
 };
 
 /** `day` = the local day the play was minted for. Reconciliation must not credit it to a
@@ -61,6 +64,7 @@ export function addPlay(rows: PlayRow[], prov: PlayRow): PlayRow[] {
         ? prov.lastPlayed
         : merged[at].lastPlayed,
     source: prov.source ?? merged[at].source,
+    ...(prov.pending ? { pending: true } : {}),
   };
   return merged;
 }

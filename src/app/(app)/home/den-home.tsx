@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 import { searchPerfEnabled, startSearchProbe, type IndexStatus } from "@/lib/search-perf";
 import { patchHistoryPayload } from "@/lib/history-patch";
 import { buildDays, iso, type HistoryPayload } from "@/lib/history-days";
-import { judgeHandoff } from "@/lib/handoff";
+import { handoffRun, judgeHandoff } from "@/lib/handoff";
 import { hanFold } from "@/lib/han-fold";
 import { useTabReset } from "@/lib/tab-reset";
 import {
@@ -154,6 +154,9 @@ type LibraryPayload = {
 // dropped is reported under the list rather than silently truncated.
 const MAX_RESULTS = 400;
 const SEARCH_DEBOUNCE_MS = 120;
+// A row the handoff added for a play within ±1.5 s of the skip bar (optimistic-play.ts).
+const isPending = (t: object): boolean => "pending" in t && t.pending === true;
+
 const NO_FALLBACK = { key: "", rows: [] as TrackStats[], failed: false };
 
 /** "12 songs" / "1 song". */
@@ -977,10 +980,29 @@ export function DenHome({
      *  that ran out, how long the change took to reach this list (docs/NOW_PLAYING_LATENCY.md);
      *  negative for a skip. */
     endAt: number | null;
+    /** When this song became current (one verdict, NOW_PLAYING_2S L2): the first PLAYING
+     *  observation's receipt minus its progress, never before the previous song stopped.
+     *  Null until it is seen playing. */
+    startAt: number | null;
+    /** Seen in a private session at any point: Spotify lists none of those plays. */
+    privateSession: boolean;
   } | null>(null);
+  // When the last song this tab watched stopped being current. The next song cannot have
+  // started before it; a seek before our first look would otherwise date its start earlier.
+  const lastChangeAtRef = useRef<number | null>(null);
+  // The last song this tab finished, for the handoff beacon's `pred`.
+  const predIdRef = useRef<string | null>(null);
   useEffect(() => {
     const prev = lastPlayingRef.current;
-    const finish = (p: NonNullable<typeof prev>) => {
+    // Every instant below is on this tab's clock: the receipt of this answer, minus Spotify's
+    // own progress (a duration). Nothing subtracts a stamp from another machine's clock.
+    const receivedAt = Date.now();
+    const finish = (p: NonNullable<typeof prev>, changeAt: number) => {
+      // The song stopped being current at `changeAt` (the next song's start, or now). Never
+      // before it started, never in the future.
+      const endedAt = Math.min(receivedAt, Math.max(changeAt, p.startAt ?? changeAt));
+      lastChangeAtRef.current = endedAt;
+      const ran = p.startAt === null ? null : handoffRun({ startAt: p.startAt, durationMs: p.durationMs }, endedAt);
       // Every verdict this shortcut reaches is beaconed to client_metrics ("handoff"): the
       // mint happens purely in the browser, so a wrong row on screen is undiagnosable from
       // the store alone — the 2026-08-19 phantom took store archaeology to rule paths out.
@@ -990,9 +1012,13 @@ export function DenHome({
       const verdict = (v: string) =>
         recordAppEvent(
           "handoff",
-          `${v}|${p.artist} — ${p.title}|gap=${Math.round((Date.now() - p.seenAt) / 1000)}s|prog=${
+          // The machine fields lead (meta is cut at 180 characters): `id` and `at` (the
+          // instant it stopped, epoch ms on this tab's clock) let scripts/np-latency.mjs find
+          // the store's row for the play and compare verdicts; `pred` is the song before it
+          // here, so a play whose predecessor Spotify never listed is excluded (REVIEW M7).
+          `${v}|id=${p.id}|run=${ran === null ? "?" : `${(ran / 1000).toFixed(1)}s`}|at=${endedAt}|pred=${predId ?? ""}|gap=${Math.round((Date.now() - p.seenAt) / 1000)}s|prog=${
             p.durationMs > 0 ? `${Math.round((p.maxProgress / p.durationMs) * 100)}%` : "?"
-          }|end=${vsEnd === undefined ? "?" : `${(vsEnd / 1000).toFixed(1)}s`}|from=${p.source ?? ""}`,
+          }|end=${vsEnd === undefined ? "?" : `${(vsEnd / 1000).toFixed(1)}s`}|${p.artist} — ${p.title}|from=${p.source ?? ""}`,
           vsEnd,
         );
       // The guards live in src/lib/handoff.ts (pure, known-answer tested — they killed
@@ -1000,8 +1026,15 @@ export function DenHome({
       const localToday = new Date(Date.now() - new Date().getTimezoneOffset() * 60000)
         .toISOString()
         .slice(0, 10);
-      const ruled = judgeHandoff(p, Date.now(), daily[0]?.day === localToday);
-      if (ruled !== "commit") return verdict(ruled);
+      const predId = predIdRef.current;
+      predIdRef.current = p.id;
+      const ruled = judgeHandoff(
+        { ...p, startAt: p.startAt ?? endedAt },
+        endedAt,
+        Date.now(),
+        daily[0]?.day === localToday,
+      );
+      if (ruled !== "commit" && ruled !== "pending") return verdict(ruled);
       // Only mint while the TODAY view is actually on screen: that's the one universe
       // where `basePlays` (the song's current today-count, confirmation's baseline) is
       // known, and the whole point of the shortcut is instant feedback on the visible
@@ -1026,8 +1059,9 @@ export function DenHome({
         lastPlayed: nowIso,
         firstPlayed: nowIso,
         source: p.source,
+        ...(ruled === "pending" ? { pending: true } : {}),
       };
-      verdict("commit");
+      verdict(ruled);
       provisionalsRef.current.push({ row, at: Date.now(), day: localToday, basePlays });
       setDaily((d) =>
         d.length
@@ -1035,7 +1069,7 @@ export function DenHome({
               {
                 ...d[0],
                 plays: d[0].plays + 1,
-                durationMs: d[0].durationMs + Math.min(p.maxProgress, p.durationMs || p.maxProgress),
+                durationMs: d[0].durationMs + (ran ?? 0),
               },
               ...d.slice(1),
             ]
@@ -1055,8 +1089,18 @@ export function DenHome({
       }
     };
     if (playing?.track) {
-      if (prev && prev.id === playing.track.id) {
+      // Repeat-one: the same song, back under 3 s once it was due to end, is a new play (a
+      // natural end, which Spotify lists). A jump back mid-song stays a seek.
+      const restarted =
+        !!prev &&
+        prev.id === playing.track.id &&
+        playing.isPlaying &&
+        prev.endAt !== null &&
+        receivedAt >= prev.endAt - 2_000 &&
+        playing.progressMs < 3_000;
+      if (prev && prev.id === playing.track.id && !restarted) {
         prev.source = playing.context?.name ?? prev.source;
+        if (playing.privateSession) prev.privateSession = true;
         // Only a PLAYING observation refreshes the liveness stamp and earns progress —
         // a paused chip re-observed every 6s must not keep a dead song "fresh".
         if (playing.isPlaying) {
@@ -1064,9 +1108,10 @@ export function DenHome({
           prev.seenAt = Date.now();
           prev.sawPlaying = true;
           prev.endAt = playing.durationMs > 0 ? Date.now() + playing.durationMs - playing.progressMs : null;
+          prev.startAt ??= Math.max(receivedAt - playing.progressMs, lastChangeAtRef.current ?? -Infinity);
         }
       } else {
-        if (prev) finish(prev);
+        if (prev) finish(prev, receivedAt - playing.progressMs);
         lastPlayingRef.current = {
           id: playing.track.id,
           title: playing.track.title,
@@ -1084,10 +1129,14 @@ export function DenHome({
             playing.isPlaying && playing.durationMs > 0
               ? Date.now() + playing.durationMs - playing.progressMs
               : null,
+          startAt: playing.isPlaying
+            ? Math.max(receivedAt - playing.progressMs, lastChangeAtRef.current ?? -Infinity)
+            : null,
+          privateSession: !!playing.privateSession,
         };
       }
     } else if (prev) {
-      finish(prev);
+      finish(prev, receivedAt);
       lastPlayingRef.current = null;
     }
     // `daily` is deliberately not a dep: the effect must fire exactly on player movement.
@@ -1531,7 +1580,9 @@ export function DenHome({
                             selRow === rowKey && "den-rowsel",
                             freshKey === `${t.artist.toLowerCase()}\n${t.name.toLowerCase()}` &&
                               "row-fresh",
+                            isPending(t) && "den-pending",
                           )}
+                          title={isPending(t) ? "Waiting for Spotify to list this play" : undefined}
                         >
                           {/* touch-callout off + phone select-none: a long-press READS
                               the clipped title (HoldTitle) instead of raising the iOS

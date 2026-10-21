@@ -303,3 +303,9 @@ tr.den-rowstate > td:last-child {
 .row-fresh > td {
   animation: den-row-fresh 1.4s cubic-bezier(0.2, 0.7, 0.3, 1) both;
 }
+
+/* A play the handoff could not tell from the skip bar (within ±1.5 s of 40%, handoff.ts):
+   dimmed until the store lists it, which replaces the row with the stored one. */
+tr.den-pending > td {
+  opacity: 0.55;
+}
