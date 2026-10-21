@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
   fail: false,
   mode: "normal" as "normal" | "economy" | "freeze",
   player: { isPlaying: true, progressMs: 1_000, durationMs: 200_000 },
+  callMs: 0,
 }));
 vi.mock("@/lib/budget/mode", () => ({ currentMode: async () => state.mode }));
 
@@ -23,6 +24,7 @@ vi.mock("@/lib/spotify", () => ({
     currentlyPlaying: async () => {
       state.calls.push(token);
       if (state.fail) throw new Error("429");
+      if (state.callMs) vi.setSystemTime(Date.now() + state.callMs);
       return { track: { id: `${token}-track`, name: "x" }, ...state.player, context: null };
     },
     contextName: async () => null,
@@ -39,6 +41,7 @@ beforeEach(() => {
   state.calls = [];
   state.fail = false;
   state.mode = "normal";
+  state.callMs = 0;
   state.uid = "aaaaaaaaaaaa";
   state.player = { isPlaying: true, progressMs: 1_000, durationMs: 200_000 };
   vi.useRealTimers();
@@ -100,6 +103,18 @@ describe("the memo at a song's end", () => {
 
   it("a hit 3 s after the sample reports the progress 3 s on", async () => {
     vi.useFakeTimers({ now: 1_800_000_000_000 });
+    state.player = { isPlaying: true, progressMs: 60_000, durationMs: 200_000 };
+    expect(await progress()).toBe(60_000);
+    vi.advanceTimersByTime(3_000);
+    expect(await progress()).toBe(63_000);
+    expect(state.calls).toHaveLength(1);
+  });
+
+  // Code review 0156 L-f: the sample is as old as Spotify's answer, not as the request that went
+  // out before it; stamped with the request's time, a replay ran the call's latency ahead.
+  it("a slow Spotify call: the replay ages from when the answer came back", async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    state.callMs = 400;
     state.player = { isPlaying: true, progressMs: 60_000, durationMs: 200_000 };
     expect(await progress()).toBe(60_000);
     vi.advanceTimersByTime(3_000);

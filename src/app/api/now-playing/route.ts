@@ -56,8 +56,11 @@ export async function GET() {
   try {
     const sp = spotifyClient(uid, accessToken, false, "now-playing");
     const playing = await sp.currentlyPlaying();
+    // The sample is as old as the answer, not as the request: stamped with `now`, a replay ran the
+    // call's latency ahead (code review 0156 L-f).
+    const sampledAt = Date.now();
     if (!playing) {
-      rememberNowPlaying(uid, now, null);
+      rememberNowPlaying(uid, sampledAt, null);
       return reply(null, uid, await floor);
     }
 
@@ -88,7 +91,7 @@ export async function GET() {
 
     // Spread first, then overwrite the raw {type,uri} context with the resolved
     // {name,type} one (later keys win).
-    rememberNowPlaying(uid, now, { ...playing, context });
+    rememberNowPlaying(uid, sampledAt, { ...playing, context });
     return reply({ ...playing, context }, uid, await floor);
   } catch (e) {
     // Rate-limited: say so, with how long to wait, so the poller backs off for that long
