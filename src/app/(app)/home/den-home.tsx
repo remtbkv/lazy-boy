@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 import { searchPerfEnabled, startSearchProbe, type IndexStatus } from "@/lib/search-perf";
 import { patchHistoryPayload } from "@/lib/history-patch";
 import { buildDays, iso, type HistoryPayload } from "@/lib/history-days";
-import { handoffRun, judgeHandoff } from "@/lib/handoff";
+import { foldHandoff, handoffRun, judgeFinished, type HandoffTrack } from "@/lib/handoff";
 import { hanFold } from "@/lib/han-fold";
 import { useTabReset } from "@/lib/tab-reset";
 import {
@@ -952,56 +952,18 @@ export function DenHome({
   useEffect(() => () => {
     if (freshTimer.current) clearTimeout(freshTimer.current);
   }, []);
-  const lastPlayingRef = useRef<{
-    id: string;
-    title: string;
-    artist: string;
-    // The album NAME, not just its art. /api/now-playing passes normTrack's track through
-    // whole (spotify/resources.ts sets `album`), so the bar has always had it — the row built
-    // below just wasn't capturing it, and a song landed in today's list with a blank Album
-    // column until the next sync replaced the row with the server's.
-    album: string | null;
-    albumImage: string | null;
-    durationMs: number;
-    source: string | null;
-    maxProgress: number;
-    /** When a poll last SAW this song ACTUALLY PLAYING (isPlaying true). A finish() long
-     *  after that means the tab was suspended or the song sat paused — see the staleness
-     *  guard below. Paused polls must NOT refresh this: a song paused at 9 PM and swapped
-     *  at 12:30 AM used to read as "seen 6s ago" and mint a 3.5-hour-late play
-     *  (audit 2026-08-19, T1.2). */
-    seenAt: number;
-    /** Whether this tab ever observed the song PLAYING. A track first seen paused (a
-     *  reopened tab, a device left loaded) carries progress it earned long ago — crediting
-     *  it on the next song change is the paused-seed phantom. */
-    sawPlaying: boolean;
-    /** When the last PLAYING observation predicted the song would end (receipt time +
-     *  duration − progress). The handoff beacon's value is finish() minus this: for a song
-     *  that ran out, how long the change took to reach this list (docs/NOW_PLAYING_LATENCY.md);
-     *  negative for a skip. */
-    endAt: number | null;
-    /** When this song became current (one verdict, NOW_PLAYING_2S L2): the first PLAYING
-     *  observation's receipt minus its progress, never before the previous song stopped.
-     *  Null until it is seen playing. */
-    startAt: number | null;
-    /** Seen in a private session at any point: Spotify lists none of those plays. */
-    privateSession: boolean;
-  } | null>(null);
+  // The song on the bar as Home observed it (handoff.ts HandoffTrack; foldHandoff keeps it).
+  // Its seenAt is stamped by PLAYING observations only: a song paused at 9 PM and swapped at
+  // 12:30 AM used to read as "seen 6s ago" and mint a 3.5-hour-late play (audit 2026-08-19,
+  // T1.2). The album NAME rides along so a finished song lands with its Album column filled.
+  const lastPlayingRef = useRef<HandoffTrack | null>(null);
   // When the last song this tab watched stopped being current. The next song cannot have
   // started before it; a seek before our first look would otherwise date its start earlier.
   const lastChangeAtRef = useRef<number | null>(null);
   // The last song this tab finished, for the handoff beacon's `pred`.
   const predIdRef = useRef<string | null>(null);
   useEffect(() => {
-    const prev = lastPlayingRef.current;
-    // Every instant below is on this tab's clock: the receipt of this answer, minus Spotify's
-    // own progress (a duration). Nothing subtracts a stamp from another machine's clock.
-    const receivedAt = Date.now();
-    const finish = (p: NonNullable<typeof prev>, changeAt: number) => {
-      // The song stopped being current at `changeAt` (the next song's start, or now). Never
-      // before it started, never in the future.
-      const endedAt = Math.min(receivedAt, Math.max(changeAt, p.startAt ?? changeAt));
-      lastChangeAtRef.current = endedAt;
+    const finish = (p: HandoffTrack, endedAt: number) => {
       const ran = p.startAt === null ? null : handoffRun({ startAt: p.startAt, durationMs: p.durationMs }, endedAt);
       // Every verdict this shortcut reaches is beaconed to client_metrics ("handoff"): the
       // mint happens purely in the browser, so a wrong row on screen is undiagnosable from
@@ -1028,12 +990,7 @@ export function DenHome({
         .slice(0, 10);
       const predId = predIdRef.current;
       predIdRef.current = p.id;
-      const ruled = judgeHandoff(
-        { ...p, startAt: p.startAt ?? endedAt },
-        endedAt,
-        Date.now(),
-        daily[0]?.day === localToday,
-      );
+      const ruled = judgeFinished({ p, endedAt }, Date.now(), daily[0]?.day === localToday);
       if (ruled !== "commit" && ruled !== "pending") return verdict(ruled);
       // Only mint while the TODAY view is actually on screen: that's the one universe
       // where `basePlays` (the song's current today-count, confirmation's baseline) is
@@ -1088,57 +1045,12 @@ export function DenHome({
         freshTimer.current = setTimeout(() => setFreshKey(null), 1600);
       }
     };
-    if (playing?.track) {
-      // Repeat-one: the same song, back under 3 s once it was due to end, is a new play (a
-      // natural end, which Spotify lists). A jump back mid-song stays a seek.
-      const restarted =
-        !!prev &&
-        prev.id === playing.track.id &&
-        playing.isPlaying &&
-        prev.endAt !== null &&
-        receivedAt >= prev.endAt - 2_000 &&
-        playing.progressMs < 3_000;
-      if (prev && prev.id === playing.track.id && !restarted) {
-        prev.source = playing.context?.name ?? prev.source;
-        if (playing.privateSession) prev.privateSession = true;
-        // Only a PLAYING observation refreshes the liveness stamp and earns progress —
-        // a paused chip re-observed every 6s must not keep a dead song "fresh".
-        if (playing.isPlaying) {
-          prev.maxProgress = Math.max(prev.maxProgress, playing.progressMs);
-          prev.seenAt = Date.now();
-          prev.sawPlaying = true;
-          prev.endAt = playing.durationMs > 0 ? Date.now() + playing.durationMs - playing.progressMs : null;
-          prev.startAt ??= Math.max(receivedAt - playing.progressMs, lastChangeAtRef.current ?? -Infinity);
-        }
-      } else {
-        if (prev) finish(prev, receivedAt - playing.progressMs);
-        lastPlayingRef.current = {
-          id: playing.track.id,
-          title: playing.track.title,
-          artist: playing.track.artist,
-          album: playing.track.album ?? null,
-          albumImage: playing.track.albumImage,
-          durationMs: playing.durationMs,
-          source: playing.context?.name ?? null,
-          // A track first seen PAUSED starts with no credit: whatever progress it shows
-          // was earned before this tab was watching.
-          maxProgress: playing.isPlaying ? playing.progressMs : 0,
-          seenAt: Date.now(),
-          sawPlaying: !!playing.isPlaying,
-          endAt:
-            playing.isPlaying && playing.durationMs > 0
-              ? Date.now() + playing.durationMs - playing.progressMs
-              : null,
-          startAt: playing.isPlaying
-            ? Math.max(receivedAt - playing.progressMs, lastChangeAtRef.current ?? -Infinity)
-            : null,
-          privateSession: !!playing.privateSession,
-        };
-      }
-    } else if (prev) {
-      finish(prev, receivedAt);
-      lastPlayingRef.current = null;
-    }
+    // The fold (handoff.ts foldHandoff, tested on poll sequences): the answer, its receipt on
+    // this tab's clock → the song on the bar, and the song it ended with the instant it stopped.
+    const fold = foldHandoff(lastPlayingRef.current, playing, Date.now(), lastChangeAtRef.current);
+    lastPlayingRef.current = fold.current;
+    lastChangeAtRef.current = fold.lastChangeAt;
+    if (fold.finished) finish(fold.finished.p, fold.finished.endedAt);
     // `daily` is deliberately not a dep: the effect must fire exactly on player movement.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing]);

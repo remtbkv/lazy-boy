@@ -72,3 +72,119 @@ export function judgeHandoff(
   if (!dailyHeadIsToday) return "no-today";
   return inBand ? "pending" : "commit";
 }
+
+/** What Home keeps about the song on the bar between answers (den-home's lastPlayingRef). */
+export type HandoffTrack = Omit<HandoffObservation, "startAt" | "privateSession"> & {
+  id: string;
+  title: string;
+  artist: string;
+  album: string | null;
+  albumImage: string | null;
+  source: string | null;
+  /** The furthest position a playing observation saw (the beacon's `prog`). */
+  maxProgress: number;
+  /** When the last PLAYING observation predicted the song would end (receipt + duration −
+   *  progress); the beacon's `end` is the finish minus this. Null when unknown. */
+  endAt: number | null;
+  /** When the song became current; null until it is seen playing. */
+  startAt: number | null;
+  privateSession: boolean;
+};
+
+/** One answer as the provider hands it to Home (now-playing-context's Playing). */
+export type HandoffAnswer = {
+  track: { id: string; title: string; artist: string; album?: string | null; albumImage: string | null };
+  isPlaying: boolean;
+  progressMs: number;
+  durationMs: number;
+  context: { name: string } | null;
+  privateSession?: boolean;
+} | null;
+
+export type HandoffFold = {
+  /** The song on the bar after this answer, or null. */
+  current: HandoffTrack | null;
+  /** The song this answer ended, and the instant it stopped being current. */
+  finished: { p: HandoffTrack; endedAt: number } | null;
+  /** When the last song this tab watched stopped being current. */
+  lastChangeAt: number | null;
+};
+
+/** Fold one answer, received at `receivedAt` on this tab's clock, into Home's observation of
+ *  the song on the bar. Pure: den-home keeps `current` and `lastChangeAt` between answers and
+ *  judges `finished` (judgeFinished). Every instant is this tab's receipt minus Spotify's own
+ *  progress (a duration); nothing subtracts a stamp from another machine's clock. */
+export function foldHandoff(
+  prev: HandoffTrack | null,
+  playing: HandoffAnswer,
+  receivedAt: number,
+  lastChangeAt: number | null,
+): HandoffFold {
+  // The previous song stopped being current at `changeAt` (the next song's start, or now):
+  // never before it started, never in the future.
+  const stop = (p: HandoffTrack, changeAt: number) => Math.min(receivedAt, Math.max(changeAt, p.startAt ?? changeAt));
+  if (!playing?.track) {
+    if (!prev) return { current: null, finished: null, lastChangeAt };
+    const endedAt = stop(prev, receivedAt);
+    return { current: null, finished: { p: prev, endedAt }, lastChangeAt: endedAt };
+  }
+  // Repeat-one: the same song, back under 3 s once it was due to end, is a new play (a
+  // natural end, which Spotify lists). A jump back mid-song stays a seek.
+  const restarted =
+    !!prev &&
+    prev.id === playing.track.id &&
+    playing.isPlaying &&
+    prev.endAt !== null &&
+    receivedAt >= prev.endAt - 2_000 &&
+    playing.progressMs < 3_000;
+  if (prev && prev.id === playing.track.id && !restarted) {
+    const next = { ...prev, source: playing.context?.name ?? prev.source };
+    if (playing.privateSession) next.privateSession = true;
+    // Only a PLAYING observation refreshes the liveness stamp and earns progress — a paused
+    // chip re-observed every 6s must not keep a dead song "fresh".
+    if (playing.isPlaying) {
+      next.maxProgress = Math.max(prev.maxProgress, playing.progressMs);
+      next.seenAt = receivedAt;
+      next.sawPlaying = true;
+      next.endAt = playing.durationMs > 0 ? receivedAt + playing.durationMs - playing.progressMs : null;
+      next.startAt ??= Math.max(receivedAt - playing.progressMs, lastChangeAt ?? -Infinity);
+    }
+    return { current: next, finished: null, lastChangeAt };
+  }
+  let finished: HandoffFold["finished"] = null;
+  if (prev) {
+    const endedAt = stop(prev, receivedAt - playing.progressMs);
+    finished = { p: prev, endedAt };
+    lastChangeAt = endedAt;
+  }
+  const current: HandoffTrack = {
+    id: playing.track.id,
+    title: playing.track.title,
+    artist: playing.track.artist,
+    album: playing.track.album ?? null,
+    albumImage: playing.track.albumImage,
+    durationMs: playing.durationMs,
+    source: playing.context?.name ?? null,
+    // A track first seen PAUSED starts with no credit: whatever progress it shows was earned
+    // before this tab was watching.
+    maxProgress: playing.isPlaying ? playing.progressMs : 0,
+    seenAt: receivedAt,
+    sawPlaying: !!playing.isPlaying,
+    endAt: playing.isPlaying && playing.durationMs > 0 ? receivedAt + playing.durationMs - playing.progressMs : null,
+    // Never before the previous song stopped: a seek before our first look would otherwise
+    // date the start earlier.
+    startAt: playing.isPlaying ? Math.max(receivedAt - playing.progressMs, lastChangeAt ?? -Infinity) : null,
+    privateSession: !!playing.privateSession,
+  };
+  return { current, finished, lastChangeAt };
+}
+
+/** Home's verdict on a song the fold finished. A song never seen playing has no start; it is
+ *  judged on its end alone (judgeHandoff rules it never-played first). */
+export function judgeFinished(
+  f: { p: HandoffTrack; endedAt: number },
+  now: number,
+  dailyHeadIsToday: boolean,
+): HandoffVerdict {
+  return judgeHandoff({ ...f.p, startAt: f.p.startAt ?? f.endedAt }, f.endedAt, now, dailyHeadIsToday);
+}
