@@ -219,16 +219,25 @@ async function spotifyFetch(input: RequestInfo | URL, init?: RequestInit): Promi
   const path = new URL(url).pathname.replace(/^\/v1/, "");
   if (method !== "GET") {
     if (/\/playlists$/.test(path)) return Response.json({ id: `${owner.toLowerCase()}-new-pl`, name: "new" }, { status: 201 });
+    // The queue refuses: saveQueue's skip-through walk stops at its first player command
+    // instead of stalling 15 s on a queue that never moves (the player below is playing).
+    if (path === "/me/player/queue") return Response.json({ error: { status: 404, message: "No active device found" } }, { status: 404 });
     return Response.json({ snapshot_id: "snap-after" }, { status: 200 });
   }
   if (path === "/me") {
     return Response.json({ id: OWNER_OF[owner] ?? owner, display_name: owner, email: null, images: [], product: "premium" });
   }
-  // No device for the playback-state read: saveQueue's skip-through walk stops at its first
-  // call instead of stalling 15 s on a queue that never moves. /api/now-playing reads the same
-  // endpoint since NOW_PLAYING_2S L2 (currently-playing is no longer called), so here it answers
-  // "nothing playing"; its context-cache path is covered by tests/now-playing-route.test.ts.
-  if (path === "/me/player") return new Response(null, { status: 204 });
+  // The player state, per owner, playing from the owner's playlist: /api/now-playing reads it
+  // (NOW_PLAYING_2S L2) and goes on to the owner's context-name cache (code review 0156 M4).
+  if (path === "/me/player") {
+    return Response.json({
+      is_playing: true,
+      progress_ms: 1000,
+      item: trackJson(owner, 1),
+      context: { type: "playlist", uri: `spotify:playlist:${owner.toLowerCase()}-pl-1` },
+      currently_playing_type: "track",
+    });
+  }
   if (path === "/me/player/recently-played") {
     return Response.json({
       items: [{ track: trackJson(owner, 9), played_at: new Date(Date.now() - 60_000).toISOString(), context: null }],
