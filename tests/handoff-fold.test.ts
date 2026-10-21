@@ -81,6 +81,14 @@ describe("foldHandoff on poll sequences", () => {
     expect(replay(polls)).toEqual([]);
   });
 
+  it("L-a: paused past the old predicted end, then back to 0 s, is a seek, not repeat-one", () => {
+    // Seen playing at 150 s (predicted end T + 200 s), paused there for 50 s.
+    const polls: Poll[] = [...playing("A", T, T, T + 150 * S)];
+    for (let t = T + 156 * S; t <= T + 204 * S; t += 6 * S) polls.push([t, song("A", 152 * S, 200 * S, false)]);
+    polls.push([T + 206 * S, song("A", 500)]); // "previous" from the paused 152 s
+    expect(replay(polls)).toEqual([]);
+  });
+
   it("a private-session song mints nothing", () => {
     const polls: Poll[] = [
       ...playing("A", T, T, T + 198 * S).map(([at, a]): Poll => [at, { ...a!, privateSession: true }]),

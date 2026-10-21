@@ -92,6 +92,9 @@ export type HandoffTrack = Omit<HandoffObservation, "startAt" | "privateSession"
   /** The receipt of the last answer that showed this song, paused included: it was still
    *  current then, so the next song cannot have started earlier (review 0156 H1). */
   lastObservedAt: number;
+  /** That answer's progress, and whether it was playing (repeat-one reads where the song is). */
+  lastProgressMs: number;
+  lastWasPlaying: boolean;
 };
 
 /** One answer as the provider hands it to Home (now-playing-context's Playing). */
@@ -132,16 +135,24 @@ export function foldHandoff(
     return { current: null, finished: { p: prev, endedAt }, lastChangeAt: endedAt };
   }
   // Repeat-one: the same song, back under 3 s once it was due to end, is a new play (a
-  // natural end, which Spotify lists). A jump back mid-song stays a seek.
+  // natural end, which Spotify lists). A jump back mid-song stays a seek. "Due to end" is the
+  // last observed position, moved on only if it was playing: a pause past the old predicted
+  // end followed by "previous" is a seek (review 0156 L-a).
   const restarted =
     !!prev &&
     prev.id === playing.track.id &&
     playing.isPlaying &&
-    prev.endAt !== null &&
-    receivedAt >= prev.endAt - 2_000 &&
+    prev.durationMs > 0 &&
+    prev.lastProgressMs + (prev.lastWasPlaying ? receivedAt - prev.lastObservedAt : 0) >= prev.durationMs - 2_000 &&
     playing.progressMs < 3_000;
   if (prev && prev.id === playing.track.id && !restarted) {
-    const next = { ...prev, source: playing.context?.name ?? prev.source, lastObservedAt: receivedAt };
+    const next = {
+      ...prev,
+      source: playing.context?.name ?? prev.source,
+      lastObservedAt: receivedAt,
+      lastProgressMs: playing.progressMs,
+      lastWasPlaying: playing.isPlaying,
+    };
     if (playing.privateSession) next.privateSession = true;
     // An in-app play is shown before Spotify answers, sometimes with no duration: the first
     // answer that knows it fills it in, or the run goes uncapped against the 30 s floor
@@ -180,6 +191,8 @@ export function foldHandoff(
     maxProgress: playing.isPlaying ? playing.progressMs : 0,
     seenAt: receivedAt,
     lastObservedAt: receivedAt,
+    lastProgressMs: playing.progressMs,
+    lastWasPlaying: playing.isPlaying,
     sawPlaying: !!playing.isPlaying,
     endAt: playing.isPlaying && playing.durationMs > 0 ? receivedAt + playing.durationMs - playing.progressMs : null,
     // Never before the previous song stopped: a seek before our first look would otherwise
