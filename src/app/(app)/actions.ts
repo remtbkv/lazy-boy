@@ -580,7 +580,7 @@ export async function playPlaylistTrackAction(
 // No history for that playlist → start from the top. Needs an active device + Premium.
 export async function resumePlaylistAction(
   playlistId: string,
-): Promise<ActionResult<{ track: string; fromTop: boolean; started: { id: string; title: string; artist: string } }>> {
+): Promise<ActionResult<{ track: string; fromTop: boolean; started: { id: string; title: string; artist: string; durationMs: number } }>> {
   try {
     const uri = `spotify:playlist:${playlistId}`;
     // Auth FIRST, then the two store reads in parallel — never in one Promise.all with
@@ -597,8 +597,9 @@ export async function resumePlaylistAction(
     ]);
     let tracks = cached;
     if (tracks.length === 0) {
-      tracks = await sp.playlistTracks(playlistId);
-      if (tracks.length > 0) void store.storePlaylistTracks(playlistId, tracks).catch(() => {});
+      const fetched = await sp.playlistTracks(playlistId);
+      tracks = fetched;
+      if (fetched.length > 0) void store.storePlaylistTracks(playlistId, fetched).catch(() => {});
     }
     if (tracks.length === 0) throw new Error("This playlist has no playable tracks.");
 
@@ -681,7 +682,12 @@ export async function resumePlaylistAction(
     await sp.playContext(uri, start.uri);
     // The song it started, so the bar shows it when the action returns instead of at the next
     // poll (NOW_PLAYING_2S.md L1).
-    return { ok: true, track: start.title, fromTop, started: { id: start.id, title: start.title, artist: start.artist } };
+    return {
+      ok: true,
+      track: start.title,
+      fromTop,
+      started: { id: start.id, title: start.title, artist: start.artist, durationMs: start.durationMs ?? 0 },
+    };
   } catch (e) {
     unstable_rethrow(e);
     if (e instanceof SpotifyError && (e.status === 404 || e.status === 403)) {

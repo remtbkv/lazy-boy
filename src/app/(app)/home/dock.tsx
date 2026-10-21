@@ -326,7 +326,10 @@ function ActionSheet({
           const r = await playThenShow(
             () => settleAction(resumePlaylistAction(picked[0])),
             (startedAt, done) => {
-              if (done.ok) playOptimistic({ ...done.started, albumImage: null }, 0, startedAt);
+              if (done.ok) {
+                const { durationMs, ...track } = done.started;
+                playOptimistic({ ...track, albumImage: null }, durationMs, startedAt);
+              }
               refresh();
             },
           );

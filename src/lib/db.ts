@@ -2607,11 +2607,11 @@ async function getPlaylistTracks(u: UserDb, playlistId: string): Promise<Track[]
 // the offset track. Skips the album/image/duration/added-at columns `getPlaylistTracks`
 // carries, which roughly halves the payload on large playlists (the read sits on Resume's
 // critical path, right before the play command).
-export type PlaylistTrackRef = { id: string; uri: string; title: string; artist: string };
+export type PlaylistTrackRef = { id: string; uri: string; title: string; artist: string; durationMs?: number | null };
 async function getPlaylistTrackOrder(u: UserDb, playlistId: string): Promise<PlaylistTrackRef[]> {
   const client = await u.client();
   const res = await client.execute({
-    sql: `SELECT t.id, t.uri, t.name AS title, t.artist
+    sql: `SELECT t.id, t.uri, t.name AS title, t.artist, t.duration_ms AS durationMs
           FROM playlist_tracks pt LEFT JOIN tracks t ON t.id = pt.track_id
           WHERE pt.playlist_id = :pid ORDER BY pt.position`,
     args: { pid: playlistId },

@@ -143,6 +143,10 @@ export function foldHandoff(
   if (prev && prev.id === playing.track.id && !restarted) {
     const next = { ...prev, source: playing.context?.name ?? prev.source, lastObservedAt: receivedAt };
     if (playing.privateSession) next.privateSession = true;
+    // An in-app play is shown before Spotify answers, sometimes with no duration: the first
+    // answer that knows it fills it in, or the run goes uncapped against the 30 s floor
+    // (review 0156 M1).
+    if (playing.durationMs > 0) next.durationMs = playing.durationMs;
     // Only a PLAYING observation refreshes the liveness stamp and earns progress — a paused
     // chip re-observed every 6s must not keep a dead song "fresh".
     if (playing.isPlaying) {

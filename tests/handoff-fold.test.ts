@@ -116,6 +116,24 @@ describe("foldHandoff on poll sequences", () => {
     expect(verdicts[0]).toEqual({ id: "A", verdict: "commit", ran: 102 });
   });
 
+  it("M1: an in-app play shown with no duration takes the real one from the first answer", () => {
+    // Resume shows the song with duration 0, the poll then reports 240 s; skipped at 35 s
+    // (15%): a skip in the store, and in Home, which used the 30 s unknown-duration floor.
+    const polls: Poll[] = [
+      [T, song("B", 0, 0)],
+      ...playing("B", T, T + 2 * S, T + 32 * S, 6 * S, 240 * S),
+      [T + 36 * S, song("C", 1 * S)],
+    ];
+    expect(replay(polls)).toEqual([{ id: "B", verdict: "skip", ran: 35 }]);
+  });
+
+  it("M1: paused 20 minutes after an in-app play, the run is capped at the song", () => {
+    const polls: Poll[] = [[T, song("B", 0, 0)], ...playing("B", T, T + 2 * S, T + 92 * S, 6 * S, 240 * S)];
+    for (let t = T + 98 * S; t <= T + 20 * 60 * S; t += 6 * S) polls.push([t, song("B", 92 * S, 240 * S, false)]);
+    polls.push([T + 20 * 60 * S + 3 * S, song("C", 1 * S)]);
+    expect(replay(polls)[0].ran).toBe(240);
+  });
+
   it("nothing playing ends the song at the receipt", () => {
     const polls: Poll[] = [...playing("A", T, T, T + 120 * S), [T + 126 * S, null]];
     expect(replay(polls)).toEqual([{ id: "A", verdict: "commit", ran: 126 }]);
