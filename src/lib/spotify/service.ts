@@ -42,8 +42,8 @@ export class Service {
   playlist(id: string) {
     return this.resources.playlist(id);
   }
-  playlistTracks(id: string, opts: { paceMs?: number } = {}) {
-    return this.resources.playlistTracks(id, undefined, opts);
+  playlistTracks(id: string) {
+    return this.resources.playlistTracks(id);
   }
   recentlyPlayed(limit = 50) {
     return this.resources.recentlyPlayed(limit);
@@ -100,11 +100,8 @@ export class Service {
   replaceItems(playlistId: string, uris: string[]) {
     return this.resources.replaceItems(playlistId, uris);
   }
-  savedTracks(opts: { paceMs?: number; deadline?: number } = {}) {
-    return this.resources.savedTracks(undefined, opts);
-  }
-  savedTracksPage(cursor: string | null) {
-    return this.resources.savedTracksPage(cursor);
+  savedTracks() {
+    return this.resources.savedTracks();
   }
   savedTracksHead() {
     return this.resources.savedTracksHead();

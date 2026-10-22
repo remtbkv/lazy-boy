@@ -9,8 +9,7 @@ const state = vi.hoisted(() => ({
   modeReads: 0,
   signedIn: true,
   playing: null as unknown,
-  steps: [] as { load: boolean }[],
-  tzWrites: 0,
+  harvests: 0,
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -32,27 +31,18 @@ vi.mock("@/lib/db", () => ({
   forUser: () => ({
     getContextName: async () => "Mix",
     recordContexts: async () => {},
-    setUserTzOffset: async () => {
-      state.tzWrites++;
-    },
-    setUserTz: async () => {
-      state.tzWrites++;
-    },
+    setUserTzOffset: async () => {},
+    getLastSync: async () => null,
+    ledgerSyncCall: async () => {},
   }),
 }));
-vi.mock("next/headers", () => ({
-  cookies: async () => ({ get: (k: string) => (k === "tzoffset" ? { value: "240" } : undefined) }),
-  headers: async () => new Headers({ "x-sync": "load" }),
-}));
-// /api/sync runs the open app's step (Phase 3, sync/tick.ts runOpenApp); its own rules are tested
-// in tests/open-app-sync.test.ts. Here only whether it ran.
-vi.mock("@/lib/sync/tick", () => ({
-  runOpenApp: async (_deps: unknown, o: { load: boolean }) => {
-    state.steps.push({ load: o.load });
-    return { ran: true, outcome: "ok" };
+vi.mock("next/headers", () => ({ cookies: async () => ({ get: () => undefined }) }));
+vi.mock("@/lib/sync/history", () => ({
+  syncRecentPlays: async () => {
+    state.harvests++;
+    return { added: 1 };
   },
 }));
-vi.mock("@/lib/sync/tick-deps", () => ({ liveTickDeps: () => ({}) }));
 
 const { GET: nowPlaying } = await import("@/app/api/now-playing/route");
 const { POST: sync } = await import("@/app/api/sync/route");
@@ -64,8 +54,7 @@ beforeEach(() => {
   state.modeReads = 0;
   state.signedIn = true;
   state.playing = PLAYING;
-  state.steps = [];
-  state.tzWrites = 0;
+  state.harvests = 0;
 });
 
 describe("/api/now-playing carries the poll floor", () => {
@@ -95,18 +84,17 @@ describe("/api/sync carries SyncOnLoad's interval", () => {
     [null, 120_000],
     ["normal", 120_000],
     ["economy", 300_000],
-  ])("mode %s: intervalMs %d, and the open app's step runs", async (mode, interval) => {
+  ])("mode %s: intervalMs %d, and it syncs", async (mode, interval) => {
     state.mode = mode;
     const body = await (await sync()).json();
-    expect(body).toMatchObject({ ok: true, ran: true, outcome: "ok", intervalMs: interval });
-    expect(state.steps).toEqual([{ load: true }]);
+    expect(body).toMatchObject({ ok: true, added: 1, intervalMs: interval });
+    expect(state.harvests).toBe(1);
   });
 
-  it("freeze stops the open app's step before any store write and asks again in 5 minutes", async () => {
+  it("freeze stops the on-load sync and asks again in 5 minutes", async () => {
     state.mode = "freeze";
     const body = await (await sync()).json();
     expect(body).toEqual({ ok: true, skipped: "freeze", intervalMs: 300_000 });
-    expect(state.steps).toEqual([]);
-    expect(state.tzWrites).toBe(0);
+    expect(state.harvests).toBe(0);
   });
 });

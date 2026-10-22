@@ -1,6 +1,11 @@
 import "server-only";
 import { spotifyClient } from "@/lib/spotify";
-import { type PlayRecord, type ContextRecord, type UserStore } from "@/lib/db";
+import {
+  getSpotifyCooldownUntil,
+  type PlayRecord,
+  type ContextRecord,
+  type UserStore,
+} from "@/lib/db";
 
 // How often the full unresolved-context pass runs. It is the only reader that can find a
 // negative-cached context whose 30-day re-check lapsed, and it is a full plays scan, so it
@@ -9,15 +14,21 @@ const CONTEXTS_FULL_CHECK_MS = 24 * 60 * 60 * 1000;
 
 type Spotify = ReturnType<typeof spotifyClient>;
 
-type RecentPlay = Awaited<ReturnType<Spotify["recentlyPlayed"]>>[number];
-
-/** Core listen-history sync: one harvest's plays (the last ~50 from recently-played) into the
- *  user's store, after its Spotify call, which the cron's step makes (multi-user PLAN §7.2
- *  step 3; sync/tick-deps.ts). The plays have natural keys and are safe to repeat; their
- *  playback contexts (playlist/album names) are resolved with the user's own client; the Home
- *  payload is rebuilt. recordPlays() stamps `last_sync`. The step honours the bucket's
- *  cooldown before it calls (step.ts), so nothing here reads one. Returns the plays added. */
-export async function recordRecentPlays(sp: Spotify, store: UserStore, recent: RecentPlay[]): Promise<number> {
+// Core listen-history sync, shared by the on-load /api/sync (session-bound client)
+// and the /api/cron/sync backstop (stored-token client).
+// Pulls the last ~50 plays into the local store and resolves any new playback
+// contexts (playlist/album names). recordPlays() stamps `last_sync`.
+export async function syncRecentPlays(
+  sp: Spotify,
+  store: UserStore,
+): Promise<{ added: number; skipped?: string }> {
+  // Spotify handed out a rate-limit ban recently — don't poke it again until the window
+  // passes (persisted, so serverless ticks honor it across invocations). Re-poking a
+  // banned endpoint is what risks turning a brief throttle into a long block.
+  if (Date.now() < (await getSpotifyCooldownUntil())) {
+    return { added: 0, skipped: "cooldown" };
+  }
+  const recent = await sp.recentlyPlayed(50);
   const rows: PlayRecord[] = recent.map((r) => ({
     trackId: r.track.id,
     name: r.track.title,
@@ -75,9 +86,9 @@ export async function recordRecentPlays(sp: Spotify, store: UserStore, recent: R
 
   // Home renders from one materialized row (db.ts, "The Home payload"), so the sync that
   // changes the data is what has to rewrite it. This is the single point both triggers pass
-  // through — /api/sync (open tab) and /api/cron/sync (the ~2-min pinger), both by way of the
-  // cron's step — so the rebuild belongs here and not in either route; adding it per route
-  // would mean two places to keep in step and one of them eventually missed.
+  // through — /api/sync (open tab) and /api/cron/sync (the ~2-min pinger), plus
+  // refreshHistoryAction — so the rebuild belongs here and not in either route; adding it per
+  // route would mean two places to keep in step and one of them eventually missed.
   // Rebuilt when plays landed (the stored payload is now wrong) and when the row is simply
   // absent — a store nothing has synced into yet, or the first tick after a deploy that moved
   // the payload's shape. A steady tick (nothing new, row present) pays one indexed meta read
@@ -91,5 +102,5 @@ export async function recordRecentPlays(sp: Spotify, store: UserStore, recent: R
     console.error("[home-payload] rebuild after sync failed", e);
   }
 
-  return added;
+  return { added };
 }

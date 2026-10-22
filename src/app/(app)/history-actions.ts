@@ -2,12 +2,14 @@
 
 import { unstable_rethrow } from "next/navigation";
 import { requireActionUser } from "@/lib/require-user";
-import { forUser, ledgerAdd, type DayStats, type StoredPlaylist, type TrackStats, type UserStore } from "@/lib/db";
+import { getSpotify } from "@/lib/session";
+import { syncRecentPlays } from "@/lib/sync/history";
+import { forUser, type DayStats, type StoredPlaylist, type TrackStats, type UserStore } from "@/lib/db";
 import { HISTORY_REFRESH_EXTRA_ROWS } from "@/lib/read-costs";
 import { tzOffsetMinutes } from "@/lib/tz";
 
-// Listen-history data actions for Home — DB reads only; from Phase 3 that includes
-// refreshHistoryAction (below), which used to harvest. Every one of them returns personal data, so each
+// Listen-history data actions for Home — DB reads only, except refreshHistoryAction (below),
+// which is the one that talks to Spotify. Every one of them returns personal data, so each
 // gates first: the layout already redirects anyone without a session, but an action is a
 // public endpoint and has to check for itself. The gate is requireActionUser's (PLAN §5.1,
 // §5.4): a session whose grant is gone is refused here as on the pages, and the store it
@@ -77,9 +79,9 @@ export type HistoryRefresh = {
    *  lands on the correct day even when the local date has just rolled over. */
   day: string | null;
   tracks: TrackStats[] | null;
-  /** The plays the store holds that the client's index is missing (newest first), so the
-   *  client can patch its in-memory search index instantly — the server payload only rebuilds
-   *  every 10 min (db.ts, the slow marker). An indexed read bounded by the delta. */
+  /** The plays this sync just landed (newest first), so the client can patch its
+   *  in-memory search index instantly — the server payload only rebuilds every 10 min
+   *  (db.ts, the slow marker). An indexed read of `added` rows, bounded by the delta. */
   newPlays: TrackStats[] | null;
 };
 
@@ -93,17 +95,15 @@ const NO_REFRESH: HistoryRefresh = {
   newPlays: null,
 };
 
-/** Re-read what's on screen from the user's store.
+/** Pull new plays from Spotify into the local store, then re-read what's on screen.
  *
- *  It calls nobody (multi-user PLAN §7.6, decision 15): it used to harvest recently-played on
- *  every call, with no debounce, from every open tab, and was one more concurrent writer of
- *  the derived state. The cron's tick stores each play within about two minutes of its end;
- *  until it does, the browser's provisional row (optimistic-play.ts, handoff.ts) stands in.
- *  `added` is always 0 now; the delta in `newPlays` carries whatever the tick stored.
+ *  This is the ONE action here that talks to Spotify — every other read is DB-only. Without
+ *  it the page renders whatever was last written to the store and never notices a song
+ *  finishing, which is exactly the bug it fixes.
  *
  *  `want` is the view the client is currently showing, so a single round-trip refreshes the
  *  strip, the all-time totals AND the visible rows:
- *    "latest"  — following the newest day (resolved server-side, so a midnight rollover
+ *    "latest"  — following the newest day (resolved AFTER the sync, so a midnight rollover
  *                moves you onto the new day instead of stranding you on yesterday)
  *    "all"     — the all-time list
  *    null      — a pinned past day (frozen history — the rows cannot change, so don't refetch
@@ -113,19 +113,23 @@ export async function refreshHistoryAction(
   want: "latest" | "all" | null,
   days: number,
   // The newest play minute the client's in-memory search index already holds. The delta
-  // returned in `newPlays` is computed against THIS: a play the cron tick stored seconds
-  // earlier is missing from the client's index until then.
+  // returned in `newPlays` is computed against THIS, not against what this call inserted:
+  // a play the cron tick synced seconds earlier is just as missing from the client's index
+  // as one we insert here, and `added` alone would skip it.
   sinceMinute: number | null = null,
 ): Promise<HistoryRefresh> {
-  // A refused caller gets the empty answer rather than a redirect mid-render.
+  // getSpotify() throws a login REDIRECT when there's no token. Returning empty instead
+  // keeps a signed-out caller from being bounced mid-render — no session, nothing to sync.
   const store = await gated();
   if (!store) return NO_REFRESH;
   try {
+    const sp = await getSpotify(store.uid, "home-sync");
+    const { added } = await syncRecentPlays(sp, store);
     // This fires every 120 s from an open tab, twice per track change and on visibility, so
-    // it is the term an open tab contributes. Only this action's own bounded head/delta check
-    // is charged here — the strip, the day and the all-time list below are ledgered under
-    // their own readers, and counting them twice would hide a real residual.
-    void ledgerAdd("history_refresh", HISTORY_REFRESH_EXTRA_ROWS).catch(() => {});
+    // it is the term an open tab contributes. Only the sync plus this action's own bounded
+    // head/delta check are charged here — the strip, the day and the all-time list below are
+    // ledgered under their own readers, and counting them twice would hide a real residual.
+    void store.ledgerSyncCall("history_refresh", added, HISTORY_REFRESH_EXTRA_ROWS);
     const tz = await tzOffsetMinutes(store);
     const [daily, allTime, newPlays] = await Promise.all([
       store.getDailyStats(tz, Math.max(14, Math.min(days, 100000))),
@@ -135,7 +139,7 @@ export async function refreshHistoryAction(
       // idx_plays_played_at, so the steady-state cost is a 1-row head check and a delta
       // fetch only runs when there is one — bounded by the delta, never a scan.
       (async (): Promise<TrackStats[] | null> => {
-        if (sinceMinute == null) return null;
+        if (sinceMinute == null) return added > 0 ? store.searchHistory("", Math.min(added, 50)) : null;
         const head = await store.searchHistory("", 1);
         const newest = head[0] ? Math.floor(Date.parse(head[0].lastPlayed) / 60000) : null;
         // `>=` on the boundary minute, not `>`: a second play landing in the SAME minute
@@ -162,7 +166,7 @@ export async function refreshHistoryAction(
         : day
           ? await store.getPlaysByDay(day, tz)
           : null;
-    return { ok: true, added: 0, daily, allTime, day, tracks, newPlays };
+    return { ok: true, added, daily, allTime, day, tracks, newPlays };
   } catch (e) {
     // A missing/expired session throws a redirect — let it through rather than reporting it
     // as a failed sync.

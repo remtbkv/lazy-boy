@@ -2,7 +2,7 @@
 // store — inserts, skip verdicts, out-of-order re-adjudication, backfill exclusion,
 // counters. Every case here pins a finding from the 2026-08-19 audit.
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { type PlayRecord } from "@/lib/db";
+import { getSpotifyCooldownUntil, setSpotifyCooldownUntil, type PlayRecord } from "@/lib/db";
 import { ownerStore } from "./owner-store";
 import { resetStore, verdicts } from "./adversarial/helpers";
 
@@ -109,6 +109,18 @@ describe("plays pipeline (simulated store)", () => {
     const rows = await store.getPlaysByDay(DAY, 0);
     const rowPlays = rows.reduce((s, r) => s + r.plays, 0);
     expect(day?.plays).toBe(rowPlays);
+  });
+
+  it("cooldown persist is monotonic (a shorter later ban cannot shorten a longer one)", async () => {
+    const far = Date.now() + 30 * 60 * 1000;
+    const near = Date.now() + 60 * 1000;
+    await setSpotifyCooldownUntil(far);
+    await setSpotifyCooldownUntil(near);
+    expect(await getSpotifyCooldownUntil()).toBe(Math.floor(far));
+    // A LONGER later ban does extend.
+    const farther = far + 60_000;
+    await setSpotifyCooldownUntil(farther);
+    expect(await getSpotifyCooldownUntil()).toBe(Math.floor(farther));
   });
 
   it("locks: nonce owners, expiry takeover, release only frees your own", async () => {

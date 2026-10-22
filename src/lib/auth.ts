@@ -122,18 +122,19 @@ export async function getValidAccessTokenFor(uid: Uid): Promise<OwnedToken | nul
   return t ? { uid: t.uid, accessToken: t.accessToken } : null;
 }
 
+/** Whether the user holds a token of record, read through the token store, so the admin's
+ *  one-time copy of his plaintext row (token-move.ts) runs first: the cron's owner alarm, which
+ *  read raw would answer "no token" to every tick before Phase 2's first read copied it. */
+export async function hasStoredTokens(uid: Uid): Promise<boolean> {
+  return (await core.getStored(uid)) !== null;
+}
+
 /** Log out's clear (RULINGS Oct 15 1:33 PM): the user's `user_tokens` row goes, so capture
  *  stops and a copied cookie is refused (a session with no grant is, session-gate.ts) until
  *  the next sign-in. */
 export async function signOutTokens(uid: Uid): Promise<void> {
   await core.removeTokens(uid);
   publishTokens(uid, null);
-}
-
-/** The cron tick's token read (PLAN.md §5.4, §7.2): src/lib/sync/tick.ts's token getter. Unlike
- *  getValidAccessTokenFor it throws every failure and never clears a dead grant (token-core.ts). */
-export function tokenForTick(uid: Uid): Promise<UserTokens | null> {
-  return core.tokenForTick(uid);
 }
 
 export const { handlers, signIn, signOut, auth } = NextAuth({

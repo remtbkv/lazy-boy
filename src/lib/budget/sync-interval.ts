@@ -26,11 +26,6 @@ export function ambientGapMs(normalGapMs: number): number {
   return current > DEFAULT_SYNC_INTERVAL_MS ? current - 30_000 : normalGapMs;
 }
 
-/** Which trigger a sync is, as /api/sync's `x-sync` header names it (multi-user PLAN §7.6): the
- *  load and a return to the tab (`load`) run the open app's step at once; the timer (`timer`)
- *  only when no cron tick has run in 5 minutes. */
-export type SyncKind = "load" | "timer";
-
 /** SyncOnLoad's loop: sync on start, then one interval after each sync, and on a return to
  *  the tab once the ambient gap has passed. A hidden tab never syncs. */
 export class SyncLoop {
@@ -39,14 +34,14 @@ export class SyncLoop {
   private stopped = true;
 
   constructor(
-    private readonly post: (kind: SyncKind) => Promise<unknown>,
+    private readonly post: () => Promise<unknown>,
     private readonly visible: () => boolean,
   ) {}
 
   start(): void {
     if (!this.stopped) return;
     this.stopped = false;
-    void this.run("load");
+    void this.run();
   }
 
   stop(): void {
@@ -56,19 +51,19 @@ export class SyncLoop {
   }
 
   focus(): void {
-    if (!this.stopped && Date.now() - this.lastAt >= ambientGapMs(0)) void this.run("load");
+    if (!this.stopped && Date.now() - this.lastAt >= ambientGapMs(0)) void this.run();
   }
 
-  private async run(kind: SyncKind): Promise<void> {
+  private async run(): Promise<void> {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     if (this.visible()) {
       this.lastAt = Date.now();
-      noteSyncReply(await this.post(kind).catch(() => null));
+      noteSyncReply(await this.post().catch(() => null));
     }
     if (this.stopped) return;
     // Two runs can overlap (a return to the tab while a sync is out): one timer, the later.
     if (this.timer) clearTimeout(this.timer);
-    this.timer = setTimeout(() => void this.run("timer"), current);
+    this.timer = setTimeout(() => void this.run(), current);
   }
 }

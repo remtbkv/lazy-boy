@@ -17,7 +17,7 @@ export function spotifyClient(owner: Uid, token: TokenSource, patient = false, s
   return new Service(token, patient, source, owner);
 }
 
-export { DeadlineError, SpotifyError, TokenOwnerError, spotifyCooldownMs } from "./client";
+export { SpotifyError, TokenOwnerError, spotifyCooldownMs } from "./client";
 export type { OwnedToken, TokenSource } from "./client";
 export type { Track, Playlist, SpotifyUser } from "./types";
 export type { CompareEntry } from "./service";
