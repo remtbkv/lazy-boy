@@ -63,9 +63,13 @@ export async function GET(req?: Request) {
     // The sample is as old as the answer, not as the request: stamped with `now`, a replay ran the
     // call's latency ahead (code review 0156 L-f).
     const sampledAt = Date.now();
-    // An empty answer is not memoized: Spotify's player has answered empty mid-playback, and the
-    // tab confirms one by asking again, which a replay of the same sample would always pass.
-    if (!playing) return reply(null, uid, await floor);
+    // An empty answer is memoized too: an idle player is the commonest state for a tab left open,
+    // and R13's bound has to cover it (code review 0158 finding 3). Spotify's player has answered
+    // empty mid-playback, but the tab confirms one with a fresh re-ask, which skips this read.
+    if (!playing) {
+      rememberNowPlaying(uid, sampledAt, null);
+      return reply(null, uid, await floor);
+    }
 
     let context: { name: string; type: string } | null = null;
     if (playing.context) {

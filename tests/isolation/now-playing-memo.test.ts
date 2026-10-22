@@ -141,8 +141,9 @@ describe("the memo at a song's end", () => {
 // with the song from before the click (the bar flipped back, Home finished the new song as a 2 s
 // skip, the np-change beacon filed a bogus change), and answered M3's confirming re-ask of an
 // empty answer with that same empty sample, so the confirmation always passed. The poll after an
-// in-app action and the re-ask send ?fresh=1, which skips the memo's read (it still writes), and
-// an empty answer is not memoized.
+// in-app action and the re-ask send ?fresh=1, which skips the memo's read (it still writes). An
+// empty answer is memoized like any other (review 0158 finding 3: an idle player is the commonest
+// state for a tab left open, and R13's bound has to cover it); the fresh re-ask confirms it.
 describe("the memo around an in-app action and an empty answer", () => {
   const req = (fresh: boolean) => new Request(`http://127.0.0.1:3000/api/now-playing${fresh ? "?fresh=1" : ""}`);
   const id = async (fresh: boolean) => ((await (await GET(req(fresh))).json()).playing?.track?.id ?? null) as string | null;
@@ -170,7 +171,18 @@ describe("the memo around an in-app action and an empty answer", () => {
     expect(state.calls).toHaveLength(1);
   });
 
-  it("an empty answer is not replayed: the re-ask 600 ms later asks Spotify again", async () => {
+  it("an idle player: plain polls inside the window share one Spotify call (R13)", async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    state.empty = true;
+    expect(await id(false)).toBeNull();
+    vi.advanceTimersByTime(2_000);
+    expect(await id(false)).toBeNull();
+    state.uid = "bbbbbbbbbbbb"; // another user's tab is not answered from it
+    expect(await id(false)).toBeNull();
+    expect(state.calls).toEqual(["tok-aaaaaaaaaaaa", "tok-bbbbbbbbbbbb"]);
+  });
+
+  it("an empty answer is not replayed to the re-ask: 600 ms later (fresh) it asks Spotify again", async () => {
     vi.useFakeTimers({ now: 1_800_000_000_000 });
     state.trackId = "A";
     state.empty = true;
