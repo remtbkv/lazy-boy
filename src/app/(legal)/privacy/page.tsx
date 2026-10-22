@@ -24,13 +24,17 @@ export default function PrivacyPage() {
         played. From that, the app stores:
       </p>
       <ul>
-        <li>your Spotify user ID;</li>
+        <li>your Spotify user ID, and a random ID Lazy Boy gives your account;</li>
         <li>
           your listening history: each song you play, when it ended, and the playlist or album it
           played from, read from Spotify every couple of minutes, including while the app is
-          closed;
+          closed; and what the app works out from it: whether each play was a skip (you heard
+          less than 40% of the song) and your listening totals;
         </li>
-        <li>a copy of your playlists (names, covers, songs and their order) and your Liked Songs;</li>
+        <li>
+          a copy of your playlists (names, covers, their owners&apos; Spotify IDs, songs, their
+          order and when each was added) and your Liked Songs (and when each was added);
+        </li>
         <li>song details: title, artist, album, cover-art link and length;</li>
         <li>
           the sign-in tokens Spotify issues, so the app can act for you without asking you to sign
@@ -38,11 +42,15 @@ export default function PrivacyPage() {
         </li>
         <li>your timezone offset, so your days start at your midnight;</li>
         <li>
-          diagnostic logs: each call the app makes to Spotify (time, address and result), page
-          load timings your browser reports, how long a song change took to show, and, when a song
+          diagnostic logs, tagged with your account&apos;s random ID and kept 30 days: each call
+          the app makes to Spotify (time, address, result and which part of the app made it); what
+          your browser reports about each page of the app you open (load timings, how long the
+          page stayed in view, which page of the app you went to next, and error messages), with a
+          random ID for the browser tab; how long a song change took to show; and, when a song
           ends while Home is open, the Spotify IDs of that song and the one before it, when it
-          ended, how long it played and how Home judged it; for a song played in a private
-          session, only that it was private and how long it played.
+          ended, how long it played, how far into it Home saw it get and how Home judged it; for a
+          song played in a private session, only that it was private and how long it played.
+          Errors the server runs into are logged by page and message, with no account&apos;s ID.
         </li>
       </ul>
       <p>
@@ -62,8 +70,9 @@ export default function PrivacyPage() {
       <p>
         Lazy Boy sets a sign-in cookie that keeps you signed in for up to 30 days, short-lived
         cookies used during the Spotify sign-in, and a cookie holding your timezone offset. It
-        also keeps small caches in your browser&apos;s local storage so pages open faster. There
-        are no ads, analytics or tracking cookies, and Lazy Boy lets no one else place cookies in
+        also keeps caches in your browser so pages and search open faster: small ones in local
+        and session storage, and a copy of your library and listening history in IndexedDB;
+        signing out clears them. There are no ads, analytics or tracking cookies, and Lazy Boy lets no one else place cookies in
         your browser. Album art loads directly from Spotify&apos;s servers. You can delete these
         cookies and caches in your browser&apos;s settings at any time; deleting the sign-in
         cookie signs you out.
@@ -71,15 +80,24 @@ export default function PrivacyPage() {
 
       <h2>Where it is kept</h2>
       <ul>
-        <li>The app runs on Vercel, which sees each request (including your IP address) as any web host does.</li>
         <li>
-          The database is on a computer Rem owns, at his home, reached over Tailscale&apos;s
-          network. A planned move puts it on Turso, a hosted database (in AWS&apos;s US East
-          region); the diagnostic logs stay on Rem&apos;s computer.
+          The app runs on Vercel, which sees each request (including your IP address) as any web
+          host does. Vercel also keeps cached copies of some of what your pages show, labelled
+          with your account&apos;s random ID, so pages open faster, and its logs hold the errors
+          and warnings the server prints.
         </li>
         <li>
-          Nightly backup copies of the database are kept on that computer for 14 days and in
-          Rem&apos;s Microsoft OneDrive for 60 days.
+          Your history, library, timezone and sign-in tokens are in a database on Turso, a hosted
+          database in AWS&apos;s US East region.
+        </li>
+        <li>
+          The diagnostic logs are on a computer Rem owns, at his home, reached over
+          Tailscale&apos;s network.
+        </li>
+        <li>
+          Nightly backup copies of the database and of the diagnostic logs, with the sign-in
+          tokens removed, are kept on that computer for 14 days and in Rem&apos;s Microsoft
+          OneDrive for 60 days.
         </li>
         <li>
           Rem uses an AI assistant (Anthropic&apos;s Claude) to maintain the app. It works only

@@ -52,6 +52,45 @@ describe("/privacy and /terms", () => {
   });
 });
 
+// /privacy has to be true of the code (Developer Terms §V). Each line below names the code path
+// the page discloses (review 0158 finding 4: browser errors went unsaid, and the page still had
+// the database moving to Turso after it moved on 2026-10-16).
+describe("/privacy says what the code stores and logs", () => {
+  const text = async () => {
+    const { default: Privacy } = await import("@/app/(legal)/privacy/page");
+    return renderToStaticMarkup(createElement(Privacy)).replace(/<[^>]+>/g, "").replace(/&#x27;|&apos;/g, "'").replace(/\s+/g, " ");
+  };
+
+  it("names where the data is today", async () => {
+    const t = await text();
+    expect(t).not.toContain("planned move"); // core is on Turso (db.ts, CLAUDE.md)
+    expect(t).toContain("on Turso");
+    expect(t).toContain("diagnostic logs are on a computer Rem owns"); // getTelemetryClient: sqld on the Zenbook
+  });
+
+  it("names every kind of diagnostic row", async () => {
+    const t = await text();
+    expect(t).toContain("error messages"); // metrics-client.ts js-error; instrumentation.ts server-error
+    expect(t).toContain("how long the page stayed in view"); // visit-ms
+    expect(t).toContain("which page of the app you went to next"); // nav-ms
+    expect(t).toContain("which part of the app made it"); // api_log.source
+    expect(t).toContain("kept 30 days"); // pruneApiLog, pruneClientMetrics
+    expect(t).toContain("only that it was private and how long it played"); // handoffBeaconMeta
+  });
+
+  it("names what the library copy and the history carry", async () => {
+    const t = await text();
+    expect(t).toContain("when each was added"); // playlist_tracks.added_at, saved_tracks.added_at
+    expect(t).toContain("whether each play was a skip"); // plays.skipped
+  });
+
+  it("names the browser's IndexedDB copy and the tokens' absence from backups", async () => {
+    const t = await text();
+    expect(t).toContain("IndexedDB"); // search-cache.ts
+    expect(t).toContain("with the sign-in tokens removed"); // backup.py STRIP
+  });
+});
+
 describe("/login consent line", () => {
   it("is shown before sign-in, beside the connect button, linking both pages", async () => {
     authMock.mockResolvedValue(null);
