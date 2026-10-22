@@ -30,10 +30,14 @@ export type NpChange = {
 const NATURAL_SLACK_MS = 2_000;
 /** A change this soon after an in-app play is that play landing. */
 const IN_APP_MS = 5_000;
-/** The tab went hidden at or after `since`: it did not watch the change happen (a tab coming
- *  back finds the change minutes late; requestAnimationFrame waits while hidden), so the bound
- *  measures the time away and the row is filed as kind=return, reported apart (review 0156 M5). */
-const away = (hiddenAt: number | null | undefined, since: number) => hiddenAt != null && hiddenAt >= since;
+/** The tab was hidden at some point after `since`: it went hidden then, or it came back into view
+ *  then (a hidden tab keeps applying states: the hidden leader's boundary polls, a follower's
+ *  relayed ones, so `since` can fall inside the spell; review 0158 finding 1). It did not watch the
+ *  change happen (a tab coming back finds the change minutes late; requestAnimationFrame waits
+ *  while hidden), so the bound measures the time away and the row is filed as kind=return,
+ *  reported apart (review 0156 M5). */
+const away = (hiddenAt: number | null | undefined, visibleAt: number | null | undefined, since: number) =>
+  (hiddenAt != null && hiddenAt >= since) || (visibleAt != null && visibleAt > since);
 
 export function npChange(i: {
   /** What the bar showed before this answer, and when that was received. */
@@ -47,6 +51,8 @@ export function npChange(i: {
   inAppAt: number | null;
   /** When the tab last went hidden, or null. */
   hiddenAt?: number | null;
+  /** When the tab last came into view, or null. */
+  visibleAt?: number | null;
 }): NpChange | null {
   const { shown, next } = i;
   if (shown && shown.track.id === next.track.id) return null;
@@ -55,7 +61,7 @@ export function npChange(i: {
   const render = Math.max(0, Math.round(i.renderedAt - i.receivedAt));
   const changeAt = i.receivedAt - pNew;
   let kind: NpChangeKind;
-  if (away(i.hiddenAt, i.shownAt)) kind = "return";
+  if (away(i.hiddenAt, i.visibleAt, i.shownAt)) kind = "return";
   else if (!shown || !shown.isPlaying) kind = "start";
   else if (i.inAppAt !== null && i.receivedAt - i.inAppAt < IN_APP_MS) kind = "in-app";
   else {
@@ -75,10 +81,16 @@ export function npChange(i: {
 
 /** The in-app path's bound: click → render, the action's round trip included. `shownAt` is when
  *  the provider applied the song. */
-export function npInApp(i: { startedAt: number; shownAt: number; renderedAt: number; hiddenAt?: number | null }): NpChange {
+export function npInApp(i: {
+  startedAt: number;
+  shownAt: number;
+  renderedAt: number;
+  hiddenAt?: number | null;
+  visibleAt?: number | null;
+}): NpChange {
   return {
     value: i.renderedAt - i.startedAt,
-    kind: away(i.hiddenAt, i.startedAt) ? "return" : "in-app",
+    kind: away(i.hiddenAt, i.visibleAt, i.startedAt) ? "return" : "in-app",
     pNew: 0,
     rtt: i.shownAt - i.startedAt,
     render: i.renderedAt - i.shownAt,

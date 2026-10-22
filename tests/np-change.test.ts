@@ -68,14 +68,29 @@ describe("a tab coming back is not a song change's latency", () => {
     expect(c?.kind).toBe("return");
   });
 
-  it("hidden only before the state it showed: an ordinary change", () => {
-    const c = npChange({ ...base, shownAt: T - 6_000, next: song("B", 400), hiddenAt: T - 60_000 });
+  it("hidden and back before the state it showed: an ordinary change", () => {
+    const c = npChange({ ...base, shownAt: T - 6_000, next: song("B", 400), hiddenAt: T - 60_000, visibleAt: T - 30_000 });
     expect(c?.kind).toBe("skip");
+  });
+
+  // Review 0158 finding 1: a hidden tab keeps applying states (the hidden leader's boundary poll,
+  // a follower's relayed state), so the state it showed can postdate the moment it went hidden.
+  it("a state applied while hidden, then a skip on the phone, then back: kind=return", () => {
+    // Hidden at T−300 s; its boundary poll applies A at T−100 s; the user skips to B at T−80 s
+    // and comes back at T; the return poll finds B 80 s in.
+    const c = npChange({ ...base, shown: song("A", 0), shownAt: T - 100_000, next: song("B", 80_000), hiddenAt: T - 300_000, visibleAt: T });
+    expect(c?.kind).toBe("return");
+  });
+
+  it("a tab opened in the background (never hidden, visible after the state it showed): kind=return", () => {
+    expect(npChange({ ...base, shownAt: T - 6_000, next: song("B", 400), hiddenAt: null, visibleAt: T - 1_000 })?.kind).toBe("return");
   });
 
   it("in-app: a click → render that spans a hidden spell is kind=return", () => {
     expect(npInApp({ startedAt: T, shownAt: T + 600, renderedAt: T + 90_000, hiddenAt: T + 650 }).kind).toBe("return");
     expect(npInApp({ startedAt: T, shownAt: T + 600, renderedAt: T + 630, hiddenAt: T - 1 })).toMatchObject({ kind: "in-app", value: 630, rtt: 600, render: 30 });
+    // The same rule as a poll's: a hidden spell that ends inside the bound counts, whenever it began.
+    expect(npInApp({ startedAt: T, shownAt: T + 600, renderedAt: T + 90_000, hiddenAt: T - 5_000, visibleAt: T + 89_000 }).kind).toBe("return");
   });
 });
 
