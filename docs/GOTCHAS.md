@@ -733,6 +733,17 @@ the DNS-blip ladder unreachable for every store query — they are all POSTs. `m
 buffers the body once and builds a fresh Request per attempt; `tests/store-fetch.test.ts`
 pins it. Don't "simplify" it back to passing `input` through.
 
+## A statement's args must be exactly its parameters
+
+A local `file:` database binds the args it is given, ignores the ones the SQL does not name and
+leaves a parameter with no arg NULL. sqld and Turso refuse both (`ARGS_INVALID: ... too many
+parameters, expected 1 found 2` / `value for parameter :b not found`; Turso cloud: `Number of
+arguments mismatch`). On Oct 22 Phase 3's claim batch handed one shared args object to statements
+that each used part of it: 2,200 tests passed, and every production tick threw at the claim
+(lane 23). So each statement gets its own args object with exactly its names, and the suites'
+client applies the rule (`tests/stubs/libsql-client.mjs`, aliased in `vitest.config.ts` and
+preloaded into the scripts a test spawns; the cases, measured on sqld, are `tests/turso-args.test.ts`).
+
 ## Simplified vs traditional Han are different strings
 
 The same song is in this store twice under two scripts, because Spotify hands the title out

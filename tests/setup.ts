@@ -4,6 +4,13 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+// A script a test spawns opens the client with Turso's rule for a statement's args, as this
+// process does through vitest.config.ts's alias (tests/stubs/libsql-client.mjs).
+const preload = `--import=${path.resolve(__dirname, "stubs/turso-args-preload.mjs")}`;
+if (!process.env.NODE_OPTIONS?.includes(preload)) {
+  process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, preload].filter(Boolean).join(" ");
+}
+
 const dir = mkdtempSync(path.join(tmpdir(), "lazyboy-sim-"));
 process.env.TURSO_DATABASE_URL = `file:${path.join(dir, "sim.db")}`;
 delete process.env.TURSO_AUTH_TOKEN;

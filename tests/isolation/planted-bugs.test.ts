@@ -14,10 +14,13 @@
 // only the first key's sentinel.
 //
 // Phase 3 adds: a tick that hands a step another user's store; a lease released without its
-// owner check.
+// owner check. Lane 40 adds the suites' store reverted to a plain `file:` client, which runs a
+// statement handed named args it does not use; Turso refuses it (lane 23's production failure).
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import { createClient } from "@libsql/client";
+import { createClient as createPlainClient } from "@libsql/client/node";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { checkIdentity, type SessionClaims, type Uid } from "@/lib/identity";
 import { appIdentityLookup, readIdentity } from "@/lib/identity-read";
@@ -346,5 +349,22 @@ describe("planted: a lease released without the owner check", () => {
   it("and passes over the real release", async () => {
     await oneUser();
     await expectReleaseNeedsItsLease(A, releaseLease);
+  });
+});
+
+describe("planted: the suites' store reverted to a plain file: client", () => {
+  // One args object shared by a batch whose statements each use some of it, as Phase 3's claim had.
+  const shared = { tick: "t1", now: 1000 };
+  const batch = [
+    { sql: "SELECT :tick AS v", args: shared },
+    { sql: "SELECT :now AS v", args: shared },
+  ];
+  it("the plain client runs the shared-args batch", async () => {
+    const plain = createPlainClient({ url: "file::memory:" });
+    await expect(plain.batch(batch, "read")).resolves.toHaveLength(2);
+  });
+  it("and the suites' client refuses it, as Turso does", async () => {
+    const c = createClient({ url: "file::memory:" });
+    await expect(c.batch(batch, "read")).rejects.toThrow("too many parameters, expected 1 found 2");
   });
 });
