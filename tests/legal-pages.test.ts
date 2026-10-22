@@ -93,6 +93,15 @@ describe("/privacy says what the code stores and logs", () => {
     expect(t).toContain("IndexedDB"); // search-cache.ts
     expect(t).toContain("with the sign-in tokens removed"); // backup.py STRIP
   });
+
+  it("names Phase 2's accounts database, the account ID and the encrypted tokens", async () => {
+    const t = await text();
+    expect(t).toContain("your Spotify user ID and account ID"); // users.account_id (identity-read.ts resolveSignIn)
+    expect(t).toContain("stored encrypted"); // user_tokens.blob (token-crypto.ts, AES-256-GCM)
+    expect(t).toContain("accounts database (who has an account, and your encrypted sign-in tokens) is on Turso too"); // app-db.ts, lazyboy-app
+    expect(t).toContain("backup copies of the history database"); // the Zenbook's backup.py copies `lazyboy`, not `lazyboy-app`
+    expect(t).not.toContain("timezone and sign-in tokens are in a database"); // the tokens left `lazyboy` for user_tokens
+  });
 });
 
 describe("/login consent line", () => {

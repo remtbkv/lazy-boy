@@ -24,7 +24,7 @@ export default function PrivacyPage() {
         played. From that, the app stores:
       </p>
       <ul>
-        <li>your Spotify user ID, and a random ID Lazy Boy gives your account;</li>
+        <li>your Spotify user ID and account ID, and a random ID Lazy Boy gives your account;</li>
         <li>
           your listening history: each song you play, when it ended, and the playlist or album it
           played from, read from Spotify every couple of minutes, including while the app is
@@ -37,8 +37,8 @@ export default function PrivacyPage() {
         </li>
         <li>song details: title, artist, album, cover-art link and length;</li>
         <li>
-          the sign-in tokens Spotify issues, so the app can act for you without asking you to sign
-          in again every hour;
+          the sign-in tokens Spotify issues, stored encrypted, so the app can act for you without
+          asking you to sign in again every hour;
         </li>
         <li>your timezone offset, so your days start at your midnight;</li>
         <li>
@@ -90,15 +90,16 @@ export default function PrivacyPage() {
           and warnings the server prints.
         </li>
         <li>
-          Your history, library, timezone and sign-in tokens are in a database on Turso, a hosted
-          database in AWS&apos;s US East region.
+          Your history, library and timezone are in a database on Turso, a hosted database in
+          AWS&apos;s US East region. Lazy Boy&apos;s accounts database (who has an account, and your
+          encrypted sign-in tokens) is on Turso too.
         </li>
         <li>
           The diagnostic logs are on a computer Rem owns, at his home, reached over
           Tailscale&apos;s network.
         </li>
         <li>
-          Nightly backup copies of the database and of the diagnostic logs, with the sign-in
+          Nightly backup copies of the history database and of the diagnostic logs, with the sign-in
           tokens removed, are kept on that computer for 14 days and in Rem&apos;s Microsoft
           OneDrive for 60 days.
         </li>
