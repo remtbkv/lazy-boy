@@ -76,6 +76,10 @@ describe("/privacy says what the code stores and logs", () => {
     expect(t).toContain("which part of the app made it"); // api_log.source
     expect(t).toContain("kept 30 days"); // pruneApiLog, pruneClientMetrics
     expect(t).toContain("only that it was private and how long it played"); // handoffBeaconMeta
+    // cpu_meter (db.ts meterFlush via budget/request-meter.ts): one row per day, route and uid
+    // with its invocations, CPU, wall time and bytes; nothing prunes it, so no 30-day claim.
+    expect(t).toContain("how many requests each page and address of the app served for you, the server time they took and how much data they sent");
+    expect(t).toContain("kept for as long as you stay connected");
   });
 
   it("names what the library copy and the history carry", async () => {
