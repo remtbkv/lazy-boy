@@ -244,13 +244,15 @@ marked swappable for the same reason: if the windowed endpoint proves unreliable
 replacement strategy behind the same signature is differencing daily snapshots of the
 month-to-date total.
 
-**Broken as of 2026-10-16: the parser does not match the endpoint's shape.**
-`fetchPlatformDayUsage` (`src/lib/usage-check.ts`) reads `database.total.rows_read`, else sums
+**The parser matched no real response through 2026-10-16** (fixed 2026-10-22: lane 2626's parser, landed by lane 2963). `fetchPlatformDayUsage`
+(`src/lib/usage-check.ts`) used to read `database.total.rows_read`, else sum
 `database.instances` as a map of counters. The endpoint (checked 2026-10-16 for `lazyboy`, HTTP
 200) returns the sum at the top level, `total.rows_read`, plus `database.usage.rows_read`, and
-`database.instances` is an array of `{uuid, usage}`. Neither branch finds a number, so every
-day records `_platform_error` and no `_platform_total`/`_residual` (the Oct 16 call did exactly
-that for Oct 15). The pace check is unaffected.
+`database.instances` is an array of `{uuid, usage}`. Neither branch found a number, so every
+day through Oct 16 recorded `_platform_error` and no `_platform_total`/`_residual`. The parser
+now reads `total`, `database.total` or `database.usage`, else sums the instance array; the
+captured body is `tests/fixtures/turso-db-usage-2026-10-16.json`
+(`tests/usage-check-parse.test.ts`). The pace check was never affected.
 
 **The thresholds are provisional.** They are sized to catch a burn of the shape that actually
 happened — millions of unattributed rows — not calibrated against a measured distribution of

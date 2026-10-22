@@ -81,24 +81,31 @@ async function fetchPlatformDayUsage(
       },
     );
     if (!res.ok) return null;
+    // The shape the endpoint returned on 2026-10-16 (tests/fixtures/turso-db-usage-2026-10-16.json):
+    // the sum at the top level as `total`, the same figure as `database.usage`, and
+    // `database.instances` as an array of {uuid, usage}. Turso's published schema puts the
+    // total at `database.total` instead, so that is read too.
     const body = (await res.json()) as {
+      total?: Record<string, number>;
       database?: {
         total?: Record<string, number>;
-        instances?: Record<string, Record<string, number>>;
+        usage?: Record<string, number>;
+        instances?: { uuid?: string; usage?: Record<string, number> }[];
       };
     };
-    // Prefer the pre-summed total; fall back to summing the per-instance figures, which is
+    // Prefer a pre-summed total; fall back to summing the per-instance figures, which is
     // what the shape degrades to when a database has been migrated between instances (this
     // one was, on 2026-08-06 — the old instance's counters are frozen and still listed).
-    const total = body.database?.total?.rows_read;
-    if (typeof total === "number") return total;
+    for (const total of [body.total, body.database?.total, body.database?.usage]) {
+      if (typeof total?.rows_read === "number") return total.rows_read;
+    }
     const instances = body.database?.instances;
-    if (instances) {
+    if (Array.isArray(instances)) {
       let sum = 0;
       let seen = false;
-      for (const v of Object.values(instances)) {
-        if (typeof v?.rows_read === "number") {
-          sum += v.rows_read;
+      for (const v of instances) {
+        if (typeof v?.usage?.rows_read === "number") {
+          sum += v.usage.rows_read;
           seen = true;
         }
       }
