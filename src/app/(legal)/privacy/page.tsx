@@ -40,7 +40,7 @@ export default function PrivacyPage() {
           the sign-in tokens Spotify issues, stored encrypted, so the app can act for you without
           asking you to sign in again every hour;
         </li>
-        <li>your timezone offset, so your days start at your midnight;</li>
+        <li>your timezone (its name and offset), so your days start at your midnight;</li>
         <li>
           diagnostic logs, tagged with your account&apos;s random ID and kept 30 days: each call
           the app makes to Spotify (time, address, result and which part of the app made it); what
@@ -72,7 +72,7 @@ export default function PrivacyPage() {
       <h2>Cookies and browser storage</h2>
       <p>
         Lazy Boy sets a sign-in cookie that keeps you signed in for up to 30 days, short-lived
-        cookies used during the Spotify sign-in, and a cookie holding your timezone offset. It
+        cookies used during the Spotify sign-in, and two cookies holding your timezone. It
         also keeps caches in your browser so pages and search open faster: small ones in local
         and session storage, and a copy of your library and listening history in IndexedDB;
         signing out clears them. There are no ads, analytics or tracking cookies, and Lazy Boy lets no one else place cookies in
