@@ -1,8 +1,9 @@
 import { after } from "next/server";
-import { getValidAccessTokenFor } from "@/lib/auth";
+import { readTokenRow } from "@/lib/app-db";
+import { getValidAccessTokenFor, hasStoredTokens } from "@/lib/auth";
 import { cronCaller, type CronCaller } from "@/lib/cron-auth";
-import { forUser, type UserStore } from "@/lib/db";
-import { phase1Owner } from "@/lib/identity";
+import type { UserStore } from "@/lib/db";
+import { adminStore } from "@/lib/identity-read";
 import { spotifyClient, SpotifyError, type OwnedToken } from "@/lib/spotify";
 import { syncRecentPlays } from "@/lib/sync/history";
 import { syncLibrary } from "@/lib/sync/library";
@@ -67,14 +68,18 @@ export async function GET(req: Request) {
 }
 
 async function tick(caller: CronCaller): Promise<Response> {
-  // Phase 1 has one user, the owner (OWNER_UID); Phase 3's claim hands this tick each due user
-  // instead (multi-user PLAN §7.2). No owner configured: capture cannot run, and says so.
-  const uid = phase1Owner();
-  if (!uid) return Response.json({ ok: false, error: "no owner" }, { status: 503 });
-  const store = forUser(uid);
+  // One user until Phase 3's claim hands this tick each due user (multi-user PLAN §7.2): the
+  // admin, at the database his `users` row names. No admin row: capture cannot run, and says
+  // so. The app database not answering is a store hiccup (200, below).
+  const store = await adminStore().catch((e) => (console.error("[cron] admin row unread", e), undefined));
+  if (store === null) return Response.json({ ok: false, error: "no owner" }, { status: 503 });
+  if (!store) return Response.json({ ok: true, skipped: "store" });
+  const uid = store.uid;
   // The owner alarm, read before the stamp so the Zenbook sees it whichever pinger's tick ran
-  // this window (PLAN §7.2 step 0). A store error here is no verdict: the stamp decides.
-  if (caller === "zenbook" && (await store.getSpotifyTokens().catch(() => undefined)) === null) {
+  // this window (PLAN §7.2 step 0). It asks the token store, so Phase 2's first tick copies the
+  // admin's plaintext row in before deciding he has none (token-move.ts, §11.4 step 3). A store
+  // error here is no verdict: the stamp decides.
+  if (caller === "zenbook" && (await hasStoredTokens(uid).catch(() => undefined)) === false) {
     return Response.json({ ok: false, error: "no token" }, { status: 503 });
   }
   // The stamp (PLAN §7.2 step 1): one compare-and-set on a meta row, so a burst of calls does
@@ -104,8 +109,7 @@ async function tick(caller: CronCaller): Promise<Response> {
     // capture has STOPPED, and a 200 here let the pinger log success for weeks (burn review
     // 2026-10-03, M1). 503 so the pinger's unit fails visibly. A store hiccup or a transient
     // refresh failure still answers 200 — those heal on their own.
-    const signedOut =
-      !tokenReadFailed && (await store.getSpotifyTokens().then((t) => t === null, () => false));
+    const signedOut = !tokenReadFailed && (await readTokenRow(uid).then((t) => t === null, () => false));
     if (signedOut) return Response.json({ ok: false, error: "no token" }, { status: 503 });
     return Response.json({ ok: true, skipped: "no token" });
   }

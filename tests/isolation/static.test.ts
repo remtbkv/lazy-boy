@@ -1,4 +1,4 @@
-// Static checks over src/ (PLAN.md §6.4: S1, S2, S4, S5, S6, S8), run on every `npm test`. They
+// Static checks over src/ (PLAN.md §6.4: S1-S8), run on every `npm test`. They
 // parse the source with the TypeScript compiler API, so a comment or a string that merely
 // mentions a pattern does not count. Each allowlist entry says why it is there; an entry marked
 // PENDING is single-user code that Phase 1's turn moves (it sits in a file queued lanes edit),
@@ -82,24 +82,20 @@ describe("S2: a Uid is minted in one place", () => {
   });
 
   // phase1Owner() mints Rem's uid from OWNER_UID for the paths that act for him with no
-  // session: the cron and the daily chores until Phase 3's claim, the health check, the
-  // sign-in's owner guard, and db.ts's app-wide rows (the cooldown) until Phase 2's app database.
-  const OWNER_PATHS = new Set([
-    "src/lib/db.ts",
-    "src/lib/owner.ts",
-    "src/app/api/cron/sync/route.ts",
-    "src/app/api/cron/daily/route.ts",
-    "src/app/api/cron/health/route.ts",
-    "src/app/api/cron/store-bench/route.ts",
-  ]);
+  // session: identity-read.ts's adminStore (the cron, the daily chores, the health check, the
+  // store bench, the sign-in's owner guard and token-move.ts's plaintext row, until Phase 3's
+  // claim), which reads his users row
+  // for his database; and db.ts's app-wide row (the cooldown) until it moves to app_meta.
+  const OWNER_PATHS = new Set(["src/lib/db.ts", "src/lib/identity-read.ts"]);
   it("phase1Owner is imported only by the paths that act for the owner without a session", () => {
     expect(importersOf("phase1Owner").filter((f) => !OWNER_PATHS.has(f))).toEqual([]);
   });
 
-  // forUserAt names the database as well as the user: only Phase 2's identity read (with the
-  // db_name it returns) may call it. Nothing in src does in Phase 1; the tests do.
-  it("forUserAt is imported by nothing in src", () => {
-    expect(importersOf("forUserAt")).toEqual([]);
+  // forUserAt names the database as well as the user: only what read the users row may call it,
+  // with the db_name it read: the identity read and adminStore (identity-read.ts), and Phase 3's
+  // claim. The tests do too.
+  it("forUserAt is imported only by the identity read", () => {
+    expect(importersOf("forUserAt")).toEqual(["src/lib/identity-read.ts"]);
   });
 });
 
@@ -139,7 +135,6 @@ describe("S3: db.ts exports no per-user function", () => {
     "getRecentlyPlayedQuotaWindows",
     "getSpotifyCallBreakdown",
     "getSpotifyCooldownUntil",
-    "isolationEventsAfter",
     "ledgerAdd",
     "ledgerDayModeledTotal",
     "ledgerSet",
@@ -184,6 +179,64 @@ describe("S3: db.ts exports no per-user function", () => {
   });
 });
 
+describe("S3: app-db.ts's exports match the reviewed snapshot", () => {
+  // Every statement on the app database lives in app-db.ts (PLAN.md §6.2 layer 7), so a new
+  // export is a new way to reach every user's identity or tokens. This list changes in the same
+  // commit as the export, where a reviewer sees it. (S3's other half, no per-user function
+  // exported from db.ts at module level, is the block above.)
+  const SNAPSHOT = [
+    "APP_SCHEMA (re-export)",
+    "APP_SCHEMA_VERSION (re-export)",
+    "AppIdentityRow (type)",
+    "TokenRow (type)",
+    "USER_STATUSES (re-export)",
+    "UserRow (type)",
+    "UserStatus (re-export)",
+    "acquireAppLock (function)",
+    "appDatabaseUrl (function)",
+    "bindAdminAccount (function)",
+    "deleteTokens (function)",
+    "deleteTokensIfUnchanged (function)",
+    "ensureAppSchema (function)",
+    "findUserByAccountId (function)",
+    "getAppMeta (function)",
+    "insertTokensIfAbsent (function)",
+    "markEventsAlarmed (function)",
+    "moveStatus (function)",
+    "readIdentityRow (function)",
+    "readTokenRow (function)",
+    "recordAppEvent (function)",
+    "recordSignIn (function)",
+    "releaseAppLock (function)",
+    "setAppMeta (function)",
+    "setAppMetaIfAbsent (function)",
+    "unreportedEvents (function)",
+    "updateTokensIfUnchanged (function)",
+    "writeSignInTokens (function)",
+  ];
+
+  it("lists every export", () => {
+    const { sf } = FILES.find((f) => f.rel === "src/lib/app-db.ts")!;
+    const out: string[] = [];
+    const exported = (n: ts.Node) =>
+      (ts.canHaveModifiers(n) ? (ts.getModifiers(n) ?? []) : []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+    for (const st of sf.statements) {
+      if (ts.isExportDeclaration(st) && st.exportClause && ts.isNamedExports(st.exportClause)) {
+        for (const e of st.exportClause.elements) out.push(`${e.name.text} (re-export)`);
+      } else if (ts.isExportAssignment(st)) {
+        out.push("default (export assignment)");
+      } else if (exported(st)) {
+        if (ts.isFunctionDeclaration(st)) out.push(`${st.name?.text} (function)`);
+        else if (ts.isTypeAliasDeclaration(st) || ts.isInterfaceDeclaration(st)) out.push(`${st.name.text} (type)`);
+        else if (ts.isVariableStatement(st)) for (const d of st.declarationList.declarations) out.push(`${d.name.getText(sf)} (const)`);
+        else if (ts.isClassDeclaration(st)) out.push(`${st.name?.text} (class)`);
+        else out.push(`${st.getText(sf).slice(0, 40)} (other)`);
+      }
+    }
+    expect(out.sort()).toEqual([...SNAPSHOT].sort());
+  });
+});
+
 describe("S4: module-scope state is on a reviewed list", () => {
   // Every module-scope binding that is ever mutated: a top-level `let` that is assigned, a
   // top-level const container (Map, Set, array, object, a globalThis-backed store) that has a
@@ -192,6 +245,8 @@ describe("S4: module-scope state is on a reviewed list", () => {
   const BROWSER = "browser module: one tab, one signed-in user";
   const REVIEWED: Record<string, string> = {
     "src/lib/user-cache.ts: names": "wrapper names, process-wide on purpose: no user data",
+    "src/lib/app-db.ts: g": "the one app-database client, keyed by its URL: global by meaning, holds no user data",
+    "src/lib/token-keys.ts: verdict": "the key check's verdict for the configured keys and database: per deployment, no user data",
     "src/lib/playlists-sync.ts: currentSync": "Map<Uid, task id>",
     "src/lib/tasks/registry.ts: store": "tasks carry their owner; getTaskFor checks it",
     "src/lib/tasks/registry.ts: running": "completion promises by task id; holds no result",
@@ -219,7 +274,8 @@ describe("S4: module-scope state is on a reviewed list", () => {
     "src/lib/search-perf.ts: enabled": BROWSER,
     // Set by the sign-out form for the rest of that page load; signing in again is a navigation.
     "src/lib/search-cache.ts: ended": BROWSER,
-    "src/lib/db.ts: g": "clients by db_name, owner verdicts and schema runs by (uid, db_name), the telemetry client, the app-wide budget mode's memo",
+    "src/lib/db.ts: g":
+      "clients by db_name, each uid's db_name as its users row last said, owner verdicts and schema runs by (uid, db_name), the telemetry client, the app-wide budget mode's memo",
     "src/lib/budget/request-meter.ts: g": "the process's meter: counts by (day, route, uid), the in-flight requests by Next's request scope and as a set, the cold-start flag, the process CPU already in a row",
     "src/lib/budget/request-meter.ts: open": "WeakMap keyed by Next's per-request scope: one in-flight request's counts, gone with it",
     "src/lib/budget/request-meter.ts: shared": "the process's meter (see g): its cold-start flag, CPU booked and in-flight set",
@@ -377,7 +433,6 @@ describe("S7: no user path awaits the telemetry store", () => {
     "ledgerDayModeledTotal",
     "recordClientMetrics",
     "getClientLoadSpeed",
-    "isolationEventsAfter",
     "meterFlush",
     "readMeter",
     "recordBudgetDay",
@@ -387,8 +442,8 @@ describe("S7: no user path awaits the telemetry store", () => {
     "src/app/api/cron/daily/route.ts": "the daily chores",
     "src/lib/usage-check.ts": "run by the daily chores and the usage-check cron route",
     "src/app/(app)/usage/telemetry.ts": "/usage, settled one section at a time",
-    "src/app/api/cron/health/route.ts": "the health check reads isolation events where Phase 1 records them",
-    "src/lib/isolation.ts": "an isolation event's only record in Phase 1; a rare path, 4 s cap",
+    "src/app/api/cron/health/route.ts": "the health check reads the CPU meter's last write (the hourly cron, no user path)",
+    "src/lib/isolation.ts": "an isolation event's telemetry row, beside its events row; a rare path, 4 s cap",
     "src/instrumentation.ts": "server errors only, after the response (STORE_MIGRATION §6 item 4)",
     "src/lib/budget/request-meter.ts": "the CPU meter's flush, inside after()",
     "src/lib/budget/daily.ts": "the budget record, run by the daily chores",

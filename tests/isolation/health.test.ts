@@ -6,7 +6,7 @@ import { GET } from "@/app/api/cron/health/route";
 import { meterFlush, recordBudgetDay, setBudgetMode } from "@/lib/db";
 import { rawClient, resetStore } from "../adversarial/helpers";
 import { reportIsolation } from "@/lib/isolation";
-import { ownerStore, ownerUid } from "../owner-store";
+import { ownerStore, ownerUid, seedOwnerApp } from "../owner-store";
 import { FAR } from "./harness";
 
 const healthy = { ok: true, staleForMs: 60_000, reason: null } as const;
@@ -64,6 +64,7 @@ describe("/api/cron/health", () => {
     process.env.CRON_SECRET = "zen-secret";
     process.env.CRON_SECRET_EXT = "ext-secret";
     await resetStore();
+    await seedOwnerApp(); // his users row; no token row yet
   });
 
   it("refuses no secret and a wrong one; accepts either pinger's", async () => {
@@ -82,11 +83,13 @@ describe("/api/cron/health", () => {
   it("red when the owner has no token row; green with a token and a recent harvest; no listening data", async () => {
     // The meter writes on every metered request in production; a meter that never wrote is red.
     await meterFlush([{ day: new Date().toISOString().slice(0, 10), route: "/api/x", uid: "-", invocations: 1, cpuUs: 1, wallMs: 1, bytes: 0 }]);
+    // The plaintext row alone is not a token from Phase 2: the token of record is user_tokens.
+    await ownerStore().setSpotifyTokens({ accessToken: "a", refreshToken: "r", expiresAt: FAR });
     const red = await call("Bearer ext-secret");
     expect(red.status).toBe(500);
     expect((await red.json()).reasons).toEqual(["owner-capture"]);
 
-    await ownerStore().setSpotifyTokens({ accessToken: "a", refreshToken: "r", expiresAt: FAR });
+    await seedOwnerApp({ accessToken: "a", refreshToken: "r", expiresAt: FAR });
     const c = await rawClient();
     await c.execute({ sql: "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_sync', ?)", args: [new Date().toISOString()] });
     const green = await call("Bearer ext-secret");
@@ -94,10 +97,10 @@ describe("/api/cron/health", () => {
     expect(Object.keys(await green.json()).sort()).toEqual(["ok", "reasons", "unchecked"]);
   });
 
-  // The inputs Phase 1's turn wired in (PLAN §7.10): isolation events where Phase 1 records them
-  // (telemetry rows), the daily chores' stamp, the pace verdict the chores record.
+  // The inputs (PLAN §7.10): isolation events in the app database's `events`, the daily chores'
+  // stamp, the pace verdict the chores record.
   async function healthy(): Promise<void> {
-    await ownerStore().setSpotifyTokens({ accessToken: "a", refreshToken: "r", expiresAt: FAR });
+    await seedOwnerApp({ accessToken: "a", refreshToken: "r", expiresAt: FAR });
     const c = await rawClient();
     await c.execute({ sql: "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_sync', ?)", args: [new Date().toISOString()] });
     await ownerStore().setHealthMark("daily_at", String(Date.now() - 3_600_000));
@@ -121,6 +124,19 @@ describe("/api/cron/health", () => {
     expect((await red.json()).reasons).toEqual(["isolation"]);
     const after = await call("Bearer ext-secret");
     expect(after.status).toBe(200);
+  });
+
+  it("no admin row (or no OWNER_UID) is a store failure: red", async () => {
+    await healthy();
+    const owner = process.env.OWNER_UID;
+    process.env.OWNER_UID = "";
+    try {
+      const res = await call("Bearer ext-secret");
+      expect(res.status).toBe(500);
+      expect((await res.json()).reasons).toEqual(["store"]);
+    } finally {
+      process.env.OWNER_UID = owner;
+    }
   });
 
   it("a daily stamp over 26 hours old is red; none yet is unchecked", async () => {

@@ -1,6 +1,6 @@
 import { cronAuthorized } from "@/lib/cron-auth";
-import { forUser, pruneApiLog, pruneClientMetrics, type UserStore } from "@/lib/db";
-import { phase1Owner } from "@/lib/identity";
+import { pruneApiLog, pruneClientMetrics, type UserStore } from "@/lib/db";
+import { adminStore } from "@/lib/identity-read";
 import { runUsageCheck } from "@/lib/usage-check";
 import { runBudgetChore } from "@/lib/budget/daily";
 
@@ -61,9 +61,9 @@ export async function GET(req: Request) {
   if (!cronAuthorized(req)) {
     return Response.json({ ok: false, error: "forbidden" }, { status: 401 });
   }
-  const owner = phase1Owner();
-  if (!owner) return Response.json({ ok: false, error: "no owner" }, { status: 503 });
-  const store = forUser(owner);
+  // The admin's database, as his `users` row names it (multi-user Phase 2).
+  const store = await adminStore().catch((e) => (console.error("[cron/daily] admin row unread", e), undefined));
+  if (!store) return Response.json({ ok: false, error: store === null ? "no owner" : "store" }, { status: 503 });
   const chores: Record<string, string> = {};
   for (const [name, run] of CHORES) {
     const t0 = Date.now();

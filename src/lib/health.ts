@@ -3,9 +3,9 @@
 //
 // It answers red with a one-word reason and nothing about anyone's listening. An input that
 // cannot be measured is null and listed as unchecked, never read as healthy or as red:
-//   - isolation events: Phase 1 records them as telemetry rows (isolation.ts); the route reads
-//     those newer than the last one a check reported, so each turns it red once; telemetry
-//     down = unchecked;
+//   - isolation events: rows in the app database's `events` (isolation.ts) that no check has
+//     reported; the route marks them `alarmed`, so each turns it red once; the app database
+//     not answering = unchecked;
 //   - the daily chores' stamp (`daily_at`, written when /api/cron/daily finishes); never
 //     stamped yet = unchecked;
 //   - Turso's month-to-date pace, as the daily chores' usage check last measured it; no

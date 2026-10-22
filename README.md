@@ -16,9 +16,24 @@ need is a (free) Spotify developer app.
    npm install
    npm run setup     # creates .env.local and generates AUTH_SECRET for you
    ```
-   Then paste your Spotify **Client ID** and **Secret** into `.env.local`. That's the only
-   thing you must fill in for local use. Everything else is optional (see comments).
-3. **Run it:** `npm run dev`, open http://127.0.0.1:3000, sign in with Spotify.
+   Then paste your Spotify **Client ID** and **Secret** into `.env.local`, and fill in the
+   three identity values the comments explain: `SPOTIFY_OWNER_ID` (the id in your Spotify
+   profile URL), `OWNER_UID` (generated once) and a dev `TOKEN_KEYS` (generated once; it
+   encrypts your Spotify token in `data/app.db`). Everything else is optional.
+3. **Make your user row** in the local app database, `data/app.db` (once; re-running changes
+   nothing). Until `npm run setup` does this itself:
+   ```bash
+   node --env-file=.env.local --input-type=module -e "
+   import { mkdirSync } from 'node:fs';
+   import { createClient } from '@libsql/client';
+   import { appSchemaBatches, adminRowStatement } from './src/lib/app-schema.ts';
+   mkdirSync('data', { recursive: true });
+   const c = createClient({ url: 'file:data/app.db' });
+   for (const b of appSchemaBatches(0, 0)) await c.batch(b, 'write');
+   await c.execute(adminRowStatement(process.env.OWNER_UID, process.env.SPOTIFY_OWNER_ID, Date.now()));"
+   ```
+4. **Run it:** `npm run dev`, open http://127.0.0.1:3000, sign in with Spotify. Your first
+   sign-in binds your Spotify account to that row.
 
 > Use `127.0.0.1`, not `localhost` — Spotify rejects `localhost` redirect URIs (the app
 > bounces you to `127.0.0.1` automatically if you land on `localhost`).
@@ -28,13 +43,26 @@ need is a (free) Spotify developer app.
 Only needed if you want an always-on instance that keeps syncing your history while the app is
 closed. A hosted instance adds a persistent DB + a scheduler.
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/remtbkv/lazy-boy&env=AUTH_SECRET,SPOTIFY_CLIENT_ID,SPOTIFY_CLIENT_SECRET,AUTH_URL,TURSO_DATABASE_URL,TURSO_AUTH_TOKEN,CRON_SECRET&envDescription=See%20.env.example%20for%20what%20each%20value%20is)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/remtbkv/lazy-boy&env=AUTH_SECRET,SPOTIFY_CLIENT_ID,SPOTIFY_CLIENT_SECRET,SPOTIFY_OWNER_ID,OWNER_UID,AUTH_URL,TURSO_DATABASE_URL,TURSO_AUTH_TOKEN,APP_DATABASE_URL,TOKEN_KEYS,CRON_SECRET&envDescription=See%20.env.example%20for%20what%20each%20value%20is)
 
-1. **Database** — create a [Turso](https://turso.tech) (libSQL) DB and set `TURSO_DATABASE_URL`
-   (`turso db show <name> --url`) and `TURSO_AUTH_TOKEN` (`turso db tokens create <name>`). Get the CLI to run these comands or just find it somewhere in the site.
-2. **Vercel env** — set `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `AUTH_SECRET`, the two Turso vars, `CRON_SECRET`
+1. **Database** — two [Turso](https://turso.tech) (libSQL) databases in one group: your data
+   (`TURSO_DATABASE_URL`, `turso db show <name> --url`, the `https://` form) and the app
+   database `lazyboy-app`, which holds the users and their encrypted Spotify tokens
+   (`APP_DATABASE_URL`). One group token reaches both: `turso group tokens create default` →
+   `TURSO_AUTH_TOKEN`. Get the CLI to run these comands or just find it somewhere in the site.
+   Then, with `OWNER_UID` and `SPOTIFY_OWNER_ID` in `.env.local` and the Turso platform token
+   in your Keychain as `lazyboy-turso-platform`:
+   ```bash
+   node --env-file=.env.local scripts/phase1-meta-keys.mjs --user <OWNER_UID> --apply  # names the data's owner
+   node --env-file=.env.local scripts/phase2-app-db.mjs --org <your-turso-org>        # lazyboy-app + your user row
+   ```
+2. **Vercel env** — set `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `AUTH_SECRET`, `SPOTIFY_OWNER_ID`, `OWNER_UID`,
+   `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `APP_DATABASE_URL`, `TOKEN_KEYS`, `CRON_SECRET`
    (`openssl rand -base64 32`), and `AUTH_URL` = your deployed origin (e.g.
-   `https://<project-name>.vercel.app`).
+   `https://<project-name>.vercel.app`). Generate `TOKEN_KEYS` inside the pipe that sets it,
+   so it is never on screen, and keep one copy somewhere safe (a lost key means everyone signs
+   in again): `echo "v1:$(openssl rand -base64 32)" | vercel env add TOKEN_KEYS production`.
+   Leave `SIGNUPS` unset (only you can sign in).
 3. **Spotify** — add `https://<your-domain>/api/auth/callback/spotify` as a Redirect URI.
 4. **Keep history current while closed** — point a pinger at `/api/cron/sync` so your
    history keeps syncing when the app isn't open: a systemd timer on an always-on machine

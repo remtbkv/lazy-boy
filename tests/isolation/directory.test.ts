@@ -1,5 +1,6 @@
-// The user-to-database mapping's first layer (PLAN.md §6.2 layer 3, M9): Phase 1's directory
-// knows the owner alone, and the one URL rule never falls back to Rem's URL. The owner check at
+// The user-to-database mapping's first layer (PLAN.md §6.2 layer 3, M9): the directory (from
+// Phase 2, each uid's db_name as its users row names it) knows only the uids a users row has
+// named, and the one URL rule never falls back to Rem's URL. The owner check at
 // open is the second layer (open.test.ts T8); these pin the first, so a fallback that the owner
 // check would only catch after reaching Rem's database fails here (lane 13's review, brief (b)).
 import { createClient } from "@libsql/client";
@@ -21,11 +22,11 @@ afterEach(() => {
   delete process.env.STORE_URL_TEMPLATE;
 });
 
-describe("Phase 1's directory and the URL rule", () => {
+describe("the directory and the URL rule", () => {
   it("forUser maps the owner to Rem's database and throws for anyone else, opening nothing", async () => {
     expect(ownerStore().dbName).toBe("lazyboy");
     await ownerStore().getLastSync(); // Rem's file is provisioned for the owner
-    expect(() => forUser(B)).toThrow(/no database is mapped to user bbbbbbbbbbbb/);
+    expect(() => forUser(B)).toThrow(/no database is named for user bbbbbbbbbbbb/);
     expect(await isolationEvents()).toBe(0);
   });
 

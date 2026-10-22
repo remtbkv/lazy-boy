@@ -7,7 +7,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { isOwnerSignIn } from "@/lib/owner";
 import { rawClient, resetStore } from "./adversarial/helpers";
-import { ownerStore } from "./owner-store";
+import { ownerStore, seedOwnerApp } from "./owner-store";
 
 const getSpotifyTokens = () => ownerStore().getSpotifyTokens();
 const setSpotifyTokens = (t: typeof OWNER_TOKENS) => ownerStore().setSpotifyTokens(t);
@@ -22,6 +22,7 @@ const OWNER_TOKENS = { accessToken: "owner-at", refreshToken: "owner-rt", expire
 beforeEach(async () => {
   delete process.env.SPOTIFY_OWNER_ID;
   await resetStore();
+  await seedOwnerApp(); // the admin's users row names his database (Phase 2)
   await setSpotifyTokens(OWNER_TOKENS);
 });
 

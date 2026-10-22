@@ -20,8 +20,12 @@ const spy = vi.hoisted(() => {
 vi.mock("@/lib/db", () => ({
   pruneApiLog: spy.chore("pruneApiLog"),
   pruneClientMetrics: spy.chore("pruneClientMetrics"),
-  // The owner's store (multi-user Phase 1: the cron and the chores run for OWNER_UID).
-  forUser: () => ({
+}));
+// The admin's store (multi-user Phase 2: the cron and the chores run for the admin, at the
+// database his users row names).
+vi.mock("@/lib/identity-read", () => ({
+  adminStore: async () => ({
+    uid: "ownerownerow",
     recomputeAllTimeStats: spy.chore("recomputeAllTimeStats"),
     rebuildHomePayload: spy.chore("rebuildHomePayload"),
     checkPlayedAtConvention: spy.chore("checkPlayedAtConvention"),
@@ -33,13 +37,13 @@ vi.mock("@/lib/db", () => ({
       spy.calls.push(`benchStore:${store}`);
       return { store, host: "file", probes: {} };
     },
-    // /api/cron/sync's no-token exit, so its GET returns before touching Spotify.
-    getSpotifyTokens: async () => null,
   }),
 }));
+// /api/cron/sync's no-token exit (no user_tokens row), so its GET returns before touching Spotify.
+vi.mock("@/lib/app-db", () => ({ readTokenRow: async () => null }));
 vi.mock("@/lib/usage-check", () => ({ runUsageCheck: spy.chore("runUsageCheck") }));
 vi.mock("@/lib/budget/daily", () => ({ runBudgetChore: spy.chore("runBudgetChore") }));
-vi.mock("@/lib/auth", () => ({ getValidAccessTokenFor: async () => null }));
+vi.mock("@/lib/auth", () => ({ getValidAccessTokenFor: async () => null, hasStoredTokens: async () => false }));
 
 const daily = await import("@/app/api/cron/daily/route");
 const bench = await import("@/app/api/cron/store-bench/route");
