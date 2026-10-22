@@ -3,21 +3,8 @@
 // refresh would have joined the first's and received the first's tokens, the one leak in the
 // census that is silent (01e A2). These run the core against a two-user store in memory.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getAppMeta } from "@/lib/app-db";
 import { createTokenCore } from "@/lib/token-core";
-import {
-  A,
-  B,
-  EXPIRED,
-  FAR,
-  expectConcurrentRefreshIsolated,
-  expectRefreshLosesToSignIn,
-  expectStoreAnswersOwnRow,
-  freshAppDb,
-  memoryTokenStore,
-  scriptedSpotify,
-  until,
-} from "./harness";
+import { A, B, EXPIRED, FAR, expectConcurrentRefreshIsolated, memoryTokenStore, scriptedSpotify } from "./harness";
 
 let spotify: ReturnType<typeof scriptedSpotify>;
 beforeEach(() => {
@@ -102,56 +89,10 @@ describe("token core, two users in one process", () => {
     expect(rows.has(B)).toBe(false);
   });
 
-  it("a token-owner refusal is an isolation event: the caller's uid and the code, no token (PLAN.md §6.5)", async () => {
-    const db = freshAppDb();
-    await getAppMeta("tick_at"); // the app database opens empty, so a missing row is the answer
-    const logged: string[] = [];
-    vi.spyOn(console, "error").mockImplementation((...a) => void logged.push(a.join(" ")));
-    const { core } = setup({});
-    await expect(
-      core.setTokens(B, { uid: A, accessToken: "at-secret", refreshToken: "rt-secret", expiresAt: FAR } as never),
-    ).rejects.toThrow(/owner/);
-    expect((await db.raw().execute("SELECT uid, code FROM events")).rows).toEqual([{ uid: B, code: "token-owner" }]);
-    expect(logged).toContain(`[isolation] token-owner uid=${B}`);
-    expect(logged.join("\n")).not.toMatch(/secret/);
-    db.close();
-    vi.restoreAllMocks();
-  });
-
-  it("assertTokenOwner throws on a token another user's getter produced", async () => {
+  it("assertTokenOwner throws on a token another user's getter produced", () => {
     const { core } = setup({});
     const t = { uid: A, accessToken: "a", refreshToken: "r", expiresAt: FAR } as never;
-    await expect(core.assertTokenOwner(t, A)).resolves.toBeUndefined();
-    await expect(core.assertTokenOwner(t, B)).rejects.toThrow(/owner/);
-  });
-});
-
-describe("conditional writes (PLAN.md §5.2; security R3, R4)", () => {
-  it("a refresh finishing after a sign-in leaves the sign-in's grant", async () => {
-    const { store } = setup({}, { delayMs: 50 });
-    await expectRefreshLosesToSignIn(store, spotify);
-  });
-
-  it("a refresh finishing after the row is gone stores nothing", async () => {
-    const { core, store, rows } = setup({ [A]: { accessToken: "old-A", refreshToken: "rt-A", expiresAt: EXPIRED } }, { delayMs: 50 });
-    const refreshing = core.getValidAccessToken(A);
-    await until(() => spotify.calls.length > 0);
-    await store.clear(A, (await store.get(A))!); // the deletion job's first step
-    expect(await refreshing).toBeNull();
-    expect(rows.has(A)).toBe(false);
-  });
-
-  it("a dead grant's clear does not take a sign-in that landed meanwhile", async () => {
-    const { core, store } = setup({ [A]: { accessToken: "old-A", refreshToken: "rt-A", expiresAt: EXPIRED } }, { dead: ["rt-A"], delayMs: 50 });
-    const refreshing = core.getValidAccessToken(A);
-    await until(() => spotify.calls.length > 0);
-    await store.set(A, { accessToken: "signin-A", refreshToken: "rt-A2", expiresAt: FAR });
-    await refreshing;
-    expect((await store.get(A))?.accessToken).toBe("signin-A");
-  });
-
-  it("each store answers each uid with its own row", async () => {
-    const { store } = setup({});
-    await expectStoreAnswersOwnRow(store);
+    expect(() => core.assertTokenOwner(t, A)).not.toThrow();
+    expect(() => core.assertTokenOwner(t, B)).toThrow(/owner/);
   });
 });

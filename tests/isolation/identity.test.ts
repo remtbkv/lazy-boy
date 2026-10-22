@@ -7,6 +7,7 @@ import {
   isUidShape,
   mintUid,
   newUid,
+  ownerOnlyLookup,
   SESSION_MAX_AGE_S,
   type IdentityLookup,
 } from "@/lib/identity";
@@ -110,14 +111,20 @@ describe("checkIdentity", () => {
     };
     expect(await checkIdentity(fresh(A), down, opts)).toEqual({ kind: "unavailable" });
   });
+
+  it("ownerOnlyLookup (Phase 1) knows the owner alone, at epoch 0, as admin", async () => {
+    const l = ownerOnlyLookup(A);
+    expect(await l(A)).toEqual({ status: "active", sessionEpoch: 0, isAdmin: true });
+    expect(await l(B)).toBeNull();
+    expect(await ownerOnlyLookup(null)(A)).toBeNull();
+  });
 });
 
 describe("session gate (the jwt and session callbacks' decisions)", () => {
-  it("signInClaims stamps the row's uid and epoch and auth_time; none without a uid-shaped row", () => {
-    expect(signInClaims({ uid: A, sessionEpoch: 0 }, NOW)).toEqual({ uid: A, ep: 0, auth_time: NOW_S });
-    expect(signInClaims({ uid: B, sessionEpoch: 3 }, NOW)).toEqual({ uid: B, ep: 3, auth_time: NOW_S });
+  it("signInClaims stamps the owner uid, epoch 0 and auth_time; none without an owner uid", () => {
+    expect(signInClaims(A, NOW)).toEqual({ uid: A, ep: 0, auth_time: NOW_S });
     expect(signInClaims(null, NOW)).toBeNull();
-    expect(signInClaims({ uid: "not-a-uid", sessionEpoch: 0 }, NOW)).toBeNull();
+    expect(signInClaims("not-a-uid", NOW)).toBeNull();
   });
 
   it("gateJwt: refused signs out (null); allowed and unavailable keep the cookie unchanged", () => {

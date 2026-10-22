@@ -37,12 +37,11 @@ Spotify HTTP — it goes through `resources.ts`. `domain.ts` imports nothing app
   `requireUser()` (`src/lib/require-user.ts`) turns its answer into each entry point's: the
   branded `Uid`, a refusal (redirect, 401 with the signed-out marker, `{ ok: false }`), or a
   retryable "unavailable". It is the only source of a uid for a request.
-- The Spotify **access/refresh tokens live in the DB**: the user's `user_tokens` row in the
-  app database, encrypted under `TOKEN_KEYS` (multi-user Phase 2; `src/lib/token-store-app.ts`,
-  read through `src/lib/token-core.ts`, keyed by uid), the single source of truth. The JWT
-  cookie never carries them: a sign-in that cannot write its row fails visibly. Rem's old
-  plaintext `meta.spotify_tokens` row stays a week after the move, as the rollback's copy
-  (`src/lib/token-move.ts`).
+- The Spotify **access/refresh tokens live in the DB** (`spotify_tokens` in the user's
+  database, read through `src/lib/token-core.ts`, keyed by uid), which is the single source of
+  truth. The JWT cookie is kept lean (tokens deleted from it
+  after sign-in); a cookie copy is only retained as a fallback if the DB write fails, and an
+  older cookie-stored session is migrated into the DB on its next request.
 - The `jwt` callback refreshes the access token when it's within ~1 min of expiry, using
   `POST https://accounts.spotify.com/api/token` (grant_type=refresh_token). On failure it
   marks the session with `error: "RefreshAccessTokenError"` so the UI can prompt re-login.

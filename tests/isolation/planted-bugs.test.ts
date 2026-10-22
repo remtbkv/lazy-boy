@@ -7,22 +7,11 @@
 // Next's key cannot see); a token core whose in-flight refresh is one promise for everyone;
 // the cache stub reverted to a pass-through (which can see no collision and no forged entry).
 // The fourth, a URL template that ignores the uid: every db_name lands in one file.
-//
-// Phase 2 adds: a cipher that drops the associated data; a cipher that reuses its IV; a
-// refresh write that is not conditional on the row it read; a TokenStore that answers another
-// uid's row; an identity read that ignores SIGNUPS. Lane 03's review adds a key check that opens
-// only the first key's sentinel.
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { checkIdentity, type SessionClaims, type Uid } from "@/lib/identity";
-import { appIdentityLookup, readIdentity } from "@/lib/identity-read";
-import { createTokenCore, type TokenStore } from "@/lib/token-core";
-import { getAppMeta, setAppMetaIfAbsent } from "@/lib/app-db";
-import { decryptTokens, encryptTokens, open, parseTokenKeys, seal, tokenAad, type TokenKey } from "@/lib/token-crypto";
-import { tokenKeysReady } from "@/lib/token-keys";
-import { appTokenStore } from "@/lib/token-store-app";
+import type { Uid } from "@/lib/identity";
+import { createTokenCore } from "@/lib/token-core";
 import { rawClient, resetStore } from "../adversarial/helpers";
 import * as faithful from "../stubs/next-cache-faithful";
 import * as passthrough from "../stubs/next-cache";
@@ -30,17 +19,9 @@ import {
   A,
   B,
   EXPIRED,
-  expectCiphertextBoundToUser,
   expectConcurrentRefreshIsolated,
-  expectFreshIvPerWrite,
-  expectRefreshLosesToSignIn,
-  expectSignupsOwnerRefusesFriend,
-  expectStoreAnswersOwnRow,
-  expectWrongOlderKeyRefuses,
-  freshAppDb,
   memoryTokenStore,
   scriptedSpotify,
-  seedUser,
 } from "./harness";
 import { expectOwnDatabases, useUserFiles } from "./user-dbs";
 
@@ -84,7 +65,6 @@ beforeEach(async () => {
 afterEach(() => {
   vi.doUnmock("next/cache");
   vi.unstubAllGlobals();
-  vi.unstubAllEnvs();
 });
 
 describe("planted: an unstable_cache keyed without the user", () => {
@@ -153,145 +133,5 @@ describe("planted: a URL template that ignores the uid", () => {
   it("and passes over the real template", async () => {
     useUserFiles();
     await expectOwnDatabases("qa", "qb");
-  });
-});
-
-// ── Phase 2 (PLAN.md §5.2-5.3): the cipher ─────────────────────────────────────────────────
-// Each planted cipher is the real one with one line changed.
-function plantedCipher(bug: "no-aad" | "fixed-iv") {
-  const encrypt = (keys: TokenKey[], uid: string, t: { accessToken: string; refreshToken: string }) => {
-    const iv = bug === "fixed-iv" ? Buffer.alloc(12) : randomBytes(12);
-    const c = createCipheriv("aes-256-gcm", keys[0].key, iv);
-    if (bug !== "no-aad") c.setAAD(Buffer.from(tokenAad(uid)));
-    const ct = Buffer.concat([c.update(JSON.stringify({ a: t.accessToken, r: t.refreshToken })), c.final()]);
-    return `${keys[0].id}.${Buffer.concat([iv, ct, c.getAuthTag()]).toString("base64url")}`;
-  };
-  const decrypt = (keys: TokenKey[], uid: string, blob: string) => {
-    const raw = Buffer.from(blob.slice(blob.indexOf(".") + 1), "base64url");
-    const d = createDecipheriv("aes-256-gcm", keys[0].key, raw.subarray(0, 12));
-    if (bug !== "no-aad") d.setAAD(Buffer.from(tokenAad(uid)));
-    d.setAuthTag(raw.subarray(raw.length - 16));
-    const o = JSON.parse(Buffer.concat([d.update(raw.subarray(12, raw.length - 16)), d.final()]).toString());
-    return { accessToken: o.a, refreshToken: o.r };
-  };
-  return { encrypt, decrypt };
-}
-
-describe("planted: a cipher that drops the associated data", () => {
-  it("the bound-to-user check catches it", () => {
-    expect(() => expectCiphertextBoundToUser(plantedCipher("no-aad"))).toThrow();
-  });
-  it("and passes over the real cipher", () => {
-    expectCiphertextBoundToUser({ encrypt: encryptTokens, decrypt: decryptTokens });
-  });
-});
-
-describe("planted: a cipher that reuses its IV", () => {
-  it("the fresh-IV check catches it", () => {
-    expect(() => expectFreshIvPerWrite(plantedCipher("fixed-iv").encrypt)).toThrow();
-  });
-  it("and passes over the real cipher", () => {
-    expectFreshIvPerWrite(encryptTokens);
-  });
-});
-
-// ── Phase 2: the token store over user_tokens ─────────────────────────────────────────────
-async function appStore() {
-  const db = freshAppDb();
-  vi.stubEnv("TOKEN_KEYS", `v1:${randomBytes(32).toString("base64")}`);
-  const store = appTokenStore();
-  await store.get(A);
-  await seedUser(db.raw(), { uid: A, status: "active" });
-  await seedUser(db.raw(), { uid: B, status: "active" });
-  const spotify = scriptedSpotify({ delayMs: 60 });
-  vi.stubGlobal("fetch", spotify.fetch);
-  return { db, store, spotify };
-}
-
-describe("planted: a refresh write that is not conditional (security R4)", () => {
-  it("the refresh-loses-to-sign-in check catches it", async () => {
-    const { store, spotify } = await appStore();
-    // The refresh lands with the sign-in's unconditional upsert instead of over the blob it read.
-    const buggy: TokenStore = { ...store, update: async (uid, t) => (await store.set(uid, t), true) };
-    await expect(expectRefreshLosesToSignIn(buggy, spotify)).rejects.toThrow();
-  });
-  it("and passes over the real store", async () => {
-    const { store, spotify } = await appStore();
-    await expectRefreshLosesToSignIn(store, spotify);
-  });
-});
-
-describe("planted: a TokenStore that answers another uid's row", () => {
-  it("the own-row check catches it", async () => {
-    const { db, store } = await appStore();
-    // The read forgot its WHERE: it answers with whichever row comes first, decrypted as its owner.
-    const buggy: TokenStore = {
-      ...store,
-      async get() {
-        const r = (await db.raw().execute("SELECT uid, blob, expires_at FROM user_tokens ORDER BY uid DESC LIMIT 1")).rows[0];
-        if (!r) return null;
-        const t = decryptTokens(parseTokenKeys(process.env.TOKEN_KEYS), String(r.uid), String(r.blob));
-        return { ...t, expiresAt: Number(r.expires_at), rev: String(r.blob) };
-      },
-    };
-    await expect(expectStoreAnswersOwnRow(buggy)).rejects.toThrow();
-  });
-  it("and passes over the real store", async () => {
-    const { store } = await appStore();
-    await expectStoreAnswersOwnRow(store);
-  });
-});
-
-describe("planted: an identity read that ignores SIGNUPS (PLAN.md §12.1)", () => {
-  const now = Math.floor(Date.now() / 1000);
-  const claims = { admin: { uid: A, ep: 0, auth_time: now }, friend: { uid: B, ep: 0, auth_time: now } };
-  async function rows() {
-    const { db } = await appStore();
-    await db.raw().execute({ sql: "UPDATE users SET is_admin = 1 WHERE uid = ?", args: [A] });
-  }
-
-  it("the freeze check catches it", async () => {
-    await rows();
-    // The lookup is right; the read forgets to pass the deployment's SIGNUPS.
-    const buggy = (c: SessionClaims) => checkIdentity(c, appIdentityLookup, { now: Date.now(), signups: "invite" });
-    await expect(expectSignupsOwnerRefusesFriend(buggy, claims)).rejects.toThrow();
-  });
-  it("and passes over the real read", async () => {
-    await rows();
-    await expectSignupsOwnerRefusesFriend((c) => readIdentity(c), claims);
-  });
-});
-
-// ── Lane 03's review: the key check (PLAN.md §5.3) ────────────────────────────────────────
-// token-keys.ts's check with one line changed: it opens the first key's sentinel and trusts the
-// rest, so a wrong older key passes the cold-start check and every blob under it fails one user
-// at a time instead of refusing the deploy.
-function plantedFirstKeyOnlyCheck(): () => Promise<TokenKey[]> {
-  const aad = (id: string) => `lazyboy:sentinel:v1:${id}`;
-  const text = (id: string) => `lazyboy token key sentinel ${id}`;
-  return async () => {
-    const keys = parseTokenKeys(process.env.TOKEN_KEYS);
-    for (const key of keys.slice(0, 1)) {
-      const name = `sentinel:${key.id}`;
-      if ((await getAppMeta(name)) === null) await setAppMetaIfAbsent(name, seal(key, aad(key.id), text(key.id)));
-      const blob = await getAppMeta(name);
-      let got: string | null = null;
-      try {
-        got = blob === null ? null : open([key], aad(key.id), blob);
-      } catch {}
-      if (got !== text(key.id)) throw new Error(`TOKEN_KEYS: key ${key.id} does not open its sentinel`);
-    }
-    return keys;
-  };
-}
-
-describe("planted: a key check that opens only the first key's sentinel (PLAN.md §5.3)", () => {
-  it("the wrong-older-key check catches it", async () => {
-    await appStore();
-    await expect(expectWrongOlderKeyRefuses(plantedFirstKeyOnlyCheck())).rejects.toThrow();
-  });
-  it("and passes over the real check", async () => {
-    await appStore();
-    await expectWrongOlderKeyRefuses(tokenKeysReady);
   });
 });

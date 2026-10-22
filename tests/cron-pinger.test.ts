@@ -2,11 +2,9 @@
 // /api/cron/sync takes CRON_SECRET (the Zenbook's timer) and CRON_SECRET_EXT (cron-job.org);
 // the owner alarm answers the Zenbook's caller only; cron-job.org always gets a bare
 // {"ok":true}; and a 90-second stamp lets one tick's work through per window, whoever calls.
-// Real db.ts on the throwaway store (the owner's, named by his users row), the real Spotify client
+// Real db.ts on the throwaway store (the owner's, through forUser), the real Spotify client
 // against a scripted fetch; one tick's work is one player-state call.
-import { createClient } from "@libsql/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { createTokenCore } from "@/lib/token-core";
 
 const ZEN = "zen-s3cret";
 const EXT = "ext-s3cret";
@@ -19,9 +17,6 @@ const spotify = vi.hoisted(() => ({
   storeDown: false,
   hold: null as Promise<void> | null,
   after: [] as Promise<unknown>[],
-  // The route's token core, built per test as auth.ts builds it: a fresh core is a fresh
-  // process, where the admin's copy of his plaintext row runs at its first read.
-  core: null as ReturnType<typeof createTokenCore> | null,
 }));
 
 // after() outside a real request: run the task and let the test await it.
@@ -35,40 +30,29 @@ const flushAfter = async () => {
 };
 
 // The real db.ts, except that the stamp on the user's store can be made to fail like a store
-// outage. Both ways to a store are wrapped: the route reaches the admin's through adminStore()
-// (forUserAt, multi-user Phase 2), the test's own reads through forUser.
+// outage.
 vi.mock("@/lib/db", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/lib/db")>();
-  const flaky = (store: ReturnType<typeof real.forUser>) => ({
-    ...store,
-    acquireLock: (name: string, ttlMs: number) =>
-      spotify.storeDown ? Promise.reject(new Error("store unavailable")) : store.acquireLock(name, ttlMs),
-  });
   return {
     ...real,
-    forUser: (uid: Parameters<typeof real.forUser>[0]) => flaky(real.forUser(uid)),
-    forUserAt: (uid: Parameters<typeof real.forUserAt>[0], dbName: string) => flaky(real.forUserAt(uid, dbName)),
+    forUser: (uid: Parameters<typeof real.forUser>[0]) => {
+      const store = real.forUser(uid);
+      return {
+        ...store,
+        acquireLock: (name: string, ttlMs: number) =>
+          spotify.storeDown ? Promise.reject(new Error("store unavailable")) : store.acquireLock(name, ttlMs),
+      };
+    },
   };
 });
 
-// The route's token functions over the core auth.ts runs (auth.ts itself loads next-auth): the
-// token core over the admin's token move (token-move.ts) over user_tokens, multi-user Phase 2.
-// No refresh is under test here; the admin's copy at a fresh process's first read is.
-vi.mock("@/lib/auth", async () => {
-  const { createTokenCore } = await import("@/lib/token-core");
-  const { appTokenStore } = await import("@/lib/token-store-app");
-  const { withAdminTokenMove } = await import("@/lib/token-move");
-  const { ownerUid } = await import("@/lib/identity");
-  const core = () => (spotify.core ??= createTokenCore(withAdminTokenMove(appTokenStore(), ownerUid)));
-  type Uid = Parameters<typeof import("@/lib/db").forUser>[0];
-  return {
-    getValidAccessTokenFor: async (uid: Uid) => {
-      const t = await core().getValidAccessToken(uid);
-      return t ? { uid: t.uid, accessToken: t.accessToken } : null;
-    },
-    hasStoredTokens: async (uid: Uid) => (await core().getStored(uid)) !== null,
-  };
-});
+// The route's token getter, reduced to the stored row: no refresh is under test here.
+vi.mock("@/lib/auth", () => ({
+  getValidAccessTokenFor: async (uid: Parameters<typeof import("@/lib/db").forUser>[0]) => {
+    const t = await (await import("@/lib/db")).forUser(uid).getSpotifyTokens();
+    return t ? { uid, accessToken: t.accessToken } : null;
+  },
+}));
 
 const TRACK = {
   id: "t1",
@@ -99,27 +83,9 @@ vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
   throw new Error(`unexpected Spotify call ${url.pathname}`);
 });
 
-const { ownerStore, ownerUid, seedOwnerApp } = await import("./owner-store");
-const { appTokenStore } = await import("@/lib/token-store-app");
+const { ownerStore } = await import("./owner-store");
 const db = ownerStore();
-// The admin's users row, which the route's adminStore() reads (multi-user Phase 2).
-await seedOwnerApp();
-const tokens = appTokenStore();
-const { appDatabaseUrl, setAppMeta } = await import("@/lib/app-db");
 const { GET } = await import("@/app/api/cron/sync/route");
-
-// The admin's copy marker (token-move.ts, app_meta `token_copy:<uid>`): written by the deploy's
-// first read of his tokens, which copied his plaintext row into user_tokens (PLAN §11.4 step 3).
-async function copyRan(ran: boolean): Promise<void> {
-  const key = `token_copy:${ownerUid()}`;
-  if (ran) return setAppMeta(key, `copied:${Date.now()}`);
-  const c = createClient({ url: appDatabaseUrl(), intMode: "number" });
-  try {
-    await c.execute({ sql: "DELETE FROM app_meta WHERE key = ?", args: [key] });
-  } finally {
-    c.close();
-  }
-}
 
 const call = (authorization?: string) =>
   GET(new Request("https://lazy-boy.example/api/cron/sync", { headers: authorization ? { authorization } : {} }));
@@ -145,12 +111,7 @@ beforeEach(async () => {
   spotify.playing = false;
   spotify.storeDown = false;
   spotify.hold = null;
-  spotify.core = null;
-  // The token of record (user_tokens), the deploy's copy long done. The plaintext meta copy is
-  // the rollback week's (PLAN §11.4) and absent here unless a test plants it.
-  await tokens.set(ownerUid(), { accessToken: "at-rem", refreshToken: "rt-rem", expiresAt: base + 3_600_000 });
-  await copyRan(true);
-  await db.clearSpotifyTokens();
+  await db.setSpotifyTokens({ accessToken: "at-rem", refreshToken: "rt-rem", expiresAt: base + 3_600_000 });
   // An idle tick: nothing playing, harvested just now, library fresh. Its work is the
   // player check.
   await db.setHarvestGate({ lastActive: 0, lastHarvest: base });
@@ -192,7 +153,7 @@ describe("/api/cron/sync, two pingers", () => {
     expect(await guarded.text()).toBe('{"ok":true}');
 
     at(200_000);
-    await tokens.remove(ownerUid());
+    await db.clearSpotifyTokens();
     const signedOut = await ext();
     expect(signedOut.status).toBe(200);
     expect(await signedOut.text()).toBe('{"ok":true}');
@@ -252,7 +213,7 @@ describe("/api/cron/sync, two pingers", () => {
   it("the Zenbook caller still sees the owner alarm inside the window cron-job.org's tick opened", async () => {
     expect((await ext()).status).toBe(200);
     expect(ticks()).toBe(1);
-    await tokens.remove(ownerUid());
+    await db.clearSpotifyTokens();
     at(30_000);
     const alarm = await zen();
     expect(alarm.status).toBe(503);
@@ -264,44 +225,9 @@ describe("/api/cron/sync, two pingers", () => {
     expect(ticks()).toBe(1);
   });
 
-  it("Phase 2's first Zenbook tick runs the admin's copy before the owner alarm reads (§11.4 step 3)", async () => {
-    // The deploy's state: his users row and his plaintext row in lazyboy.meta, no user_tokens
-    // row yet, the copy never run. Not "no token": the tick copies the row in and runs.
-    await tokens.remove(ownerUid());
-    await copyRan(false);
-    await db.setSpotifyTokens({ accessToken: "at-plain", refreshToken: "rt-plain", expiresAt: base + 3_600_000 });
-    const z = await zen();
-    expect({ status: z.status, body: await z.json() }).toEqual({ status: 200, body: { ok: true, added: 0, idle: true } });
-    expect(ticks()).toBe(1);
-    expect(await tokens.get(ownerUid())).toMatchObject({ accessToken: "at-plain", refreshToken: "rt-plain" });
-  });
-
-  it("the owner alarm reads the token of record: a plaintext copy alone is no token, and none is no alarm", async () => {
-    // The deploy's copy ran (beforeEach), then a dead grant's clear removed the user_tokens row;
-    // the rollback week's plaintext copy is still there. Inside the window cron-job.org's tick
-    // opened, the Zenbook must still hear the alarm.
-    expect((await ext()).status).toBe(200);
-    expect(ticks()).toBe(1);
-    await tokens.remove(ownerUid());
-    await db.setSpotifyTokens({ accessToken: "at-old", refreshToken: "rt-old", expiresAt: base + 3_600_000 });
-    at(30_000);
-    const alarm = await zen();
-    expect({ status: alarm.status, body: await alarm.json() }).toEqual({ status: 503, body: { ok: false, error: "no token" } });
-
-    // A week on (§11.4 step 6) the plaintext copy is gone and the token of record stays: no
-    // alarm, and the tick runs.
-    await db.clearSpotifyTokens();
-    await tokens.set(ownerUid(), { accessToken: "at-rem", refreshToken: "rt-rem", expiresAt: base + 3_600_000 });
-    at(200_000);
-    const z = await zen();
-    expect(z.status).toBe(200);
-    expect(ticks()).toBe(2);
-  });
-
   it("with no owner configured the Zenbook hears 503 and cron-job.org still a bare {\"ok\":true}", async () => {
-    // The tick resolves its user first (adminStore: OWNER_UID's users row); that answer is the
-    // tick's, so it reaches the Zenbook's caller and never cron-job.org's (lane 33's stitch of
-    // lanes 08 and 12; lane 34's of lane 15).
+    // The tick resolves its user first (phase1Owner, forUser); that answer is the tick's, so it
+    // reaches the Zenbook's caller and never cron-job.org's (lane 33's stitch of lanes 08 and 12).
     const owner = process.env.OWNER_UID;
     delete process.env.OWNER_UID;
     try {

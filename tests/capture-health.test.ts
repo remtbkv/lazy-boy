@@ -62,15 +62,10 @@ describe("captureHealthMessage", () => {
 });
 
 describe("getCaptureHealth (real store)", () => {
-  it("reads last_sync and token presence: the user's user_tokens row, not the plaintext copy", async () => {
-    const { ownerStore, seedOwnerApp } = await import("./owner-store");
-    const db = ownerStore();
-    await seedOwnerApp();
+  it("reads last_sync and token presence", async () => {
+    const db = (await import("./owner-store")).ownerStore();
     expect((await db.getCaptureHealth()).reason).toBe("signed out");
-    // The plaintext row is the rollback week's copy (PLAN §11.4): it is no token of record.
     await db.setSpotifyTokens({ accessToken: "a", refreshToken: "r", expiresAt: 0 });
-    expect((await db.getCaptureHealth()).reason).toBe("signed out");
-    await seedOwnerApp({ accessToken: "a", refreshToken: "r", expiresAt: 0 });
     // No last_sync yet: signed in but never synced.
     expect(await db.getCaptureHealth()).toEqual({ ok: false, staleForMs: null, reason: "stale" });
     // A harvest stamps last_sync atomically with its plays.
@@ -90,18 +85,13 @@ describe("getCaptureHealth (real store)", () => {
     ]);
     expect((await db.getCaptureHealth()).ok).toBe(true);
     await db.clearSpotifyTokens();
-    await seedOwnerApp();
   });
 });
 
 // next-auth can't load under vitest (next/server); the route only needs the token getter, which
 // for a store with no tokens returns null — the case under test. Tokens present + null is the
-// transient refresh failure, which must stay a 200. The owner alarm's question is the row of
-// record (no admin copy is pending in these cases).
-vi.mock("@/lib/auth", () => ({
-  getValidAccessTokenFor: async () => null,
-  hasStoredTokens: async (uid: string) => (await (await import("@/lib/app-db")).readTokenRow(uid)) !== null,
-}));
+// transient refresh failure, which must stay a 200.
+vi.mock("@/lib/auth", () => ({ getValidAccessTokenFor: async () => null }));
 
 describe("cron with no token", () => {
   const call = async () => {
@@ -110,33 +100,16 @@ describe("cron with no token", () => {
     return GET(new Request("http://x/api/cron/sync", { headers: { authorization: "Bearer s3cret" } }));
   };
   it("signed out (no stored tokens) → 503 so the pinger's unit fails visibly", async () => {
-    const { ownerStore, seedOwnerApp } = await import("./owner-store");
-    await seedOwnerApp();
-    // A plaintext row left from the rollback week does not count as signed in (PLAN §11.4).
-    await ownerStore().setSpotifyTokens({ accessToken: "a", refreshToken: "r", expiresAt: 0 });
     const res = await call();
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ ok: false, error: "no token" });
-    await ownerStore().clearSpotifyTokens();
   });
   it("tokens stored but no access token (transient refresh failure) → still 200", async () => {
-    const { seedOwnerApp } = await import("./owner-store");
-    await seedOwnerApp({ accessToken: "a", refreshToken: "r", expiresAt: 0 });
+    const db = (await import("./owner-store")).ownerStore();
+    await db.setSpotifyTokens({ accessToken: "a", refreshToken: "r", expiresAt: 0 });
     const res = await call();
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, skipped: "no token" });
-    await seedOwnerApp();
-  });
-  it("no admin row: no owner, 503", async () => {
-    const { seedOwnerApp } = await import("./owner-store");
-    const { appDatabaseUrl } = await import("@/lib/app-db");
-    const { createClient } = await import("@libsql/client");
-    await seedOwnerApp();
-    const c = createClient({ url: appDatabaseUrl() });
-    await c.execute("DELETE FROM users");
-    c.close();
-    const res = await call();
-    expect(res.status).toBe(503);
-    expect(await res.json()).toEqual({ ok: false, error: "no owner" });
+    await db.clearSpotifyTokens();
   });
 });

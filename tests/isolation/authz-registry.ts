@@ -491,7 +491,7 @@ export const ENTRIES: Entry[] = [
     id: "GET /api/auth/callback/spotify",
     file: "src/app/api/auth/[...nextauth]/route.ts",
     kind: "auth",
-    gate: "if (!(await isOwnerSignIn(profile?.id ?? undefined))) return false;",
+    gate: "return isOwnerSignIn(profile?.id ?? undefined);",
     gateFile: "src/lib/auth.ts",
     does: "finishes OAuth: exchanges the code, reads /v1/me uncached-by-design, runs signIn (owner only), writes the token row, sets the session cookie",
     cells: {

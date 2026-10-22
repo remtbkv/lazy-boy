@@ -4,15 +4,21 @@
 import NextAuth, { customFetch } from "next-auth";
 import Spotify from "next-auth/providers/spotify";
 import { cache } from "react";
-import { mintUid, ownerUid, type IdentityVerdict, type Uid } from "@/lib/identity";
-import { readIdentity, resolveSignIn, signedInUser, signInRedirect } from "@/lib/identity-read";
+import {
+  checkIdentity,
+  mintUid,
+  ownerOnlyLookup,
+  ownerUid,
+  signupsMode,
+  type IdentityVerdict,
+  type Uid,
+} from "@/lib/identity";
 import { isOwnerSignIn } from "@/lib/owner";
 import { gateJwt, sessionFields, signInClaims } from "@/lib/session-gate";
 import type { OwnedToken } from "@/lib/spotify";
 import { SPOTIFY_NOT_REGISTERED, spotifyUserinfo } from "@/lib/spotify/userinfo";
 import { createTokenCore, isFresh, RefreshError, type UserTokens } from "@/lib/token-core";
-import { withAdminTokenMove } from "@/lib/token-move";
-import { appTokenStore } from "@/lib/token-store-app";
+import { ownerTokenStore } from "@/lib/token-store-owner";
 
 // Spotify banned `localhost` redirect URIs (Nov 2025): only the loopback IP literal
 // `http://127.0.0.1:PORT` is allowed over HTTP. But Next.js normalizes 127.0.0.1 ->
@@ -50,14 +56,15 @@ type SpotifyToken = {
   uid?: string;
   ep?: number;
   auth_time?: number;
+  accessToken?: string;
+  refreshToken?: string;
+  expiresAt?: number;
   error?: "RefreshAccessTokenError";
 };
 
 // The token core, per user (src/lib/token-core.ts: the refresh, the in-flight map and the lock,
-// all keyed by uid), over Phase 2's encrypted `user_tokens` (token-store-app.ts). The admin's
-// first read in a process copies his plaintext `meta` row in once ever, or, with
-// LB_TOKEN_ROLLBACK=1, writes it back (token-move.ts, PLAN.md §11.4).
-const core = createTokenCore(withAdminTokenMove(appTokenStore(), ownerUid));
+// all keyed by uid). Phase 1 has one user: its store is the owner's plaintext `meta` row.
+const core = createTokenCore(ownerTokenStore(ownerUid));
 
 // ── Request-scoped reads ───────────────────────────────────────────────────────────────
 // One tokens read per request instead of one per callback. /home calls auth() twice (the
@@ -83,13 +90,16 @@ function publishTokens(uid: Uid, t: UserTokens | null): void {
   tokenBox(uid).p = Promise.resolve(t);
 }
 
-// The identity read (docs/multi-user/PLAN.md §5.1), once per request per cookie: the jwt
-// callback and the session callback ask the same box. It reads the app database's `users` row
-// under SIGNUPS (identity-read.ts); a read that throws, or token keys that fail their
-// sentinel, is the "unavailable" outcome.
+// The identity check (docs/multi-user/PLAN.md §5.1), once per request per cookie: the jwt
+// callback and the session callback ask the same box. Phase 1's lookup is the OWNER_UID
+// constant (no app database yet), so it never throws; Phase 2's app-database read can, and
+// that is the "unavailable" outcome.
 const identityFor = cache(
   (uid: unknown, ep: unknown, authTime: unknown): Promise<IdentityVerdict> =>
-    readIdentity({ uid, ep, auth_time: authTime }),
+    checkIdentity({ uid, ep, auth_time: authTime }, ownerOnlyLookup(ownerUid()), {
+      now: Date.now(),
+      signups: signupsMode(),
+    }),
 );
 
 /** The Spotify access token for THIS request — server-only, and deliberately NOT a field on
@@ -120,21 +130,6 @@ export async function spotifyAccessTokenFor(uid: Uid): Promise<OwnedToken | unde
 export async function getValidAccessTokenFor(uid: Uid): Promise<OwnedToken | null> {
   const t = await core.getValidAccessToken(uid);
   return t ? { uid: t.uid, accessToken: t.accessToken } : null;
-}
-
-/** Whether the user holds a token of record, read through the token store, so the admin's
- *  one-time copy of his plaintext row (token-move.ts) runs first: the cron's owner alarm, which
- *  read raw would answer "no token" to every tick before Phase 2's first read copied it. */
-export async function hasStoredTokens(uid: Uid): Promise<boolean> {
-  return (await core.getStored(uid)) !== null;
-}
-
-/** Log out's clear (RULINGS Oct 15 1:33 PM): the user's `user_tokens` row goes, so capture
- *  stops and a copied cookie is refused (a session with no grant is, session-gate.ts) until
- *  the next sign-in. */
-export async function signOutTokens(uid: Uid): Promise<void> {
-  await core.removeTokens(uid);
-  publishTokens(uid, null);
 }
 
 export const { handlers, signIn, signOut, auth } = NextAuth({
@@ -188,24 +183,25 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     }),
   ],
   callbacks: {
-    // Runs before jwt, so a refused account never reaches the token write below. The owner
-    // guard (lib/owner.ts) stays until Phase 4a; then the app database decides by Spotify's
-    // account_id (identity-read.ts): a refusal is AccessDenied or a named case on /login.
+    // Owner-only. Runs before jwt, so a refused account never reaches the token write below;
+    // Auth.js answers it with AccessDenied. See lib/owner.ts. With no OWNER_UID configured
+    // there is no uid to put on the cookie, so every sign-in is refused (multi-user Phase 1).
     async signIn({ profile }) {
       if (profile?.id === SPOTIFY_NOT_REGISTERED) return "/login?error=SpotifyNotRegistered";
-      if (!(await isOwnerSignIn(profile?.id ?? undefined))) return false;
-      const o = await resolveSignIn(profile ?? {});
-      return o.kind === "allowed" ? true : signInRedirect(o);
+      if (!ownerUid()) {
+        console.error("[auth] OWNER_UID is unset or malformed: refusing sign-in");
+        return false;
+      }
+      return isOwnerSignIn(profile?.id ?? undefined);
     },
-    async jwt({ token, account, profile }) {
+    async jwt({ token, account }) {
       const t = token as SpotifyToken;
       // Initial sign-in: name the user on the cookie (uid, session epoch, auth_time, from the
-      // `users` row signIn just admitted, never from the incoming cookie), then write the encrypted
-      // token row. Tokens never ride in the cookie: one there is bound to no user row and
-      // invisible to the cron, so a sign-in that cannot write its row fails visibly and is
-      // retried (PLAN.md §5.1, 01e A18).
+      // owner constant in Phase 1, never from the incoming cookie), then stash tokens in the
+      // DB (the source of truth) and keep the cookie lean. The DB lets concurrent refreshes
+      // coordinate (see the token core's refreshShared).
       if (account) {
-        const claims = signInClaims(await signedInUser(profile ?? {}), Date.now());
+        const claims = signInClaims(ownerUid(), Date.now());
         if (!claims) return null;
         t.uid = claims.uid;
         t.ep = claims.ep;
@@ -217,10 +213,23 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           refreshToken: account.refresh_token!,
           expiresAt: account.expires_at!,
         };
-        await core.setTokens(uid, tokens);
-        // The session callback reads next, in this same request — hand it what we wrote
-        // instead of making it re-read the row we just stamped.
-        publishTokens(uid, tokens);
+        try {
+          await core.setTokens(uid, tokens);
+          // The session callback reads next, in this same request — hand it what we wrote
+          // instead of making it re-read the row we just stamped.
+          publishTokens(uid, tokens);
+          // Stored in the DB (the source of truth) — keep the cookie lean.
+          delete t.accessToken;
+          delete t.refreshToken;
+          delete t.expiresAt;
+        } catch {
+          // DB write failed (e.g. a transient Turso hiccup). Don't fail the whole
+          // login with a server error — keep the tokens in the JWT cookie instead; the
+          // migration path below moves them to the DB on a later request once it's back.
+          t.accessToken = tokens.accessToken;
+          t.refreshToken = tokens.refreshToken;
+          t.expiresAt = tokens.expiresAt;
+        }
         delete t.error;
         return t;
       }
@@ -243,6 +252,25 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         // later request resolve the token.
         return t;
       }
+      // Migrate older sessions that kept tokens in the cookie into the DB once.
+      if (!stored && t.refreshToken && t.accessToken && t.expiresAt) {
+        stored = {
+          uid,
+          accessToken: t.accessToken,
+          refreshToken: t.refreshToken,
+          expiresAt: t.expiresAt,
+        };
+        // Best-effort: if the write fails, keep the cookie tokens and retry next time.
+        try {
+          await core.setTokens(uid, stored);
+          publishTokens(uid, stored);
+          delete t.accessToken;
+          delete t.refreshToken;
+          delete t.expiresAt;
+        } catch {
+          /* keep cookie tokens; a later request migrates them */
+        }
+      }
       if (!stored) {
         t.error = "RefreshAccessTokenError";
         return t;
@@ -257,7 +285,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         // refreshShared resolves to the tokens now in the DB (ours, or a winner's) — publish
         // them so the session callback hands out the fresh access token rather than the
         // expired one this request started with.
-        publishTokens(uid, await core.refreshShared(uid));
+        publishTokens(uid, await core.refreshShared(uid, stored.refreshToken));
         delete t.error;
       } catch (e) {
         if (e instanceof RefreshError && e.terminal) {

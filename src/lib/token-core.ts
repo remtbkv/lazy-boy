@@ -4,38 +4,23 @@
 //   - the in-flight refresh is a Map<Uid, Promise>. As one promise per process it would let a
 //     second user's concurrent refresh join the first's and receive the first's tokens (01e A2);
 //   - the cross-instance refresh lock, the stored row and every write are per uid, through a
-//     `TokenStore` (Phase 2: `user_tokens`, encrypted, token-store-app.ts);
+//     `TokenStore` (Phase 1: the owner's plaintext row in `meta`, token-store-owner.ts; Phase 2:
+//     `user_tokens`, encrypted);
 //   - a token object names its owner, and `setTokens` / `assertTokenOwner` refuse a mismatch,
-//     so a refactor that shares a promise or cache across users fails on the first mixed call,
-//     and record a `token-owner` isolation event first (PLAN.md §6.5);
-//   - a refresh writes, and a dead grant clears, only over the row it read (Phase 2, security
-//     R3-R4): a refresh that read the old grant before a sign-in cannot overwrite the new one,
-//     and one finishing after the deletion job removed the row stores nothing.
+//     so a refactor that shares a promise or cache across users fails on the first mixed call.
 // The refresh rules themselves (retries, the fresh-token veto, the lock and its waits) are the
 // single-user code's, unchanged; their comments say why each is there.
 import type { SpotifyTokens } from "@/lib/db";
 import type { Uid } from "@/lib/identity";
-import { reportIsolation } from "@/lib/isolation";
 
 const TOKEN_URL = "https://accounts.spotify.com/api/token";
 
 export type UserTokens = SpotifyTokens & { uid: Uid };
 
-/** What a store hands back: the tokens, and `rev`, an opaque version of the row they came from
- *  (Phase 2: its blob), which a refresh's write and a clear must name. */
-export type StoredTokens = SpotifyTokens & { rev: string };
-
 export interface TokenStore {
-  get(uid: Uid): Promise<StoredTokens | null>;
-  /** A sign-in's write: insert or replace, only while the user is live; throws if nothing landed. */
+  get(uid: Uid): Promise<SpotifyTokens | null>;
   set(uid: Uid, t: SpotifyTokens): Promise<void>;
-  /** A refresh's write, only over the row `read` came from; false when that row moved on or is gone. */
-  update(uid: Uid, t: SpotifyTokens, read: StoredTokens): Promise<boolean>;
-  /** Clear only the row `read` came from. */
-  clear(uid: Uid, read: StoredTokens): Promise<void>;
-  /** Log out: the row goes, whatever it holds, so capture stops (RULINGS Oct 15 1:33 PM); a
-   *  refresh racing it then stores nothing, since its write names a row that is gone. */
-  remove(uid: Uid): Promise<void>;
+  clear(uid: Uid): Promise<void>;
   /** A cross-instance lease on this user's refresh; the owner string, or null if held. */
   lock(uid: Uid, ttlMs: number): Promise<string | null>;
   unlock(uid: Uid, owner: string): Promise<void>;
@@ -134,38 +119,18 @@ export function createTokenCore(store: TokenStore) {
     expiresAt: t.expiresAt,
   });
 
-  async function assertTokenOwner(t: UserTokens, uid: Uid): Promise<void> {
-    if (t.uid === uid) return;
-    await reportIsolation("token-owner", uid);
-    throw new Error(`token owner mismatch`);
-  }
-
-  // A row as read: the tokens, owned, and the version a write over it must name.
-  type Row = { t: UserTokens; read: StoredTokens };
-  async function readRow(uid: Uid): Promise<Row | null> {
-    const r = await store.get(uid);
-    return r ? { t: own(uid, r), read: r } : null;
+  function assertTokenOwner(t: UserTokens, uid: Uid): void {
+    if (t.uid !== uid) throw new Error(`token owner mismatch`);
   }
 
   async function getStored(uid: Uid): Promise<UserTokens | null> {
-    return (await readRow(uid))?.t ?? null;
+    const t = await store.get(uid);
+    return t ? own(uid, t) : null;
   }
 
-  /** A sign-in's write (the store lands it only while the user is live). */
   async function setTokens(uid: Uid, t: UserTokens): Promise<void> {
-    await assertTokenOwner(t, uid);
+    assertTokenOwner(t, uid);
     await store.set(uid, t);
-  }
-
-  // A refresh's write lands only over the row it read. If that row moved on (a sign-in wrote a
-  // newer grant) or is gone (the deletion job), this refresh stores nothing and answers with
-  // whatever fresh grant the row now holds.
-  async function writeRefreshed(uid: Uid, updated: UserTokens, read: StoredTokens): Promise<UserTokens> {
-    await assertTokenOwner(updated, uid);
-    if (await store.update(uid, updated, read)) return updated;
-    const now = await getStored(uid);
-    if (now && isFresh(now)) return now;
-    throw new RefreshError(false, "token row moved on during the refresh");
   }
 
   // Guard against a cross-process rotation race wiping good tokens. A terminal
@@ -174,24 +139,26 @@ export function createTokenCore(store: TokenStore) {
   // has moved on and is still valid. Only clear when what's stored is still the exact
   // token we just failed with; otherwise someone else won the race, so keep theirs.
   async function clearTokensIfStale(uid: Uid, attemptedRefreshToken: string): Promise<void> {
-    const current = await readRow(uid);
+    const current = await store.get(uid);
     // A FRESH stored access token vetoes the clear regardless of the refresh-token compare:
     // Spotify doesn't always rotate refresh tokens, so a winner's successful refresh can
     // leave the same refresh token beside a brand-new access token — and the loser's
     // invalid_grant (a replay rejection) then matched on refreshToken and logged the user
     // out of a live session (wave-2 audit, B4).
-    if (!current || isFresh(current.t)) return;
-    if (current.t.refreshToken === attemptedRefreshToken) await store.clear(uid, current.read);
+    if (current && isFresh(current)) return;
+    if (!current || current.refreshToken === attemptedRefreshToken) {
+      await store.clear(uid);
+    }
   }
 
   // In-process lock, per user: concurrent requests in THIS instance that all see the same
   // user's expired token share ONE refresh instead of each firing their own (which, with
   // Spotify's rotating PKCE refresh token, would invalidate each other and log the user out).
   const inflight = new Map<Uid, Promise<UserTokens>>();
-  function refreshShared(uid: Uid): Promise<UserTokens> {
+  function refreshShared(uid: Uid, refreshToken: string): Promise<UserTokens> {
     let p = inflight.get(uid);
     if (!p) {
-      p = coordinatedRefresh(uid).finally(() => {
+      p = coordinatedRefresh(uid, refreshToken).finally(() => {
         inflight.delete(uid);
       });
       inflight.set(uid, p);
@@ -205,11 +172,9 @@ export function createTokenCore(store: TokenStore) {
   //   2) take a short-lived DB lock so only one refresh hits Spotify with a given
   //      rotating token; losers poll the DB for the winner's freshly-written token.
   // This is what stops concurrent cold starts from racing into invalid_grant.
-  // No row means nothing to refresh: a row the deletion job removed is never written back.
-  async function coordinatedRefresh(uid: Uid): Promise<UserTokens> {
-    const first = await readRow(uid);
-    if (!first) throw new RefreshError(false, "no token row");
-    if (isFresh(first.t)) return first.t;
+  async function coordinatedRefresh(uid: Uid, triedToken: string): Promise<UserTokens> {
+    let current = await getStored(uid);
+    if (current && isFresh(current)) return current;
 
     for (let attempt = 0; attempt < 2; attempt++) {
       // 30s, not 15: the refresh worst-case (3 attempts × 3s + backoff, plus the DB writes)
@@ -218,11 +183,11 @@ export function createTokenCore(store: TokenStore) {
       const lockOwner = await store.lock(uid, 30_000);
       if (lockOwner) {
         try {
-          const current = await readRow(uid); // the winner may have just written
-          if (!current) throw new RefreshError(false, "no token row");
-          if (isFresh(current.t)) return current.t;
-          const updated = own(uid, await refreshAccessToken(current.t.refreshToken));
-          return await writeRefreshed(uid, updated, current.read);
+          current = await getStored(uid); // the winner may have just written
+          if (current && isFresh(current)) return current;
+          const updated = own(uid, await refreshAccessToken(current?.refreshToken ?? triedToken));
+          await setTokens(uid, updated);
+          return updated;
         } finally {
           await store.unlock(uid, lockOwner);
         }
@@ -237,10 +202,10 @@ export function createTokenCore(store: TokenStore) {
     }
     // Last resort: refresh ourselves rather than fail the request — with the STORE's current
     // refresh token, not the one this caller started with, which the winner may have rotated.
-    const latest = await readRow(uid);
-    if (!latest) throw new RefreshError(false, "no token row");
-    const updated = own(uid, await refreshAccessToken(latest.t.refreshToken));
-    return writeRefreshed(uid, updated, latest.read);
+    const latest = await getStored(uid);
+    const updated = own(uid, await refreshAccessToken(latest?.refreshToken ?? triedToken));
+    await setTokens(uid, updated);
+    return updated;
   }
 
   // Freshness alone proves the winner published: callers only wait here after seeing an
@@ -266,8 +231,8 @@ export function createTokenCore(store: TokenStore) {
     if (!stored) return null;
     if (isFresh(stored)) return stored;
     try {
-      const fresh = await refreshShared(uid);
-      await assertTokenOwner(fresh, uid);
+      const fresh = await refreshShared(uid, stored.refreshToken);
+      assertTokenOwner(fresh, uid);
       return fresh;
     } catch (e) {
       if (e instanceof RefreshError && e.terminal) await clearTokensIfStale(uid, stored.refreshToken);
@@ -278,7 +243,6 @@ export function createTokenCore(store: TokenStore) {
   return {
     getStored,
     setTokens,
-    removeTokens: (uid: Uid) => store.remove(uid),
     clearTokensIfStale,
     refreshShared,
     getValidAccessToken,

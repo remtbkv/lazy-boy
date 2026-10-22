@@ -1,8 +1,7 @@
 // Per-user database files for the isolation suite (PLAN.md §6.4 "What the harness gains"): each
-// test gets its own directory holding `app.db` beside the users' files (`u1-…`, `u2-…`), each
-// made by production code (app-db.ts's open applies the app schema; db.ts's open provisions a
-// user's file for the uid that opens it first), so provisioning is under test too. A user's
-// `users` row in app.db names their file, and the identity read is what hands forUser the name. Two users with deliberate collisions (the same track ids at the same played_at, the
+// test gets its own directory, STORE_URL_TEMPLATE points every db_name at a file in it, and the
+// production open provisions each file for the uid that opens it first, so provisioning is under
+// test too. Two users with deliberate collisions (the same track ids at the same played_at, the
 // same playlist id with different members, the same context URI named for one and
 // negative-cached for the other) carry a marker (`A-only-…`, `B-only-…`) in every text column.
 // dumpDb is an ordered logical dump of every table, in place of a file hash, which WAL would fool.
@@ -11,10 +10,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createClient } from "@libsql/client";
 import { expect } from "vitest";
-import { readTokenRow } from "@/lib/app-db";
-import { forUser, forUserAt, type PlayRecord, type StoredPlaylist, type UserStore } from "@/lib/db";
+import { forUserAt, type PlayRecord, type StoredPlaylist, type UserStore } from "@/lib/db";
 import { mintUid, type Uid } from "@/lib/identity";
-import { readIdentity } from "@/lib/identity-read";
 import type { Track } from "@/lib/spotify/types";
 
 export const A: Uid = mintUid("aaaaaaaaaaaa");
@@ -23,42 +20,11 @@ export type Tag = "A" | "B";
 export const tagOf = (uid: Uid): Tag => (uid === A ? "A" : "B");
 export const FAR = 4_000_000_000;
 
-/** A fresh directory for this test file's databases: STORE_URL_TEMPLATE names the users' files
- *  in it, and APP_DATABASE_URL its `app.db`, which app-db.ts's production open creates at first
- *  use (so `dumpDb("app")` dumps the app database). */
+/** A fresh directory for this test file's user databases; STORE_URL_TEMPLATE names it. */
 export function useUserFiles(): string {
   const dir = mkdtempSync(path.join(tmpdir(), "lazyboy-users-"));
   process.env.STORE_URL_TEMPLATE = `file:${dir}/{db}.db`;
-  process.env.APP_DATABASE_URL = `file:${dir}/app.db`;
   return dir;
-}
-
-/** A friend's `users` row naming `dbName` (inserted, or moved there as a restore moves it):
- *  active, epoch 0. Provisioning itself is Phase 4a's invite script. */
-export async function nameDb(uid: Uid, dbName: string): Promise<void> {
-  await readTokenRow(uid); // the production open creates the app database's schema
-  const c = createClient({ url: process.env.APP_DATABASE_URL as string });
-  try {
-    await c.execute({
-      sql: `INSERT INTO users (uid, account_id, spotify_id, db_name, status, status_at, is_admin, session_epoch, invited_at)
-            VALUES (:uid, :aid, :sid, :db, 'active', 0, 0, 0, 0)
-            ON CONFLICT(uid) DO UPDATE SET db_name = excluded.db_name`,
-      args: { uid, aid: `acct-${uid}`, sid: `sp-${uid}`, db: dbName },
-    });
-  } finally {
-    c.close();
-  }
-}
-
-/** What every request does before it reaches a user's data: the identity read for the user's
- *  live cookie (SIGNUPS=invite, so a friend is allowed), then forUser(uid), which reaches the
- *  database that read named. */
-export async function signedIn(uid: Uid): Promise<UserStore> {
-  process.env.TOKEN_KEYS ||= `v1:${Buffer.alloc(32, 5).toString("base64")}`;
-  process.env.SIGNUPS = "invite";
-  const v = await readIdentity({ uid, ep: 0, auth_time: Math.floor(Date.now() / 1000) });
-  expect(v).toMatchObject({ kind: "allowed", uid });
-  return forUser(uid);
 }
 
 /** Every table of the database `dbName` names under the current template, rows sorted. */

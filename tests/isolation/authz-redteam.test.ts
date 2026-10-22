@@ -48,7 +48,6 @@ import {
   REM_PLAYLIST,
   SECRETS,
   become,
-  dump,
   installSpotify,
   observe,
   request,
@@ -224,59 +223,6 @@ describe("cookie and token reuse", () => {
     const state = new URL(signin.headers.get("location") ?? "").searchParams.get("state") ?? "";
     const done = await GET(new NextRequest(request(`/api/auth/callback/spotify?code=code-REM&state=${encodeURIComponent(state)}`)));
     expect(new URL(done.headers.get("location") ?? "").origin).toBe("http://127.0.0.1:3000");
-  });
-
-  it("Log out deletes Rem's token of record (user_tokens) and its plaintext copy: a copy of his cookie is refused, and the cron stops (RULINGS Oct 15 1:33 PM)", async () => {
-    await seedRem();
-    await become("rem");
-    const copy = ctx.cookies.get(COOKIE)!;
-    expect(JSON.parse((await tokenRow())!).app).not.toBeNull();
-    const { run } = await import("./authz-harness");
-    const out = await run(async () => (await import("@/app/(app)/actions")).logout());
-    expect(out).toMatchObject({ kind: "redirect" });
-    expect(await tokenRow(), "a token row left after Log out").toBeNull();
-    await become("anon");
-    ctx.cookies.set(COOKIE, copy);
-    expect((await library()).status, "the copied cookie after Log out").toBe(401);
-    ctx.cookies.clear();
-    expect((await cron({ authorization: `Bearer ${SECRETS.cron}` })).status, "the cron after Log out").toBe(503);
-  });
-
-  it("the revoked friend is refused by their own row (status, then epoch), never as an unknown uid; friends A and B by SIGNUPS=owner, each with only their own token row", async () => {
-    await seedRem();
-    const { readIdentity } = await import("@/lib/identity-read");
-    const claims = (uid: string, ep = 0) => ({ uid, ep, auth_time: Math.floor(Date.now() / 1000) });
-    expect(await readIdentity(claims("rrrrrrrrrrrr"))).toEqual({ kind: "refused", reason: "status" });
-    expect(await readIdentity(claims("rrrrrrrrrrrr", 1))).toEqual({ kind: "refused", reason: "status" });
-    for (const uid of ["aaaaaaaaaaaa", "bbbbbbbbbbbb"]) {
-      expect(await readIdentity(claims(uid))).toEqual({ kind: "refused", reason: "signups" });
-    }
-    const { appTokenStore } = await import("@/lib/token-store-app");
-    const { mintUid } = await import("@/lib/identity");
-    expect((await appTokenStore().get(mintUid("aaaaaaaaaaaa")))?.accessToken).toBe("at-A-friend");
-    expect((await appTokenStore().get(mintUid("bbbbbbbbbbbb")))?.accessToken).toBe("at-B-friend");
-  });
-
-  it("the app database down (identity read unavailable) reaches each require*User form as the retryable answer, never a sign-out", async () => {
-    await seedRem();
-    await become("rem");
-    spotifyCalls.length = 0;
-    const before = await dump();
-    const saved = process.env.APP_DATABASE_URL;
-    process.env.APP_DATABASE_URL = "libsql://app-db-down.invalid";
-    try {
-      const res = await library();
-      expect([res.status, res.headers.get("x-lb-signed-out")]).toEqual([503, null]);
-      const { addToQueueAction } = await import("@/app/(app)/actions");
-      expect(await addToQueueAction("spotify:track:rem-t1")).toMatchObject({ ok: false, retry: true });
-      const { default: Playlists } = await import("@/app/(app)/playlists/page");
-      await expect(Playlists()).rejects.toMatchObject({ name: "RetryableAuthError" });
-    } finally {
-      if (saved === undefined) delete process.env.APP_DATABASE_URL;
-      else process.env.APP_DATABASE_URL = saved;
-    }
-    expect(await dump()).toBe(before);
-    expect(spotifyCalls.filter((c) => c.bearer === "at-REM")).toEqual([]);
   });
 
   it("a friend's completed sign-in leaves Rem's token row byte for byte", async () => {

@@ -7,9 +7,9 @@
 // `mintUid` below is the only cast. Who may import it is pinned by tests/isolation/static.test.ts
 // (S2): the session gate, and later the cron's claim and the scripts' `--user` helper.
 //
-// No database here: the lookup is a parameter. Phase 2's is the app-database read
-// (identity-read.ts, `appIdentityLookup`), which replaced Phase 1's owner-only constant with
-// the same signature; `checkIdentity`'s three outcomes stay as they are.
+// No database here. Phase 1 has one user and no app database, so the identity lookup is
+// `ownerOnlyLookup` over the `OWNER_UID` constant; Phase 2 swaps in the app-database read with
+// the same signature, and `checkIdentity`'s three outcomes stay as they are.
 import { randomBytes } from "node:crypto";
 
 declare const brand: unique symbol;
@@ -36,9 +36,8 @@ export function mintUid(s: string): Uid {
   return s as Uid;
 }
 
-/** Rem's uid: a Production constant, not a secret (§11.4), the uid of the admin's `users` row.
- *  phase1Owner() below and the runtime's copy of his plaintext token row use it. Null when
- *  unset or malformed. */
+/** Rem's uid in Phase 1: a Production constant, not a secret (§11.4). Null when unset or
+ *  malformed, which refuses every sign-in rather than minting a cookie for no one. */
 export function ownerUid(): string | null {
   const v = process.env.OWNER_UID;
   return isUidShape(v) ? v : null;
@@ -96,6 +95,12 @@ export async function checkIdentity(
   if (claims.ep !== row.sessionEpoch) return { kind: "refused", reason: "epoch" };
   if (opts.signups === "owner" && !row.isAdmin) return { kind: "refused", reason: "signups" };
   return { kind: "allowed", uid: mintUid(claims.uid), admin: row.isAdmin };
+}
+
+/** Phase 1's lookup: the owner alone, active, at epoch 0, admin (§11.4). */
+export function ownerOnlyLookup(owner: string | null): IdentityLookup {
+  return async (uid) =>
+    owner && uid === owner ? { status: "active", sessionEpoch: 0, isAdmin: true } : null;
 }
 
 /** `SIGNUPS`: "owner" (the default, Phases 1-3) admits the admin alone whatever the rows say. */

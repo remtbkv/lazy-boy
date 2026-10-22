@@ -1,10 +1,8 @@
 # SECURITY.md
 
 Security posture and the checklist to clear before a public production deploy. The data is a
-database per user (multi-user PLAN §4), named by each user's row in the app database
-`lazyboy-app`, which also holds every user's Spotify tokens encrypted under `TOKEN_KEYS`
-(Phase 2); the runbooks for a token-key rotation, a restore, a rollback and a suspected
-cross-user exposure are at the end.
+database per user (multi-user PLAN §4; Phase 1 knows one user, `OWNER_UID`); the runbooks for
+a rollback and for a suspected cross-user exposure are at the end.
 
 ## Already in place
 
@@ -92,8 +90,8 @@ cross-user exposure are at the end.
 - [ ] **`AUTH_URL`** set to the real HTTPS origin; **`AUTH_SECRET`** is a strong random value
       (`openssl rand -base64 32`), stored in the host's secret manager, not in the repo.
 - [x] **User-scope the listen-history store.** A database per user, reached only through
-      `forUser(uid)` (multi-user Phase 1), at the database the user's `users` row names
-      (Phase 2, with the tokens encrypted in `user_tokens`); Phase 4a adds the first other user.
+      `forUser(uid)` (multi-user Phase 1). Phase 2 adds the app database (users, encrypted
+      tokens) and Phase 4a the first other user.
 - [ ] **Spotify's development mode allows five accounts, Rem's included** (the dashboard's
       User Management; multi-user PLAN §13.2, RULINGS Oct 15 12:46 PM). Each friend is added by hand in the dashboard;
       at most four. Other accounts get Spotify's 403 at sign-in. Extended quota is not sought.
@@ -108,39 +106,6 @@ cross-user exposure are at the end.
       code (none currently); scrub any error reporting of tokens.
 - [ ] `allowedDevOrigins` is dev-only and harmless in prod, but review it isn't masking a real
       CORS need.
-
-## Rotating a token key (multi-user PLAN §5.3, decision 23: on compromise only)
-
-1. Put the new key first: `TOKEN_KEYS=v2:<new>,v1:<old>` (generated inside the pipe that sets
-   it, one copy kept somewhere safe), and redeploy. The first runtime to hold `v2` writes its
-   sentinel; new writes take `v2`, old blobs still read under `v1`.
-2. Re-encrypt every blob not under the first key (the daily chore, once it exists; until then
-   a refresh rewrites each user's blob within the hour).
-3. Drop `v1` only after `SELECT count(*) FROM user_tokens WHERE blob LIKE 'v1.%'` reads 0. The
-   cold-start check covers the configured keys only: with `v1` dropped early, each blob still
-   under it fails one user at a time (a `decrypt` event each, the user left `active`, nothing
-   written), and that user signs in again.
-
-## Restores (multi-user PLAN §12.5)
-
-Every Turso restore makes a database with a new name (point-in-time and dump restores alike),
-and the app follows `users.db_name` on every request, so a new name is safe.
-
-- **A user's database** (Rem's or a friend's): create it from point-in-time or a dump; check its
-  `owner_uid`; write a new `store_epoch`; set the user's `sync_state` to `paused` (Phase 3);
-  move `users.db_name` to the new name; delete the old database's `owner_uid`, so any process
-  still holding it refuses it at its next open; resume. A warm instance reaches the new name at
-  the user's next identity read (or claim): `forUserAt` drops the old name's client and open
-  verdict and checks the new database's owner. Rem's database restored from a nightly backup
-  holds no plaintext token; his token is in `user_tokens`, which the restore does not touch.
-- **`lazyboy-app`**: the restored copy revives what changed since it was taken, so before the
-  pingers resume: delete every `users` row whose `lb-u-<uid>` database no longer exists
-  (`turso db list`), re-run their telemetry deletion, re-apply every deletion and disable
-  recorded since the copy in the telemetry store's lifecycle log, bump every `session_epoch`
-  (sessions ended since the copy stay ended), then resume. Point `APP_DATABASE_URL` at the new
-  name and redeploy. Its `user_tokens` blobs need the same `TOKEN_KEYS`.
-- **Rehearsed** before the first friend: restore a throwaway user's database under a new name,
-  see the app serve from it, destroy it.
 
 ## Rollback (multi-user PLAN §13.5)
 
@@ -159,21 +124,6 @@ and the app follows `users.db_name` on every request, so a new name is safe.
    deployments built before it (`vercel rm <url>`), so no rollback can bring the old secret
    back or put single-user code in front of a friend's cookie.
 6. **Rehearse it** on Rem alone inside the phase's soak.
-
-**Phase 2's cell** (PLAN §11.4 "Rollback"). The build before Phase 2 reads Rem's plaintext
-token row in `lazyboy.meta`, which Phase 2 keeps for a week after the move:
-
-- **Inside the week**: revert and push. The older build runs on the group token, which reaches
-  `lazyboy`, and reads the plaintext row; an access token past its expiry is renewed by the
-  unchanged refresh token. If Rem pressed Log out under Phase 2, the plaintext copy went with
-  his row, so he signs in once.
-- **After the week** (the plaintext row deleted, §11.4 step 6): set `LB_TOKEN_ROLLBACK=1` in
-  Production and redeploy Phase 2 first. Rem's next token read in each process writes his
-  plaintext row back from his blob (`[token-move] rollback: … written back from the blob`) and
-  every later write of his tokens is mirrored there. Check the row exists, then revert.
-- Never Instant Rollback across Phase 2: every deployment before it holds the invalidated
-  `lazyboy` token. A rollback to a build from before the interim pinger's guard pauses the
-  cron-job.org job first.
 
 ## A suspected cross-user exposure (multi-user PLAN §13.6)
 

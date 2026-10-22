@@ -6,12 +6,12 @@ import { isUidShape, mintUid, type IdentityVerdict, type Uid } from "@/lib/ident
 
 export type SignInClaims = { uid: string; ep: number; auth_time: number };
 
-/** What the jwt callback's sign-in branch puts on the cookie: taken from the user's `users`
- *  row (its uid and session epoch), never from the incoming cookie or the profile, which is
- *  what keeps session fixation out. `auth_time` is written here and nowhere else. */
-export function signInClaims(user: { uid: string; sessionEpoch: number } | null, now: number): SignInClaims | null {
-  if (!user || !isUidShape(user.uid)) return null;
-  return { uid: user.uid, ep: user.sessionEpoch, auth_time: Math.floor(now / 1000) };
+/** What the jwt callback's sign-in branch puts on the cookie: taken from the user's row (in
+ *  Phase 1, the owner constant), never from the incoming cookie or the profile, which is what
+ *  keeps session fixation out. `auth_time` is written here and nowhere else. */
+export function signInClaims(owner: string | null, now: number): SignInClaims | null {
+  if (!isUidShape(owner)) return null;
+  return { uid: owner, ep: 0, auth_time: Math.floor(now / 1000) };
 }
 
 /** The jwt callback's answer for a later request: null signs the request out (Auth.js clears
