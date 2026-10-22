@@ -219,9 +219,10 @@ async function spotifyFetch(input: RequestInfo | URL, init?: RequestInit): Promi
   const path = new URL(url).pathname.replace(/^\/v1/, "");
   if (method !== "GET") {
     if (/\/playlists$/.test(path)) return Response.json({ id: `${owner.toLowerCase()}-new-pl`, name: "new" }, { status: 201 });
-    // The queue refuses: saveQueue's skip-through walk stops at its first player command
-    // instead of stalling 15 s on a queue that never moves (the player below is playing).
-    if (path === "/me/player/queue") return Response.json({ error: { status: 404, message: "No active device found" } }, { status: 404 });
+    // `next` refuses: saveQueue's skip-through walk stops at its first skip instead of stalling
+    // 15 s on a queue that never moves (the player below is playing). Not the queue itself:
+    // addToQueueAction is one of the player commands the suites expect to succeed.
+    if (path === "/me/player/next") return Response.json({ error: { status: 404, message: "No active device found" } }, { status: 404 });
     return Response.json({ snapshot_id: "snap-after" }, { status: 200 });
   }
   if (path === "/me") {
