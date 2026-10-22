@@ -27,6 +27,8 @@ const PLANTS = [
   // Phase 3
   "planted: a step handed another user's store",
   "planted: a lease released without the owner check",
+  // Lane 40: Turso's args rule.
+  "planted: the suites' store reverted to a plain file: client",
   // Phase 4a and its turn
   "planted: a claim without its compare-and-set",
   "planted: a Log out that leaves capture on",

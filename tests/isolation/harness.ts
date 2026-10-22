@@ -153,7 +153,7 @@ export async function seedApprovedInvite(raw: Client, o: { rid: string; uid: str
               VALUES (:uid, NULL, :sid, :db, 'invited', :at, 0, 0, :at)`,
         args: { uid: o.uid, sid: `invite:${o.rid}`, db: `lb-u-${o.uid}`, at: o.invitedAt },
       },
-      { sql: "UPDATE requests SET status = 'approved', status_at = :at, uid = :uid WHERE id = :rid", args: { ...o, at: o.invitedAt } },
+      { sql: "UPDATE requests SET status = 'approved', status_at = :at, uid = :uid WHERE id = :rid", args: { at: o.invitedAt, uid: o.uid, rid: o.rid } },
     ],
     "write",
   );
