@@ -14,14 +14,15 @@ const song = (id: string, progressMs: number, durationMs = 200 * S, isPlaying = 
   context: null,
 });
 
-type Poll = [at: number, answer: HandoffAnswer];
+/** `sampledAt`: when the state was sampled, if before its receipt (a cached or relayed state). */
+type Poll = [at: number, answer: HandoffAnswer, sampledAt?: number];
 /** Run the fold over polls; each finished song → { id, verdict, ran (s, rounded) }. */
 function replay(polls: Poll[]) {
   let current: HandoffTrack | null = null;
   let lastChangeAt: number | null = null;
   const out: { id: string; verdict: string; ran: number | null }[] = [];
-  for (const [at, answer] of polls) {
-    const f = foldHandoff(current, answer, at, lastChangeAt);
+  for (const [at, answer, sampledAt] of polls) {
+    const f = foldHandoff(current, answer, at, lastChangeAt, sampledAt);
     current = f.current;
     lastChangeAt = f.lastChangeAt;
     if (f.finished) {
@@ -122,6 +123,25 @@ describe("foldHandoff on poll sequences", () => {
     ];
     const verdicts = replay(polls);
     expect(verdicts[0]).toEqual({ id: "A", verdict: "commit", ran: 102 });
+  });
+
+  it("H1: a cached state bounds the change at its sample time, not at the paint (review 0158 finding 2)", () => {
+    // A (150 s) started at T. The cache is written at T + 40 s, the user skips to B at T + 45 s,
+    // a new tab opens at T + 65 s and paints A aged to 65 s; the first live answer (T + 65.8 s)
+    // shows B 20.8 s in. The store: A ran 45 s of 150 s (30%), a skip.
+    const polls: Poll[] = [
+      [T + 65 * S, song("A", 65 * S, 150 * S), T + 40 * S],
+      [T + 65.8 * S, song("B", 20.8 * S)],
+    ];
+    expect(replay(polls)).toEqual([{ id: "A", verdict: "skip", ran: 45 }]);
+  });
+
+  it("H1: a state sampled at its receipt keeps today's bound", () => {
+    const polls: Poll[] = [
+      [T + 65 * S, song("A", 65 * S, 150 * S), T + 65 * S],
+      [T + 65.8 * S, song("B", 20.8 * S)],
+    ];
+    expect(replay(polls)).toEqual([{ id: "A", verdict: "commit", ran: 65 }]);
   });
 
   it("M1: an in-app play shown with no duration takes the real one from the first answer", () => {

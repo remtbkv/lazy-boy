@@ -61,6 +61,10 @@ export type Playing = {
 
 type NowPlayingValue = {
   playing: Playing;
+  /** When the state on the bar was taken: a poll's receipt, or the original poll's for a cached
+   *  or relayed state (its progress is aged to when it was applied). Home's handoff bounds a
+   *  song change by it (handoff.ts lastSampledAt). */
+  playingAt: () => number;
   refresh: () => void;
   setPlaying: React.Dispatch<React.SetStateAction<Playing>>;
   /** Optimistic play/pause. `progressMs` pins the position at flip time (the header
@@ -399,6 +403,8 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     else void pollOnce();
   }, [pollOnce]);
 
+  const playingAt = useCallback(() => lastAppliedAt.current, []);
+
   useEffect(() => {
     aliveRef.current = true;
     const canCoordinate =
@@ -624,7 +630,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
   );
 
   return (
-    <Ctx.Provider value={{ playing, refresh, setPlaying, toggle, playOptimistic, holdDuring }}>
+    <Ctx.Provider value={{ playing, playingAt, refresh, setPlaying, toggle, playOptimistic, holdDuring }}>
       {children}
     </Ctx.Provider>
   );
@@ -636,6 +642,7 @@ export function useNowPlaying(): NowPlayingValue {
   return (
     v ?? {
       playing: null,
+      playingAt: () => 0,
       refresh: () => {},
       setPlaying: () => {},
       toggle: async () => ({ ok: true }),

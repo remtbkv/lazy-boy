@@ -89,9 +89,13 @@ export type HandoffTrack = Omit<HandoffObservation, "startAt" | "privateSession"
   /** When the song became current; null until it is seen playing. */
   startAt: number | null;
   privateSession: boolean;
-  /** The receipt of the last answer that showed this song, paused included: it was still
-   *  current then, so the next song cannot have started earlier (review 0156 H1). */
+  /** The receipt of the last answer that showed this song, paused included. */
   lastObservedAt: number;
+  /** When that answer was sampled: its receipt for a live poll, earlier for a cached or relayed
+   *  state or the one the provider holds when Home mounts. The song was still current then, so
+   *  the next song cannot have started earlier (review 0156 H1). The receipt would date a cached
+   *  state's song as current at the paint and move a skip's end forward (review 0158 finding 2). */
+  lastSampledAt: number;
   /** That answer's progress, and whether it was playing (repeat-one reads where the song is). */
   lastProgressMs: number;
   lastWasPlaying: boolean;
@@ -119,13 +123,17 @@ export type HandoffFold = {
 /** Fold one answer, received at `receivedAt` on this tab's clock, into Home's observation of
  *  the song on the bar. Pure: den-home keeps `current` and `lastChangeAt` between answers and
  *  judges `finished` (judgeFinished). Every instant is this tab's receipt minus Spotify's own
- *  progress (a duration); nothing subtracts a stamp from another machine's clock. */
+ *  progress (a duration); nothing subtracts a stamp from another machine's clock. `sampledAt` is
+ *  when the provider took the state (never after its receipt); its progress is already aged to
+ *  the receipt. */
 export function foldHandoff(
   prev: HandoffTrack | null,
   playing: HandoffAnswer,
   receivedAt: number,
   lastChangeAt: number | null,
+  sampledAt: number = receivedAt,
 ): HandoffFold {
+  const sampled = Math.min(sampledAt, receivedAt);
   // The previous song stopped being current at `changeAt` (the next song's start, or now):
   // never before it started, never in the future.
   const stop = (p: HandoffTrack, changeAt: number) => Math.min(receivedAt, Math.max(changeAt, p.startAt ?? changeAt));
@@ -150,6 +158,7 @@ export function foldHandoff(
       ...prev,
       source: playing.context?.name ?? prev.source,
       lastObservedAt: receivedAt,
+      lastSampledAt: sampled,
       lastProgressMs: playing.progressMs,
       lastWasPlaying: playing.isPlaying,
     };
@@ -174,7 +183,7 @@ export function foldHandoff(
     // The new song's progress dates the change, but a seek before this first look moves that
     // date back, past the moment the previous song was last seen current (review 0156 H1: the
     // previous song's run went to the new one). Bounded by it, the error is one poll interval.
-    const endedAt = stop(prev, Math.max(receivedAt - playing.progressMs, prev.lastObservedAt));
+    const endedAt = stop(prev, Math.max(receivedAt - playing.progressMs, prev.lastSampledAt));
     finished = { p: prev, endedAt };
     lastChangeAt = endedAt;
   }
@@ -191,6 +200,7 @@ export function foldHandoff(
     maxProgress: playing.isPlaying ? playing.progressMs : 0,
     seenAt: receivedAt,
     lastObservedAt: receivedAt,
+    lastSampledAt: sampled,
     lastProgressMs: playing.progressMs,
     lastWasPlaying: playing.isPlaying,
     sawPlaying: !!playing.isPlaying,

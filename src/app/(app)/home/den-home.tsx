@@ -824,7 +824,7 @@ export function DenHome({
   //     recently-played endpoint lags the chip by a beat, so ask once more 4s later.
   //   • the tab becomes visible → you were away; catch up now instead of waiting out a timer.
   //   • a slow interval → covers idle/stopped playback, where neither of the above ever fires.
-  const { playing } = useNowPlaying();
+  const { playing, playingAt } = useNowPlaying();
   const nowPlayingId = playing?.track.id ?? null;
   // What the user is looking at right now, readable from inside an in-flight refresh so a slow
   // response can't overwrite a view they've since moved away from.
@@ -1043,8 +1043,9 @@ export function DenHome({
       }
     };
     // The fold (handoff.ts foldHandoff, tested on poll sequences): the answer, its receipt on
-    // this tab's clock → the song on the bar, and the song it ended with the instant it stopped.
-    const fold = foldHandoff(lastPlayingRef.current, playing, Date.now(), lastChangeAtRef.current);
+    // this tab's clock and when the provider took it → the song on the bar, and the song it
+    // ended with the instant it stopped.
+    const fold = foldHandoff(lastPlayingRef.current, playing, Date.now(), lastChangeAtRef.current, playingAt());
     lastPlayingRef.current = fold.current;
     lastChangeAtRef.current = fold.lastChangeAt;
     if (fold.finished) finish(fold.finished.p, fold.finished.endedAt);
