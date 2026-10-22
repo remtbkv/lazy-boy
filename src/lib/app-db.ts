@@ -264,7 +264,7 @@ export async function createJoinRequest(o: { email: string; name: string; agreed
                      (SELECT count(*) FROM requests WHERE status = 'pending') AS pending,
                      (SELECT count(*) FROM requests WHERE created_at > :hour) AS recent,
                      (SELECT count(*) FROM requests WHERE email = :email AND status IN ('pending', 'approved')) AS dup`,
-        args,
+        args: { hour: args.hour, email },
       },
       {
         sql: `INSERT INTO requests (id, email, name, status, created_at, status_at, terms_version)
@@ -336,7 +336,7 @@ export async function claimInvite(requestId: string, accountId: string, spotifyI
       {
         sql: `UPDATE requests SET status = 'claimed', status_at = :now, join_hash = NULL
               WHERE id = :rid AND status = 'approved' AND uid IN (SELECT uid FROM users WHERE account_id = :aid)`,
-        args,
+        args: { now, rid: requestId, aid: accountId },
       },
     ],
     "write",
@@ -431,7 +431,6 @@ export async function dailyCandidates(
   now: number,
   o: { revokedAfterMs: number; grantWideHoldMs: number; grantWindowMs: number },
 ): Promise<DailyCandidates> {
-  const args = { revoked: now - o.revokedAfterMs, invites: now - INVITE_TTL_MS, wide: now - o.grantWideHoldMs, window: o.grantWindowMs };
   const [del, rev, inv, wide, gone] = await (await appClient()).batch(
     [
       "SELECT uid FROM users WHERE status = 'deleting' AND is_admin = 0 ORDER BY uid",
@@ -440,14 +439,14 @@ export async function dailyCandidates(
                                     WHERE e.at BETWEEN u.status_at - :window AND u.status_at + :window
                                       AND (e.code = 'grant-wide' OR (e.code = 'invalid-grant' AND e.uid <> u.uid))) AS wide
               FROM users u WHERE u.status = 'revoked' AND u.is_admin = 0 AND u.status_at <= :revoked ORDER BY u.uid`,
-        args,
+        args: { window: o.grantWindowMs, revoked: now - o.revokedAfterMs },
       },
       {
         sql: `SELECT uid FROM users WHERE status IN ('provisioning', 'invited') AND account_id IS NULL AND is_admin = 0
                 AND invited_at <= :invites ORDER BY uid`,
-        args,
+        args: { invites: now - INVITE_TTL_MS },
       },
-      { sql: "SELECT count(*) AS n FROM events WHERE code = 'grant-wide' AND at >= :wide", args },
+      { sql: "SELECT count(*) AS n FROM events WHERE code = 'grant-wide' AND at >= :wide", args: { wide: now - o.grantWideHoldMs } },
       "SELECT uid FROM users WHERE status = 'deleted' AND is_admin = 0 ORDER BY uid",
     ],
     "read",
@@ -467,17 +466,16 @@ export async function dailyCandidates(
  *  locks) whose uid has no users row (security R3); requests still pending after 14 days (they hold
  *  an e-mail); the health check's red records past 30 days. Counts per sweep. */
 export async function dailySweeps(now: number, deletedRowTtlMs: number): Promise<Record<string, number>> {
-  const args = { deleted: now - deletedRowTtlMs, pending: now - INVITE_TTL_MS, reds: `health_red:${now - 30 * 86_400_000}` };
   const names = ["deletedRows", "orphanTokens", "orphanQueue", "orphanLocks", "pendingRequests", "healthRecords"];
   const rs = await (await appClient()).batch(
     [
-      { sql: "DELETE FROM users WHERE status = 'deleted' AND is_admin = 0 AND status_at <= :deleted", args },
+      { sql: "DELETE FROM users WHERE status = 'deleted' AND is_admin = 0 AND status_at <= :deleted", args: { deleted: now - deletedRowTtlMs } },
       "DELETE FROM user_tokens WHERE uid NOT IN (SELECT uid FROM users)",
       "DELETE FROM sync_state WHERE uid NOT IN (SELECT uid FROM users)",
       `DELETE FROM app_meta WHERE key LIKE 'lock:spotify_refresh:%'
          AND substr(key, length('lock:spotify_refresh:') + 1) NOT IN (SELECT uid FROM users)`,
-      { sql: "DELETE FROM requests WHERE status = 'pending' AND created_at <= :pending", args },
-      { sql: "DELETE FROM app_meta WHERE key LIKE 'health_red:%' AND key < :reds", args },
+      { sql: "DELETE FROM requests WHERE status = 'pending' AND created_at <= :pending", args: { pending: now - INVITE_TTL_MS } },
+      { sql: "DELETE FROM app_meta WHERE key LIKE 'health_red:%' AND key < :reds", args: { reds: `health_red:${now - 30 * 86_400_000}` } },
     ],
     "write",
   );

@@ -111,6 +111,8 @@ export async function deleteTelemetryRows(uid: string, execute: TelemetryExec): 
   for (const table of tables) await execute({ sql: TELEMETRY_SQL.deleteRows(table), args: { uid } });
 }
 
+// Each statement gets exactly the names its SQL uses: Turso refuses an arg it does not name
+// (docs/GOTCHAS.md).
 const s = (sql: string, args: Stmt["args"]): Stmt => ({ sql, args });
 
 type Row = { db: string; admin: boolean; status: string; statusAt: number };
@@ -149,13 +151,12 @@ export async function runDeletion(uid: string, deps: DeletionDeps): Promise<Dele
   // retry finds the row already `deleting` and leaves its clock alone.
   if (row.status !== "deleting") {
     const now = deps.now();
-    const args = { uid, now, from: row.status, lock: lockKey(uid) };
     const [moved] = await deps.exec([
-      s(DELETION_SQL.markDeleting, args),
-      s(DELETION_SQL.dropQueue, args),
-      s(DELETION_SQL.dropTokens, args),
-      s(DELETION_SQL.dropLock, args),
-      s(DELETION_SQL.dropRequest, args),
+      s(DELETION_SQL.markDeleting, { uid, now, from: row.status }),
+      s(DELETION_SQL.dropQueue, { uid }),
+      s(DELETION_SQL.dropTokens, { uid }),
+      s(DELETION_SQL.dropLock, { uid, lock: lockKey(uid) }),
+      s(DELETION_SQL.dropRequest, { uid }),
     ]);
     if (moved.rowsAffected !== 1) return { kind: "refused", reason: "status" };
     row = { ...row, status: "deleting", statusAt: now };
@@ -186,15 +187,15 @@ export async function runDeletion(uid: string, deps: DeletionDeps): Promise<Dele
   // Step 5, after the lease window.
   const t = deps.now();
   if (t - row.statusAt < LEASE_WINDOW_MS) return { kind: "pending", step: "window" };
-  const a5 = { uid, now: t, lock: lockKey(uid), mark };
+  const lock = lockKey(uid);
   const [, , , left] = await deps.exec([
-    s(DELETION_SQL.dropQueue, a5),
-    s(DELETION_SQL.dropTokens, a5),
-    s(DELETION_SQL.dropLock, a5),
-    s(DELETION_SQL.remaining, a5),
+    s(DELETION_SQL.dropQueue, { uid }),
+    s(DELETION_SQL.dropTokens, { uid }),
+    s(DELETION_SQL.dropLock, { uid, lock }),
+    s(DELETION_SQL.remaining, { uid, lock }),
   ]);
   if (Number(left.rows[0].n) !== 0) throw new Error(`deletion ${uid}: rows remain after the lease window`);
-  await deps.exec([s(DELETION_SQL.markDeleted, a5), s(DELETION_SQL.dropMark, a5)]);
+  await deps.exec([s(DELETION_SQL.markDeleted, { uid, now: t }), s(DELETION_SQL.dropMark, { mark })]);
   return { kind: "done" };
 }
 
