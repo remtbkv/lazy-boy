@@ -514,7 +514,9 @@ const claimArgs = (o: { tick: string; now: number; signups: "owner" | "invite"; 
 });
 
 // The tick's view, read in the claim's batch: app-wide scalars and uids, never a user's data.
-const viewStatements = (args: ClaimArgs): InStatement[] => [
+// Each statement of the claim gets exactly the names its SQL uses: Turso refuses an arg a
+// statement does not name, which a local file accepts (docs/GOTCHAS.md, lane 23).
+const viewStatements = ({ day, signups, confirm, recent }: ClaimArgs): InStatement[] => [
   {
     sql: `SELECT
             (SELECT COALESCE(SUM(rp_calls), 0) FROM sync_state WHERE quota_day = :day) AS rp_total,
@@ -524,10 +526,10 @@ const viewStatements = (args: ClaimArgs): InStatement[] => [
                WHERE u.status = 'needs_reconnect' AND (:signups = 'invite' OR u.is_admin = 1)
                  AND s.last_error = 'invalid_grant' AND u.status_at <= :confirm
                ORDER BY u.status_at LIMIT 1) AS confirm_uid`,
-    args,
+    args: { day, signups, confirm },
   },
   "SELECT key, value FROM app_meta WHERE key LIKE 'cooldown:%'",
-  { sql: "SELECT uid, last_ok_at FROM sync_state WHERE last_ok_at >= :recent", args },
+  { sql: "SELECT uid, last_ok_at FROM sync_state WHERE last_ok_at >= :recent", args: { recent } },
 ];
 
 function toClaim(leased: ResultSet, [view, cooldowns, ok]: ResultSet[]): Claim {
@@ -549,7 +551,9 @@ function toClaim(leased: ResultSet, [view, cooldowns, ok]: ResultSet[]): Claim {
  *  tick's view. A leased user is not due, so two ticks, or a tick and an open tab, never work on
  *  one user at once. */
 export async function claimDueUsers(o: { tick: string; now: number; signups: "owner" | "invite"; quotaDay?: string }): Promise<Claim> {
-  const args = { ...claimArgs(o), due: o.now + DUE_EARLY_MS };
+  const args = claimArgs(o);
+  const { tick, now, signups, until } = args;
+  const due = now + DUE_EARLY_MS;
   const rs = await onTickClient((c) =>
     c.batch(
       [
@@ -557,20 +561,20 @@ export async function claimDueUsers(o: { tick: string; now: number; signups: "ow
           sql: `INSERT INTO sync_state (uid, state, next_probe_at)
                 SELECT u.uid, 'idle', :now FROM users u
                 WHERE ${ACTIVE_LEASABLE} AND NOT EXISTS (SELECT 1 FROM sync_state s WHERE s.uid = u.uid)`,
-          args,
+          args: { now, signups },
         },
         {
           sql: `UPDATE sync_state SET lease_owner = :tick, lease_until = :until
                 WHERE uid IN (SELECT s.uid FROM sync_state s JOIN users u ON u.uid = s.uid
                               WHERE ${ACTIVE_LEASABLE} AND s.state <> 'paused' AND s.next_probe_at <= :due
                                 AND (s.lease_until IS NULL OR s.lease_until < :now))`,
-          args,
+          args: { tick, until, signups, due, now },
         },
         {
           sql: `SELECT ${CLAIMED_COLS} FROM sync_state s JOIN users u ON u.uid = s.uid
                 LEFT JOIN user_tokens t ON t.uid = s.uid
                 WHERE s.lease_owner = :tick AND s.lease_until = :until`,
-          args,
+          args: { tick, until },
         },
         ...viewStatements(args),
       ],
@@ -592,26 +596,29 @@ export async function claimUser(o: {
   dueOnly: boolean;
   signups: "owner" | "invite";
 }): Promise<Claim> {
-  const args = { ...claimArgs(o), uid: o.uid, due: o.dueOnly ? o.now + DUE_EARLY_MS : null };
+  const args = claimArgs(o);
+  const { tick, now, signups, until } = args;
+  const uid = o.uid;
+  const due = o.dueOnly ? now + DUE_EARLY_MS : null;
   const live = `EXISTS (SELECT 1 FROM users u WHERE u.uid = :uid AND ${ACTIVE_LEASABLE})`;
   const rs = await (await appClient()).batch(
     [
       {
         sql: `INSERT INTO sync_state (uid, state, next_probe_at) SELECT :uid, 'idle', :now WHERE ${live}
               ON CONFLICT(uid) DO NOTHING`,
-        args,
+        args: { uid, now, signups },
       },
       {
         sql: `UPDATE sync_state SET lease_owner = :tick, lease_until = :until
               WHERE uid = :uid AND state <> 'paused' AND (lease_until IS NULL OR lease_until < :now)
                 AND (:due IS NULL OR next_probe_at <= :due) AND ${live}`,
-        args,
+        args: { tick, until, uid, now, due, signups },
       },
       {
         sql: `SELECT ${CLAIMED_COLS} FROM sync_state s JOIN users u ON u.uid = s.uid
               LEFT JOIN user_tokens t ON t.uid = s.uid
               WHERE s.uid = :uid AND s.lease_owner = :tick AND s.lease_until = :until`,
-        args,
+        args: { uid, tick, until },
       },
       ...viewStatements(args),
     ],
@@ -713,7 +720,8 @@ export async function finishGrantConfirm(uid: Uid | string, outcome: "ok" | "dea
         : "last_error = 'invalid_grant'";
   await one({
     sql: `UPDATE sync_state SET ${set} WHERE uid = :uid AND last_error = 'invalid_grant:confirming'`,
-    args: { uid, now },
+    // Only `ok`'s SET names :now.
+    args: outcome === "ok" ? { uid, now } : { uid },
   });
 }
 
