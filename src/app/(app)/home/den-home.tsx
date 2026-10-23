@@ -980,7 +980,6 @@ export function DenHome({
       // One event per song change while the tab is open; meta carries the inputs the
       // guards judged.
       const vsEnd = p.endAt === null ? undefined : Date.now() - p.endAt;
-      // The track by its id, never its name (handoffBeaconMeta, multi-user PLAN §13.1).
       const verdict = (v: string) =>
         recordAppEvent("handoff", handoffBeaconMeta(v, p, { ran, endedAt, pred: predId, now: Date.now(), vsEndMs: vsEnd }), vsEnd);
       // The guards live in src/lib/handoff.ts (pure, known-answer tested — they killed

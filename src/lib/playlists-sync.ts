@@ -9,8 +9,7 @@
 // so newly-cached data appears as it lands.
 import "server-only";
 import { getValidAccessTokenFor, spotifyAccessTokenFor } from "@/lib/auth";
-import { getAppMeta } from "@/lib/app-db";
-import { forUser } from "@/lib/db";
+import { forUser, getSpotifyCooldownUntil } from "@/lib/db";
 import { spotifyClient } from "@/lib/spotify";
 import { syncLibrary } from "@/lib/sync/library";
 import type { Uid } from "@/lib/identity";
@@ -37,9 +36,8 @@ export async function startLibrarySync(user: Gate): Promise<
   // library then STAYS stale, every navigation re-kicks another doomed probe (api_log,
   // 2026-08-17: library-scan-bg hitting /me a minute apart into a 36-minute Retry-After —
   // the persisted cooldown was only honored by the history sync, not here). Skip until the
-  // window passes; the cron tick and the next client kick retry naturally. The library
-  // bucket's own cooldown (client.ts): a recently-played ban does not stop a scan.
-  if (Date.now() < (Number(await getAppMeta("cooldown:library")) || 0)) {
+  // window passes; the cron tick and the next client kick retry naturally.
+  if (Date.now() < (await getSpotifyCooldownUntil())) {
     return { skipped: "rate-limited" };
   }
 

@@ -383,7 +383,6 @@ describe("the cron and pinger secrets", () => {
     expect(spotifyCalls.some((c) => (c.bearer ?? "").startsWith("at-REM"))).toBe(true);
   });
 
-
   it("the Zenbook pinger still gets the 503 owner alarm when no token is stored", async () => {
     await seedRem();
     await become("staleLogout"); // drops the token row

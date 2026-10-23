@@ -1,9 +1,9 @@
-// ADVERSARIAL — src/lib/handoff.ts
-// The file documents exact rules, so its state space is enumerated exhaustively against a
-// predicate written from the prose, not from the code. (The harvest gate this file also
-// enumerated left with the single-user tick; Phase 3's policy is tests/harvest-policy.test.ts.)
+// ADVERSARIAL — src/lib/harvest-gate.ts and src/lib/handoff.ts
+// Both files document exact rules, so both state spaces are enumerated exhaustively against
+// a predicate written from the prose, not from the code.
 
 import { describe, expect, it } from "vitest";
+import { shouldHarvest, HARVEST_BACKSTOP_MS, type HarvestGate } from "@/lib/harvest-gate";
 import {
   handoffRun,
   judgeHandoff,
@@ -14,6 +14,78 @@ import {
   type HandoffObservation,
   type HandoffVerdict,
 } from "@/lib/handoff";
+
+describe("shouldHarvest — exhaustive enumeration", () => {
+  // The contract, transcribed from harvest-gate.ts:5-14:
+  //   playing tick            -> harvest
+  //   lastActive >= lastHarvest (the session tail is still open) -> harvest
+  //   the backstop has lapsed (> 1h since the last harvest)      -> harvest
+  //   otherwise                                                  -> don't
+  const expected = (g: HarvestGate, playing: boolean, now: number) =>
+    playing || g.lastActive >= g.lastHarvest || now - g.lastHarvest > HARVEST_BACKSTOP_MS;
+
+  const T = 1_000_000_000;
+  const deltas = [-1, 0, 1, -60_000, 60_000]; // lastActive relative to lastHarvest
+  const sinceHarvest = [
+    0,
+    1,
+    HARVEST_BACKSTOP_MS - 1,
+    HARVEST_BACKSTOP_MS,
+    HARVEST_BACKSTOP_MS + 1,
+    HARVEST_BACKSTOP_MS * 5,
+  ];
+
+  for (const playing of [false, true]) {
+    for (const d of deltas) {
+      for (const s of sinceHarvest) {
+        it(`playing=${playing} lastActive-lastHarvest=${d} sinceHarvest=${s}`, () => {
+          const gate: HarvestGate = { lastHarvest: T, lastActive: T + d };
+          expect(shouldHarvest(gate, playing, T + s)).toBe(expected(gate, playing, T + s));
+        });
+      }
+    }
+  }
+
+  it("the documented tick sequence: play -> idle tail -> closed", () => {
+    // "a PLAYING tick stamps lastActive = now, harvests, and stamps lastHarvest = now
+    //  (equal stamps); the first IDLE tick after playback sees lastActive >= lastHarvest
+    //  (equal) -> harvests the session's tail once, and its own fresher lastHarvest closes
+    //  the branch" (harvest-gate.ts:6-10)
+    let gate: HarvestGate = { lastActive: 0, lastHarvest: 0 };
+    const t1 = 1_000_000;
+    expect(shouldHarvest(gate, true, t1)).toBe(true);
+    gate = { lastActive: t1, lastHarvest: t1 }; // equal stamps
+
+    const t2 = t1 + 120_000;
+    expect(shouldHarvest(gate, false, t2)).toBe(true); // the tail
+    gate = { ...gate, lastHarvest: t2 };
+
+    const t3 = t2 + 120_000;
+    expect(shouldHarvest(gate, false, t3)).toBe(false); // closed
+  });
+
+  it("a cooldown-skipped harvest leaves the branch open for the next tick", () => {
+    // "a cooldown-skipped harvest withholds the lastHarvest stamp ... so the branch stays
+    //  open and retries next tick" (harvest-gate.ts:11-12)
+    const t1 = 1_000_000;
+    const gate: HarvestGate = { lastActive: t1, lastHarvest: t1 };
+    expect(shouldHarvest(gate, false, t1 + 60_000)).toBe(true);
+    expect(shouldHarvest(gate, false, t1 + 120_000)).toBe(true); // no stamp written
+  });
+
+  it("the backstop fires strictly AFTER an hour, and re-arms after each harvest", () => {
+    const t = 1_000_000;
+    const closed: HarvestGate = { lastActive: t - 1, lastHarvest: t };
+    expect(shouldHarvest(closed, false, t + HARVEST_BACKSTOP_MS)).toBe(false);
+    expect(shouldHarvest(closed, false, t + HARVEST_BACKSTOP_MS + 1)).toBe(true);
+    const restamped: HarvestGate = { lastActive: t - 1, lastHarvest: t + HARVEST_BACKSTOP_MS + 1 };
+    expect(shouldHarvest(restamped, false, t + HARVEST_BACKSTOP_MS + 2)).toBe(false);
+  });
+
+  it("a cold gate (both stamps zero) harvests once", () => {
+    expect(shouldHarvest({ lastActive: 0, lastHarvest: 0 }, false, 1)).toBe(true);
+  });
+});
 
 describe("judgeHandoff — exhaustive enumeration", () => {
   const NOW = 1_000_000_000;

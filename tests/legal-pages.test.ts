@@ -102,12 +102,6 @@ describe("/privacy says what the code stores and logs", () => {
     expect(t).toContain("backup copies of the history database"); // the Zenbook's backup.py copies `lazyboy`, not `lazyboy-app`
     expect(t).not.toContain("timezone and sign-in tokens are in a database"); // the tokens left `lazyboy` for user_tokens
   });
-
-  it("names Phase 3's timezone name beside its offset", async () => {
-    const t = await text();
-    expect(t).toContain("your timezone (its name and offset)"); // db.ts user_tz and user_tz_offset (api/sync)
-    expect(t).toContain("two cookies holding your timezone"); // timezone-cookie.tsx: tzoffset and tzname
-  });
 });
 
 describe("/login consent line", () => {

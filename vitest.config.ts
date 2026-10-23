@@ -11,9 +11,6 @@ export default defineConfig({
       // Order matters: specific module ids before the `@/` prefix.
       { find: "server-only", replacement: path.resolve(__dirname, "tests/stubs/empty.ts") },
       { find: "next/cache", replacement: path.resolve(__dirname, "tests/stubs/next-cache.ts") },
-      // The real client, refusing a statement whose args are not its parameters, as Turso does
-      // and a `file:` database does not (tests/stubs/libsql-client.mjs).
-      { find: /^@libsql\/client$/, replacement: path.resolve(__dirname, "tests/stubs/libsql-client.mjs") },
       // next-auth imports the extensionless "next/server", which Node's ESM resolver refuses;
       // with next-auth inlined below, this lets the REAL Auth.js run in tests (the authz suite).
       { find: /^next\/server$/, replacement: "next/server.js" },

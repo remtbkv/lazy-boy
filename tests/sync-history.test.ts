@@ -1,15 +1,13 @@
-// recordRecentPlays end-to-end: a fake Spotify service feeding the REAL store — context
-// resolution + negative caching, the home-payload rebuild trigger. (The cooldown gate that
-// used to sit in front of the harvest is the cron step's now: tests/isolation/step-quota.test.ts.)
+// syncRecentPlays end-to-end: a fake Spotify service feeding the REAL store — cooldown
+// gating, context resolution + negative caching, the home-payload rebuild trigger.
 import { describe, expect, it, vi } from "vitest";
-import { recordRecentPlays } from "@/lib/sync/history";
+import { syncRecentPlays } from "@/lib/sync/history";
+import { getSpotifyCooldownUntil, setSpotifyCooldownUntil } from "@/lib/db";
 import { ownerStore } from "./owner-store";
 
 const store = ownerStore();
 
-type FakeSp = Parameters<typeof recordRecentPlays>[0];
-// The harvest as the step makes it: the Spotify call, then the record.
-const syncRecentPlays = async (sp: FakeSp, s: typeof store) => ({ added: await recordRecentPlays(sp, s, await sp.recentlyPlayed(50)) });
+type FakeSp = Parameters<typeof syncRecentPlays>[0];
 
 // The wire shape sp.recentlyPlayed hands back: {track, playedAt, contextType, contextUri}.
 type RecentItem = {
@@ -57,7 +55,7 @@ const rec = (id: string, hhmm: string, ctx?: string): RecentItem => ({
   contextUri: ctx ?? null,
 });
 
-describe("recordRecentPlays (fake Spotify, real store)", () => {
+describe("syncRecentPlays (fake Spotify, real store)", () => {
   it("harvests, resolves context names, negative-caches dead ones, rebuilds the payload", async () => {
     const sp = fakeSp({
       recent: [rec("s2", "10:10", "spotify:playlist:good"), rec("s1", "10:00", "spotify:playlist:dead")],
@@ -93,5 +91,20 @@ describe("recordRecentPlays (fake Spotify, real store)", () => {
     const { added } = await syncRecentPlays(sp, store);
     expect(added).toBe(0);
     expect((await store.getHomePayload())!.builtAt).toBe(before); // unchanged
+  });
+
+  it("a persisted cooldown suppresses the harvest entirely", async () => {
+    await setSpotifyCooldownUntil(Date.now() + 60_000);
+    expect(await getSpotifyCooldownUntil()).toBeGreaterThan(Date.now());
+    let called = 0;
+    const sp = {
+      recentlyPlayed: async () => {
+        called += 1;
+        return [];
+      },
+    } as unknown as FakeSp;
+    const r = await syncRecentPlays(sp, store);
+    expect(r.skipped).toBe("cooldown");
+    expect(called).toBe(0); // zero Spotify calls
   });
 });

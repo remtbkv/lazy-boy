@@ -1,8 +1,7 @@
 // The hourly health check (docs/multi-user/PLAN.md §7.10): a cron-job.org job with failure
 // e-mail calls this; a 500 is the e-mail. The reply carries reasons and the names of checks
 // not yet measurable, never anything about anyone's listening (cron-job.org keeps bodies).
-import { getAppMeta, markEventsAlarmed, unreportedEvents } from "@/lib/app-db";
-import { readCapture } from "@/lib/capture-read";
+import { markEventsAlarmed, unreportedEvents } from "@/lib/app-db";
 import { getBudgetMode, readBudgetDay, readMeter } from "@/lib/db";
 import { worstMode } from "@/lib/budget/budget";
 import { isMode } from "@/lib/budget/modes";
@@ -18,15 +17,10 @@ export async function GET(req: Request) {
   }
   let ownerCapture = null;
   let marks;
-  let dailyMark: string | null;
   try {
     const store = await adminStore();
     if (!store) return Response.json({ ok: false, reasons: ["store"] }, { status: 500 });
-    [ownerCapture, marks, dailyMark] = await Promise.all([
-      readCapture(store.uid).then((c) => c.health),
-      store.getHealthMarks(),
-      getAppMeta("daily_at"),
-    ]);
+    [ownerCapture, marks] = await Promise.all([store.getCaptureHealth(), store.getHealthMarks()]);
   } catch {
     // The store did not answer: that is itself a reason to wake Rem.
     return Response.json({ ok: false, reasons: ["store"] }, { status: 500 });
@@ -40,9 +34,8 @@ export async function GET(req: Request) {
     await markEventsAlarmed(events.newest).catch(() => {});
   }
 
-  // The daily chores stamp `app_meta.daily_at` when they finish, whether the daily route or a
-  // tick ran them; never stamped yet = not measurable.
-  const dailyAt = Number(dailyMark) || 0;
+  // The daily chores stamp `daily_at` when they finish; never stamped yet = not measurable.
+  const dailyAt = Number(marks.daily_at) || 0;
   // Turso's pace, as the daily chores last measured it: older than the chores' own window
   // is no verdict at all.
   let quotaAhead: boolean | null = null;

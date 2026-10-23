@@ -24,8 +24,8 @@ import {
   type Row,
   type TransactionMode,
 } from "@libsql/client";
-import { getAppMeta, setAppMeta } from "@/lib/app-db";
-import { newUid, type Uid } from "@/lib/identity";
+import { readTokenRow } from "@/lib/app-db";
+import { newUid, phase1Owner, type Uid } from "@/lib/identity";
 import { reportIsolation } from "@/lib/isolation";
 import { userCache } from "@/lib/user-cache";
 import type { Track } from "@/lib/spotify/types";
@@ -37,8 +37,7 @@ import {
   playedAtConvention,
   type AllTimeStats,
 } from "@/lib/skip-rule";
-import type { ProbeState } from "@/lib/harvest-policy";
-import { likedDiff, type LikedRow } from "@/lib/liked-diff";
+import { captureHealth, type CaptureHealth } from "@/lib/capture-health";
 import { makeStoreFetch } from "@/lib/store-fetch";
 import { HISTORY_INDEX_SHAPE, LIBRARY_INDEX_SHAPE } from "@/lib/search-shape";
 import { ALLTIME_GATE_MS, isMode, type Mode } from "@/lib/budget/modes";
@@ -64,6 +63,7 @@ import {
   playKey,
   newPlays,
   diffPositions,
+  diffKeyed,
   diffPlaylistList,
   identityChanges,
   type PlaylistListRow,
@@ -682,11 +682,6 @@ async function migrateTelemetry(client: Client): Promise<void> {
   // errors, rows written before Phase 1).
   if (!apiLogCols.has("user_id")) {
     await client.execute("ALTER TABLE api_log ADD COLUMN user_id TEXT");
-  }
-  // A 429's `reason` from its body (QUOTA_EXCEEDED, or none for a rate limit): how the quota is
-  // counted is found from these rows (multi-user PLAN §4.3, §7.9).
-  if (!apiLogCols.has("reason")) {
-    await client.execute("ALTER TABLE api_log ADD COLUMN reason TEXT");
   }
   const metricsInfo = await client.execute("PRAGMA table_info(client_metrics)");
   if (!metricsInfo.rows.some((r) => String(r.name) === "user_id")) {
@@ -1732,12 +1727,11 @@ export const HOME_PAYLOAD_SHAPE = "v1";
 const HOME_PAYLOAD_KEY = "home_payload";
 // The strip width Home renders on first paint; it extends on demand from dailyStatsAction.
 const HOME_DAILY_DAYS = 14;
-// The zone a user who has not published one yet is assumed to be in. The payload is built on
-// the WRITE path, where there is no browser and therefore no `tzoffset` cookie —
-// tzOffsetMinutes() returns 0 (UTC) in a cron context, which would bucket days wrong for every
-// read of the payload. Each user's browser publishes its IANA zone (`user_tz`); until one has,
-// New York, Rem's. The OFFSET is computed per rebuild below from the zone, never pinned to
-// whichever of −240/−300 was true when this shipped.
+// The user's zone, fixed. The payload is built on the WRITE path, where there is no browser
+// and therefore no `tzoffset` cookie — tzOffsetMinutes() returns 0 (UTC) in a cron context,
+// which would bucket days wrong for every read of the payload. This app is single-user and
+// that user is in New York, so the zone is a constant; the OFFSET is not, and is computed
+// per rebuild below rather than pinned to whichever of −240/−300 was true when this shipped.
 const HOME_TZ = "America/New_York";
 
 export type HomePayload = {
@@ -1788,8 +1782,7 @@ async function rebuildHomePayload(u: UserDb): Promise<HomePayload> {
   // the tz cookie), the fixed home zone otherwise. The hardcoded zone alone meant the
   // payload's buckets and every cookie-driven read on the same page could disagree the
   // moment the user wasn't in NY (audit 2026-08-19, T2.20).
-  const [storedOffset, zone] = await Promise.all([getUserTzOffset(u), getUserTz(u)]);
-  const tzOffsetMinutes = payloadTzOffset(storedOffset, zoneOffsetMinutes(zone ?? HOME_TZ));
+  const tzOffsetMinutes = payloadTzOffset(await getUserTzOffset(u), zoneOffsetMinutes(HOME_TZ));
   const [daily, allTime] = await Promise.all([
     readDailyStats(u, tzOffsetMinutes, HOME_DAILY_DAYS),
     // Already a single meta read off the primary, refreshed on write by recordPlays.
@@ -2210,14 +2203,22 @@ async function getLastSync(u: UserDb): Promise<string | null> {
   return getMeta(u, "last_sync");
 }
 
-// The hourly health check's own mark (multi-user PLAN §7.10), in the admin's database: the
-// last Turso pace verdict the daily chores recorded (`quota_pace`, {at, ahead}). Meta only: no
-// marker bump. Which isolation events a check has reported is the app database's
-// `events.alarmed` (Phase 2); when the chores last finished is `app_meta.daily_at` (Phase 3),
-// which a cron tick reads too.
-export type HealthMark = "quota_pace";
+/** Whether history is still being captured (capture-health.ts): the last harvest's age and
+ *  whether the user has a token row: `user_tokens` in the app database, the token of record
+ *  from multi-user Phase 2 (the plaintext `meta` row is only token-move.ts's rollback copy). */
+async function getCaptureHealth(u: UserDb): Promise<CaptureHealth> {
+  const [lastSync, tokens] = await Promise.all([getLastSync(u), readTokenRow(u.uid)]);
+  return captureHealth(Date.now(), lastSync, tokens !== null);
+}
+
+// The hourly health check's own marks (multi-user PLAN §7.10), in the admin's database until
+// they move to app_meta: when the daily chores last finished (`daily_at`, epoch ms) and the
+// last Turso pace verdict they recorded (`quota_pace`, {at, ahead}). Which isolation events a
+// check has reported is the app database's `events.alarmed`. Meta only: no marker bump.
+export type HealthMark = "daily_at" | "quota_pace";
 async function getHealthMarks(u: UserDb): Promise<Record<HealthMark, string | null>> {
-  return { quota_pace: await getMeta(u, "quota_pace") };
+  const [daily, pace] = await Promise.all([getMeta(u, "daily_at"), getMeta(u, "quota_pace")]);
+  return { daily_at: daily, quota_pace: pace };
 }
 async function setHealthMark(u: UserDb, key: HealthMark, value: string): Promise<void> {
   await setMeta(u, key, value);
@@ -2617,15 +2618,6 @@ async function getPlaylistSnapshot(u: UserDb, playlistId: string): Promise<strin
   return getMeta(u, `plsnap:${playlistId}`);
 }
 
-/** Every playlist's stored snapshot_id, in one statement over the `plsnap:` keys: the rescan
- *  reads them once instead of one getMeta per playlist (multi-user PLAN §7.7; ~110 serial
- *  reads for Rem's library, about half of a day's `meta` reads). */
-async function getPlaylistSnapshots(u: UserDb): Promise<Map<string, string>> {
-  const client = await u.client();
-  const r = await client.execute("SELECT key, value FROM meta WHERE key LIKE 'plsnap:%'");
-  return new Map(r.rows.map((x) => [String(x.key).slice("plsnap:".length), String(x.value)]));
-}
-
 /** A playlist's cached tracks in playlist order (empty if never cached). */
 async function getPlaylistTracks(u: UserDb, playlistId: string): Promise<Track[]> {
   const client = await u.client();
@@ -2718,40 +2710,21 @@ async function deletePlaylistFromDb(u: UserDb, playlistId: string): Promise<void
 }
 
 // ---- saved tracks (Liked Songs index; the other half of "the library") ----
-/** The stored Liked Songs as (track, added_at) pairs: what the scan's head read compares the
- *  newest page against (liked-diff.ts likedHead). */
-async function readSavedRows(u: UserDb): Promise<LikedRow[]> {
+/** Replace the stored Liked Songs with a fresh full list, in liked order, and stamp
+ *  the cheap change-signals (count + newest added_at) used to skip future re-fetches. */
+async function storeSavedTracks(u: UserDb, tracks: Track[]): Promise<void> {
   const client = await u.client();
-  const r = await client.execute("SELECT track_id AS trackId, added_at AS addedAt FROM saved_tracks");
-  return plainRows(r.rows) as unknown as LikedRow[];
-}
-
-/** Replace the stored Liked Songs with a fresh full list, newest first, and stamp the cheap
- *  change-signals (count + newest added_at) used to skip future re-fetches. Keyed by track and
- *  diffed without `position` (liked-diff.ts likedDiff): Spotify lists Liked newest first, so
- *  one like used to move every row's position and rewrite all N of them, though nothing reads
- *  `position` (multi-user PLAN §7.7, scale 3). Returns the saved_tracks rows written. */
-async function storeSavedTracks(u: UserDb, tracks: Track[]): Promise<number> {
-  const { upserts, deletes } = likedDiff(
-    tracks.map((t) => ({ trackId: t.id, addedAt: t.addedAt ?? null })),
-    await readSavedRows(u),
+  // Diff against the cache instead of delete-all + reinsert (same row-write-quota reasoning
+  // as storePlaylistTracks — this one re-ran in full at least daily via LIKED_FULL_MAX_AGE_MS).
+  const cachedRes = await client.execute(
+    "SELECT track_id AS trackId, added_at AS addedAt, position FROM saved_tracks",
   );
-  const changed = new Set(upserts.map((r) => r.trackId));
-  return storeSavedDiff(u, tracks.filter((t) => changed.has(t.id)), deletes, tracks.length, tracks[0]?.addedAt ?? null);
-}
-
-/** Write a Liked Songs diff the scan already worked out: `upserts` (new likes, or a moved
- *  added_at) and `deletes` (unliked track ids), with the list's count and newest added_at as
- *  Spotify reported them. Returns the saved_tracks rows written. */
-async function storeSavedDiff(
-  u: UserDb,
-  upserts: Track[],
-  deletes: string[],
-  total: number,
-  topAddedAt: string | null,
-): Promise<number> {
-  const client = await u.client();
-  const incoming: TrackFields[] = upserts.map((t) => ({
+  const cachedSaved = plainRows(cachedRes.rows) as unknown as {
+    trackId: string;
+    addedAt: string | null;
+    position: number;
+  }[];
+  const incoming: TrackFields[] = tracks.map((t) => ({
     id: t.id,
     name: t.title,
     artist: t.artist,
@@ -2761,17 +2734,21 @@ async function storeSavedDiff(
     durationMs: t.durationMs ?? null,
   }));
   const cachedTracks = await readCachedTracks(client, [...new Set(incoming.map((t) => t.id))]);
+
   const stmts: InStatement[] = tracksNeedingWrite(incoming, cachedTracks).map(trackUpsertStmt);
   const renamed = identityChanges(incoming, cachedTracks);
-  // `position` keeps its column and nothing reads it: a new row takes its index among this
-  // write's rows, an existing one keeps whatever it had.
-  upserts.forEach((t, i) => {
+  const { upserts, deletes } = diffKeyed(
+    tracks.map((t, i) => ({ trackId: t.id, addedAt: t.addedAt ?? null, position: i })),
+    cachedSaved,
+  );
+  for (const r of upserts) {
     stmts.push({
       sql: `INSERT INTO saved_tracks (track_id, added_at, position) VALUES (:tid, :added, :pos)
-            ON CONFLICT(track_id) DO UPDATE SET added_at = excluded.added_at`,
-      args: { tid: t.id, added: t.addedAt ?? null, pos: i },
+            ON CONFLICT(track_id) DO UPDATE SET added_at = excluded.added_at,
+              position = excluded.position`,
+      args: { tid: r.trackId, added: r.addedAt, pos: r.position },
     });
-  });
+  }
   for (let i = 0; i < deletes.length; i += 500) {
     const chunk = deletes.slice(i, i + 500);
     stmts.push({
@@ -2782,15 +2759,14 @@ async function storeSavedDiff(
   // As in storePlaylistTracks: only the saved_tracks/tracks writes above feed a cached read,
   // so a diff that came back empty writes the three stamps below and announces nothing.
   if (stmts.length > 0) stmts.push(writeSeqStmt(), librarySeqStmt());
-  stmts.push(metaStmt("liked_total", String(total)));
-  stmts.push(metaStmt("liked_top_added_at", topAddedAt ?? ""));
+  stmts.push(metaStmt("liked_total", String(tracks.length)));
+  stmts.push(metaStmt("liked_top_added_at", tracks[0]?.addedAt ?? ""));
   stmts.push(metaStmt("saved_synced_at", new Date().toISOString()));
   await client.batch(stmts, "write");
   // saved_tracks is not read by the orphan verdict, but a renamed song is.
   if (renamed.length > 0) await recomputeOrphanFlags(u, { identities: renamed });
   // The write moved the marker; drop this request's copy so the read that follows re-keys.
   dropWriteSeqCache(u);
-  return upserts.length + deletes.length;
 }
 
 /** The cheap Liked-Songs change-signals (count + newest added_at). */
@@ -2870,54 +2846,65 @@ async function getUserTzOffset(u: UserDb): Promise<number | null> {
   const n = v === null ? NaN : Number(v);
   return Number.isFinite(n) ? Math.max(-720, Math.min(840, Math.round(n))) : null;
 }
-/** Written only when it changes (multi-user PLAN §4.3): /api/sync publishes it on every call,
- *  and an unchanged value writes no row. True when it wrote. */
-async function setUserTzOffset(u: UserDb, offsetMin: number): Promise<boolean> {
-  return setMetaIfChanged(u, "user_tz_offset", String(Math.round(offsetMin)));
+async function setUserTzOffset(u: UserDb, offsetMin: number): Promise<void> {
+  await setMeta(u, "user_tz_offset", String(Math.round(offsetMin)));
 }
 
-/** The browser's IANA zone (`user_tz`, PLAN §4.3, design C §3.3), published beside the offset:
- *  the Home payload buckets days in it and runs its DST check against it, so a friend in
- *  Chicago is not read as New York an hour off. Null until a browser has published one. */
-async function getUserTz(u: UserDb): Promise<string | null> {
-  const v = await getMeta(u, "user_tz").catch(() => null);
-  return v && isZone(v) ? v : null;
+/** When a library scan was last STARTED (the completion stamp above only lands on success —
+ *  gating on it alone retried a failing scan every cron tick). Epoch ms. */
+async function getLibraryScanAttemptAt(u: UserDb): Promise<number | null> {
+  const v = await getMeta(u, "library_scan_attempt_at");
+  return v ? Number(v) || null : null;
 }
-/** Written only when it changes; a zone this runtime does not know is never stored. */
-async function setUserTz(u: UserDb, zone: string): Promise<boolean> {
-  return isZone(zone) && setMetaIfChanged(u, "user_tz", zone);
-}
-function isZone(z: string): boolean {
-  if (z.length > 64) return false;
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone: z });
-    return true;
-  } catch {
-    return false;
-  }
+async function setLibraryScanAttemptAt(u: UserDb): Promise<void> {
+  await setMeta(u, "library_scan_attempt_at", String(Date.now()));
 }
 
-// What the cron's /me/player probe last saw (multi-user PLAN §7.3, harvest-policy.ts), written
-// only when the track or the play state changes, so a probe that changes nothing writes nothing.
-// It replaces the single-user harvest gate's two stamps (`player_last_active`,
-// `rp_last_harvest`), which nothing reads from Phase 3. Unreadable = none.
-async function readProbe(u: UserDb): Promise<ProbeState | null> {
-  const v = await getMeta(u, "probe");
-  if (!v) return null;
-  try {
-    const p = JSON.parse(v) as ProbeState;
-    return p?.v === 1 ? p : null;
-  } catch {
-    return null;
-  }
+// Spotify rate-limit backoff, persisted so it survives across serverless invocations
+// (the HTTP client's in-memory cooldown is wiped between each cron/API invocation, so
+// without this every scheduled tick would re-poke a banned endpoint). Stored as epoch ms.
+// ── The recently-played harvest gate ────────────────────────────────────────────────
+// Two timestamps that let the cron tick SKIP the recently-played call when nothing has
+// played since the last harvest (Rem, 2026-08-17: two multi-hour QUOTA_EXCEEDED penalties
+// on that endpoint in two days — Spotify has this app on a tight quota, so the dominant
+// call must stop running around the clock). currently-playing sits in its own quota
+// bucket and is what the tick checks instead.
+async function getHarvestGate(u: UserDb): Promise<{ lastActive: number; lastHarvest: number }> {
+  const [a, h] = await Promise.all([getMeta(u, "player_last_active"), getMeta(u, "rp_last_harvest")]);
+  return { lastActive: Number(a) || 0, lastHarvest: Number(h) || 0 };
 }
-async function writeProbe(u: UserDb, p: ProbeState): Promise<void> {
-  await setMeta(u, "probe", JSON.stringify(p));
+async function setHarvestGate(u: UserDb, v: {
+  lastActive?: number;
+  lastHarvest?: number;
+}): Promise<void> {
+  if (v.lastActive !== undefined) await setMeta(u, "player_last_active", String(v.lastActive));
+  if (v.lastHarvest !== undefined) await setMeta(u, "rp_last_harvest", String(v.lastHarvest));
 }
 
-// The app-wide budget mode (src/lib/budget/, CAPACITY §6), in the app database's app_meta
-// beside the cooldowns (multi-user PLAN §4.2: app-wide state is the app's, not a user's). The
-// daily chores write it; the hot paths read it through a per-process memo of at
+// App-wide by meaning: Spotify's rate limit is per app, so one user's 429 holds everyone off
+// (multi-user PLAN §4.3). Phase 1 has no app database, so the row stays where it always was,
+// in the admin's database; Phase 2 moves it to `app_meta` (`cooldown:<bucket>`) and these two
+// keep their signatures.
+export async function getSpotifyCooldownUntil(): Promise<number> {
+  const v = await getMeta(adminDb(), "spotify_cooldown_until");
+  return v ? Number(v) || 0 : 0;
+}
+export async function setSpotifyCooldownUntil(untilMs: number): Promise<void> {
+  // MAX, not overwrite: a later, shorter ban must never SHORTEN a persisted longer one
+  // (audit 2026-08-19, T1.10 — the module-scoped copy in spotify/client.ts already maxes;
+  // the persisted copy silently didn't).
+  const client = await adminDb().client();
+  await client.execute({
+    sql: `INSERT INTO meta (key, value) VALUES ('spotify_cooldown_until', :v)
+          ON CONFLICT(key) DO UPDATE SET
+            value = CASE WHEN CAST(meta.value AS INTEGER) >= CAST(excluded.value AS INTEGER)
+                         THEN meta.value ELSE excluded.value END`,
+    args: { v: String(Math.floor(untilMs)) },
+  });
+}
+
+// The app-wide budget mode (src/lib/budget/, CAPACITY §6), beside the cooldown for the same
+// reason. The daily chores write it; the hot paths read it through a per-process memo of at
 // most 10 minutes, so a change reaches every instance within 10 minutes for one meta read per
 // instance per 10 minutes. Meta only: no marker bump.
 const BUDGET_MODE_KEY = "budget_mode";
@@ -2929,7 +2916,7 @@ export async function getBudgetMode(maxAgeMs = BUDGET_MODE_MEMO_MS): Promise<Mod
   const memo = g.__lbBudgetMode;
   if (memo && maxAgeMs > 0 && Date.now() - memo.at < maxAgeMs) return memo.mode;
   try {
-    const v = await getAppMeta(BUDGET_MODE_KEY);
+    const v = await getMeta(adminDb(), BUDGET_MODE_KEY);
     const mode = isMode(v) ? v : null;
     g.__lbBudgetMode = { at: Date.now(), mode };
     return mode;
@@ -2940,7 +2927,7 @@ export async function getBudgetMode(maxAgeMs = BUDGET_MODE_MEMO_MS): Promise<Mod
   }
 }
 export async function setBudgetMode(mode: Mode): Promise<void> {
-  await setAppMeta(BUDGET_MODE_KEY, mode);
+  await setMeta(adminDb(), BUDGET_MODE_KEY, mode);
   g.__lbBudgetMode = { at: Date.now(), mode };
 }
 
@@ -3126,17 +3113,6 @@ function metaStmt(key: string, value: string): InStatement {
   };
 }
 
-/** setMeta that writes no row when the value is already there. True when it wrote. */
-async function setMetaIfChanged(u: UserDb, key: string, value: string): Promise<boolean> {
-  const client = await u.client();
-  const r = await client.execute({
-    sql: `INSERT INTO meta (key, value) VALUES (?, ?)
-          ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE meta.value IS NOT excluded.value`,
-    args: [key, value],
-  });
-  return r.rowsAffected > 0;
-}
-
 // No write marker here: nothing cached is derived from `meta` (write-marker note).
 async function setMeta(u: UserDb, key: string, value: string): Promise<void> {
   const client = await u.client();
@@ -3172,8 +3148,6 @@ export async function logSpotifyRequest(entry: {
   source?: string;
   /** The user whose token made the call (the Spotify client's owner). */
   uid?: string | null;
-  /** A 429's `reason` (QUOTA_EXCEEDED); null otherwise. */
-  reason?: string | null;
 }): Promise<void> {
   const client = await getTelemetryClient();
   // Store just the endpoint path (no host, no query string) — enough to see which calls
@@ -3189,9 +3163,9 @@ export async function logSpotifyRequest(entry: {
   // that can't see the dominant source is blind (Rem, 2026-08-16). Self-hosted store —
   // the writes cost nothing.
   await client.execute({
-    sql: `INSERT INTO api_log (ts, method, path, status, retry_after, source, user_id, reason)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    args: [Date.now(), entry.method, p, entry.status, entry.retryAfter, entry.source ?? null, entry.uid ?? null, entry.reason ?? null],
+    sql: `INSERT INTO api_log (ts, method, path, status, retry_after, source, user_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    args: [Date.now(), entry.method, p, entry.status, entry.retryAfter, entry.source ?? null, entry.uid ?? null],
   });
   // Prune occasionally rather than on every write.
   if (++apiLogWrites % 256 === 0) await pruneApiLog();
@@ -3935,23 +3909,25 @@ const USER_FNS = {
   findTrackWithPlaylists,
   getAllTimePlays,
   getAllTimeStats,
+  getCaptureHealth,
   getHealthMarks,
   getCleanBackupPref,
   getContextName,
   getContextsFullCheckAt,
   getDailyStats,
+  getHarvestGate,
   getHistoryIndex,
   getHistoryIndexVersion,
   getHomePayload,
   getLastSync,
   getLibraryIndex,
   getLibraryIndexVersion,
+  getLibraryScanAttemptAt,
   getLibrarySyncedAt,
   getLibraryTracks,
   getLikedSignals,
   getMeId,
   getPlaylistSnapshot,
-  getPlaylistSnapshots,
   getPlaylistsSyncedAt,
   getPlaylistTrackOrder,
   getPlaylistTracks,
@@ -3961,15 +3937,12 @@ const USER_FNS = {
   getStoredPlaylist,
   getStoredPlaylists,
   getUniqueSongCount,
-  getUserTz,
   getUserTzOffset,
   hasHomePayload,
   hasPlaysBeforeDay,
   ledgerSyncCall,
   maybeRecomputeAllTimeStats,
   playedTracksInContext,
-  readProbe,
-  readSavedRows,
   rebuildHomePayload,
   recomputeAllTimeStats,
   recomputeUniqueSongCount,
@@ -3980,18 +3953,17 @@ const USER_FNS = {
   searchHistory,
   setContextsFullCheckAt,
   setHealthMark,
+  setHarvestGate,
+  setLibraryScanAttemptAt,
   setLibrarySyncedAt,
   setSpotifyTokens,
-  setUserTz,
   setUserTzOffset,
   storePlaylists,
   storePlaylistTracks,
-  storeSavedDiff,
   storeSavedTracks,
   unresolvedContextUris,
   unseenContexts,
   upsertStoredPlaylist,
-  writeProbe,
 };
 
 type Bound<F> = F extends (u: UserDb, ...args: infer A) => infer R ? (...args: A) => R : never;
@@ -4030,4 +4002,12 @@ export function forUserAt(uid: Uid, dbName: string): UserStore {
     store[name] = (...args: unknown[]) => (fn as (u: UserDb, ...a: unknown[]) => unknown)(u, ...args);
   }
   return Object.freeze(store) as unknown as UserStore;
+}
+
+/** The admin's database, for the app-wide rows that live there until Phase 2's app database
+ *  (the Spotify cooldown). Throws when OWNER_UID is unset. */
+function adminDb(): UserDb {
+  const owner = phase1Owner();
+  if (!owner) throw new Error("OWNER_UID is unset: there is no admin database");
+  return userDb(owner, PRIMARY_DB);
 }

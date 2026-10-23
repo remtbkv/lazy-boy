@@ -275,20 +275,6 @@ export function createTokenCore(store: TokenStore) {
     }
   }
 
-  // The cron tick's read (PLAN.md §5.4 step 1, §7.2 step 3): the same row, lock and in-flight map
-  // as getValidAccessToken, but every failure reaches the step, which treats each differently: a
-  // dead grant throws the terminal RefreshError and clears nothing, so the user stops with the
-  // blob kept for the confirming refresh 10 minutes later; a read that fails (a blob that does
-  // not decrypt, the keys refusing, the store) throws as it is. Null only when there is no row.
-  async function tokenForTick(uid: Uid): Promise<UserTokens | null> {
-    const stored = await getStored(uid);
-    if (!stored) return null;
-    if (isFresh(stored)) return stored;
-    const fresh = await refreshShared(uid);
-    await assertTokenOwner(fresh, uid);
-    return fresh;
-  }
-
   return {
     getStored,
     setTokens,
@@ -296,7 +282,6 @@ export function createTokenCore(store: TokenStore) {
     clearTokensIfStale,
     refreshShared,
     getValidAccessToken,
-    tokenForTick,
     assertTokenOwner,
   };
 }

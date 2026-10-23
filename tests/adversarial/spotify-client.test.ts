@@ -8,14 +8,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const db = vi.hoisted(() => ({
   logSpotifyRequest: vi.fn(async () => {}),
+  setSpotifyCooldownUntil: vi.fn(async () => {}),
   getApiLogSummary: vi.fn(async () => ({ windows: [] as { seconds: number; calls: number }[] })),
 }));
 vi.mock("@/lib/db", () => db);
-// A long ban persists to its bucket's `cooldown:<bucket>` in the app database (Phase 3).
-const app = vi.hoisted(() => ({ extendCooldown: vi.fn(async () => {}) }));
-vi.mock("@/lib/app-db", () => app);
 
-import { HttpClient, SpotifyError, spotifyCooldownMs } from "@/lib/spotify/client";
+import { HttpClient, SpotifyError } from "@/lib/spotify/client";
 
 type Step = () => Response | Promise<Response>;
 
@@ -63,7 +61,7 @@ beforeEach(() => {
   vi.setSystemTime(clock);
   fetchCalls.length = 0;
   db.logSpotifyRequest.mockClear();
-  app.extendCooldown.mockClear();
+  db.setSpotifyCooldownUntil.mockClear();
   db.getApiLogSummary.mockClear();
 });
 
@@ -135,7 +133,7 @@ describe("429 Retry-After parsing", () => {
     expect(db.logSpotifyRequest).toHaveBeenCalledWith(
       expect.objectContaining({ status: 429, retryAfter: null }),
     );
-    expect(app.extendCooldown).not.toHaveBeenCalled();
+    expect(db.setSpotifyCooldownUntil).not.toHaveBeenCalled();
   });
 
   it("a missing Retry-After header uses the 1s default", async () => {
@@ -175,8 +173,8 @@ describe("the hard-ban boundary (HARD_BAN_S = 120)", () => {
     expect(err).toBeInstanceOf(SpotifyError);
     expect((err as SpotifyError).status).toBe(429);
     expect(fetchCalls).toHaveLength(1); // no retry at all
-    expect(app.extendCooldown).toHaveBeenCalledTimes(1);
-    expect(app.extendCooldown).toHaveBeenCalledWith("library", clock + 121_000);
+    expect(db.setSpotifyCooldownUntil).toHaveBeenCalledTimes(1);
+    expect(db.setSpotifyCooldownUntil).toHaveBeenCalledWith(clock + 121_000);
   });
 
   it("Retry-After 120 is NOT a hard ban: no persisted cooldown, and it retries", async () => {
@@ -185,7 +183,7 @@ describe("the hard-ban boundary (HARD_BAN_S = 120)", () => {
     const t = track(c.get("/x"));
     await vi.advanceTimersByTimeAsync(5_000);
     expect(t.state.settled).toBe(false); // still sleeping out the per-wait cap
-    expect(app.extendCooldown).not.toHaveBeenCalled();
+    expect(db.setSpotifyCooldownUntil).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(500);
     await t.done;
     expect(t.state.error).toBeInstanceOf(SpotifyError);
@@ -198,16 +196,15 @@ describe("the hard-ban boundary (HARD_BAN_S = 120)", () => {
     script(rl("86400"));
     const c = new HttpClient("tok");
     await c.get("/x").catch(() => {});
-    expect(app.extendCooldown).toHaveBeenCalledWith("library", clock + 30 * 60 * 1000);
+    expect(db.setSpotifyCooldownUntil).toHaveBeenCalledWith(clock + 30 * 60 * 1000);
   });
 });
 
 // ------------------------------------------------------------ shared cooldown
 
 describe("the cooldown is shared across ALL Spotify requests", () => {
-  it("a ban raised by one client instance blocks a second instance in the same module, on its bucket", async () => {
-    // A long ban is module-scoped per bucket (client.ts, multi-user PLAN §4.3): /x and /y are
-    // both the library bucket's.
+  it("a ban raised by one client instance blocks a second instance in the same module", async () => {
+    // "Shared cooldown across ALL Spotify requests (module-scoped)." (client.ts:43-47)
     script(rl("121"), ok({ never: true }), ok({ never: true }));
     const a = new HttpClient("tok-a", false, "srcA");
     await a.get("/x").catch(() => {});
@@ -217,25 +214,8 @@ describe("the cooldown is shared across ALL Spotify requests", () => {
     const err = await b.get("/y").catch((e) => e);
     expect(err).toBeInstanceOf(SpotifyError);
     expect((err as SpotifyError).status).toBe(429);
-    expect(String((err as Error).message)).toMatch(/long cooldown/);
+    expect(String((err as Error).message)).toMatch(/try again shortly/);
     expect(fetchCalls).toHaveLength(1); // B never reached the network
-  });
-
-  it("a long ban on one bucket leaves the others alone; a rate limit holds them all", async () => {
-    script(rl("121"), ok({ v: 1 }), rl("2"));
-    const c = new HttpClient("tok");
-    await c.get("/me/player/recently-played?limit=50").catch(() => {});
-    expect(app.extendCooldown).toHaveBeenCalledWith("recently-played", clock + 121_000);
-    // The player bucket is not held: no cooldown to wait out, and its read reaches Spotify.
-    expect(spotifyCooldownMs()).toBe(0);
-    expect(await c.get("/me/player")).toEqual({ v: 1 });
-    // A short 429 (the 30-second rate limit) is the app's: the player waits it out too.
-    const limited = c.get("/playlists/p").catch(() => {});
-    await vi.advanceTimersByTimeAsync(0);
-    expect(spotifyCooldownMs()).toBeGreaterThan(2_000);
-    expect(app.extendCooldown).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(10_000);
-    await limited;
   });
 
   it("a patient client bails on a cooldown longer than 2 minutes instead of poking through", async () => {
@@ -493,14 +473,13 @@ describe("getAll", () => {
     expect((err as SpotifyError).status).toBe(502);
   });
 
-  it("a self-referencing next link terminates with a 508 as soon as a cursor repeats", async () => {
-    // "Termination was delegated entirely to Spotify's `next`, and a self-referencing link
-    //  would loop forever; a cursor already read ends it." (client.ts getAll; Phase 3 replaced
-    //  the 500-page cap, which failed every scan of a list over 25,000 items, PLAN §7.7)
+  it("a self-referencing next link terminates with a 508 after 500 pages", async () => {
+    // "Termination was delegated entirely to Spotify's `next` — a self-referencing link would
+    //  loop forever. 500 pages ~ 25k items" (client.ts:249-253)
     script(...times(600, page([1], "https://api.spotify.com/v1/x?offset=0", 10_000)));
     const err = await new HttpClient("tok").getAll("/x").catch((e) => e);
     expect((err as SpotifyError).status).toBe(508);
-    expect(fetchCalls).toHaveLength(2);
+    expect(fetchCalls).toHaveLength(500);
   });
 });
 

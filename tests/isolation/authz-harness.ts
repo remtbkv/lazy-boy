@@ -361,12 +361,7 @@ async function seedApp(tokens: { accessToken: string; refreshToken: string; expi
     await appTokenStore().set(mintUid(uid), { accessToken: `at-${tag}-friend`, refreshToken: `rt-${tag}-friend`, expiresAt: FAR });
   }
   await a.execute("UPDATE users SET status = 'disabled', session_epoch = 1 WHERE uid = 'rrrrrrrrrrrr'");
-  // The daily chores ran 25 hours ago, as in production: a cron tick then does a tick's work and
-  // leaves the chores to their route (Phase 3, PLAN §7.11: overdue at 26), and the route, which runs
-  // them once a UTC day, has today's run still to do.
-  await a.execute({ sql: "INSERT INTO app_meta (key, value) VALUES ('daily_at', ?)", args: [String(Date.now() - 25 * 3_600_000)] });
 }
-
 
 async function tables(): Promise<string[]> {
   const c = await raw();

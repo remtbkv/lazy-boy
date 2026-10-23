@@ -17,8 +17,7 @@ vi.hoisted(() => {
 import { createClient } from "@libsql/client";
 import { GET } from "@/app/api/cron/health/route";
 import { forUserAt, setBudgetMode, StoreRefusedError } from "@/lib/db";
-import { ownerStore, ownerUid, seedOwnerApp } from "../owner-store";
-import { setAppMeta } from "@/lib/app-db";
+import { ownerStore, seedOwnerApp } from "../owner-store";
 import { A, B, seedUser, useUserFiles } from "./user-dbs";
 
 const FAR = 4_000_000_000;
@@ -28,18 +27,14 @@ const health = () =>
 beforeAll(async () => {
   process.env.CRON_SECRET_EXT = "ext-secret";
   useUserFiles();
-  // A healthy owner: his row and token, a cron step a minute ago (sync_state, Phase 3), the
-  // chores' stamps (daily_at in app_meta from Phase 3).
+  // A healthy owner: his row and token, a harvest a minute ago, the chores' stamps.
   await seedOwnerApp({ accessToken: "a", refreshToken: "r", expiresAt: FAR });
   const owner = ownerStore();
   await owner.getLastSync(); // the first open provisions the owner's file
-  const app = createClient({ url: process.env.APP_DATABASE_URL as string });
-  await app.execute({
-    sql: "INSERT INTO sync_state (uid, state, next_probe_at, last_ok_at) VALUES (?, 'idle', 0, ?)",
-    args: [ownerUid(), Date.now() - 60_000],
-  });
-  app.close();
-  await setAppMeta("daily_at", String(Date.now() - 3_600_000));
+  const c = createClient({ url: process.env.TURSO_DATABASE_URL as string });
+  await c.execute({ sql: "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_sync', ?)", args: [new Date().toISOString()] });
+  c.close();
+  await owner.setHealthMark("daily_at", String(Date.now() - 3_600_000));
   await owner.setHealthMark("quota_pace", JSON.stringify({ at: Date.now() - 3_600_000, ahead: false }));
   await setBudgetMode("normal"); // the meter's daily record, as the chores leave it
 });

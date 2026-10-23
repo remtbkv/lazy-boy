@@ -1,18 +1,33 @@
 // Economy and freeze on the app-wide paths (docs/multi-user/CAPACITY.md §6's table): each
-// mode's interval as the now-playing poller, SyncOnLoad and Home's open-tab refresh read it, the
-// all-time gate, and the stored mode as the hot paths see it through their 10-minute cache.
+// mode's interval as the now-playing poller, SyncOnLoad, Home's open-tab refresh and the cron
+// tick read it, and the stored mode as the hot paths see it through their 10-minute cache.
 // The route halves (now-playing's floor, /api/sync's interval) are in budget-routes.test.ts.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { createClient } from "@libsql/client";
-import { appDatabaseUrl, getAppMeta } from "@/lib/app-db";
+const spy = vi.hoisted(() => ({ librarySyncs: 0 }));
+vi.mock("@/lib/auth", () => ({
+  getValidAccessTokenFor: async () => "tok",
+  hasStoredTokens: async (uid: string) => (await (await import("@/lib/app-db")).readTokenRow(uid)) !== null,
+}));
+vi.mock("@/lib/spotify", () => ({
+  SpotifyError: class SpotifyError extends Error {},
+  spotifyClient: () => ({ currentlyPlaying: async () => null }),
+}));
+vi.mock("@/lib/sync/history", () => ({ syncRecentPlays: async () => ({ added: 0 }) }));
+vi.mock("@/lib/sync/library", () => ({
+  syncLibrary: async () => {
+    spy.librarySyncs++;
+  },
+}));
+
 import { getBudgetMode, setBudgetMode } from "@/lib/db";
 import { ALLTIME_GATE_MS, LIBRARY_RESCAN_MS, NOW_PLAYING_MIN_POLL_MS, SYNC_INTERVAL_MS, type Mode } from "@/lib/budget/modes";
 import { currentMode } from "@/lib/budget/mode";
 import { INITIAL_POLL_STATE, PollLoop, STEADY_MS, planNextPoll, type PollOutcome } from "@/lib/now-playing-poll";
 import { SyncLoop, ambientGapMs, noteSyncReply, syncIntervalMs } from "@/lib/budget/sync-interval";
+import { GET as cronSync } from "@/app/api/cron/sync/route";
 import { play, rawClient, resetStore } from "./adversarial/helpers";
-import { ownerStore } from "./owner-store";
+import { ownerStore, seedOwnerApp } from "./owner-store";
 
 const MIN = 60_000;
 const MODES: Mode[] = ["normal", "economy", "freeze"];
@@ -30,24 +45,9 @@ describe("the policy table", () => {
   });
 });
 
-// The mode is the app's, so it lives in the app database's app_meta (beside the cooldowns and
-// the tick's stamps), never in a user's database.
-async function appMeta(sql: string): Promise<void> {
-  await getAppMeta("schema_version"); // the first open creates the app database
-  const c = createClient({ url: appDatabaseUrl(), intMode: "number" });
-  try {
-    await c.execute(sql);
-  } finally {
-    c.close();
-  }
-}
-
 describe("the stored mode and its cache", () => {
   beforeEach(async () => {
     await resetStore();
-    await appMeta("DELETE FROM app_meta WHERE key = 'budget_mode'");
-    await setBudgetMode("normal"); // resets this process's memo
-    await appMeta("DELETE FROM app_meta WHERE key = 'budget_mode'");
   });
 
   it("never written reads as none (the hot paths take it as normal)", async () => {
@@ -61,35 +61,22 @@ describe("the stored mode and its cache", () => {
     await setBudgetMode("economy");
     expect(await currentMode()).toBe("economy");
     // Another instance (the daily chores) moves it: this one sees it within 10 minutes.
-    await appMeta("UPDATE app_meta SET value = 'freeze' WHERE key = 'budget_mode'");
+    const c = await rawClient();
+    await c.execute("UPDATE meta SET value = 'freeze' WHERE key = 'budget_mode'");
     expect(await currentMode()).toBe("economy");
     vi.setSystemTime(Date.parse("2026-10-16T10:09:59Z"));
     expect(await currentMode()).toBe("economy");
     vi.setSystemTime(Date.parse("2026-10-16T10:10:00Z"));
     expect(await currentMode()).toBe("freeze");
     // The health check reads it uncached.
-    await appMeta("UPDATE app_meta SET value = 'normal' WHERE key = 'budget_mode'");
+    await c.execute("UPDATE meta SET value = 'normal' WHERE key = 'budget_mode'");
     expect(await getBudgetMode(0)).toBe("normal");
   });
 
   it("a value that is not a mode reads as none", async () => {
-    await appMeta("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('budget_mode', 'panic')");
+    const c = await rawClient();
+    await c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('budget_mode', 'panic')");
     expect(await getBudgetMode(0)).toBeNull();
-  });
-
-  it("is the app's: in app_meta, untouched by the admin's database, read with OWNER_UID unset", async () => {
-    await setBudgetMode("economy");
-    const user = await rawClient();
-    expect((await user.execute("SELECT value FROM meta WHERE key = 'budget_mode'")).rows).toEqual([]);
-    const owner = process.env.OWNER_UID;
-    delete process.env.OWNER_UID;
-    try {
-      expect(await getBudgetMode(0)).toBe("economy");
-      await setBudgetMode("freeze");
-      expect(await getAppMeta("budget_mode")).toBe("freeze");
-    } finally {
-      process.env.OWNER_UID = owner;
-    }
   });
 });
 
@@ -146,22 +133,20 @@ describe("SyncOnLoad's loop and Home's open-tab refresh read /api/sync's interva
 
   function run(mode: Mode) {
     const at: number[] = [];
-    const kinds: string[] = [];
     const t0 = Date.now();
     const loop = new SyncLoop(
-      async (kind) => {
+      async () => {
         at.push(Date.now() - t0);
-        kinds.push(kind);
         return { ok: true, intervalMs: SYNC_INTERVAL_MS[mode] };
       },
       () => true,
     );
-    return { at, kinds, loop };
+    return { at, loop };
   }
 
   it("normal: on load, every 2 minutes after the last sync, and on every return to the tab", async () => {
     vi.useFakeTimers();
-    const { at, kinds, loop } = run("normal");
+    const { at, loop } = run("normal");
     loop.start();
     await vi.advanceTimersByTimeAsync(2 * MIN);
     expect(at).toEqual([0, 2 * MIN]);
@@ -171,8 +156,6 @@ describe("SyncOnLoad's loop and Home's open-tab refresh read /api/sync's interva
     expect(at).toEqual([0, 2 * MIN, 2 * MIN + 10_000]);
     await vi.advanceTimersByTimeAsync(2 * MIN);
     expect(at).toEqual([0, 2 * MIN, 2 * MIN + 10_000, 4 * MIN + 10_000]);
-    // Phase 3's /api/sync: the load and a return to the tab say `load`, the timer `timer`.
-    expect(kinds).toEqual(["load", "timer", "load", "timer"]);
     loop.stop();
     expect(syncIntervalMs()).toBe(2 * MIN);
     expect(ambientGapMs(45_000)).toBe(45_000);
@@ -218,9 +201,54 @@ describe("SyncOnLoad's loop and Home's open-tab refresh read /api/sync's interva
   });
 });
 
-// The cron tick's library rescan follows the mode in Phase 3's tick: tests/isolation/t4-tick.test.ts
-// (economy's 2-hour floor, freeze's none) and tick-route.test.ts (the stored mode through the
-// real route).
+describe("the cron tick's library rescan follows the mode", () => {
+  const call = () => cronSync(new Request("http://x/api/cron/sync", { headers: { authorization: "Bearer s" } }));
+
+  beforeEach(async () => {
+    process.env.CRON_SECRET = "s";
+    spy.librarySyncs = 0;
+    await resetStore();
+    // The admin's users row, which the tick's adminStore() reads, and his token of record
+    // (user_tokens, Phase 2): the tick reads it for the owner alarm before any harvest or rescan
+    // (the Zenbook's caller; lane 07's pinger as stitched into Phase 1), and without it every
+    // call ends in 503 "no token" before reaching the rescan.
+    await seedOwnerApp({ accessToken: "at", refreshToken: "rt", expiresAt: Date.now() + 3_600_000 });
+  });
+
+  async function libraryAgeMinutes(m: number) {
+    const c = await rawClient();
+    // Each tick harvests (the gate's first-tick rule), so it reaches the library step; and the
+    // pinger's 90-second stamp is cleared, so a second call in one test is a tick, not "recent".
+    await c.execute("DELETE FROM meta WHERE key IN ('rp_last_harvest', 'player_last_active', 'lock:tick')");
+    await c.execute({
+      sql: "INSERT OR REPLACE INTO meta (key, value) VALUES ('library_synced_at', ?)",
+      args: [new Date(Date.now() - m * MIN).toISOString()],
+    });
+  }
+
+  it("normal: 40 minutes old rescans", async () => {
+    await setBudgetMode("normal");
+    await libraryAgeMinutes(40);
+    expect((await (await call()).json()).library).toBe("synced");
+    expect(spy.librarySyncs).toBe(1);
+  });
+
+  it("economy: 40 minutes is fresh, 2 hours and a minute rescans", async () => {
+    await setBudgetMode("economy");
+    await libraryAgeMinutes(40);
+    expect((await (await call()).json()).library).toBe("fresh");
+    await libraryAgeMinutes(121);
+    expect((await (await call()).json()).library).toBe("synced");
+    expect(spy.librarySyncs).toBe(1);
+  });
+
+  it("freeze: no rescan however old", async () => {
+    await setBudgetMode("freeze");
+    await libraryAgeMinutes(24 * 60);
+    expect((await (await call()).json()).library).toBe("frozen");
+    expect(spy.librarySyncs).toBe(0);
+  });
+});
 
 describe("the all-time recompute's gate follows the mode", () => {
   beforeEach(async () => {
