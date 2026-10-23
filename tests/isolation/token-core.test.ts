@@ -4,6 +4,7 @@
 // census that is silent (01e A2). These run the core against a two-user store in memory.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAppMeta } from "@/lib/app-db";
+import { mintUid } from "@/lib/identity";
 import { createTokenCore } from "@/lib/token-core";
 import {
   A,
@@ -153,5 +154,35 @@ describe("conditional writes (PLAN.md §5.2; security R3, R4)", () => {
   it("each store answers each uid with its own row", async () => {
     const { store } = setup({});
     await expectStoreAnswersOwnRow(store);
+  });
+});
+
+describe("the tick's token read (PLAN.md §5.4 step 1, §7.2 step 3)", () => {
+  it("a fresh token as stored; an expiring one refreshed; no row, null", async () => {
+    const { core } = setup({
+      [A]: { accessToken: "at-A", refreshToken: "rt-A", expiresAt: FAR },
+      [B]: { accessToken: "old-B", refreshToken: "rt-B", expiresAt: EXPIRED },
+    });
+    expect((await core.tokenForTick(A))?.accessToken).toBe("at-A");
+    expect(await core.tokenForTick(B)).toMatchObject({ uid: B, accessToken: "at:rt-B" });
+    expect(await core.tokenForTick(mintUid("cccccccccccc"))).toBeNull();
+  });
+
+  it("invalid_grant stops and keeps: it throws the terminal error and leaves the row for the confirmation", async () => {
+    const { core, rows, writes } = setup({ [A]: { accessToken: "old-A", refreshToken: "rt-A", expiresAt: EXPIRED } }, { dead: ["rt-A"] });
+    await expect(core.tokenForTick(A)).rejects.toMatchObject({ name: "RefreshError", terminal: true });
+    expect(rows.get(A)?.refreshToken).toBe("rt-A");
+    expect(writes.filter((w) => w.op === "clear")).toEqual([]);
+    // The request path's read still clears a dead grant (single-user behaviour, unchanged here).
+    expect(await core.getValidAccessToken(A)).toBeNull();
+    expect(rows.has(A)).toBe(false);
+  });
+
+  it("a store that fails the read throws, so the step can tell it from no row", async () => {
+    const { core, store } = setup({});
+    store.get = async () => {
+      throw new Error("token blob does not decrypt: bad tag");
+    };
+    await expect(core.tokenForTick(A)).rejects.toThrow(/does not decrypt/);
   });
 });

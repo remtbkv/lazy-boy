@@ -12,14 +12,20 @@
 // refresh write that is not conditional on the row it read; a TokenStore that answers another
 // uid's row; an identity read that ignores SIGNUPS. Lane 03's review adds a key check that opens
 // only the first key's sentinel.
+//
+// Phase 3 adds: a tick that hands a step another user's store; a lease released without its
+// owner check. Lane 40 adds the suites' store reverted to a plain `file:` client, which runs a
+// statement handed named args it does not use; Turso refuses it (lane 23's production failure).
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import { createClient } from "@libsql/client";
+import { createClient as createPlainClient } from "@libsql/client/node";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { checkIdentity, type SessionClaims, type Uid } from "@/lib/identity";
 import { appIdentityLookup, readIdentity } from "@/lib/identity-read";
 import { createTokenCore, type TokenStore } from "@/lib/token-core";
-import { getAppMeta, setAppMetaIfAbsent } from "@/lib/app-db";
+import { getAppMeta, releaseLease, setAppMetaIfAbsent } from "@/lib/app-db";
 import { decryptTokens, encryptTokens, open, parseTokenKeys, seal, tokenAad, type TokenKey } from "@/lib/token-crypto";
 import { tokenKeysReady } from "@/lib/token-keys";
 import { appTokenStore } from "@/lib/token-store-app";
@@ -42,6 +48,7 @@ import {
   scriptedSpotify,
   seedUser,
 } from "./harness";
+import { expectReleaseNeedsItsLease, expectStepsKeepToTheirStore } from "./tick-harness";
 import { expectOwnDatabases, useUserFiles } from "./user-dbs";
 
 const data: Record<string, string> = { [A]: "A-only-history", [B]: "B-only-history" };
@@ -293,5 +300,71 @@ describe("planted: a key check that opens only the first key's sentinel (PLAN.md
   it("and passes over the real check", async () => {
     await appStore();
     await expectWrongOlderKeyRefuses(tokenKeysReady);
+  });
+});
+
+// ── Phase 3: the tick (PLAN.md §6.2 layer 4, §7.2) ─────────────────────────────────────────
+// A tick whose step lookup ignores the user it was given and hands every step the first user's
+// store; and a release that drops its lease-owner check, so a step that outlived its lease
+// overwrites the schedule of the tick that took the user after it.
+describe("planted: a step handed another user's store", () => {
+  async function twoUsers() {
+    const db = freshAppDb();
+    await getAppMeta("schema_version");
+    await seedUser(db.raw(), { uid: A, status: "active" });
+    await seedUser(db.raw(), { uid: B, status: "active", admin: true });
+    for (const u of [A, B]) {
+      await db.raw().execute({ sql: "INSERT INTO user_tokens (uid, blob, expires_at, granted_at) VALUES (?, 'v1.x', 0, 0)", args: [u] });
+    }
+  }
+  it("the own-store check catches it", async () => {
+    await twoUsers();
+    await expect(expectStepsKeepToTheirStore(A, B, (stores) => () => stores[A].store)).rejects.toThrow();
+  });
+  it("and passes over the tick handing each step its own", async () => {
+    await twoUsers();
+    await expectStepsKeepToTheirStore(A, B, (stores) => (u) => stores[u.uid].store);
+  });
+});
+
+describe("planted: a lease released without the owner check", () => {
+  async function oneUser() {
+    const db = freshAppDb();
+    await getAppMeta("schema_version");
+    await seedUser(db.raw(), { uid: A, status: "active" });
+    return db;
+  }
+  it("the late-release check catches it", async () => {
+    const db = await oneUser();
+    const buggy = async (uid: Uid, _tick: string, now: number, w: { nextProbeAt: number }) =>
+      (
+        await db.raw().execute({
+          sql: `UPDATE sync_state SET next_probe_at = ?, lease_owner = NULL, lease_until = NULL
+                WHERE uid = ? AND lease_until >= ?`,
+          args: [w.nextProbeAt, uid, now],
+        })
+      ).rowsAffected === 1;
+    await expect(expectReleaseNeedsItsLease(A, buggy)).rejects.toThrow();
+  });
+  it("and passes over the real release", async () => {
+    await oneUser();
+    await expectReleaseNeedsItsLease(A, releaseLease);
+  });
+});
+
+describe("planted: the suites' store reverted to a plain file: client", () => {
+  // One args object shared by a batch whose statements each use some of it, as Phase 3's claim had.
+  const shared = { tick: "t1", now: 1000 };
+  const batch = [
+    { sql: "SELECT :tick AS v", args: shared },
+    { sql: "SELECT :now AS v", args: shared },
+  ];
+  it("the plain client runs the shared-args batch", async () => {
+    const plain = createPlainClient({ url: "file::memory:" });
+    await expect(plain.batch(batch, "read")).resolves.toHaveLength(2);
+  });
+  it("and the suites' client refuses it, as Turso does", async () => {
+    const c = createClient({ url: "file::memory:" });
+    await expect(c.batch(batch, "read")).rejects.toThrow("too many parameters, expected 1 found 2");
   });
 });

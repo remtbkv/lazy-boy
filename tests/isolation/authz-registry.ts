@@ -116,7 +116,7 @@ export const FINDINGS: Record<FindingId, { title: string; detail: string; owner:
     title: "The cron's owner alarm and per-user outcome would go to cron-job.org",
     detail:
       "/api/cron/sync answers its outcome (added counts, the 503 'no token' alarm) to whoever holds a secret. PLAN §7.2 step 0: cron-job.org gets a bare {\"ok\":true}, since it keeps response bodies and disables a job after a run of failures.",
-    owner: "L07 (lane 07, item 2, done on mu/pinger: the owner alarm and the outcome answer the Zenbook's CRON_SECRET only, cron-job.org gets a bare {\"ok\":true})",
+    owner: "L07 (lane 07, item 2, done on mu/pinger: the owner alarm and the outcome answer the Zenbook's CRON_SECRET only, cron-job.org gets a bare {\"ok\":true}); P3 (lane 17: Phase 3's tick keeps both, and the Zenbook's outcome names no friend's trigger or count)",
   },
   F11: {
     title: "Background tasks have no owner",
@@ -287,7 +287,7 @@ export const ENTRIES: Entry[] = [
     file: "src/app/api/sync/route.ts",
     kind: "route",
     gate: "const user = await requireRouteUser();",
-    does: "harvests recently-played with Rem's grant into plays/tracks; writes meta user_tz from the tzoffset cookie and the sync stamps",
+    does: "the cron's step for the session's user under the cron's lease (PLAN §7.6): /me/player with their grant, a recently-played harvest into their plays when the policy says so; meta user_tz_offset and user_tz from the cookies, only when they change",
     cells: userCells("requireRouteUser: no session → 401 with the signed-out marker before any read"),
     invoke: async () => (await route("@/app/api/sync/route", "POST")())(),
   },
@@ -367,14 +367,15 @@ export const ENTRIES: Entry[] = [
     id: "GET /api/cron/sync",
     file: "src/app/api/cron/sync/route.ts",
     kind: "route",
-    gate: "if (!caller) {",
-    does: "the tick, at most one per 90 s whoever calls (the stamp, acquireLock('tick')): currently-playing and recently-played with Rem's stored grant, harvest stamps, plays; a library rescan every 30 min",
+    gate: "if (!caller) return { status: 401",
+    gateFile: "src/lib/sync/tick.ts",
+    does: "the tick, at most one per 45 s whoever calls (app_meta.tick_at): the claim of every due user, each one's /me/player probe and, when the policy says so, a recently-played harvest with that user's own grant into their own plays; one library rescan; the daily chores when daily_at is over 26 h old",
     cells: cronCells(
       {
         vercelCron: { target: "allow", rule: "Bearer $CRON_SECRET → the tick (vercel.json, 07:00 UTC)" },
         cronjobOrg: {
           target: "allow",
-          rule: "Bearer $CRON_SECRET_EXT → the tick; the reply is a bare {\"ok\":true}, never the outcome or the owner alarm (PLAN §7.2 step 0)",
+          rule: "Bearer $CRON_SECRET_EXT → the tick, after the reply; the reply is a bare {\"ok\":true}, never the outcome or the owner alarm (PLAN §7.2 step 0)",
           finding: "F10",
         },
       },
@@ -655,7 +656,7 @@ export const ENTRIES: Entry[] = [
     file: "src/app/(app)/history-actions.ts",
     kind: "action",
     gate: "const user = await requireActionUser();",
-    does: "harvests recently-played with Rem's grant, then re-reads the strip, all-time totals and the visible day",
+    does: "re-reads the strip, the all-time totals, the visible day and the plays the client's index is missing from Rem's store; no Spotify call (decision 15)",
     cells: userCells("gated(): requireActionUser refused → NO_REFRESH before any read"),
     invoke: async () => historyAction("refreshHistoryAction", "latest", 14, null),
   },

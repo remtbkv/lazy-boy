@@ -61,9 +61,9 @@ describe("S1: unstable_cache only inside userCache", () => {
 
 describe("S2: a Uid is minted in one place", () => {
   // The gate mints from the session; auth.ts mints Rem's uid in the sign-in branch and in the
-  // two owner-bound Phase 1 shims. Phase 2 adds the cron's claim; the scripts' --user helper
-  // comes with forUser.
-  const MINTERS = new Set(["src/lib/session-gate.ts", "src/lib/auth.ts"]);
+  // two owner-bound Phase 1 shims. Phase 3 adds the cron's claim (app-db.ts, from the rows it
+  // just leased); the scripts' --user helper comes with forUser.
+  const MINTERS = new Set(["src/lib/session-gate.ts", "src/lib/auth.ts", "src/lib/app-db.ts"]);
 
   it("no `as Uid` outside identity.ts", () => {
     const casts: string[] = [];
@@ -84,19 +84,21 @@ describe("S2: a Uid is minted in one place", () => {
   // phase1Owner() mints Rem's uid from OWNER_UID for the paths that act for him with no
   // session: identity-read.ts's adminStore (the cron, the daily chores, the health check, the
   // store bench, the sign-in's owner guard and token-move.ts's plaintext row, until Phase 3's
-  // claim), which reads his users row
-  // for his database; and db.ts's app-wide row (the cooldown) until it moves to app_meta.
-  const OWNER_PATHS = new Set(["src/lib/db.ts", "src/lib/identity-read.ts"]);
+  // claim), which reads his users row for his database. db.ts no longer does: its app-wide rows
+  // (the cooldown, the budget mode) are app_meta's from Phase 3's turn.
+  const OWNER_PATHS = new Set(["src/lib/identity-read.ts"]);
   it("phase1Owner is imported only by the paths that act for the owner without a session", () => {
     expect(importersOf("phase1Owner").filter((f) => !OWNER_PATHS.has(f))).toEqual([]);
   });
 
   // forUserAt names the database as well as the user: only what read the users row may call it,
-  // with the db_name it read: the identity read and adminStore (identity-read.ts), and Phase 3's
-  // claim. The tests do too.
-  it("forUserAt is imported only by the identity read", () => {
-    expect(importersOf("forUserAt")).toEqual(["src/lib/identity-read.ts"]);
+  // with the db_name it read: Phase 2's identity read and adminStore (identity-read.ts), and
+  // Phase 3's tick, which opens each claimed user's store at the db_name the claim read from the
+  // users row that leased them (src/lib/sync/tick-deps.ts). The tests do too.
+  it("forUserAt is imported only by the identity read and the tick's store lookup", () => {
+    expect(importersOf("forUserAt").sort()).toEqual(["src/lib/identity-read.ts", "src/lib/sync/tick-deps.ts"]);
   });
+
 });
 
 function importersOf(name: string): string[] {
@@ -116,9 +118,9 @@ function importersOf(name: string): string[] {
 describe("S3: db.ts exports no per-user function", () => {
   // Every value db.ts exports, as a snapshot a reviewer sees change: forUser and forUserAt (the
   // only way to a user's data), the telemetry store's functions (no user's database), the
-  // app-wide cooldown and budget mode (the admin's database until Phase 2's app_meta), and pure helpers and
-  // constants. A per-user function exported here could run against a database without naming
-  // its user (PLAN.md §6.2 layer 3).
+  // app-wide budget mode (app_meta's `budget_mode`), and pure helpers and constants. (The app-wide
+  // cooldown left for app_meta's `cooldown:<bucket>` at Phase 3's turn.) A per-user function
+  // exported here could run against a database without naming its user (PLAN.md §6.2 layer 3).
   const EXPORTS = [
     "HISTORY_INDEX_SHAPE",
     "HOME_PAYLOAD_SHAPE",
@@ -134,7 +136,6 @@ describe("S3: db.ts exports no per-user function", () => {
     "getClientLoadSpeed",
     "getRecentlyPlayedQuotaWindows",
     "getSpotifyCallBreakdown",
-    "getSpotifyCooldownUntil",
     "ledgerAdd",
     "ledgerDayModeledTotal",
     "ledgerSet",
@@ -151,7 +152,6 @@ describe("S3: db.ts exports no per-user function", () => {
     "recordBudgetDay",
     "recordClientMetrics",
     "setBudgetMode",
-    "setSpotifyCooldownUntil",
   ];
 
   it("its value exports match the snapshot", () => {
@@ -213,6 +213,26 @@ describe("S3: app-db.ts's exports match the reviewed snapshot", () => {
     "unreportedEvents (function)",
     "updateTokensIfUnchanged (function)",
     "writeSignInTokens (function)",
+    // Phase 3, the sync queue. Cross-user by design: readOwnerAlarm, claimDueUsers (the claim),
+    // grantFailuresSince; each takes no uid and returns scheduling, never data (sync-queue.test.ts).
+    "Claim (type)",
+    "ClaimedUser (type)",
+    "OwnerAlarmRow (type)",
+    "Release (type)",
+    "TICK_STATEMENT_TIMEOUT_MS (const)",
+    "claimDueUsers (function)",
+    "claimRescan (function)",
+    "claimUser (function)",
+    "countRpCall (function)",
+    "extendCooldown (function)",
+    "finishGrantConfirm (function)",
+    "grantFailuresSince (function)",
+    "oneAttemptFetch (function)",
+    "readOwnerAlarm (function)",
+    "releaseLease (function)",
+    "scheduleRescan (function)",
+    "stampTick (function)",
+    "startGrantConfirm (function)",
   ];
 
   it("lists every export", () => {
@@ -252,6 +272,7 @@ describe("S4: module-scope state is on a reviewed list", () => {
     "src/lib/tasks/registry.ts: running": "completion promises by task id; holds no result",
     "src/lib/han-fold.ts: TABLE": "a fixed folding table filled at module load; no user data",
     "src/lib/spotify/client.ts: cooldownUntil": "app-wide on purpose: Spotify's rate limit is per app (PLAN.md §4.3)",
+    "src/lib/spotify/client.ts: bucketUntil": "keyed by quota bucket, app-wide on purpose: a long ban is the developer account's on that endpoint family (PLAN.md §4.3, §7.8)",
     "src/app/(app)/use-search-mode.ts: lastKbHeight": BROWSER,
     "src/components/now-playing-context.tsx: markedNowPlayingReady": BROWSER,
     "src/components/now-playing-context.tsx: npChangeSeq": BROWSER,

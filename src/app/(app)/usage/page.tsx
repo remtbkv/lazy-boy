@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { captureHealthMessage } from "@/lib/capture-health";
+import { readCapture } from "@/lib/capture-read";
 import { forUser, type ClientMetricsPage, type MetricStat, type PageOpen } from "@/lib/db";
 import { requirePageUser } from "@/lib/require-user";
 import { tzOffsetMinutes } from "@/lib/tz";
@@ -256,7 +257,7 @@ export default async function UsagePage() {
     loadUsageTelemetry(DAYS),
     liveCounters(),
     tzOffsetMinutes(store),
-    store.getCaptureHealth().catch(() => null),
+    readCapture(user.uid).then((c) => c.health, () => null),
   ]);
   const { ledger, client, spotifyCalls, quotaWindows, budget, down } = telemetry;
   const summaryByPage = new Map(client.pages.map((p) => [p.page, p]));

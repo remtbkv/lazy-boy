@@ -71,6 +71,15 @@ function chunk<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
+function savedOf(items: RawSavedTrackItem[]): Track[] {
+  const out: Track[] = [];
+  for (const i of items) {
+    const t = normTrack(i.track);
+    if (t) out.push({ ...t, addedAt: i.added_at });
+  }
+  return out;
+}
+
 export class Resources {
   readonly http: HttpClient;
   constructor(token: TokenSource, patient = false, source = "untagged", owner: string | null = null) {
@@ -122,12 +131,14 @@ export class Resources {
   async playlistTracks(
     id: string,
     onProgress?: (collected: number, total: number) => void,
+    opts: { paceMs?: number } = {},
   ): Promise<Track[]> {
     // Spotify migrated playlist tracks to the `/items` endpoint; the old
     // `/tracks` endpoint now returns 403.
     const items = await this.http.getAll<RawPlaylistTrackItem>(
       `/playlists/${id}/items?limit=100`,
       onProgress,
+      opts,
     );
     const out: Track[] = [];
     for (const i of items) {
@@ -199,17 +210,21 @@ export class Resources {
   // ---- library ----
   async savedTracks(
     onProgress?: (collected: number, total: number) => void,
+    opts: { paceMs?: number; deadline?: number } = {},
   ): Promise<Track[]> {
     const items = await this.http.getAll<RawSavedTrackItem>(
       "/me/tracks?limit=50",
       onProgress,
+      opts,
     );
-    const out: Track[] = [];
-    for (const i of items) {
-      const t = normTrack(i.track);
-      if (t) out.push({ ...t, addedAt: i.added_at });
-    }
-    return out;
+    return savedOf(items);
+  }
+
+  /** One page of Liked Songs, newest first, from `cursor` (null: the first page): the library
+   *  scan reads from the top until it meets a stored like (multi-user PLAN §7.7). */
+  async savedTracksPage(cursor: string | null): Promise<{ tracks: Track[]; total: number; next: string | null }> {
+    const page = await this.http.page<RawSavedTrackItem>(cursor ?? "/me/tracks?limit=50");
+    return { tracks: savedOf(page.items), total: page.total ?? 0, next: page.next };
   }
 
   /** Cheap Liked-Songs change-probe: total count + the newest added_at, without
@@ -272,6 +287,17 @@ export class Resources {
       ...(typeof data.timestamp === "number" ? { timestamp: data.timestamp } : {}),
       privateSession: data.device?.is_private_session === true,
     };
+  }
+
+  /** The cron's probe (multi-user PLAN.md §7.3): `/me/player` alone, one call. It reports the
+   *  active device's track even where currently-playing answers 204 mid-playback, and 204 (null
+   *  here) only when no device is active. An item that is not a track (an episode) has no id. */
+  async playerState(): Promise<{ trackId: string | null; isPlaying: boolean; progressMs: number } | null> {
+    const data = await this.http.get<
+      { is_playing?: boolean; progress_ms?: number | null; item?: { id?: string | null } | null } | undefined
+    >("/me/player");
+    if (!data) return null;
+    return { trackId: data.item?.id ?? null, isPlaying: Boolean(data.is_playing), progressMs: data.progress_ms ?? 0 };
   }
 
   /** Add a track to the active device's playback queue. 404 if no active device. */

@@ -37,7 +37,7 @@ src/app/(app)/           authed shell: layout gates (requirePageUser), renders t
                          home/ (greeting, action dock, day strip, song table), playlists/,
                          playlists/[id]/, friends/, usage/ (per-page load speed, then the
                          rows-read ledger below it; no nav link)
-                         history-actions.ts  Home's listen-history reads + the Spotify sync
+                         history-actions.ts  Home's listen-history reads (store only)
 src/app/api/auth/        Auth.js route handler (NextAuth catch-all)
 src/app/api/tasks/       background-task progress polling endpoint
 src/app/api/playlists/sync  one full library scan → DB, as a background task (the cron tick
@@ -52,11 +52,14 @@ src/app/api/search/       the two payloads Home filters in the browser (gated; p
 src/app/api/now-playing/ live "what's playing"; null when idle (never stale)
 src/app/api/build/       this deployment's build id, unauthenticated, no DB — fetched with
                          credentials omitted so it escapes Vercel's deployment pinning
-src/app/api/sync/        on-load listen-history sync (POST; debounced server-side)
-src/app/api/cron/sync/   scheduled history sync (the Zenbook's 2-min timer; Vercel cron at
-                         07:00 UTC as the last-resort backstop) + the library rescan, self-gated
-                         to every 30 min
-src/app/api/cron/daily/  the daily chores (Vercel cron, 09:00 UTC): all-time heal + Home payload
+src/app/api/sync/        the open app's sync (POST): the cron's step for the session's user,
+                         on a load or a return to the tab, or every 2 min when no tick has run
+                         in 5 (multi-user PLAN §7.6); writes the browser's zone when it changes
+src/app/api/cron/sync/   the tick (lib/sync/tick.ts, wired in tick-deps.ts): two pingers, the
+                         Zenbook's timer on even minutes and cron-job.org on odd ones, one tick
+                         per 45 s; Vercel cron at 07:00 UTC as the last-resort backstop
+src/app/api/cron/daily/  the daily chores (lib/daily-chores.ts; Vercel cron, 09:00 UTC, or a tick
+                         when app_meta.daily_at is 26 h old): all-time heal + Home payload
                          rebuild, api_log/client_metrics prunes, the played_at convention check,
                          the usage check, the budget record. Each isolated; answers 200; notifies nobody
 src/app/api/cron/usage-check/  Turso quota guard (logic in lib/usage-check.ts): real usage vs
@@ -76,6 +79,12 @@ src/lib/token-core.ts    Spotify token refresh (centralized), keyed by uid, writ
                          LB_TOKEN_ROLLBACK=1)
 src/lib/app-db.ts        every statement on the app database `lazyboy-app` (users, user_tokens,
                          sync_state, events, app_meta); its schema is app-schema.ts
+src/lib/sync/            the cron tick (tick.ts: the stamp, the claim, per-user steps, the 20-s
+                         reply, one rescan, the daily chores when overdue), each user's step
+                         (step.ts: token, /me/player probe, harvest when harvest-policy.ts says
+                         so, counted by brake.ts), history.ts (a harvest's record), library.ts
+                         (the rescan: no /me, Liked read from the top, liked-diff.ts).
+                         capture-read.ts + capture-health.ts: Home's capture line from sync_state
 src/lib/identity.ts      the uid, the branded Uid, the identity check, phase1Owner() (the owner
                          for the session-less paths); identity-read.ts reads it (and sign-in's
                          account_id link) from the app database, naming the user's database
@@ -112,7 +121,7 @@ src/lib/budget/          the Vercel/Turso budget (CAPACITY.md §6): request-mete
                          invocation's CPU at requireUser and the cron secret check, flushed to the
                          telemetry store's cpu_meter; budget.ts projects the month per limit and
                          sets normal/economy/freeze; daily.ts records it (the daily chores) and
-                         writes meta.budget_mode; modes.ts is what each mode slows. ARCHITECTURE.md
+                         writes app_meta.budget_mode; modes.ts is what each mode slows. ARCHITECTURE.md
 src/lib/build-skew.ts    when a tab running an old bundle reloads itself (debounce/throttle/
                          defer). The unpinned /api/build probe overrules the cheaper
                          now-playing beacon, which a pinned tab can fake. GOTCHAS.md
@@ -139,7 +148,8 @@ ops/zenbook-meter/       the store meter deployed on the Zenbook (proxy on 8090 
                          ~/lazyboy-backup/backup.py on the Zenbook, quota-forensic/BRIDGE.md
 scripts/backfill-from-backstop.mjs  replay the Zenbook backstop recorder's captured plays
                          into the primary (the loss-repair path; recorder lives on the
-                         Zenbook at ~/lazyboy-recorder, lazyboy-recorder.timer, every 15 min)
+                         Zenbook at ~/lazyboy-recorder, lazyboy-recorder.timer, hourly from
+                         Phase 3's deploy; every 15 min before it)
 scripts/import-extended-history.mjs  refill outage gaps from Spotify's Extended Streaming
                          History export; both importers close with scripts/import-tail.mjs
 scripts/np-latency.mjs   read-only: np-change percentiles by path and kind, Home's verdicts joined to

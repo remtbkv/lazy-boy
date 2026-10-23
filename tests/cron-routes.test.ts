@@ -11,10 +11,19 @@ const spy = vi.hoisted(() => {
     (name: string, fail = false) =>
     async () => {
       calls.push(name);
+      if (name === "runBudgetChore" && spy.during) await spy.during();
       if (fail || spy.failing.has(name)) throw new Error(`${name} failed`);
       return name === "runUsageCheck" ? spy.usage : undefined;
     };
-  return { calls, marks, failing: new Set<string>(), chore, usage: { status: 200, body: { ok: true } as Record<string, unknown> } };
+  return {
+    calls,
+    marks,
+    failing: new Set<string>(),
+    chore,
+    usage: { status: 200, body: { ok: true } as Record<string, unknown> },
+    // Runs inside the route's run, mid-chores (the lock case).
+    during: null as null | (() => Promise<void>),
+  };
 });
 
 vi.mock("@/lib/db", () => ({
@@ -39,12 +48,11 @@ vi.mock("@/lib/identity-read", () => ({
     },
   }),
 }));
-// /api/cron/sync's no-token exit (no user_tokens row), so its GET returns before touching Spotify.
-vi.mock("@/lib/app-db", () => ({ readTokenRow: async () => null }));
 vi.mock("@/lib/usage-check", () => ({ runUsageCheck: spy.chore("runUsageCheck") }));
 vi.mock("@/lib/budget/daily", () => ({ runBudgetChore: spy.chore("runBudgetChore") }));
-vi.mock("@/lib/auth", () => ({ getValidAccessTokenFor: async () => null, hasStoredTokens: async () => false }));
+vi.mock("@/lib/auth", () => ({ getValidAccessTokenFor: async () => null, tokenForTick: async () => null }));
 
+const { getAppMeta, setAppMeta } = await import("@/lib/app-db");
 const daily = await import("@/app/api/cron/daily/route");
 const bench = await import("@/app/api/cron/store-bench/route");
 const sync = await import("@/app/api/cron/sync/route");
@@ -54,11 +62,13 @@ const req = (path: string, headers: Record<string, string> = {}) =>
 const authed = { authorization: "Bearer s3cret" };
 
 describe("cron routes", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     spy.calls.length = 0;
     spy.marks.length = 0;
     spy.failing.clear();
     spy.usage = { status: 200, body: { ok: true } };
+    // No run yet today: each case starts as the first delivery of the day.
+    await setAppMeta("daily_at", "0");
   });
 
   it("daily and store-bench answer 401 without the secret, and run nothing", async () => {
@@ -85,6 +95,55 @@ describe("cron routes", () => {
     expect(spy.calls).toHaveLength(chores.length);
   });
 
+  // The two-user rehearsal's daily cycle (docs/multi-user/REHEARSAL.md, check 9) ran the chores
+  // twice in one UTC day both ways below: a tick found daily_at stale at 08:32 and Vercel's cron
+  // came at 09:00, and a second delivery of the cron ran them again.
+  it("runs the chores once a UTC day: a second delivery, or the cron after a tick's run that day, runs none", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.UTC(2026, 9, 20, 9, 0, 30));
+      expect((await daily.GET(req("/api/cron/daily", authed))).status).toBe(200);
+      // The day's run: every chore, once ("daily runs each chore exactly once" pins the list).
+      const ran = [...spy.calls];
+      expect(ran.length).toBeGreaterThan(0);
+      spy.calls.length = 0;
+      const again = await daily.GET(req("/api/cron/daily", authed));
+      expect(again.status).toBe(200);
+      expect(await again.json()).toMatchObject({ ok: true, skipped: "ran today" });
+      expect(spy.calls).toEqual([]);
+      // A tick ran them at 08:32 today; the cron at 09:00 runs none. Yesterday's run leaves today's due.
+      await setAppMeta("daily_at", String(Date.UTC(2026, 9, 20, 8, 32)));
+      expect((await (await daily.GET(req("/api/cron/daily", authed))).json()).skipped).toBe("ran today");
+      expect(spy.calls).toEqual([]);
+      await setAppMeta("daily_at", String(Date.UTC(2026, 9, 19, 9, 0)));
+      expect((await daily.GET(req("/api/cron/daily", authed))).status).toBe(200);
+      expect(spy.calls).toEqual(ran);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds the tick's lock:daily while it runs, so the cron and a tick never run the chores at once", async () => {
+    const { acquireAppLock, releaseAppLock } = await import("@/lib/app-db");
+    // A tick holds it: the cron runs nothing.
+    const tick = await acquireAppLock("lock:daily", 60_000);
+    expect(tick).toBeTruthy();
+    expect(await (await daily.GET(req("/api/cron/daily", authed))).json()).toMatchObject({ ok: true, skipped: "running" });
+    expect(spy.calls).toEqual([]);
+    await releaseAppLock("lock:daily", tick!);
+    // The cron's run holds it: a tick asking mid-run is refused; it is free again afterwards.
+    let midRun: string | null = "not asked";
+    spy.during = async () => {
+      midRun = await acquireAppLock("lock:daily", 60_000);
+    };
+    expect((await daily.GET(req("/api/cron/daily", authed))).status).toBe(200);
+    spy.during = null;
+    expect(midRun).toBeNull();
+    const after = await acquireAppLock("lock:daily", 60_000);
+    expect(after).toBeTruthy();
+    await releaseAppLock("lock:daily", after!);
+  });
+
   it("one failing chore does not stop the rest, and the route still answers 200", async () => {
     spy.failing.add("pruneApiLog");
     const res = await daily.GET(req("/api/cron/daily", authed));
@@ -96,8 +155,10 @@ describe("cron routes", () => {
   });
 
   it("/api/cron/sync has no daily block: the old x-vercel-cron header runs no chore", async () => {
+    // A tick runs the chores only when daily_at is over 26 hours old (PLAN §7.11).
+    await setAppMeta("daily_at", String(Date.now()));
     const res = await sync.GET(req("/api/cron/sync", { ...authed, "x-vercel-cron": "1" }));
-    expect(res.status).toBe(503); // the no-token exit, reached without any chore
+    expect(res.status).toBe(503); // the owner alarm (no admin row here), reached without any chore
     expect(spy.calls).toEqual([]);
   });
 
@@ -108,14 +169,14 @@ describe("cron routes", () => {
     expect(spy.calls).toEqual(["benchStore:core", "benchStore:telemetry"]);
   });
 
-  // The health check reads these (PLAN §7.10): when the chores last finished, and Turso's pace.
+  // The health check and the tick read these (PLAN §7.10-7.11): when the chores last finished
+  // (`app_meta.daily_at`), and Turso's pace.
   it("daily stamps daily_at when its run finishes, and the usage check's pace verdict", async () => {
     spy.usage = { status: 500, body: { ok: false, breached: ["rows_read"] } };
     spy.failing.add("pruneApiLog"); // a failed chore still finishes the run
     const t0 = Date.now();
     await daily.GET(req("/api/cron/daily", authed));
-    const daily_at = spy.marks.find(([k]) => k === "daily_at");
-    expect(Number(daily_at?.[1])).toBeGreaterThanOrEqual(t0);
+    expect(Number(await getAppMeta("daily_at"))).toBeGreaterThanOrEqual(t0);
     const pace = JSON.parse(spy.marks.find(([k]) => k === "quota_pace")?.[1] ?? "null");
     expect(pace).toMatchObject({ ahead: true });
   });
@@ -123,6 +184,7 @@ describe("cron routes", () => {
   it("an unconfigured usage check records no pace verdict", async () => {
     spy.usage = { status: 500, body: { ok: false, error: "unconfigured" } };
     await daily.GET(req("/api/cron/daily", authed));
-    expect(spy.marks.map(([k]) => k)).toEqual(["daily_at"]);
+    expect(spy.marks.map(([k]) => k)).toEqual([]);
+
   });
 });
