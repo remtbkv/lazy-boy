@@ -66,7 +66,11 @@ export default async function AppLayout({ children }: { children: React.ReactNod
               them, every soft-nav mark was measured against the OLD view's origin, clamped to
               an exact 0, and pooled into the percentiles (audit 2026-08-19, T2.16). */}
           <MetricsCollector />
-          {children}
+          {/* The page, in a box-less wrapper (`contents`: the pages still lay out in #den-root's
+              column) that the chrome makes inert while the person's tab choice loads. */}
+          <div data-lb-page="" className="contents">
+            {children}
+          </div>
           <CleanProgressWatcher />
           <SyncOnLoad />
           <TimezoneCookie />

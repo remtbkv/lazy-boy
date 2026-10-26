@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { LogOut, Unplug } from "lucide-react";
@@ -18,6 +18,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { announceTabReset } from "@/lib/tab-reset";
+import { choose, commit, IDLE, press, tabOf, type TabNav } from "@/lib/tab-nav";
 import { clearStored, idbKV } from "@/lib/search-cache";
 import { clearThisBrowser, userStorageName } from "@/lib/user-storage";
 import { useUid } from "@/components/user-context";
@@ -33,8 +34,13 @@ const TABS = [
   { key: "playlists", href: "/playlists", label: "Playlists" },
   { key: "friends", href: "/friends", label: "Friends" },
 ] as const;
+const TAB_HREFS = TABS.map((t) => t.href);
 
 type TabKey = (typeof TABS)[number]["key"];
+
+// How long a page the person has left stays inert while their choice loads. A navigation that
+// never commits must not leave the page dead.
+const LEAVE_MAX_MS = 8000;
 
 // `active` and `awake` are derived here rather than passed in, because the chrome now lives in
 // the layout and must not depend on which page rendered it. `awake` comes straight from the
@@ -50,40 +56,108 @@ function useActiveTab(): TabKey {
 export function DenChrome({ name, image }: { name: string; image: string | null }) {
   const active = useActiveTab();
   const pathname = usePathname();
-  // useActiveTab() FALLS BACK to "home" for routes that aren't tabs (/usage), which is right
-  // for the highlight but wrong for the arrow-key handler — on those routes the arrows belong
-  // to the page (the ledger's day pager), so the tab switcher must stand down entirely.
-  const onTabRoute = TABS.some((t) => pathname.startsWith(t.href));
   const { playing } = useNowPlaying();
   const awake = !!playing?.isPlaying;
   const router = useRouter();
   const tabRefs = useRef<Partial<Record<TabKey, HTMLAnchorElement>>>({});
+  // The place the person last chose and the places they left (lib/tab-nav.ts). The handlers read
+  // the ref at the moment of a press; `target` re-renders the highlight and the inert page.
+  const nav = useRef<TabNav>(IDLE);
+  const [target, setTarget] = useState<string | null>(null);
+  const apply = useCallback((s: TabNav) => {
+    nav.current = s;
+    setTarget(s.target);
+  }, []);
+  // The highlight follows the choice at once; the page follows when its navigation commits.
+  const targetTab = target === null ? -1 : tabOf(TAB_HREFS, target);
+  const shown: TabKey = targetTab >= 0 ? TABS[targetTab].key : active;
+  // The page on screen is one the person has left: their choice is still on its way.
+  const isLeaving = target !== null && target !== pathname;
+
+  useEffect(() => {
+    TABS.forEach((t) => router.prefetch(t.href));
+  }, [active, router]);
+
   // ←/→ move between the top tabs. Neighboring routes are prefetched so the switch is
   // instant. Ignored while typing (search field) or with a dialog/sheet open, and when a
   // modifier is held (browser shortcuts), so it only fires on a bare arrow press.
+  //
+  // Each press moves from the tab the LAST press chose, never the committed route: a press while
+  // a navigation is still loading used to repeat it or be dropped, and the stale one landed later
+  // (lib/tab-nav.ts). The route on screen is read at the press, from the address bar Next writes
+  // at commit, so there is no window between a commit and an effect re-running.
   useEffect(() => {
-    TABS.forEach((t) => router.prefetch(t.href));
-    const idx = TABS.findIndex((t) => t.key === active);
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
       if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
       const el = document.activeElement as HTMLElement | null;
       if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
       if (document.querySelector('[role="dialog"]')) return;
-      if (!onTabRoute) return;
-      const next = e.key === "ArrowRight" ? idx + 1 : idx - 1;
-      if (next < 0 || next >= TABS.length) return;
+      // Off the tabs (/usage) the arrows belong to the page (the ledger's day pager).
+      const at = window.location.pathname;
+      if (tabOf(TAB_HREFS, at) < 0) return;
+      const { state, go } = press(nav.current, TAB_HREFS, at, e.key === "ArrowRight" ? 1 : -1);
+      if (go === null) return;
       e.preventDefault();
-      router.push(TABS[next].href);
+      apply(state);
+      // Back to the page on screen: navigating to it is what stops the one still loading. It
+      // stays where it was scrolled.
+      if (go === at) router.replace(at + window.location.search, { scroll: false });
+      else router.push(go);
       // Move DOM focus with the selection. Without this, the tab you clicked keeps
       // browser focus after the route changes — and since the keydown itself is what
       // upgrades the browser's :focus-visible heuristic, its ring reappears on the
-      // now-inactive old tab instead of the one arrow keys just navigated to.
-      tabRefs.current[TABS[next].key]?.focus();
+      // now-inactive old tab instead of the one arrow keys just navigated to. It also keeps
+      // Enter on the tab the person chose.
+      tabRefs.current[TABS[tabOf(TAB_HREFS, go)].key]?.focus();
+    };
+    // A link to a tab's page (a tab, the mark, a playlist card) or Back/Forward is a choice too;
+    // any other link ends the bookkeeping (a download or a page off the tabs never commits here).
+    const onClick = (e: MouseEvent) => {
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      const a = (e.target as Element | null)?.closest?.("a[href]") as HTMLAnchorElement | null;
+      if (!a || a.target || a.hasAttribute("download")) return;
+      const url = new URL(a.href);
+      if (url.origin !== window.location.origin) return;
+      apply(tabOf(TAB_HREFS, url.pathname) >= 0 ? choose(nav.current, url.pathname) : IDLE);
+    };
+    const onPop = () => {
+      const at = window.location.pathname;
+      apply(tabOf(TAB_HREFS, at) >= 0 ? choose(nav.current, at) : IDLE);
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [active, onTabRoute, router]);
+    document.addEventListener("click", onClick, true);
+    window.addEventListener("popstate", onPop);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.removeEventListener("click", onClick, true);
+      window.removeEventListener("popstate", onPop);
+    };
+  }, [apply, router]);
+
+  // A commit of a place the person already left — a slow push that lost the race, or the state
+  // Next 16.2 kept from one and rendered on the next server action — sends them back to their
+  // choice. Replace, so the stray page leaves no history entry.
+  useEffect(() => {
+    const { state, go } = commit(nav.current, pathname);
+    if (state !== nav.current) apply(state);
+    if (go !== null) router.replace(go, { scroll: false });
+  }, [pathname, apply, router]);
+
+  // The page the person has left takes no clicks, keys or focus while their choice loads
+  // (layout.tsx's data-lb-page wrapper), so nothing acts on it: not the search they reach for,
+  // not an Enter. Bounded, so a navigation that never commits cannot leave it dead.
+  useEffect(() => {
+    if (!isLeaving) return;
+    const page = document.querySelector("[data-lb-page]");
+    if (!page) return;
+    page.setAttribute("inert", "");
+    const t = setTimeout(() => page.removeAttribute("inert"), LEAVE_MAX_MS);
+    return () => {
+      clearTimeout(t);
+      page.removeAttribute("inert");
+    };
+  }, [isLeaving, target]);
 
   // Phone: the bar slides up as you scroll down and back the moment you scroll up —
   // DIRECTION-tracked (an accumulator over scroll deltas), not distance-from-top, so it
@@ -176,7 +250,7 @@ export function DenChrome({ name, image }: { name: string; image: string | null 
                 // room, and 13px read as desktop-shrunk. Home is a real tab everywhere —
                 // panda-as-home was too implicit.
                 "rounded-md px-2.5 py-1.5 text-[15px] font-medium transition-colors outline-none focus-visible:outline-none sm:px-3",
-                t.key === active
+                t.key === shown
                   ? "text-foreground"
                   : "text-muted-foreground/70 hover:text-foreground",
               )}
