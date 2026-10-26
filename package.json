@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "setup": "node scripts/setup.mjs",
+    "postinstall": "node scripts/patch-next-router-queue.mjs",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
