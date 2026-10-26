@@ -141,6 +141,8 @@ src/lib/build-skew.ts    when a tab running an old bundle reloads itself (deboun
 src/lib/np-change.ts     the np-change beacon (change → render bound per song change, NOW_PLAYING_2S
                          §4.1) and playThenShow for in-app plays; handoff.ts is Home's verdict on a
                          finished song (how long it was current, the store's rule)
+src/lib/tab-nav.ts       the top tabs' ←/→ and click navigation as pure steps (chrome.tsx): a press
+                         moves from the last choice, and a late commit of a place left is undone
 src/lib/format.ts        duration/time/day formatting (shared)
 src/lib/filter.ts        fuzzyFilter — substring+prefix name search (shared)
 src/components/ui/       UI primitives — Base UI under the hood, NOT Radix (see GOTCHAS.md)
@@ -172,6 +174,8 @@ scripts/import-extended-history.mjs  refill outage gaps from Spotify's Extended 
                          History export; both importers close with scripts/import-tail.mjs
 scripts/np-latency.mjs   read-only: np-change percentiles by path and kind, Home's verdicts joined to
                          the store's plays (NOW_PLAYING_2S §4.4)
+scripts/patch-next-router-queue.mjs  postinstall: Next 16.3.0's router-queue fix applied to the
+                         installed 16.2.x (a superseded navigation became router state). GOTCHAS.md
 scripts/script-user.mjs  every store script's required --user <uid> (OWNER_UID in Phase 1)
 scripts/phase1-meta-keys.mjs  writes owner_uid, schema_version, min_reader, store_epoch into a
                          database's meta (Phase 1's deploy step on Rem's `lazyboy`)

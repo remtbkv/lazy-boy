@@ -623,6 +623,41 @@ hand a background task a fixed token string — it'll 401 mid-run. Pass a `Token
 getter from `getValidAccessToken`) so the client refreshes through the shared lock as
 needed. Interactive request-path callers still pass the plain string (fresh for the request).
 
+## Tab switching: the last choice decides, and Next 16.2's router queue is patched
+
+Rem, Oct 26, 2026: a run of ←/→ ended on Playlists seconds after his last ← had brought Home
+back, while he typed in Home's search. Two causes, either one enough (lane 0597):
+
+- **The handler moved from the committed route.** `chrome.tsx` computed the next tab from
+  `usePathname()`, which only moves when a navigation commits. While Playlists was still loading,
+  a second → pushed Playlists again and a ← on Home was dropped as "already at the left end"; the
+  first push was never cancelled and landed ~2 s later. Presses now move from the place the
+  person last chose (`lib/tab-nav.ts`); a ← back to the page on screen navigates to it, which is
+  what makes Next discard the push still loading. The highlight moves at the press, focus follows
+  the choice (so Enter opens it, not the tab left behind), and the page on screen is `inert`
+  while the choice loads (`data-lb-page` in the layout, at most 8 s), so no click or key acts on
+  a page the person has left.
+- **Next 16.2's router queue keeps a navigation it was told to drop.** When a discarded action
+  (a navigation, or a server action a navigation superseded) settles, `runRemainingActions`
+  advances `pending` past the navigation that replaced it; the next dispatch finds the queue idle
+  and does not discard that navigation, so it settles after the newer one and becomes the
+  router's state without being on screen. The next server action renders it, because
+  server-action-reducer returns `state` when nothing was revalidated, and on Home server actions
+  run on mount, on refresh and while typing before the search index loads. Measured with the
+  handler fixed and the queue not: 7 of 40 randomized runs committed Playlists after the last
+  key, six of them through a server action whose POST went to `/playlists` while Home was on
+  screen. Next 16.3.0 fixed it upstream;
+  `scripts/patch-next-router-queue.mjs` applies the same change to the installed 16.2.x on every
+  `npm install` (`postinstall`), to `dist/` and `dist/esm/` (the client bundle's copy). A Next it
+  does not recognise fails the install; from 16.3.0 on, delete the script. A node_modules cloned
+  instead of installed is unpatched until the script runs. `chrome.tsx` also sends the person
+  back when a place they left commits, replace and no scroll, as the second line.
+
+Known answers: `tests/tab-nav.test.ts` (the steps), `tests/next-router-queue.test.ts` (the queue,
+patched and not). In a browser, against a production build: `node tests/rehearsal/late-actions.mjs`
+(each cause on cue, plus the Save-queue bubble a finished save used to close); on today's code
+before the fix it failed 9 of 12 runs, after it 12 of 12 pass.
+
 ## Server actions must rethrow Next's control-flow errors
 
 `getSpotify()` handles a dead session by calling `redirect("/login")` — which works by
