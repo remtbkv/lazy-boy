@@ -677,7 +677,7 @@ Phases: P1 Phase 1's turn (lane 12: requireUser and the uid's identity check, fo
 
 ### page /home
 
-- File: `src/app/(app)/home/page.tsx`. Gate today: `src/app/(app)/home/page.tsx:72`.
+- File: `src/app/(app)/home/page.tsx`. Gate today: `src/app/(app)/home/page.tsx:73`.
 - Does, when allowed: renders the day strip, all-time card and the opening day's rows from the Home payload.
 - Calls (from the source): store `forUser`; via `readCapture`, `requirePageUser`, `tzOffsetMinutes`.
 - `anon`: D — requirePageUser: no session → redirect('/login') before any read

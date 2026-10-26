@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useTransition } from "react";
 import { Diff, Eraser, GitMerge, ListPlus, Play, X } from "lucide-react";
 import {
   mergeAction,
@@ -13,6 +13,7 @@ import {
 } from "@/app/(app)/actions";
 import { PlaylistsSync } from "@/components/playlists-sync";
 import { writeCleanActive } from "@/lib/clean-progress";
+import { exitDone, originFrom, pointOf, type Point } from "@/lib/dock-motion";
 import { useUid } from "@/components/user-context";
 import { useNowPlaying } from "@/components/now-playing-context";
 import { playThenShow } from "@/lib/np-change";
@@ -66,7 +67,10 @@ export function ActionDock({
   // Save queue never opens a sheet: it has nothing to pick, so a full-height panel was
   // three restatements of "Save queue" over empty space (Rem, 2026-08-13). It gets a
   // small confirm bubble anchored to the button that was just tapped instead.
-  const [queueAnchor, setQueueAnchor] = useState<{ left: number; top: number } | null>(null);
+  const [queueAnchor, setQueueAnchor] = useState<{ left: number; top: number; from: Point } | null>(null);
+  // The pressed pill's centre: what the sheet grows out of and shrinks back into (den.css,
+  // "The dock's motion").
+  const [from, setFrom] = useState<Point | null>(null);
   const action = ACTIONS.find((a) => a.key === open) ?? null;
 
   const activate = (key: ActionKey, e: React.MouseEvent) => {
@@ -75,11 +79,13 @@ export function ActionDock({
       setQueueAnchor({
         left: Math.max(8, Math.min(r.left, window.innerWidth - 218)),
         top: r.bottom + 8,
+        from: pointOf(e.currentTarget),
       });
       return;
     }
     // The library fetch failed earlier: opening a sheet is the moment it's needed, so retry.
     if (loadFailed) onRetry?.();
+    setFrom(pointOf(e.currentTarget));
     setOpen(key);
   };
 
@@ -107,7 +113,7 @@ export function ActionDock({
               key={a.key}
               type="button"
               onClick={(e) => activate(a.key, e)}
-              className="flex h-11 shrink-0 snap-start items-center gap-1.5 rounded-full border border-border bg-card px-4 text-[13px] font-medium text-foreground/90 transition-colors active:bg-accent"
+              className="flex h-11 shrink-0 snap-start items-center gap-1.5 rounded-full border border-border bg-card px-4 text-[13px] font-medium text-foreground/90 active:bg-accent"
             >
               <a.icon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.9} />
               {a.label}
@@ -124,7 +130,7 @@ export function ActionDock({
             key={a.key}
             type="button"
             onClick={(e) => activate(a.key, e)}
-            className="flex h-10 items-center gap-2 rounded-full border border-border bg-card px-4 text-sm font-medium text-foreground/90 transition-colors hover:border-[color-mix(in_srgb,var(--border)_55%,var(--muted-foreground))] hover:bg-accent"
+            className="flex h-10 items-center gap-2 rounded-full border border-border bg-card px-4 text-sm font-medium text-foreground/90 hover:border-[color-mix(in_srgb,var(--border)_55%,var(--muted-foreground))] hover:bg-accent"
           >
             <a.icon className="size-4" strokeWidth={1.9} />
             {a.label}
@@ -142,6 +148,7 @@ export function ActionDock({
       {action ? (
         <ActionSheet
           action={action}
+          from={from}
           playlists={playlists}
           backupPref={backupPref}
           loadFailed={loadFailed}
@@ -153,33 +160,80 @@ export function ActionDock({
   );
 }
 
+// Closing a dock surface: .dock-leaving starts its exit (den.css), and it unmounts when that
+// exit has played out (exitDone), not on a timer. The promise lets a confirm show its result
+// only once the surface is back in its pill, so the toast never rises through a sheet that is
+// still leaving (recorded on the phone: the two crossed in the same strip of screen). The state
+// lives in refs, not in a render's closure: the Escape listener (bound once) and a save's leave()
+// after its 1–2 min await hold an older render, and a save that ended after its bubble was closed
+// and opened again used to close the NEW one (lane 0597, tests/rehearsal/late-actions.mjs
+// save-queue). A second leave() returns the first one's promise and closes nothing, and an
+// instance that has unmounted never calls onClose.
+function useLeave(onClose: () => void, ...surfaces: React.RefObject<HTMLElement | null>[]) {
+  const [leaving, setLeaving] = useState(false);
+  const left = useRef<Promise<void> | null>(null);
+  const settle = useRef<() => void>(() => {});
+  const leave = () => {
+    if (!left.current) {
+      left.current = new Promise<void>((resolve) => (settle.current = resolve));
+      setLeaving(true);
+    }
+    return left.current;
+  };
+  useEffect(() => {
+    if (!leaving) return;
+    let live = true;
+    exitDone(...surfaces.map((s) => s.current)).then(() => {
+      if (live) onClose();
+      settle.current();
+    });
+    return () => {
+      live = false;
+    };
+    // Runs once, when the exit starts; the refs and onClose are this surface's for its life.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [leaving]);
+  return { leaving, leave };
+}
+
+// Every label a button can show, stacked in one grid cell with only the current one visible, so
+// the button is as wide as its widest label from the start: "Working…" no longer resized
+// Clean's confirm at each press (recorded: x−27 w+27, and back as the sheet left).
+function Labels({ labels, show }: { labels: string[]; show: number }) {
+  return (
+    <span className="grid justify-items-center">
+      {labels.map((l, i) => (
+        <span key={i} className={cn("col-start-1 row-start-1", i !== show && "invisible")}>
+          {l}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 // Save queue's confirm: a compact bubble AT the button (no sheet, no scrim, no repeated
 // copy — the pill already said what it does). One tap to run, X or outside tap to leave.
-// Enters with a quick pop, leaves with the same fade-down the sheet uses.
+// Grows out of the pill and shrinks back into it.
 function QueuePopover({
   anchor,
   onClose,
 }: {
-  anchor: { left: number; top: number };
+  anchor: { left: number; top: number; from: Point };
   onClose: () => void;
 }) {
   const [pending, start] = useTransition();
   const { holdDuring } = useNowPlaying();
-  const [closing, setClosing] = useState(false);
-  // A ref, not `closing`: the Escape listener (bound once) and a save's `dismiss()` after its 1–2
-  // min await both hold the closure of an older render. Reading `closing` there, a save that ended
-  // after the bubble was closed and opened again closed the NEW bubble (lane 0597 sweep,
-  // tests/rehearsal/late-actions.mjs save-queue).
-  const closed = useRef(false);
-  const dismiss = () => {
-    if (closed.current) return;
-    closed.current = true;
-    setClosing(true);
-    setTimeout(onClose, 180);
-  };
+  const bubble = useRef<HTMLDivElement>(null);
+  const { leaving, leave } = useLeave(onClose, bubble);
+  useLayoutEffect(() => {
+    const el = bubble.current;
+    if (el) el.style.transformOrigin = originFrom(anchor.from, el);
+    // The origin is the pill pressed to open this bubble; it never changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") dismiss();
+      if (e.key === "Escape") void leave();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -193,32 +247,33 @@ function QueuePopover({
       // The walk skips through the queue and back: no tab polls meanwhile, or Home would see
       // every song it passes "end" and list it (NOW_PLAYING_2S §1.3).
       const r = await holdDuring(() => settleAction(saveQueueAction()));
+      await leave();
       if (r.ok) toast.success(`Saved to "${r.name}"`);
       else toast.error(r.error);
-      dismiss();
     });
   };
   return (
     <>
       {/* Transparent outside-tap catcher — a toast-like bubble earns no dimmed scrim. */}
-      <button type="button" aria-label="Close" onClick={dismiss} className="fixed inset-0 z-50" />
+      <button type="button" aria-label="Close" onClick={() => void leave()} className="fixed inset-0 z-50" />
       <div
-        className={cn("den-pop fixed z-50 flex items-center gap-1 rounded-2xl border border-border bg-popover p-1.5 shadow-xl shadow-black/40", closing && "den-closing")}
+        ref={bubble}
+        className={cn("dock-surface dock-pop fixed z-50 flex items-center gap-1 rounded-2xl border border-border bg-popover p-1.5 shadow-xl shadow-black/40", leaving && "dock-leaving")}
         style={{ left: anchor.left, top: anchor.top }}
       >
         <button
           type="button"
           onClick={save}
           disabled={pending}
-          className="h-[44px] rounded-xl bg-foreground px-4 text-[15px] font-semibold text-background transition-opacity disabled:opacity-50 sm:h-9 sm:text-sm"
+          className="h-[44px] rounded-xl bg-foreground px-4 text-[15px] font-semibold text-background transition-opacity duration-(--dock-dur) ease-(--dock-ease) disabled:opacity-50 sm:h-9 sm:text-sm"
         >
-          {pending ? "Saving…" : "Save queue"}
+          <Labels labels={["Save queue", "Saving…"]} show={pending ? 1 : 0} />
         </button>
         <button
           type="button"
           aria-label="Close"
-          onClick={dismiss}
-          className="flex size-[44px] shrink-0 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted hover:text-foreground sm:size-9"
+          onClick={() => void leave()}
+          className="flex size-[44px] shrink-0 items-center justify-center rounded-xl text-muted-foreground hover:bg-muted hover:text-foreground sm:size-9"
         >
           <X className="size-6 sm:size-4" />
         </button>
@@ -229,6 +284,7 @@ function QueuePopover({
 
 function ActionSheet({
   action,
+  from,
   playlists,
   backupPref,
   loadFailed,
@@ -236,6 +292,7 @@ function ActionSheet({
   onClose,
 }: {
   action: (typeof ACTIONS)[number];
+  from: Point | null;
   playlists: Playlist[];
   backupPref: boolean;
   loadFailed: boolean;
@@ -257,20 +314,26 @@ function ActionSheet({
     null,
   );
 
-  // Animated exit: every close path plays the roll-down (transform+opacity only, so it
-  // runs on the compositor — no layout per frame) and unmounts when it lands. Rem,
-  // 2026-08-13: closing must glide down like the search reveal, never blink out.
-  const [closing, setClosing] = useState(false);
-  const requestClose = () => {
-    setClosing((already) => {
-      if (!already) setTimeout(onClose, 230);
-      return true;
-    });
-  };
+  // The sheet grows out of the pill that opened it and every close path shrinks it back in,
+  // fully faded, before it unmounts (den.css, "The dock's motion"; useLeave).
+  const sheet = useRef<HTMLDivElement>(null);
+  const scrim = useRef<HTMLButtonElement>(null);
+  const head = useRef<HTMLParagraphElement>(null);
+  const { leaving, leave: requestClose } = useLeave(onClose, sheet, scrim);
+  useLayoutEffect(() => {
+    const el = sheet.current;
+    if (el) el.style.transformOrigin = originFrom(from, el);
+    // The origin is the pill pressed to open this sheet; it never changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Subtract's second step holds the sheet's box: the result replaces the picker inside the
+  // same height (and the header's) instead of the sheet resizing under the finger (recorded:
+  // h−75 and, centred on desktop, its top 38 px lower).
+  const [hold, setHold] = useState<{ sheet: number; head: number } | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") requestClose();
+      if (e.key === "Escape") void requestClose();
     };
     window.addEventListener("keydown", onKey);
     const prev = document.body.style.overflow;
@@ -279,7 +342,7 @@ function ActionSheet({
       window.removeEventListener("keydown", onKey);
       document.body.style.overflow = prev;
     };
-    // requestClose closes over setState + onClose only; re-binding per render is noise.
+    // requestClose closes over refs and a state setter only; re-binding per render is noise.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -323,9 +386,11 @@ function ActionSheet({
   // The real Spotify flows. Merge names itself, and Clean reports progress through the
   // app-wide CleanProgressWatcher (see the layout) — so neither needs a step of its own.
   // Every action is awaited through settleAction, so a transport failure is a toast instead
-  // of an error boundary (see QueuePopover).
+  // of an error boundary (see QueuePopover). The result shows once the sheet is back in its
+  // pill (`after`), and the button keeps saying "Working…" while it goes.
   const confirm = () => {
     start(async () => {
+      let after = () => {};
       switch (action.key) {
         case "resume": {
           // The bar shows the song Resume started when the action returns (NOW_PLAYING_2S L1).
@@ -339,37 +404,37 @@ function ActionSheet({
               refresh();
             },
           );
-          if (r.ok) toast.success(`Resuming "${nameOf(picked[0])}"`);
-          else toast.error(r.error);
+          after = () => (r.ok ? toast.success(`Resuming "${nameOf(picked[0])}"`) : toast.error(r.error));
           break;
         }
         case "clean": {
           const r = await settleAction(startCleanAction(picked[0], backupPref));
           if (!r.ok) {
-            toast.error(r.error);
+            after = () => toast.error(r.error);
             break;
           }
-          // Hand the task to the global watcher so progress keeps showing after this closes.
-          if (r.taskId) writeCleanActive(uid, { taskId: r.taskId, playlistId: picked[0] });
-          toast.success(
-            r.unique
-              ? `"${r.name}" — nothing to strip, every song is new`
-              : `Cleaning "${r.name}" — ${r.removed} already-saved removed, ${r.kept} kept${
-                  r.deduped ? `, ${r.deduped} duplicate cop${r.deduped === 1 ? "y" : "ies"} collapsed` : ""
-                }`,
-          );
+          after = () => {
+            // Hand the task to the global watcher so progress keeps showing after this closes;
+            // its pill grows out of the same pill this sheet came from.
+            if (r.taskId) writeCleanActive(uid, { taskId: r.taskId, playlistId: picked[0] }, from);
+            toast.success(
+              r.unique
+                ? `"${r.name}" — nothing to strip, every song is new`
+                : `Cleaning "${r.name}" — ${r.removed} already-saved removed, ${r.kept} kept${
+                    r.deduped ? `, ${r.deduped} duplicate cop${r.deduped === 1 ? "y" : "ies"} collapsed` : ""
+                  }`,
+            );
+          };
           break;
         }
         case "queue": {
           const r = await holdDuring(() => settleAction(saveQueueAction()));
-          if (r.ok) toast.success(`Saved to "${r.name}"`);
-          else toast.error(r.error);
+          after = () => (r.ok ? toast.success(`Saved to "${r.name}"`) : toast.error(r.error));
           break;
         }
         case "merge": {
           const r = await settleAction(mergeAction(picked)); // click order is the merge order
-          if (r.ok) toast.success(`Merged ${r.count} songs into "${r.name}"`);
-          else toast.error(r.error);
+          after = () => (r.ok ? toast.success(`Merged ${r.count} songs into "${r.name}"`) : toast.error(r.error));
           break;
         }
         case "subtract": {
@@ -381,14 +446,16 @@ function ActionSheet({
             ),
           );
           if (r.ok) {
+            setHold({ sheet: sheet.current?.offsetHeight ?? 0, head: head.current?.offsetHeight ?? 0 });
             setPreview({ kept: r.kept, overlap: r.overlap });
             return; // stay open — the result IS the point
           }
-          toast.error(r.error);
+          after = () => toast.error(r.error);
           break;
         }
       }
-      requestClose();
+      await requestClose();
+      after();
     });
   };
 
@@ -397,35 +464,42 @@ function ActionSheet({
     const name = `${nameOf(picked[0])} minus ${others.map(nameOf).join(" + ")}`.slice(0, 100);
     start(async () => {
       const r = await settleAction(saveCompareDiffAction(name, preview.kept.map((t) => t.uri)));
+      await requestClose();
       if (r.ok) toast.success(`Saved ${r.count} songs to "${name}"`);
       else toast.error(r.error);
-      requestClose();
     });
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-6">
       <button
+        ref={scrim}
         type="button"
         aria-label="Close"
-        onClick={requestClose}
-        className={cn("den-scrim absolute inset-0 bg-black/55", closing && "den-closing")}
+        onClick={() => void requestClose()}
+        className={cn("dock-scrim absolute inset-0 bg-black/55", leaving && "dock-leaving")}
       />
       <div
+        ref={sheet}
         role="dialog"
         aria-modal
         aria-label={action.label}
         className={cn(
-          "den-sheet relative flex max-h-[78dvh] w-full flex-col rounded-t-2xl border border-border bg-popover pb-[env(safe-area-inset-bottom)] sm:max-h-[70vh] sm:max-w-md sm:rounded-2xl",
-          closing && "den-closing",
+          "dock-surface relative flex max-h-[78dvh] w-full flex-col rounded-t-2xl border border-border bg-popover pb-[env(safe-area-inset-bottom)] sm:max-h-[70vh] sm:max-w-md sm:rounded-2xl",
+          leaving && "dock-leaving",
         )}
+        style={hold ? { height: hold.sheet } : undefined}
       >
         {/* No title row — the button just tapped already named the action, so the
             description IS the header. No grab handle either: it read as draggable (it
             wasn't) and echoed the iOS home indicator. The X spans the description's two
             lines at finger size (Rem, 2026-08-13). */}
         <div className="flex items-start justify-between gap-3 px-5 pt-5 sm:pt-4">
-          <p className="text-[16px] leading-snug text-muted-foreground sm:text-[13px]">
+          <p
+            ref={head}
+            className="text-[16px] leading-snug text-muted-foreground sm:text-[13px]"
+            style={hold ? { minHeight: hold.head } : undefined}
+          >
             {preview
               ? `${preview.kept.length} only in "${nameOf(picked[0])}" · ${preview.overlap.length} shared`
               : action.blurb}
@@ -433,8 +507,8 @@ function ActionSheet({
           <button
             type="button"
             aria-label="Close"
-            onClick={requestClose}
-            className="-mr-2 -mt-1 flex size-[44px] shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground sm:mt-0.5 sm:size-8"
+            onClick={() => void requestClose()}
+            className="-mr-2 -mt-1 flex size-[44px] shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground sm:mt-0.5 sm:size-8"
           >
             <X className="size-6 sm:size-4" />
           </button>
@@ -445,29 +519,33 @@ function ActionSheet({
           <div className="mx-5 mt-3 flex items-center gap-0.5 self-start rounded-xl border border-border bg-card p-1">
             {(
               [
-                ["base", `Base${picked.length ? ` · ${picked.length}` : ""}`],
-                ["subtract", `Subtract${others.length ? ` · ${others.length}` : ""}`],
+                ["base", "Base", picked.length],
+                ["subtract", "Subtract", others.length],
               ] as const
-            ).map(([key, label]) => (
+            ).map(([key, label, count]) => (
               <button
                 key={key}
                 type="button"
                 onClick={() => setGroup(key)}
                 aria-pressed={group === key}
                 className={cn(
-                  "h-10 rounded-lg px-4 text-[15px] font-medium transition-colors sm:h-8 sm:px-3 sm:text-[13px]",
+                  "h-10 rounded-lg px-4 text-[15px] font-medium tabular-nums sm:h-8 sm:px-3 sm:text-[13px]",
                   group === key ? "bg-secondary text-foreground" : "text-muted-foreground",
                 )}
               >
                 {label}
+                {/* Room for the count is kept while it is zero, so the first pick doesn't
+                    widen the segment and shove its neighbour (recorded: +15 px). */}
+                <span className={cn(!count && "invisible")}> · {count || 1}</span>
               </button>
             ))}
           </div>
         ) : null}
 
         {preview ? (
-          // The result. Same row rhythm as the picker, so the sheet doesn't lurch.
-          <div className="thin-scroll mt-4 min-h-0 flex-1 overflow-y-auto border-t border-border/60">
+          // The result. Same row rhythm as the picker, so the sheet doesn't lurch. Keyed apart
+          // from the picker's list, so it opens at its top, not at the picker's scroll position.
+          <div key="result" className="thin-scroll mt-4 min-h-0 flex-1 overflow-y-auto border-t border-border/60">
             {preview.kept.length === 0 ? (
               <p className="px-5 py-6 text-sm text-muted-foreground">
                 Every song is already in the playlists you subtracted.
@@ -488,7 +566,7 @@ function ActionSheet({
             ))}
           </div>
         ) : action.select ? (
-          <div className="thin-scroll mt-4 min-h-0 flex-1 overflow-y-auto border-t border-border/60">
+          <div key="pick" className="thin-scroll mt-4 min-h-0 flex-1 overflow-y-auto border-t border-border/60">
             {/* The library streams in just after mount (see DockLoader), so on a very fast
                 click it may not have landed yet. */}
             {playlists.length === 0 && loadFailed ? (
@@ -517,7 +595,7 @@ function ActionSheet({
                   onClick={() => tap(p.id)}
                   aria-pressed={on}
                   className={cn(
-                    "flex w-full items-center gap-3 px-5 py-3 text-left transition-colors sm:py-2.5",
+                    "flex w-full items-center gap-3 px-5 py-3 text-left sm:py-2.5",
                     on ? "bg-white/[0.06]" : "hover:bg-white/[0.03]",
                   )}
                 >
@@ -552,7 +630,7 @@ function ActionSheet({
                 setOthers([]);
                 setGroup("base");
               }}
-              className="text-[15px] font-medium text-muted-foreground transition-colors hover:text-foreground sm:text-sm"
+              className="text-[15px] font-medium text-muted-foreground hover:text-foreground sm:text-sm"
             >
               Clear
             </button>
@@ -563,13 +641,17 @@ function ActionSheet({
             type="button"
             onClick={preview ? saveDiff : confirm}
             disabled={pending || (!preview && !ready) || (!!preview && preview.kept.length === 0)}
-            className="h-12 rounded-xl bg-foreground px-6 text-[16px] font-semibold text-background transition-opacity disabled:opacity-40 sm:h-10 sm:rounded-lg sm:px-5 sm:text-sm"
+            className="h-12 rounded-xl bg-foreground px-6 text-[16px] font-semibold text-background transition-opacity duration-(--dock-dur) ease-(--dock-ease) disabled:opacity-40 sm:h-10 sm:rounded-lg sm:px-5 sm:text-sm"
           >
-            {pending
-              ? "Working…"
-              : preview
-                ? `Save ${preview.kept.length} songs`
-                : action.label}
+            <Labels
+              labels={[
+                preview ? `Save ${preview.kept.length} songs` : action.label,
+                "Working…",
+                // Subtract's button turns into "Save N songs"; sized for that from the start.
+                ...(action.key === "subtract" ? ["Save 0000 songs"] : []),
+              ]}
+              show={pending ? 1 : 0}
+            />
           </button>
         </div>
       </div>
@@ -595,7 +677,7 @@ function SelectionBadge({
     return (
       <span
         className={cn(
-          "size-[18px] shrink-0 rounded-full border transition-colors",
+          "size-[18px] shrink-0 rounded-full border",
           on ? "border-[var(--bamboo)] bg-[var(--bamboo)]" : "border-border",
         )}
       />

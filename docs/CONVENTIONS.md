@@ -32,6 +32,13 @@ Palette (CSS variables in `src/app/globals.css`, mapped to Tailwind/shadcn token
   day + all-time cards) roll from the old value to the new via `AnimatedNumber` (ease-out,
   reduced-motion aware, no count-up on first paint). Use it for any number that changes under
   the user.
+- **Motion comes from the press.** A surface an action opens (Home's dock: the action sheet,
+  the Save-queue bubble, the "Tidying up…" pill) grows out of the control that was pressed and
+  shrinks back into it, on transform and opacity only, with one duration and easing
+  (`--dock-dur`, `--dock-ease` in den.css). It unmounts when its exit transition ends
+  (`exitDone`, lib/dock-motion.ts), never on a timer, and its result toast follows the exit.
+  Press states change instantly (no color fades). Reduced motion keeps the fade alone.
+  `tests/dock-motion.test.ts` fails on any other animated property in the dock.
 - **Images load over a steady skeleton, then fade in** (`PlaylistThumb`): a reserved
   aspect-square box with a subtle pulse, the image fading in on decode — so covers arriving at
   different times read as a smooth fill, never a broken grid, and the layout never shifts.

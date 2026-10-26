@@ -3,6 +3,7 @@
 // active (in localStorage, so it survives reloads) for CleanProgressWatcher to poll.
 // The key is the user's (userStorageName(uid, "clean:active")): another user signing in on
 // this browser neither sees nor polls this one's clean (multi-user PLAN §6.2 layer 6).
+import type { Point } from "@/lib/dock-motion";
 import { userStorageName } from "@/lib/user-storage";
 
 export const cleanActiveKey = (uid: string) => userStorageName(uid, "clean:active");
@@ -18,11 +19,12 @@ export function readCleanActive(uid: string): CleanActive | null {
   }
 }
 
-export function writeCleanActive(uid: string, active: CleanActive): void {
+export function writeCleanActive(uid: string, active: CleanActive, from?: Point | null): void {
   localStorage.setItem(userStorageName(uid, "clean:active"), JSON.stringify(active));
   // Nudge the watcher to start polling immediately (same-tab; cross-tab uses the
-  // native `storage` event).
-  window.dispatchEvent(new CustomEvent("clean:active"));
+  // native `storage` event). `from` is the dock pill the clean was started from: the
+  // watcher's pill grows out of it (den.css, "The dock's motion").
+  window.dispatchEvent(new CustomEvent<Point | null>("clean:active", { detail: from ?? null }));
 }
 
 export function clearCleanActive(uid: string): void {

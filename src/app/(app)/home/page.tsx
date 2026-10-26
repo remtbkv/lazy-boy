@@ -10,6 +10,7 @@ import { RateLimitNotice } from "./rate-limit-notice";
 import { CaptureHealthNotice } from "./capture-health-notice";
 import { DockLoader } from "./dock-loader";
 import { LockViewport } from "./lock-viewport";
+import { StableText } from "./stable-text";
 
 // Home. Reads the local store only
 // (zero Spotify API calls), so iterating on it can never touch a rate limit.
@@ -111,7 +112,7 @@ export default async function HomePage() {
               den-home-band: folds away in the phone search mode (den.css). */}
           <header className="den-home-band shrink-0">
             <h1 className="den-display text-4xl leading-tight tracking-tight sm:text-5xl">
-              {greeting}
+              <StableText text={greeting} />
             </h1>
           </header>
 

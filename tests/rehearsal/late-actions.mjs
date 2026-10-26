@@ -175,7 +175,7 @@ async function saveQueueRun(ctx) {
   let slowActions = false;
   const page = await openHome(ctx, (r) => (slowActions && r.method() === "POST" && r.headers()["next-action"] ? 3000 : 0));
   const pill = page.locator("button:visible", { hasText: "Save queue" }).first();
-  const bubble = page.locator(".den-pop");
+  const bubble = page.locator(".dock-pop");
   await pill.click();
   await bubble.waitFor();
   slowActions = true;
@@ -188,7 +188,7 @@ async function saveQueueRun(ctx) {
   await pill.click(); // open it again
   await bubble.waitFor();
   await sleep(Math.max(0, savedAt + 3000 + 1500 - Date.now())); // the first save has ended
-  const open = (await bubble.count()) === 1 && !(await bubble.getAttribute("class"))?.includes("den-closing");
+  const open = (await bubble.count()) === 1 && !(await bubble.getAttribute("class"))?.includes("dock-leaving");
   await page.close();
   return { ok: open, say: open ? "the reopened bubble stayed open after the first save ended" : "the first save's end closed the reopened bubble", timeline: [] };
 }

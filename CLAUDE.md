@@ -141,6 +141,8 @@ src/lib/build-skew.ts    when a tab running an old bundle reloads itself (deboun
 src/lib/np-change.ts     the np-change beacon (change → render bound per song change, NOW_PLAYING_2S
                          §4.1) and playThenShow for in-app plays; handoff.ts is Home's verdict on a
                          finished song (how long it was current, the store's rule)
+src/lib/dock-motion.ts   Home's dock motion: the pressed control as transform-origin, the exit's end
+                         (den.css "The dock's motion"; tests/dock-motion.test.ts)
 src/lib/tab-nav.ts       the top tabs' ←/→ and click navigation as pure steps (chrome.tsx): a press
                          moves from the last choice, and a late commit of a place left is undone
 src/lib/format.ts        duration/time/day formatting (shared)

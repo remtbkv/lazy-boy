@@ -191,43 +191,67 @@ html:has(#den-root) body {
   }
 }
 
-/* ---- Bottom sheet (mobile action panels) ---------------------------------------- */
-@keyframes den-sheet-up {
-  from { transform: translateY(100%); }
-  to   { transform: translateY(0); }
-}
 @keyframes den-fade-in {
   from { opacity: 0; }
   to   { opacity: 1; }
 }
-.den-sheet { animation: den-sheet-up 0.3s cubic-bezier(0.32, 0.72, 0, 1); }
-.den-scrim { animation: den-fade-in 0.25s ease-out; }
 
-/* Animated exits (Rem, 2026-08-13: closing must roll down, never blink out). All
-   transform/opacity — compositor-only, no per-frame layout. The sheet slides back the
-   way it came while the scrim lifts; the queue bubble pops in near its button and drops
-   away with a short fade-down. */
-@keyframes den-sheet-down {
-  from { transform: translateY(0); opacity: 1; }
-  to   { transform: translateY(100%); opacity: 0.6; }
+/* ---- The dock's motion (Home's Resume, Clean, Save queue, Merge, Subtract) ----------
+   Everything the dock moves (the action sheet and its scrim, the Save-queue bubble, the
+   "Tidying up…" pill) shares ONE duration and ONE easing and animates
+   transform and opacity only, on the compositor. A surface grows out of the control that was
+   pressed (dock.tsx sets its transform-origin to that control's centre, lib/dock-motion.ts) and
+   shrinks back into it on close, so the motion reads as caused by the press and nothing
+   travels away from where the eye is. Rem, 2026-10-26, on the old roll-down: "very choppy",
+   it "fades down"; recorded, it slid 630-750 px down, faded only to 60% and then blinked out.
+   Transitions, not keyframes: a close during the opening reverses from where it is. The entry
+   is @starting-style; the exit is the .dock-leaving class, and the element is removed when its
+   transitions end (exitDone), never on a timer. Subtract's result replaces the picker inside
+   the held sheet without a fade: the picker cannot fade out under it unless both stay mounted,
+   and a fade-in alone showed an empty sheet for its first frames. tests/dock-motion.test.ts
+   fails on any animated property here or in the dock's markup that is not transform or opacity. */
+#den-root {
+  --dock-dur: 240ms;
+  --dock-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 }
-@keyframes den-fade-out {
-  from { opacity: 1; }
-  to   { opacity: 0; }
+.dock-surface {
+  /* set inline on mount. A custom property here instead is inherited by the sheet's ~180 rows,
+     and setting it restyled every one in the opening frame: a first open's frame took a median
+     34 ms with it, 25 ms inline, 25 ms on the old dock (5 page loads each, lane 0598) */
+  transform-origin: 50% 0%;
+  transition:
+    opacity var(--dock-dur) var(--dock-ease),
+    transform var(--dock-dur) var(--dock-ease);
 }
-.den-sheet.den-closing { animation: den-sheet-down 230ms cubic-bezier(0.4, 0, 0.7, 0.95) both; }
-.den-scrim.den-closing { animation: den-fade-out 230ms ease-out both; }
-
-@keyframes den-pop-in {
-  from { opacity: 0; transform: translateY(-4px) scale(0.94); }
-  to   { opacity: 1; transform: none; }
+/* A leaving surface takes no taps; its scrim still does until it unmounts, so a tap during the
+   exit lands on nothing instead of on the page under it. */
+.dock-surface.dock-leaving {
+  opacity: 0;
+  pointer-events: none;
 }
-@keyframes den-pop-out {
-  from { opacity: 1; transform: none; }
-  to   { opacity: 0; transform: translateY(8px); }
+.dock-scrim.dock-leaving {
+  opacity: 0;
 }
-.den-pop { animation: den-pop-in 170ms cubic-bezier(0.2, 0.8, 0.25, 1) both; }
-.den-pop.den-closing { animation: den-pop-out 180ms ease-in both; }
+.dock-scrim {
+  transition: opacity var(--dock-dur) var(--dock-ease);
+}
+@starting-style {
+  .dock-surface,
+  .dock-scrim {
+    opacity: 0;
+  }
+}
+/* The scale is the motion; reduced motion keeps the fade alone (no element moves or grows). */
+@media (prefers-reduced-motion: no-preference) {
+  .dock-surface.dock-leaving {
+    transform: scale(0.9);
+  }
+  @starting-style {
+    .dock-surface {
+      transform: scale(0.9);
+    }
+  }
+}
 
 /* ---- Row states, ported from Spotify (Rem, 2026-08-16) ---------------------------
    Hover: a quiet wash. Click or RIGHT-CLICK: a stronger wash that STAYS after the cursor
@@ -277,12 +301,6 @@ tr.den-rowstate > td:last-child {
 @media (prefers-reduced-motion: reduce) {
   .den-panda-asleep,
   .den-panda-awake,
-  .den-sheet,
-  .den-scrim,
-  .den-sheet.den-closing,
-  .den-scrim.den-closing,
-  .den-pop,
-  .den-pop.den-closing,
   .np-live,
   #den-root.den-reveal .den-row,
   .den-marquee[data-run] > span {

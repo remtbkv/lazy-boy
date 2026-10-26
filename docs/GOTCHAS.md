@@ -819,6 +819,19 @@ The cache is self-healing: negative rows carry a `checked_at` and are re-tried a
 days (`NEGATIVE_RECHECK_MS`), never-seen contexts always first — so if the app ever leaves
 dev mode, names fill in on their own within a month. No manual cleanup.
 
+## A revalidating server action refreshes the page you are on
+
+`mergeAction`, `startCleanAction`, `saveQueueAction` and `saveCompareDiffAction` call
+`revalidatePath("/playlists")`. Called from Home's dock, the answer carries
+`x-action-revalidated: 1`, and Next's client then refreshes the page being viewed (`/home`)
+in place (`server-action-reducer.js`: `FreshnessPolicy.RefreshAll`): Home's server render runs
+again and its tree is reconciled, right as the sheet leaves. Two things followed from that,
+both recorded by lane 0598 (2026-10-26): the greeting, drawn with `Math.random()` per server
+render, swapped under the leaving sheet (it is now kept per mount, `home/stable-text.tsx`), and
+in two of the first runs a long frame right after the action answered (199 and 233 ms) let the
+old timer-based exit unmount the sheet before it had played (at opacity 0.89 and 1.00). Anything on Home that must hold still through a dock action has to
+survive a same-route refresh, and a dock exit ends on its own transitions (`exitDone`).
+
 ## FloatingBar measures its previous sibling
 
 The bottom search pill computes the page's bottom padding from

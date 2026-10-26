@@ -1,24 +1,33 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { toast } from "@/lib/toast";
 import { cleanActiveKey, clearCleanActive, readCleanActive } from "@/lib/clean-progress";
+import { exitDone, originFrom, type Point } from "@/lib/dock-motion";
 import type { Task } from "@/lib/tasks/registry";
 import { clearIfSignedOut } from "@/lib/user-storage";
 import { useUid } from "@/components/user-context";
+import { cn } from "@/lib/utils";
 
 type ReconcileResult = { changed: boolean; name: string; added: number; removed: number };
 
 // Mounted once in the (app) layout so it survives navigation. After a clean, Phase 1
 // has already created the cleaned playlist (the user got a toast for it); this watches
 // the background Phase-2 reconcile and only speaks up if the refresh actually adjusted
-// the result. A small "Tidying up…" pill shows while it runs.
+// the result. A small "Tidying up…" pill shows while it runs: it grows out of the dock pill the
+// clean was started from and fades back out when the reconcile ends (den.css, "The dock's
+// motion"), where it used to appear and vanish in one frame.
 export function CleanProgressWatcher() {
   const uid = useUid();
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
   const misses = useRef(0);
   const [active, setActive] = useState(false);
+  // Mounted while active and through its exit after; `from` is the dock pill (clean:active's detail).
+  const [shown, setShown] = useState(false);
+  const from = useRef<Point | null>(null);
+  const pill = useRef<HTMLDivElement>(null);
+  if (active && !shown) setShown(true);
 
   useEffect(() => {
     // One tick at a time: a response slower than the 1s interval would otherwise
@@ -100,7 +109,10 @@ export function CleanProgressWatcher() {
     }
 
     ensureRunning();
-    const onActive = () => ensureRunning();
+    const onActive = (e: Event) => {
+      from.current = (e as CustomEvent<Point | null>).detail ?? null;
+      ensureRunning();
+    };
     const onStorage = (e: StorageEvent) => {
       if (e.key === cleanActiveKey(uid)) ensureRunning();
     };
@@ -113,11 +125,30 @@ export function CleanProgressWatcher() {
     };
   }, [uid]);
 
-  if (!active) return null;
+  useLayoutEffect(() => {
+    const el = pill.current;
+    if (shown && el) el.style.transformOrigin = originFrom(from.current, el);
+  }, [shown]);
+  useEffect(() => {
+    if (active || !shown) return;
+    let live = true;
+    exitDone(pill.current).then(() => live && setShown(false));
+    return () => {
+      live = false;
+    };
+  }, [active, shown]);
+
+  if (!shown) return null;
 
   return (
     <div className="pointer-events-none fixed inset-x-0 top-[4.5rem] z-30 mx-auto flex max-w-5xl justify-end px-4 sm:px-6">
-      <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-border bg-card/95 px-3 py-1.5 text-xs text-muted-foreground shadow-lg ring-1 ring-white/5 backdrop-blur">
+      <div
+        ref={pill}
+        className={cn(
+          "dock-surface pointer-events-auto flex items-center gap-2 rounded-full border border-border bg-card/95 px-3 py-1.5 text-xs text-muted-foreground shadow-lg ring-1 ring-white/5 backdrop-blur",
+          !active && "dock-leaving",
+        )}
+      >
         <Loader2 className="size-3.5 animate-spin" />
         Tidying up…
       </div>
