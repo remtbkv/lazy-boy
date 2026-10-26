@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { Diff, Eraser, GitMerge, ListPlus, Play, X } from "lucide-react";
 import {
   mergeAction,
@@ -166,8 +166,14 @@ function QueuePopover({
   const [pending, start] = useTransition();
   const { holdDuring } = useNowPlaying();
   const [closing, setClosing] = useState(false);
+  // A ref, not `closing`: the Escape listener (bound once) and a save's `dismiss()` after its 1–2
+  // min await both hold the closure of an older render. Reading `closing` there, a save that ended
+  // after the bubble was closed and opened again closed the NEW bubble (lane 0597 sweep,
+  // tests/rehearsal/late-actions.mjs save-queue).
+  const closed = useRef(false);
   const dismiss = () => {
-    if (closing) return;
+    if (closed.current) return;
+    closed.current = true;
     setClosing(true);
     setTimeout(onClose, 180);
   };
